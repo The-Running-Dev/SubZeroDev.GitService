@@ -75,19 +75,46 @@ test('S2.1 — migration 0001 applies against a fresh volume: all sixteen tables
 test('S2.1 — migrate is idempotent: a second run applies nothing and leaves one row', async () => {
   await withVolumeAsync(async (volume) => {
     const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    await store.open();
+    assert.equal((await store.migrate()).ok, true);
+
+    const second = await store.migrate();
+    assert.equal(second.ok, true);
+    if (!second.ok) return;
+    assert.equal(second.value, 0, 'no migration re-applied');
+    await store.close();
+
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    try {
+      const rows = db.prepare('SELECT version FROM schema_migration').all();
+      assert.equal(rows.length, 1, 'schema_migration still holds exactly one row');
+    } finally {
+      db.close();
+    }
+  });
+});
+
+test('usageByTable reports bytes, not row counts', async () => {
+  await withVolumeAsync(async (volume) => {
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
     try {
       await store.open();
-      assert.equal((await store.migrate()).ok, true);
-
-      const second = await store.migrate();
-      assert.equal(second.ok, true);
-      if (!second.ok) return;
-      assert.equal(second.value, 0, 'no migration re-applied');
+      await store.migrate();
 
       const usage = await store.usageByTable();
-      assert.equal(usage.ok, true);
+      assert.equal(usage.ok, true, 'dbstat must be available for per-table byte usage');
       if (!usage.ok) return;
-      assert.equal(usage.value.schema_migration, 1);
+
+      // One migration row cannot occupy one byte; a populated table costs at
+      // least a page. This is what distinguishes a byte figure from a count.
+      assert.ok(
+        usage.value.schema_migration >= 512,
+        `schema_migration should report page-sized bytes, got ${usage.value.schema_migration}`,
+      );
+      // Every table in the union is reported, including the empty ones.
+      for (const table of STORE_TABLE_NAMES) {
+        assert.equal(typeof usage.value[table], 'number', `${table} is reported`);
+      }
     } finally {
       await store.close();
     }
@@ -137,12 +164,19 @@ test('S2.5 — an induced migration failure leaves the pre-migration copy intact
       const copies = readdirSync(path.join(volume, 'backups')).filter((f) => f.startsWith('pre-migration-'));
       assert.equal(copies.length, 1, 'the pre-migration copy survives the failure intact');
 
+      await store.close();
+
       // The failed migration rolled back: 0001's tables are still there and
       // no partial row was left behind for version 2.
-      const applied = await store.usageByTable();
-      assert.equal(applied.ok, true);
-      if (!applied.ok) return;
-      assert.equal(applied.value.schema_migration, 1, 'only migration 0001 is recorded');
+      const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+      try {
+        const versions = (db.prepare('SELECT version FROM schema_migration').all() as { version: number }[]).map(
+          (r) => r.version,
+        );
+        assert.deepEqual(versions, [1], 'only migration 0001 is recorded');
+      } finally {
+        db.close();
+      }
     } finally {
       await store.close();
     }
@@ -153,8 +187,9 @@ test('S2.6 — a corrupt store reports corrupt, naming the newest snapshot with 
   await withVolumeAsync(async (volume) => {
     const first = createStructuredStore({ volumeRoot: volume, clock: systemClock });
     await first.open();
-    await first.migrate();
+    // Boot's order: the pre-migration copy is taken before migrate, not after.
     await first.backupBeforeMigration();
+    await first.migrate();
     await first.snapshot();
     await first.close();
 

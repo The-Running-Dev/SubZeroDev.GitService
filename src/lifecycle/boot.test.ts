@@ -155,6 +155,52 @@ test('a tampered registry artifact fails boot and releases the lease again', asy
   });
 });
 
+test('a boot that fails after opening the store closes it again, leaking no handle', async () => {
+  await withVolumeAsync(async (volume) => {
+    const seed = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    await seed.open();
+    await seed.migrate();
+    await seed.close();
+    writeFileSync(path.join(volume, 'store.sqlite'), 'not a database', 'utf8');
+
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    let closed = 0;
+    const countingStore = { ...store, close: async () => { closed += 1; await store.close(); } };
+
+    const lifecycle = createLifecycle({
+      volumeRoot: volume,
+      buildDir: writeBuildDir(volume),
+      clock: systemClock,
+      store: countingStore,
+      consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+    });
+
+    const booted = await lifecycle.boot();
+    assert.equal(booted.ok, false, 'the corrupt store fails boot');
+    assert.ok(closed >= 1, 'boot closed the store it had opened, without relying on shutdown()');
+  });
+});
+
+test('a registry that is absent reports registry-unreadable, not a mismatch with invented digests', async () => {
+  await withVolumeAsync(async (volume) => {
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    const lifecycle = createLifecycle({
+      volumeRoot: volume,
+      buildDir: path.join(volume, 'no-such-build-dir'),
+      clock: systemClock,
+      store,
+      consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+    });
+
+    const booted = await lifecycle.boot();
+    assert.equal(booted.ok, false);
+    if (booted.ok) return;
+    assert.equal(booted.error.code, 'registry-unreadable', 'distinct from fingerprint-mismatch');
+    if (booted.error.code !== 'registry-unreadable') return;
+    assert.ok(booted.error.reason.length > 0, 'names why it could not be read');
+  });
+});
+
 test('a corrupt store fails boot with store-failed carrying the corrupt cause', async () => {
   await withVolumeAsync(async (volume) => {
     // Seed a healthy store, then corrupt it on disk.

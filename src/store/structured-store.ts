@@ -88,6 +88,14 @@ export interface StructuredStoreOptions {
   readonly migrations?: readonly Migration[];
 }
 
+function isAlreadyApplied(database: DatabaseSync, version: number): boolean {
+  const schemaMigrationExists =
+    database.prepare('SELECT name FROM sqlite_master WHERE type = ? AND name = ?').all('table', 'schema_migration')
+      .length > 0;
+  if (!schemaMigrationExists) return false;
+  return database.prepare('SELECT version FROM schema_migration WHERE version = ?').all(version).length > 0;
+}
+
 function timestampForFilename(at: IsoUtcTimestamp): string {
   return at.replace(/[:.]/g, '-');
 }
@@ -195,16 +203,20 @@ export function createStructuredStore(options: StructuredStoreOptions): Structur
     async migrate(): Promise<Outcome<number, StoreError>> {
       const database = requireDb();
       let applied = 0;
+
+      // A migration must never run without a rollback target on disk, because
+      // `migration-failed` promises one and definition-of-done item 18 restores
+      // it. Boot always calls `backupBeforeMigration` first, so this is a
+      // backstop for any other caller rather than a second copy on the normal
+      // path — it only fires when no pre-migration copy exists at all.
+      const pending = migrations.filter((m) => !isAlreadyApplied(database, m.version));
+      if (pending.length > 0 && newestWithPrefix(PRE_MIGRATION_PREFIX) === null) {
+        const insurance = copyTo(PRE_MIGRATION_PREFIX);
+        if (!insurance.ok) return insurance;
+      }
+
       for (const migration of migrations) {
-        const schemaMigrationExists =
-          database.prepare('SELECT name FROM sqlite_master WHERE type = ? AND name = ?').all('table', 'schema_migration')
-            .length > 0;
-        if (schemaMigrationExists) {
-          const already = database
-            .prepare('SELECT version FROM schema_migration WHERE version = ?')
-            .all(migration.version);
-          if (already.length > 0) continue;
-        }
+        if (isAlreadyApplied(database, migration.version)) continue;
 
         const checksum = createHash('sha256').update(migration.sql, 'utf8').digest('hex');
         try {
@@ -221,16 +233,21 @@ export function createStructuredStore(options: StructuredStoreOptions): Structur
           } catch {
             // The failure already aborted the transaction; nothing to undo.
           }
+          // Guaranteed non-null by the backstop above: a migration never runs
+          // without a pre-migration copy, so `backupAt` always names a real
+          // rollback target rather than an empty string wearing the brand.
           const newest = newestWithPrefix(PRE_MIGRATION_PREFIX);
+          if (newest === null) {
+            return err(
+              storeError(
+                { code: 'io-failed' },
+                `migration ${migration.version} failed and no pre-migration copy could be found to roll back to`,
+              ),
+            );
+          }
           return err(
             storeError(
-              {
-                code: 'migration-failed',
-                version: migration.version,
-                // The pre-migration copy is item 18's rollback target. If it is
-                // somehow absent, say so rather than inventing a timestamp.
-                backupAt: newest?.at ?? ('' as IsoUtcTimestamp),
-              },
+              { code: 'migration-failed', version: migration.version, backupAt: newest.at },
               `migration ${migration.version} failed: ${cause instanceof Error ? cause.message : String(cause)}`,
             ),
           );
@@ -274,15 +291,35 @@ export function createStructuredStore(options: StructuredStoreOptions): Structur
     async usageByTable(): Promise<Outcome<Readonly<Record<StoreTableName, number>>, StoreError>> {
       const database = requireDb();
       const usage = {} as Record<StoreTableName, number>;
+      for (const table of STORE_TABLE_NAMES) usage[table] = 0;
+
       try {
-        for (const table of STORE_TABLE_NAMES) {
-          const quoted = table === 'grant' ? '"grant"' : table;
-          const rows = database.prepare(`SELECT COUNT(*) AS n FROM ${quoted}`).all() as { n: number }[];
-          usage[table] = Number(rows[0]?.n ?? 0);
+        // Bytes, not row counts: this feeds `VolumeUsage.storeByTable`, and the
+        // question disk pressure asks is how much of the volume a table is
+        // taking. A table's indexes are charged to the table they index, so the
+        // figure is the space that table actually costs.
+        const owner = new Map<string, string>();
+        for (const row of database
+          .prepare("SELECT name, tbl_name FROM sqlite_master WHERE type IN ('table','index')")
+          .all() as { name: string; tbl_name: string }[]) {
+          owner.set(row.name, row.tbl_name);
+        }
+
+        for (const row of database.prepare('SELECT name, SUM(pgsize) AS bytes FROM dbstat GROUP BY name').all() as {
+          name: string;
+          bytes: number;
+        }[]) {
+          const table = owner.get(row.name) ?? row.name;
+          if (table in usage) {
+            usage[table as StoreTableName] += Number(row.bytes ?? 0);
+          }
         }
         return ok(usage);
       } catch {
-        return err(storeError({ code: 'io-failed' }, 'could not read per-table usage'));
+        // `dbstat` is a compile-time option. Say the figure is unavailable
+        // rather than substituting row counts, which answer a different
+        // question and would understate a large table with few rows.
+        return err(storeError({ code: 'io-failed' }, 'per-table byte usage is unavailable: the dbstat virtual table is not compiled in'));
       }
     },
 

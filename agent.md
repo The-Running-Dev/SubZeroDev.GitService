@@ -56,6 +56,18 @@ and preferences belong in `AGENTS.md`.
   value everything else was checked against.
 - **Several confident recollections were wrong.** Every claim about an external contract
   should be checked against the published spec, not remembered.
+- **An OS resource whose lifetime must equal the process's needs a strong reference from
+  module scope.** The instance lease kept its lock handle reachable only through the object
+  `acquire` returned. Every test passed; a real holder that idled for a fifth of a second
+  lost the lock while alive and healthy, and a second process was granted the same volume.
+  Cost about forty minutes to bisect, and it would otherwise have shipped silent dual
+  ownership — the exact failure the lease exists to prevent. **Exercise a long-lived holder
+  with an idle process, not a short-lived one**, or the bug cannot appear: a process that
+  exits promptly never gives the runtime a chance to collect anything.
+- **On this host, make temp-directory cleanup best-effort.** Six store tests reported red
+  for an `EPERM` in `rmSync` while every assertion in them had passed — Windows refuses to
+  unlink a file with an open handle, and SQLite does not always release on `close()`. Cost a
+  full rewrite of the test file to discover that the failures were cleanup, not behaviour.
 
 ## Token economy
 

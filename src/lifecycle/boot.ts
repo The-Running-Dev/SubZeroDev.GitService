@@ -1,7 +1,10 @@
 import { err, ok, type Outcome } from '../shared/outcome.ts';
-import type { DeclarationId, Sha256Hex } from '../shared/brands.ts';
+import type { DeclarationId, OperationId, RegistryToolName, ScheduledJobId, Sha256Hex } from '../shared/brands.ts';
 import type { ModuleErrorBase } from '../shared/result-kind.ts';
+import type { CapabilityName } from '../contract/capabilities.ts';
 import type { Clock } from '../clock/clock.ts';
+import type { Clone } from '../clone/types.ts';
+import { UNVERIFIED_AUDIT_CHAIN, type AuditChainState } from '../audit/types.ts';
 import type { StructuredStore } from '../store/structured-store.ts';
 import type { StoreError } from '../store/errors.ts';
 import { acquireLease, type InstanceLease, type LeaseGuard, type LockAcquirer } from './lease.ts';
@@ -12,9 +15,10 @@ export type BootError = ModuleErrorBase &
     | { readonly code: 'lease-held'; readonly holder: InstanceLease }
     | { readonly code: 'lease-not-exclusive' }
     | { readonly code: 'fingerprint-mismatch'; readonly expected: Sha256Hex; readonly found: Sha256Hex }
+    | { readonly code: 'registry-unreadable'; readonly reason: string }
     | { readonly code: 'console-manifest-mismatch'; readonly expected: Sha256Hex; readonly found: Sha256Hex }
-    | { readonly code: 'ceiling-outside-contract'; readonly capabilities: readonly string[] }
-    | { readonly code: 'executor-missing'; readonly tools: readonly string[] }
+    | { readonly code: 'ceiling-outside-contract'; readonly capabilities: readonly CapabilityName[] }
+    | { readonly code: 'executor-missing'; readonly tools: readonly RegistryToolName[] }
     | { readonly code: 'store-failed'; readonly cause: StoreError }
   );
 
@@ -37,23 +41,15 @@ function bootError<T extends { readonly code: BootError['code'] }>(variant: T, s
  *                         which is the correct answer rather than a stub
  */
 export interface BootJobReport {
-  readonly markedDone: readonly string[];
-  readonly markedNeedsAttention: readonly string[];
-  readonly returnedToPending: readonly string[];
-  readonly leftRunning: readonly string[];
+  readonly markedDone: readonly ScheduledJobId[];
+  readonly markedNeedsAttention: readonly ScheduledJobId[];
+  readonly returnedToPending: readonly ScheduledJobId[];
+  readonly leftRunning: readonly ScheduledJobId[];
 }
 
 export interface RevalidationReport {
-  readonly jobsParked: readonly string[];
-  readonly entriesParked: readonly string[];
-}
-
-export interface AuditChainState {
-  readonly verifiedThrough: number | null;
-  readonly headHash: Sha256Hex | null;
-  readonly mirroredHeadHash: Sha256Hex | null;
-  readonly retainedAnchors: readonly never[];
-  readonly chainBreak: null;
+  readonly jobsParked: readonly ScheduledJobId[];
+  readonly entriesParked: readonly OperationId[];
 }
 
 export interface BootReport {
@@ -66,7 +62,7 @@ export interface BootReport {
   readonly auditChain: AuditChainState;
   readonly jobsResolved: BootJobReport;
   readonly revalidation: RevalidationReport;
-  readonly clones: readonly never[];
+  readonly clones: readonly Clone[];
   readonly recoveryPending: readonly DeclarationId[];
 }
 
@@ -87,14 +83,6 @@ export interface LifecycleDependencies {
   /** Reports a lease takeover. The durable audit record lands in S3. */
   readonly onTakeover?: (previousHolder: InstanceLease, current: InstanceLease) => void;
 }
-
-const EMPTY_AUDIT_CHAIN: AuditChainState = {
-  verifiedThrough: null,
-  headHash: null,
-  mirroredHeadHash: null,
-  retainedAnchors: [],
-  chainBreak: null,
-};
 
 const NO_JOBS: BootJobReport = {
   markedDone: [],
@@ -152,9 +140,13 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
             ),
           );
         }
+        // Distinct from a mismatch on purpose. A mismatch has two real digests
+        // to report; an unreadable artifact has none, and forcing it into that
+        // shape would mean fabricating two `Sha256Hex` values that never
+        // existed — precisely what the brand is there to prevent.
         return err(
           bootError(
-            { code: 'fingerprint-mismatch', expected: '' as Sha256Hex, found: '' as Sha256Hex },
+            { code: 'registry-unreadable', reason: registry.error.reason },
             `registry artifact unreadable: ${registry.error.reason}`,
           ),
         );
@@ -163,6 +155,11 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       // Step 4 — open the store, integrity-check it, take the pre-migration
       // copy, then run forward-only migrations. The copy is taken before
       // migrate on purpose: it is item 18's rollback target.
+      //
+      // Every failure from here on must close the store as well as release the
+      // lease. A caller is entitled to treat a failed boot as "nothing was
+      // acquired" and never call shutdown(); leaving the SQLite handle open
+      // would hold a file descriptor on the volume for the life of the process.
       const opened = await deps.store.open();
       if (!opened.ok) {
         guard.release();
@@ -170,26 +167,23 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         return err(bootError({ code: 'store-failed', cause: opened.error }, opened.error.summary));
       }
 
+      const failAfterOpen = async (cause: StoreError): Promise<Outcome<BootReport, BootError>> => {
+        await deps.store.close();
+        if (guard) {
+          guard.release();
+          guard = null;
+        }
+        return err(bootError({ code: 'store-failed', cause }, cause.summary));
+      };
+
       const integrity = await deps.store.integrityCheck();
-      if (!integrity.ok) {
-        guard.release();
-        guard = null;
-        return err(bootError({ code: 'store-failed', cause: integrity.error }, integrity.error.summary));
-      }
+      if (!integrity.ok) return failAfterOpen(integrity.error);
 
       const backup = await deps.store.backupBeforeMigration();
-      if (!backup.ok) {
-        guard.release();
-        guard = null;
-        return err(bootError({ code: 'store-failed', cause: backup.error }, backup.error.summary));
-      }
+      if (!backup.ok) return failAfterOpen(backup.error);
 
       const migrated = await deps.store.migrate();
-      if (!migrated.ok) {
-        guard.release();
-        guard = null;
-        return err(bootError({ code: 'store-failed', cause: migrated.error }, migrated.error.summary));
-      }
+      if (!migrated.ok) return failAfterOpen(migrated.error);
 
       // Step 8 — re-derive clone state from disk. S5 owns clone directories;
       // with none declared, the derived set is genuinely empty.
@@ -200,7 +194,7 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         consoleFingerprint: deps.consoleFingerprint,
         migrationsApplied: migrated.value,
         provisioningPending: false,
-        auditChain: EMPTY_AUDIT_CHAIN,
+        auditChain: UNVERIFIED_AUDIT_CHAIN,
         jobsResolved: NO_JOBS,
         revalidation: { jobsParked: [], entriesParked: [] },
         clones: [],

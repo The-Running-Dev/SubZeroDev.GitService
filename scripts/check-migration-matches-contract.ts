@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { contractPath, migrationPath, renderMigration0001 } from './generate-migration-0001.ts';
+import { contractPath, migrationPath, renderMigration0001, toLf } from './generate-migration-0001.ts';
 
 /**
  * Fails the build if the committed migration has drifted from the contract's
@@ -8,8 +8,11 @@ import { contractPath, migrationPath, renderMigration0001 } from './generate-mig
  * schema without writing the follow-on migration.
  */
 
-const expected = renderMigration0001(fs.readFileSync(contractPath(), 'utf8'));
-const actual = fs.readFileSync(migrationPath(), 'utf8');
+// Both sides are normalised to LF before comparing, so a CRLF checkout reports
+// a real schema difference if there is one, rather than failing the build on a
+// line ending nobody chose.
+const expected = toLf(renderMigration0001(fs.readFileSync(contractPath(), 'utf8')));
+const actual = toLf(fs.readFileSync(migrationPath(), 'utf8'));
 
 if (expected !== actual) {
   console.error(

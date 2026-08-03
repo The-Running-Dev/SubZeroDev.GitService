@@ -176,6 +176,34 @@ test('a lease released in an orderly way frees the volume for the next instance'
   });
 });
 
+test('an orderly release removes the lease file, so a clean restart is NOT reported as a takeover', async () => {
+  await withVolumeAsync(async (volume) => {
+    const first = acquireLease({ volumeRoot: volume, clock: systemClock });
+    assert.equal(first.ok, true);
+    if (!first.ok) return;
+    assert.equal(existsSync(path.join(volume, LEASE_FILENAME)), true, 'the holder wrote its lease');
+
+    first.value.guard.release();
+    assert.equal(
+      existsSync(path.join(volume, LEASE_FILENAME)),
+      false,
+      'an orderly release removes the lease file',
+    );
+
+    const second = acquireLease({ volumeRoot: volume, clock: systemClock });
+    assert.equal(second.ok, true);
+    if (!second.ok) return;
+    try {
+      // Without this, every restart after a clean shutdown claims a takeover
+      // from an instance that shut down properly — corrupting operator
+      // diagnostics now and the audit trail once S3 lands.
+      assert.equal(second.value.takenOverFrom, null, 'a clean restart reports no takeover');
+    } finally {
+      second.value.guard.release();
+    }
+  });
+});
+
 test('the production acquirer is the one wired by default', () => {
   assert.equal(typeof sqliteLockAcquirer.acquire, 'function');
   assert.equal(typeof sqliteLockAcquirer.childIsRefused, 'function');

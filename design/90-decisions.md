@@ -28,7 +28,79 @@ Append-only. Newest at the top. The rejected alternatives are the point — with
 
 - ~~**`20-contract.md` invariant E8 contradicts the design's own `/healthz` polling.**~~ — **resolved 2026-08-03**, see the decision below. Found by `/slices` while writing S1's acceptance criteria, and resolved by splitting the payload rather than by choosing between the two readings: the real defect was that one type carried both a liveness probe and an operator health report.
 
+- **Boot step 3 is unimplemented; invariants B4 and B5 are currently unenforced.** S1's `Touches` line named boot steps 2 **and 3**, but none of S1's acceptance criteria covered step 3, so it was neither built nor missed by a test — the `Touches` line overstated the slice. `BootError.ceiling-outside-contract` and `executor-missing` are declared in the union and **never constructed anywhere**. Building it now would add a check that cannot fail: the ceiling needs a `DeploymentCeiling` (S5) and the executor check needs the module adapter (S6), and against today's empty registry and absent ceiling both pass vacuously, which looks done while guarding nothing. **Carried to S5 for the ceiling half and S6 for the executor half**, where each first has something real to reject. Found by `/reconcile` 2026-08-03.
+
+- **Four contract members are declared but not yet implemented, each with an owning slice.** `Lifecycle.runMaintenance` and `Lifecycle.recoverDeclaration` (S17 and S8) are absent from the implemented interface; `StructuredStore.incrementalVacuum` returns a constant zero (S17); `BootReport.provisioningPending` is reported `false` rather than measured, because the operator credential it would read does not exist (S4); and a lease takeover is written to the process log rather than the audit trail, so **invariant S8 is unenforced for the `lease-takeover` record** (S3). None contradicts the contract — the code has simply not caught up — but all four are the kind of gap that reads as finished. Recorded by `/reconcile` 2026-08-03.
+
+- **Definition-of-done item 9 is not fully closed.** S2's acceptance asks for the "volume grants the lock to both" path to be demonstrated "by pointing the service at a bind-mounted host path". The code path and its refusal message are covered by an injected acquirer, and both are tested; the **filesystem property itself has never been run against a real Docker bind mount**. That is the half of item 9 the design leans on hardest, and it is still an assumption. Recorded by `/reconcile` 2026-08-03.
+
 ---
+
+### 2026-08-03 — The instance-lease handle is held from module scope, because GC releasing it is silent dual ownership
+Context: Found while implementing S2, by a test that spawns a real holder process and probes it from outside. The first implementation kept the open lock handle reachable only through the object `acquire` returned. Every short test passed — the process exits before any collection — but a holder that reached the event loop and idled lost the lock within a fifth of a second, while alive, healthy, and still reporting itself ready. A separate process was then granted the same volume. The design's stale-lock reasoning covers process *death* and correctly concludes the kernel cleans up; it does not cover the handle being finalised under a living process, which produces the same dual ownership with no kill, no log line and a self-test that passed minutes earlier.
+Chosen: Open lock handles are held in a module-scoped set for the process's lifetime, removed only on explicit release. The lifetime of the OS lock is tied to the lifetime of the process by construction rather than by reachability. `10-design.md` boot step 1 now names the failure, so it cannot be reintroduced by someone reimplementing the lease from the design alone.
+Rejected: **Rely on the returned guard keeping the handle alive** — the natural reading, and what was written first; it makes a correctness-critical OS resource depend on an optimisation detail nobody controls, and the bug it produces is invisible to any test whose process exits promptly. **A keep-alive timer or periodic re-acquire** — would paper over collection without preventing it, and turns a structural guarantee into a race. **A finaliser that re-acquires** — re-acquisition after release is exactly the window a second instance uses.
+Reversibility: cheap in code, expensive in consequence — reverting reintroduces a failure that testing did not catch the first time.
+
+### 2026-08-03 — SQLite is both the structured store and the advisory-lock primitive; no new dependency
+Context: S2 needs a transactional store and an exclusive advisory OS lock that the kernel releases on death. Node ships no `flock` binding, and `AGENTS.md` requires a decision-log entry naming rejected alternatives before any new dependency.
+Chosen: `node:sqlite`, a runtime builtin, for both. The store is an ordinary database; the lease lock is a `BEGIN EXCLUSIVE` transaction held open on a dedicated file that exists only to be locked, which is a real `fcntl`/`LockFileEx` advisory lock. Both properties the design depends on were verified directly against real processes before anything was built on them: a second process is refused while the holder lives, and the lock is released by the kernel on `SIGKILL`.
+Rejected: **`better-sqlite3`** — the usual choice and faster, and it is a native dependency needing a compiler in the image for a workload that is not throughput-bound. **A lock file created with `wx`** — no dependency, and it leaves a stale file after an unclean kill, which is precisely the case the brief demands be handled. **A native `flock` binding** — the most literal reading of "advisory OS lock", for one syscall, at the cost of a compiled dependency.
+Reversibility: expensive — the schema, the migration story and the lease mechanism all sit on it.
+
+### 2026-08-03 — The lease is two files: one carries the lock, one carries the contents
+Context: The design said "open the lease file and take the exclusive advisory OS lock", implying one file. Without a `flock` binding the lock has to be carried by something the platform will lock, and that cannot also be a file being rewritten as JSON.
+Chosen: `lease.lock` holds the advisory lock and is never read; `lease.json` holds `InstanceLease` and is written while the lock is held. A reader that finds the JSON has learned who *claims* the volume; only the lock decides who holds it. Both documents are amended to describe the split.
+Rejected: **Lock the JSON file itself** — one file and matches the original wording, and it requires a native binding or locking a file that is concurrently rewritten. **Put the holder's identity inside the lock database** — also one file, and it makes reading "who holds this?" require opening a database that is deliberately locked.
+Reversibility: cheap — the split is internal to the lease module.
+
+### 2026-08-03 — Migration 0001 is generated from the contract, and immutable once released
+Context: The contract's § Persisted schemas already states the full schema. Retyping it into a migration invites a typo that no test would catch, since the tests would be written against the typo.
+Chosen: `scripts/generate-migration-0001.ts` transcribes the contract's SQL blocks mechanically, and `npm run check:migration` fails the build if the committed migration and the contract disagree. The generator is **not** part of `npm run build`: once released, migration 0001 is immutable, because its checksum is recorded in `schema_migration` and a retained pre-migration copy is restored against exactly that schema. A contract amendment after release needs migration 0002, written by hand. The drift check was verified in both directions — exit 1 against a hand-edited migration, exit 0 when matching.
+Rejected: **Hand-write the migration** — normal practice, and it puts a silent transcription error between the contract and the database. **Regenerate on every build** — keeps them in step automatically, and would silently rewrite a released migration when the contract changes, breaking every retained backup's restore path.
+Reversibility: cheap for the generator, expensive for the immutability rule once a store exists in the field.
+
+### 2026-08-03 — Boot verifies the registry artifact by raw-byte hash, not by recompiling its fingerprint
+Context: Boot step 2 must refuse to start when the registry does not match what was built. The obvious implementation recomputes the compiler's fingerprint and compares — but invariant B8 keeps the compiler out of the runtime image entirely, so the runtime cannot recompute anything.
+Chosen: The build emits `registry.json` alongside `registry.json.sha256`, and boot compares a SHA-256 of the artifact's raw bytes. A byte-for-byte tamper is exactly as detectable this way, and the artifact's own semantic `fingerprint` field travels through unmodified for the version route to report. `scripts/check-no-compiler-in-runtime.ts` enforces B8 against the real module graph, and was verified to fail when the compiler is imported.
+Rejected: **Recompile the fingerprint at boot** — the strongest check, and it violates B8 and puts the whole compiler in the deployed image. **Trust the artifact** — nothing to build, and it forfeits definition-of-done item 1.
+Reversibility: cheap.
+
+### 2026-08-03 — `no-executor` and `multiple-executors` are decided within the declaration array alone
+Context: The contract named both variants without saying what triggers them. `compile` receives only the declarations, and B1 forbids L0 from importing the layer that implements a target, so the compiler cannot know what is actually implemented.
+Chosen: `no-executor` is an `ExecutionTarget` naming an empty identifier — nothing could ever execute it. `multiple-executors` is two or more declarations claiming the identical target. A target that is well-formed but unimplemented is boot's problem, and boot already owns `executor-missing`. The contract now states this.
+Rejected: **Give `compile` a second parameter listing implemented targets** — makes `no-executor` mean what it sounds like, and either breaks B1 or pushes build wiring into the contract's signature. **Leave both unreachable** — honest about the closed world, and ships two error variants that definition-of-done item 2 counts but nothing can ever produce.
+Reversibility: cheap.
+
+### 2026-08-03 — Every `CompilerError` is `validation`, not `infrastructure`
+Context: The first implementation stamped every compiler error `infrastructure`. Raised by an automated reviewer on PR #3.
+Chosen: `validation` for all eight. A rejected declaration set is caller input failing the contract, which is the envelope's own definition of `validation`. `infrastructure` would make `isError` true for all eight, telling a consumer the service was broken when the declarations were.
+Rejected: **Keep `infrastructure`** — a build failure is fatal either way, and it corrupts the one rule the envelope exists to express.
+Reversibility: cheap.
+
+### 2026-08-03 — The contract fingerprint is invariant to the order of set-like fields
+Context: Raised by an automated reviewer on PR #3. `capabilities` and `scopes` are sets in every sense but their TypeScript type, so authoring the same two capabilities in a different order changed the fingerprint and would have failed a boot that should have passed.
+Chosen: Both are sorted before hashing, in a projection used only for the fingerprint; the emitted entries keep the author's original order, which is a readability choice rather than a content one. Array order is preserved everywhere else, and entry order is normalised by tool name.
+Rejected: **Sort every array during canonicalisation** — one rule, no special cases, and it would silently make a genuinely ordered field order-insensitive. **Change the types to `Set`** — expresses it properly, and changes a contract type for a hashing concern.
+Reversibility: cheap, but it changes every fingerprint, so it is cheap only before a deployment exists.
+
+### 2026-08-03 — Node's native TypeScript execution and `node:test`; no bundler, no test framework
+Context: The contract fixes TypeScript on Node with ESM. Nothing else about tooling was decided, and `AGENTS.md` requires a decision entry for any new dependency.
+Chosen: Run `.ts` directly on Node's built-in type stripping, test with `node:test`, type-check with `tsc --noEmit`. The only dev dependencies are `typescript` and `@types/node`; the runtime has none.
+Rejected: **Vitest or Jest** — better watch mode and richer assertions, for a dependency tree larger than the service. **esbuild or tsx** — faster startup, and a build step between source and what runs, which is exactly what makes a fingerprint harder to trust.
+Reversibility: cheap.
+
+### 2026-08-03 — The version route's bearer check is a placeholder until S13
+Context: S1 needed an authenticated route to satisfy "the version route answers 401 without a credential", but the L4 authorization module is S13.
+Chosen: A shared-secret bearer token from `OPERATOR_API_TOKEN`, compared in constant time over SHA-256 digests so the credential's length does not affect control flow. The server refuses to start without it. It proves the route is authenticated; it is not the OAuth surface and does not pretend to be.
+Rejected: **Leave the route unauthenticated until S13** — less pretence, and it would ship a route serving fingerprints in violation of E8. **Build part of S13 now** — no placeholder, and it starts the authorization module without the store, grants or clients it depends on.
+Reversibility: cheap — it is one function behind the surfaces module.
+
+### 2026-08-03 — `consoleFingerprint` is the SHA-256 of the empty string until S19
+Context: `BootReport` and `VersionReport` both carry a console asset fingerprint, and the console does not exist until S19.
+Chosen: The SHA-256 of the empty string, named `NO_CONSOLE_FINGERPRINT`. It is a well-known constant that reads as a placeholder to anyone who looks it up, rather than a plausible-looking hash that would be mistaken for a real manifest.
+Rejected: **A zero or all-`f` string** — obviously fake, and not a valid SHA-256, so it would have to bypass the brand's own validator. **Make the field nullable** — most honest, and it changes a contract type to accommodate a temporary absence.
+Reversibility: cheap.
 
 ### 2026-08-03 — The liveness probe is split from the health report; E8 is about data, not routes
 Context: `/slices` found contract invariant E8 ("no HTTP route is unauthenticated at any point in the lifecycle") contradicting `10-design.md`, which has definition-of-done item 15's companion check polling `/healthz` unauthenticated until the commit SHA is stable. Presented as two defensible readings — exempt the health route, or authenticate the check. Both are wrong, and the framing hid the actual defect: `HealthReport` had fused two different things onto one payload. The design's sentence was written inside the provisioning section arguing about enrolment and never considered `/healthz`; the contract generalised it to every route; and the contract's own `HealthReport` then put `failingCredentialRefs`, `auditChain`, `volume` and `parkedOperations` on the endpoint the design polls unauthenticated. On a publicly reachable origin that is an inventory of declaration ids and credential reference names, plus whether audit tampering was detected and how close the volume is to full.

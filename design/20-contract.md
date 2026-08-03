@@ -691,6 +691,12 @@ interface InstanceLease {
 Written once at acquisition and never refreshed. Exclusion is the OS lock; the contents only name
 the holder.
 
+**The lock and the contents are two files**, not one. The runtime has no `flock` binding, so the
+advisory lock is carried by a dedicated file that exists only to be locked, and `InstanceLease` is
+written beside it while that lock is held. A reader that finds the JSON has learned who *claims*
+the volume; only the lock decides who holds it. That split is why a lease file left by a dead
+instance is a takeover to be reported rather than a refusal — see the boot path in `10-design.md`.
+
 ### The result envelope
 
 ```ts
@@ -1281,7 +1287,8 @@ rule that a failing credential is marked for one declaration and never reference
 
 | File | Holds | Written |
 |---|---|---|
-| Instance lease | `InstanceLease` as JSON | once at acquisition, under an exclusive advisory OS lock |
+| Instance lease lock | nothing readable — it exists only to carry the exclusive advisory OS lock | opened and locked at acquisition, held for the process's lifetime |
+| Instance lease | `InstanceLease` as JSON | once at acquisition, while the lock above is held |
 | Audit segment | one `AuditRecord` JSON per line | append-only, rotated at `auditSegmentBytes` |
 | Provisioning file | an enrolment secret | by an operator with host access; burned at enrolment |
 | Break-glass file | a single-use token | by an operator with host access; consumed at next login |
@@ -1612,6 +1619,35 @@ interface Lifecycle {
 `recoverDeclaration` is the lazy pass, called on first use and by the background sweep. Any resume
 step it runs goes through the injected dispatch and takes the global mutation lock for itself,
 completing before the triggering call acquires anything.
+
+Boot step 1's lock is taken through an injected seam, because the failure it must detect is a
+property of the volume rather than of this code, and a volume that does not exclude cannot be
+produced on demand in a test:
+
+```ts
+interface LeaseGuard {
+  release(): void;
+}
+
+type LeaseAcquisition =
+  | { readonly acquired: true; readonly guard: LeaseGuard }
+  | { readonly acquired: false };
+
+interface LockAcquirer {
+  acquire(lockPath: string): LeaseAcquisition;
+  childIsRefused(lockPath: string): boolean;
+}
+```
+
+`childIsRefused` spawns a **real second process** that attempts the same lock and reports whether
+it was refused. A child rather than a second acquire from this process, because the property
+relied on is cross-process exclusion: a same-process re-acquire tests the locking API, and can
+pass on a broken volume and fail on a sound one. An acquirer whose `childIsRefused` returns false
+makes boot fatal with `lease-not-exclusive`.
+
+The deployment supplies one implementation. Everything else the lifecycle and store modules export
+— factories, options records and the migration list — is an internal helper and out of scope here,
+per this section's opening rule.
 
 ### L2 — git operations
 
@@ -2463,6 +2499,17 @@ Every variant **fails the build**. A warning is never sufficient — that is def
 `limit-exceeds-cap` covers a `monitoring-wait` whose `timeoutSeconds` exceeds
 `monitoringWaitCapSeconds`.
 
+`no-executor` and `multiple-executors` are decided **within the declaration array alone**, because
+`compile` receives nothing else and invariant B1 forbids L0 from importing the layer that
+implements a target. `no-executor` is a declaration whose `ExecutionTarget` names an empty
+identifier — nothing could ever execute it. `multiple-executors` is two or more declarations
+claiming the identical target, by `kind` and identifier. Neither can detect a target that is
+well-formed but unimplemented; boot does that, and it is boot that owns `executor-missing`.
+
+Every `CompilerError` carries `resultKind: 'validation'`. A rejected declaration set is caller
+input failing the contract — the envelope's own definition of `validation` — not a failure of the
+service or its environment, so `isError` is false for all eight.
+
 ### Boot
 
 ```ts
@@ -2470,6 +2517,7 @@ type BootError = ModuleErrorBase & (
   | { readonly code: 'lease-held'; readonly holder: InstanceLease }
   | { readonly code: 'lease-not-exclusive' }
   | { readonly code: 'fingerprint-mismatch'; readonly expected: Sha256Hex; readonly found: Sha256Hex }
+  | { readonly code: 'registry-unreadable'; readonly reason: string }
   | { readonly code: 'console-manifest-mismatch'; readonly expected: Sha256Hex; readonly found: Sha256Hex }
   | { readonly code: 'ceiling-outside-contract'; readonly capabilities: readonly CapabilityName[] }
   | { readonly code: 'executor-missing'; readonly tools: readonly RegistryToolName[] }
@@ -2482,6 +2530,7 @@ type BootError = ModuleErrorBase & (
 | `lease-held` | A live instance holds the lease | no | Refuse to start, naming the holder from the lease contents |
 | `lease-not-exclusive` | The child-process self-test was granted the same lock | no | **Fatal**, naming the volume configuration. This is the bind-mount case, and the alternative is two instances silently sharing one store |
 | `fingerprint-mismatch`, `console-manifest-mismatch` | The artifact does not match what was built | no | Fatal. The service must never start with a smaller accidental tool set or a swapped bundle |
+| `registry-unreadable` | The registry artifact is absent, unparseable, or carries no valid fingerprint | no | Fatal, naming the reason. Distinct from `fingerprint-mismatch`, which has two real digests to report; here there is nothing to compare, and reporting it as a mismatch would mean inventing them |
 | `ceiling-outside-contract` | The deployment ceiling names a capability the contract set lacks | no | Fatal |
 | `executor-missing` | A registry entry has no registered executor | no | Fatal |
 | `store-failed` | Open, integrity check or migration failed | no | Fatal, per the store's own table |

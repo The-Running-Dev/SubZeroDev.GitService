@@ -1,16 +1,17 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { isoUtcTimestamp, type IsoUtcTimestamp } from '../shared/brands.ts';
 import type { Clock } from '../clock/clock.ts';
 
 export interface InstanceLease {
   readonly instanceId: string;
   readonly bootId: string;
   readonly hostName: string;
-  readonly startedAt: string;
+  readonly startedAt: IsoUtcTimestamp;
 }
 
 export const LEASE_LOCK_FILENAME = 'lease.lock';
@@ -138,14 +139,19 @@ function readLeaseFile(leasePath: string): InstanceLease | null {
   try {
     const parsed = JSON.parse(readFileSync(leasePath, 'utf8')) as Partial<InstanceLease>;
     if (
-      typeof parsed.instanceId === 'string' &&
-      typeof parsed.bootId === 'string' &&
-      typeof parsed.hostName === 'string' &&
-      typeof parsed.startedAt === 'string'
+      typeof parsed.instanceId !== 'string' ||
+      typeof parsed.bootId !== 'string' ||
+      typeof parsed.hostName !== 'string' ||
+      typeof parsed.startedAt !== 'string'
     ) {
-      return parsed as InstanceLease;
+      return null;
     }
-    return null;
+    // `startedAt` is branded, and this is the boundary it crosses back over.
+    // A file hand-edited to carry a malformed timestamp is treated as
+    // unreadable rather than admitted as a valid lease.
+    const startedAt = isoUtcTimestamp(parsed.startedAt);
+    if (!startedAt.ok) return null;
+    return { ...parsed, startedAt: startedAt.value } as InstanceLease;
   } catch {
     return null;
   }
@@ -156,12 +162,19 @@ function readLeaseFile(leasePath: string): InstanceLease | null {
  * startup — the lock is the exclusion, the file only names the holder. This
  * placeholder is what the operator sees when the holder died between taking
  * the lock and writing its name, which is a real interleaving.
+ *
+ * `startedAt` is the epoch rather than a plausible time: the contract makes
+ * the field a non-null `IsoUtcTimestamp`, so something has to go there, and a
+ * recent-looking timestamp would be a fabricated claim about a holder whose
+ * identity is precisely what could not be read. Alongside three `unknown`
+ * strings it reads as the placeholder it is.
  */
+const EPOCH = isoUtcTimestamp('1970-01-01T00:00:00.000Z');
 const UNKNOWN_HOLDER: InstanceLease = {
   instanceId: 'unknown',
   bootId: 'unknown',
   hostName: 'unknown',
-  startedAt: 'unknown',
+  startedAt: EPOCH.ok ? EPOCH.value : ('1970-01-01T00:00:00.000Z' as IsoUtcTimestamp),
 };
 
 export interface AcquireLeaseOptions {
@@ -202,8 +215,30 @@ export function acquireLease(options: AcquireLeaseOptions): { ok: true; value: L
   };
   writeFileSync(leasePath, `${JSON.stringify(lease, null, 2)}\n`, 'utf8');
 
+  // An orderly release removes the lease file before dropping the lock, so the
+  // next boot sees no claimant and reports no takeover. Without this, *every*
+  // restart after a clean shutdown is indistinguishable from a crash, because
+  // the only evidence a takeover happened is a lease file the previous holder
+  // left behind — and a clean shutdown left one too.
+  //
+  // The order matters: drop the file first, then the lock. Releasing the lock
+  // first opens a window where another instance can acquire and write its own
+  // lease, which this release would then delete.
+  const guard: LeaseGuard = {
+    release(): void {
+      try {
+        if (existsSync(leasePath)) unlinkSync(leasePath);
+      } catch {
+        // A lease file we cannot remove is not worth failing shutdown over;
+        // the worst case is the next boot reporting a takeover that did not
+        // happen, which is the condition this whole branch exists to avoid.
+      }
+      attempt.guard.release();
+    },
+  };
+
   return {
     ok: true,
-    value: { lease, guard: attempt.guard, selfTestPassed: true, takenOverFrom: previous },
+    value: { lease, guard, selfTestPassed: true, takenOverFrom: previous },
   };
 }

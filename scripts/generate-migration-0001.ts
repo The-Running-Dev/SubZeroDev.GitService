@@ -17,14 +17,25 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+/**
+ * `.gitattributes` pins LF in the working tree on every host, so a CRLF
+ * checkout should not happen. Normalising anyway costs nothing and means a
+ * clone that ignored those attributes fails with a real mismatch rather than
+ * "expected 7 sql blocks, found 0", which names neither the cause nor the file.
+ */
+function toLf(text: string): string {
+  return text.replace(/\r\n/g, '\n');
+}
+
 export function renderMigration0001(contractMarkdown: string): string {
-  const start = contractMarkdown.indexOf('## Persisted schemas');
-  const end = contractMarkdown.indexOf('## Public signatures');
+  const normalised = toLf(contractMarkdown);
+  const start = normalised.indexOf('## Persisted schemas');
+  const end = normalised.indexOf('## Public signatures');
   if (start < 0 || end < 0) {
     throw new Error('could not locate the Persisted schemas section in the contract');
   }
 
-  const blocks = [...contractMarkdown.slice(start, end).matchAll(/```sql\n([\s\S]*?)```/g)].map((m) =>
+  const blocks = [...normalised.slice(start, end).matchAll(/```sql\n([\s\S]*?)```/g)].map((m) =>
     (m[1] ?? '').trimEnd(),
   );
   if (blocks.length !== 7) {
@@ -47,6 +58,8 @@ export const MIGRATION_0001_SQL = \`${escaped}
 \`;
 `;
 }
+
+export { toLf };
 
 export function contractPath(): string {
   return path.join(repoRoot, 'design', '20-contract.md');

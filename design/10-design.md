@@ -1102,9 +1102,15 @@ operation.
 
 ### 3. Boot and recovery — triggered by process start
 
-1. Open the lease file and take the exclusive advisory OS lock, then **self-test it with a real
+1. Open the lease lock and take the exclusive advisory OS lock, then **self-test it with a real
    second process** — a short-lived child attempts the same lock and must be refused. A filesystem
    that grants both is not one this service can run on safely, and startup is fatal there.
+
+   **The lock and the lease contents are two files.** The advisory lock is carried by a file that
+   exists only to be locked; `InstanceLease` is written beside it while that lock is held. The
+   runtime has no `flock` binding, so the lock has to live on something the platform will lock for
+   us, and that cannot also be a file being rewritten as JSON. A reader that finds the JSON has
+   learned who *claims* the volume; only the lock decides who holds it.
 
    The test is a child rather than a second acquire from this process because the property relied
    on is *cross-process* exclusion, and same-process re-acquisition is a property of the locking
@@ -1120,6 +1126,17 @@ operation.
    enough that two instances can both believe they hold the lease. The storage volume must be a
    container-managed named volume for that reason, and the child-process test is what turns a
    volume that does not honour the lock into a refusal instead of silent dual ownership.
+
+   **A held lock can also be lost while the process is alive and healthy**, which is a second way
+   to reach dual ownership and is not a variant of the case above. The lock lives in the OS, but
+   it survives only as long as the handle holding it stays open — and a handle the language runtime
+   considers unreachable may be finalised at any time, closing it and releasing the lock under a
+   process that goes on believing it owns the volume. No kill is involved, nothing is logged, and
+   the self-test above has long since passed. The mitigation is that **the handle is held for the
+   process's lifetime by construction**, from module scope, rather than being reachable only
+   through whatever object acquisition happened to return. This is stated here because anyone
+   reimplementing the lease from the boot sequence alone would otherwise reintroduce it, and
+   because it is invisible to any test whose process exits promptly — see `90-decisions.md`.
 2. Load the generated registry, verify its fingerprint, verify the console asset manifest. A
    mismatch is fatal — the service must never start with a smaller accidental tool set.
 3. Verify the deployment ceiling names only capabilities in the contract set. Verify every
