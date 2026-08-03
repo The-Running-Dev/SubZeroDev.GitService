@@ -130,23 +130,36 @@ async function requireSession(deps: ConsoleAuthDependencies, req: IncomingMessag
 }
 
 /**
- * Invariant E7: every mutating cookie route needs an `Origin` check and a
- * double-submit token. Checked after the session itself, so a request with
- * no valid session answers `401` (an auth problem) rather than `403` (a CSRF
- * problem) — the two are different failures and the design gives both a
- * named response.
+ * The `Origin` half of invariant E7, on its own: the request's declared
+ * origin must be this service's own host. Applied to every mutating
+ * `/auth/*` route as blanket defense-in-depth, not because the contract
+ * requires it there — E7 itself is scoped to "mutating **cookie** routes",
+ * and enrol/login/recovery-code/break-glass authenticate by secret, not by
+ * cookie, so none of them are exploitable by a forged cross-site request
+ * (it can't supply a secret it doesn't have). Recorded on the PR #8 review
+ * thread rather than left implicit: a uniform "Origin checked everywhere"
+ * rule is simpler to state and audit than "checked except on these four".
  */
-function csrfOk(req: IncomingMessage): boolean {
+function originOk(req: IncomingMessage): boolean {
   const origin = req.headers.origin;
   const host = req.headers.host;
   if (!origin || !host) return false;
-  let originHost: string;
   try {
-    originHost = new URL(origin).host;
+    return new URL(origin).host === host;
   } catch {
     return false;
   }
-  if (originHost !== host) return false;
+}
+
+/**
+ * Invariant E7 in full: every mutating cookie route needs an `Origin` check
+ * and a double-submit token. Checked after the session itself, so a request
+ * with no valid session answers `401` (an auth problem) rather than `403`
+ * (a CSRF problem) — the two are different failures and the design gives
+ * both a named response.
+ */
+function csrfOk(req: IncomingMessage): boolean {
+  if (!originOk(req)) return false;
 
   const cookies = parseCookies(req.headers.cookie);
   const csrfCookie = cookies[CSRF_COOKIE];
@@ -169,6 +182,10 @@ export async function handleConsoleAuthRoute(
   url: URL,
 ): Promise<boolean> {
   if (req.method === 'POST' && url.pathname === '/auth/enrol') {
+    if (!originOk(req)) {
+      sendJson(res, 403, { error: 'csrf-check-failed' });
+      return true;
+    }
     const body = await readJsonBody(req);
     if (!body) {
       sendJson(res, 400, { error: 'bad-request' });
@@ -188,6 +205,10 @@ export async function handleConsoleAuthRoute(
   }
 
   if (req.method === 'POST' && url.pathname === '/auth/login') {
+    if (!originOk(req)) {
+      sendJson(res, 403, { error: 'csrf-check-failed' });
+      return true;
+    }
     const body = await readJsonBody(req);
     if (!body) {
       sendJson(res, 400, { error: 'bad-request' });
@@ -209,6 +230,10 @@ export async function handleConsoleAuthRoute(
   }
 
   if (req.method === 'POST' && url.pathname === '/auth/login/recovery-code') {
+    if (!originOk(req)) {
+      sendJson(res, 403, { error: 'csrf-check-failed' });
+      return true;
+    }
     const body = await readJsonBody(req);
     if (!body) {
       sendJson(res, 400, { error: 'bad-request' });
@@ -230,6 +255,10 @@ export async function handleConsoleAuthRoute(
   }
 
   if (req.method === 'POST' && url.pathname === '/auth/login/break-glass') {
+    if (!originOk(req)) {
+      sendJson(res, 403, { error: 'csrf-check-failed' });
+      return true;
+    }
     const body = await readJsonBody(req);
     if (!body) {
       sendJson(res, 400, { error: 'bad-request' });

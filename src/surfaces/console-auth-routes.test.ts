@@ -71,6 +71,7 @@ function cookieValue(setCookieHeaders: string[], name: string): string | null {
 async function enrolAndLogin(baseUrl: string): Promise<{ cookies: string[]; sessionCookieHeader: string; csrfToken: string }> {
   const enrolResponse = await fetch(`${baseUrl}/auth/enrol`, {
     method: 'POST',
+    headers: { Origin: baseUrl },
     body: JSON.stringify({ provisioningSecret: PROVISIONING_SECRET, subject: SUBJECT, password: PASSWORD }),
   });
   assert.equal(enrolResponse.status, 200);
@@ -81,6 +82,7 @@ async function enrolAndLogin(baseUrl: string): Promise<{ cookies: string[]; sess
 
   const loginResponse = await fetch(`${baseUrl}/auth/login`, {
     method: 'POST',
+    headers: { Origin: baseUrl },
     body: JSON.stringify({ subject: SUBJECT, password: PASSWORD, totpCode: code }),
   });
   assert.equal(loginResponse.status, 200);
@@ -131,12 +133,14 @@ test('S4.2 — enrolment with the wrong secret answers 401; with the right secre
     await withServer(volume, async (baseUrl) => {
       const wrong = await fetch(`${baseUrl}/auth/enrol`, {
         method: 'POST',
+        headers: { Origin: baseUrl },
         body: JSON.stringify({ provisioningSecret: 'nope', subject: SUBJECT, password: PASSWORD }),
       });
       assert.equal(wrong.status, 401);
 
       const right = await fetch(`${baseUrl}/auth/enrol`, {
         method: 'POST',
+        headers: { Origin: baseUrl },
         body: JSON.stringify({ provisioningSecret: PROVISIONING_SECRET, subject: SUBJECT, password: PASSWORD }),
       });
       assert.equal(right.status, 200);
@@ -145,11 +149,61 @@ test('S4.2 — enrolment with the wrong secret answers 401; with the right secre
 
       const again = await fetch(`${baseUrl}/auth/enrol`, {
         method: 'POST',
+        headers: { Origin: baseUrl },
         body: JSON.stringify({ provisioningSecret: PROVISIONING_SECRET, subject: SUBJECT, password: PASSWORD }),
       });
       assert.equal(again.status, 401);
       const againBody = (await again.json()) as { error: string };
       assert.equal(againBody.error, 'already-provisioned');
+    });
+  });
+});
+
+test('a cross-origin POST to /auth/enrol is rejected before it ever reaches operator identity', async () => {
+  await withVolumeAsync(async (volume) => {
+    writeProvisioningSecret(volume, PROVISIONING_SECRET);
+    await withServer(volume, async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/auth/enrol`, {
+        method: 'POST',
+        headers: { Origin: 'https://attacker.example' },
+        body: JSON.stringify({ provisioningSecret: PROVISIONING_SECRET, subject: SUBJECT, password: PASSWORD }),
+      });
+      assert.equal(response.status, 403);
+    });
+  });
+});
+
+test('a cross-origin POST to /auth/login is rejected, even with the correct password and TOTP code', async () => {
+  await withVolumeAsync(async (volume) => {
+    writeProvisioningSecret(volume, PROVISIONING_SECRET);
+    await withServer(volume, async (baseUrl) => {
+      const enrolResponse = await fetch(`${baseUrl}/auth/enrol`, {
+        method: 'POST',
+        headers: { Origin: baseUrl },
+        body: JSON.stringify({ provisioningSecret: PROVISIONING_SECRET, subject: SUBJECT, password: PASSWORD }),
+      });
+      const { totpSecret } = (await enrolResponse.json()) as { totpSecret: string };
+      const code = currentTotpCode(base32Decode(totpSecret), Date.parse(systemClock.now()) / 1000);
+
+      const response = await fetch(`${baseUrl}/auth/login`, {
+        method: 'POST',
+        headers: { Origin: 'https://attacker.example' },
+        body: JSON.stringify({ subject: SUBJECT, password: PASSWORD, totpCode: code }),
+      });
+      assert.equal(response.status, 403);
+    });
+  });
+});
+
+test('a same-origin POST to /auth/enrol with no Origin header at all is rejected (fail-closed, not fail-open)', async () => {
+  await withVolumeAsync(async (volume) => {
+    writeProvisioningSecret(volume, PROVISIONING_SECRET);
+    await withServer(volume, async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/auth/enrol`, {
+        method: 'POST',
+        body: JSON.stringify({ provisioningSecret: PROVISIONING_SECRET, subject: SUBJECT, password: PASSWORD }),
+      });
+      assert.equal(response.status, 403);
     });
   });
 });
