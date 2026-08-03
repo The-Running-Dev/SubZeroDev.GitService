@@ -1,10 +1,11 @@
 import { err, ok, type Outcome } from '../shared/outcome.ts';
-import type { DeclarationId, OperationId, RegistryToolName, ScheduledJobId, Sha256Hex } from '../shared/brands.ts';
+import type { DeclarationId, OperationId, RegistryToolName, ScheduledJobId, Sha256Hex, Subject } from '../shared/brands.ts';
 import type { ModuleErrorBase } from '../shared/result-kind.ts';
 import type { CapabilityName } from '../contract/capabilities.ts';
 import type { Clock } from '../clock/clock.ts';
 import type { Clone } from '../clone/types.ts';
-import { UNVERIFIED_AUDIT_CHAIN, type AuditChainState } from '../audit/types.ts';
+import type { AuditChainState } from '../audit/types.ts';
+import type { Audit } from '../audit/audit.ts';
 import type { StructuredStore } from '../store/structured-store.ts';
 import type { StoreError } from '../store/errors.ts';
 import { acquireLease, type InstanceLease, type LeaseGuard, type LockAcquirer } from './lease.ts';
@@ -27,12 +28,13 @@ function bootError<T extends { readonly code: BootError['code'] }>(variant: T, s
 }
 
 /**
- * S2 delivers boot steps 1, 4 and 8, and carries step 2 forward from S1.
- * The remaining `BootReport` members belong to subsystems that do not exist
- * yet, and are reported at their empty values rather than invented:
+ * S2 delivers boot steps 1, 4 and 8, and carries step 2 forward from S1. S3
+ * adds the audit trail: a lease takeover is now a real, verifiable record,
+ * and `auditChain` is boot's own `verify()` result rather than a placeholder.
+ * The remaining `BootReport` members still belong to subsystems that do not
+ * exist yet, and are reported at their empty values rather than invented:
  *
  *   provisioningPending — operator identity, S4
- *   auditChain          — the audit trail, S3
  *   jobsResolved        — the scheduler, S16
  *   revalidation        — needs both of the above
  *   recoveryPending     — recovery, S8
@@ -78,11 +80,14 @@ export interface LifecycleDependencies {
   readonly buildDir: string;
   readonly clock: Clock;
   readonly store: StructuredStore;
+  readonly audit: Audit;
   readonly consoleFingerprint: Sha256Hex;
   readonly acquirer?: LockAcquirer;
-  /** Reports a lease takeover. The durable audit record lands in S3. */
+  /** Fires alongside the durable `lease-takeover` audit record — operator-visible even if the trail itself cannot be written. */
   readonly onTakeover?: (previousHolder: InstanceLease, current: InstanceLease) => void;
 }
+
+const SYSTEM_ACTOR = { kind: 'recovery', subject: 'system' as Subject, clientId: null, grantId: null } as const;
 
 const NO_JOBS: BootJobReport = {
   markedDone: [],
@@ -122,10 +127,6 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         );
       }
       guard = leaseResult.value.guard;
-
-      if (leaseResult.value.takenOverFrom && deps.onTakeover) {
-        deps.onTakeover(leaseResult.value.takenOverFrom, leaseResult.value.lease);
-      }
 
       // Step 2 — the registry fingerprint, delivered in S1.
       const registry = await verifyRegistryArtifact(deps.buildDir);
@@ -185,6 +186,28 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       const migrated = await deps.store.migrate();
       if (!migrated.ok) return failAfterOpen(migrated.error);
 
+      // The lease-takeover record can only be written now: audit_chain_head
+      // is created by migration 0001, which has just run. Detected at step 1,
+      // appended here — never fatal to boot, per invariant S3 (append never
+      // throws) and S4 (a chain break is reported, never fatal).
+      const takenOverFrom = leaseResult.value.takenOverFrom;
+      if (takenOverFrom) {
+        await deps.audit.append({
+          at: deps.clock.now(),
+          operationId: null,
+          declarationId: null,
+          generation: null,
+          tool: null,
+          actorRef: SYSTEM_ACTOR,
+          context: 'recovery',
+          form: 'lease-takeover',
+          previousHolder: takenOverFrom,
+        });
+        if (deps.onTakeover) deps.onTakeover(takenOverFrom, leaseResult.value.lease);
+      }
+
+      const auditChain = await deps.audit.verify();
+
       // Step 8 — re-derive clone state from disk. S5 owns clone directories;
       // with none declared, the derived set is genuinely empty.
       return ok({
@@ -194,7 +217,7 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         consoleFingerprint: deps.consoleFingerprint,
         migrationsApplied: migrated.value,
         provisioningPending: false,
-        auditChain: UNVERIFIED_AUDIT_CHAIN,
+        auditChain,
         jobsResolved: NO_JOBS,
         revalidation: { jobsParked: [], entriesParked: [] },
         clones: [],
@@ -203,6 +226,9 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
     },
 
     async shutdown(_reason: ShutdownReason): Promise<void> {
+      // Audit before the store: both hold a handle on the same file, and the
+      // module that opened one is the module that releases it.
+      await deps.audit.close();
       await deps.store.close();
       if (guard) {
         guard.release();

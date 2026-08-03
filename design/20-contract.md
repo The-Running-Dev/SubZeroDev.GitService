@@ -1331,12 +1331,22 @@ rule that a failing credential is marked for one declaration and never reference
 | Instance lease lock | nothing readable — it exists only to carry the exclusive advisory OS lock | opened and locked at acquisition, held for the process's lifetime |
 | Instance lease | `InstanceLease` as JSON | once at acquisition, while the lock above is held |
 | Audit segment | one `AuditRecord` JSON per line | append-only, rotated at `auditSegmentBytes` |
+| — its path | `audit/NNNNNN.jsonl` under the volume root, six zero-padded digits, numbered from `000001` | created on first append to that segment |
 | Provisioning file | an enrolment secret | by an operator with host access; burned at enrolment |
 | Break-glass file | a single-use token | by an operator with host access; consumed at next login |
 | Pending pull-request list, one per declaration | `PendingPullRequestList` as JSON | temp-then-rename on each tick |
 
 A missing or unparseable pending pull-request list is treated as empty and never thrown — a bad
 read must not crash a tick.
+
+**The audit segments are the trail; `audit_chain_head` is an advisory mirror.** The row exists so
+the head can be read without walking the files, and so a cleanly truncated tail is detectable. It
+is never the source of truth: the head is re-derivable from the last parseable record of the
+highest-numbered segment, and `Audit.append` and `Audit.verify` both fall back to that when the
+structured store is unreadable. That is what makes the log outlive the store's corruption, which is
+the reason it is a separate storage kind rather than another table. A segment is rotated **before**
+a record that would exceed `auditSegmentBytes` is written, so a segment only exceeds the cap when a
+single record does.
 
 ---
 
@@ -1596,8 +1606,14 @@ interface Audit {
   verify(): Promise<AuditChainState>;
   chainState(): Promise<AuditChainState>;
   runRetention(): Promise<RetentionReport>;
+  close(): Promise<void>;
 }
 ```
+
+`close` releases the module's own handle on the structured store, mirroring `StructuredStore.close`.
+The lifecycle module calls it during shutdown: a module that opens a resource is the module that
+releases it, and leaving the handle to process exit makes an in-process restart hold a file open on
+a host that refuses to unlink open files.
 
 `append` never throws and never rejects. Every append passes through one writer inside the module,
 which is what assigns `sequence`, `previousHash` and `hash`.
@@ -2086,6 +2102,16 @@ through an authenticated `tools/list` rather than through the probe.
 A bearer route accepts no cookie and a cookie route accepts no bearer. The route table itself is
 not fixed here — see `## Unresolved`.
 
+**Three paths are fixed, ahead of that table, because they already ship**: `LivenessReport` on
+`GET /healthz` unauthenticated, `VersionReport` on `GET /version`, and `HealthReport` on
+`GET /health`, the latter two authenticated. U4 still owns the rest of the route table, but these
+three are externally observable — an operator's monitoring binds to them — so U4 resolving later
+must accept them rather than rename a live endpoint.
+
+**No route handler may take the process down.** An unhandled rejection in a handler is fatal to the
+service, which would hand anyone able to make one throw the same power that refusing to start on a
+corrupt trail would. Every surface catches at the handler boundary and answers `500`.
+
 ---
 
 ## Error semantics
@@ -2295,6 +2321,15 @@ read that outcome differently:
 
 `chain-broken` is surfaced in the health view and the audit view and is **never fatal**. Refusing to
 start on a corrupt trail would hand anyone able to corrupt it a way to stop the service.
+
+All three variants carry `resultKind: 'infrastructure'`. None is a caller's fault: a query that
+cannot read a segment, or a chain that does not verify, says something about the volume rather than
+about the request, and `isError` is true for all three accordingly.
+
+`verify` and `chainState` return an `AuditChainState` and have **no error type at all** — they must
+not throw, for the same reason `chain-broken` is not fatal. A trail so damaged that it cannot be
+read reports a `chainBreak` describing that, rather than propagating an exception into whatever was
+asking. That includes the case where the structured store holding the mirror is itself unreadable.
 
 ### Notifier
 
