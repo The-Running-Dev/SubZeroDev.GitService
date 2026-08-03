@@ -2,14 +2,16 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gitSha, type GitSha } from './shared/brands.ts';
-import { verifyRegistryArtifact } from './lifecycle/registry-integrity.ts';
+import { systemClock } from './clock/clock.ts';
+import { createStructuredStore } from './store/structured-store.ts';
+import { createLifecycle } from './lifecycle/boot.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './surfaces/http-server.ts';
 
 /**
- * The composition root. It never imports the compiler (invariant B8,
- * enforced by `scripts/check-no-compiler-in-runtime.ts`) — it reads the
- * already-built artifact under `build/` and refuses to start a transport if
- * that artifact fails its integrity check (boot steps 2 and 3).
+ * The composition root. It never imports the compiler (invariant B8, enforced
+ * by `scripts/check-no-compiler-in-runtime.ts`): it wires the lifecycle module,
+ * which reads the already-built artifact under `build/`, takes the instance
+ * lease, and migrates the store. No transport starts unless boot succeeds.
  */
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -44,32 +46,64 @@ async function main(): Promise<void> {
     return;
   }
 
-  const verified = await verifyRegistryArtifact(buildDir);
-  if (!verified.ok) {
-    if (verified.error.code === 'fingerprint-mismatch') {
-      console.error(
-        `server: registry fingerprint-mismatch — expected ${verified.error.expected}, found ${verified.error.found}. Refusing to start; no transport starts.`,
-      );
-    } else {
-      console.error(`server: registry-unreadable — ${verified.error.reason}. Refusing to start; no transport starts.`);
-    }
-    process.exit(1);
-    return;
-  }
-
+  const volumeRoot = process.env.VOLUME_ROOT ?? path.join(repoRoot, 'volume');
   const commitSha = resolveCommitSha();
   const port = resolvePort();
 
+  const store = createStructuredStore({ volumeRoot, clock: systemClock });
+  const lifecycle = createLifecycle({
+    volumeRoot,
+    buildDir,
+    clock: systemClock,
+    store,
+    consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+    onTakeover: (previous, current) => {
+      // The durable `lease-takeover` audit record lands in S3; until the audit
+      // trail exists, the takeover is reported here so it is never silent.
+      console.warn(
+        `server: took over the volume from instance ${previous.instanceId} on ${previous.hostName} ` +
+          `(started ${previous.startedAt}), which did not release its lease. Now held by ${current.instanceId}.`,
+      );
+    },
+  });
+
+  // Readiness is false until boot returns success: the lease must be held and
+  // migrations applied before this instance reports that it can serve.
+  let ready = false;
+
+  const booted = await lifecycle.boot();
+  if (!booted.ok) {
+    console.error(`server: boot failed (${booted.error.code}) — ${booted.error.summary}`);
+    console.error('server: refusing to start; no transport starts.');
+    await lifecycle.shutdown('fatal');
+    process.exit(1);
+    return;
+  }
+  ready = true;
+
   const server = createSurfacesServer({
     commitSha,
-    contractFingerprint: verified.value.contractFingerprint,
-    consoleFingerprint: NO_CONSOLE_FINGERPRINT,
-    ready: () => true,
+    contractFingerprint: booted.value.registryFingerprint,
+    consoleFingerprint: booted.value.consoleFingerprint,
+    ready: () => ready,
     operatorApiToken,
   });
 
+  const shutdown = (signal: NodeJS.Signals): void => {
+    ready = false;
+    server.close(() => {
+      void lifecycle.shutdown('signal').then(() => process.exit(0));
+    });
+    void signal;
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+
   server.listen(port, () => {
-    console.log(`server: listening on :${port} (commit ${commitSha}, contract ${verified.value.contractFingerprint})`);
+    console.log(
+      `server: listening on :${port} (commit ${commitSha}, contract ${booted.value.registryFingerprint}, ` +
+        `instance ${booted.value.lease.instanceId}, migrations applied ${booted.value.migrationsApplied})`,
+    );
   });
 }
 
