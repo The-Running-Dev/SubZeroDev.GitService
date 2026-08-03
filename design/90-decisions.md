@@ -43,13 +43,13 @@ Rejected: **bcrypt** — the standard choice for password hashing and widely sup
 Reversibility: cheap (one migration to re-hash, but no deployed store yet)
 
 
+### 2026-08-04 — Provisioning and break-glass file names are fixed in the data volume
 Context: S4 needs to read two files from the volume root: the provisioning secret and the break-glass token. The contract's file table fixed the audit segment layout, the lease files, the TOTP sealing key path, and the pending pull-request list, but did not name these two. Leaving them to the implementation means a reimplementation cannot find them without reading the source.
 Chosen: `provisioning.secret` and `break-glass.token`, both under the volume root, each containing exactly one line. These names match the terminology used consistently in the contract and design. Both are now in the contract's file table.
 Rejected: **Environment-variable-configured paths** — flexible for operators, and it adds a new configuration surface with no clear benefit over a fixed per-volume name and no named path for a reimplementation to find. **A dedicated subdirectory** — cleaner if many such files accumulate, and the convention is one provisioning and one break-glass token per volume, so grouping them adds complexity without reducing ambiguity.
 Reversibility: cheap
 
 
-Context: A requested “agent that runs on code PRs, validates changes with the best model, addresses
 PR issues, posts and resolves issues” risks crossing two binding boundaries at once: the brief's
 "not a general workflow engine" non-goal, and the non-goal against becoming a general GitHub API
 proxy. The existing host contract already covers PR status, comments, checks, deploy status and
