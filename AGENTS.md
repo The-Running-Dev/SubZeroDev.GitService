@@ -4,15 +4,22 @@ This file is binding for every agent session in this repo, regardless of tool or
 
 ## This repository
 
-`SubZeroDev.Git` manages a Git repository, exposing git operations over an **API** and **MCP endpoints**, behind a pre-defined workflow. Target repositories are **declared, not hardcoded** — any repository named in a declaration is in scope, including ones outside the `SubZeroDev.*` estate. Work is applied through **GitHub Actions and the `gh` CLI**. Lifespan: **maintained for years**, so the full design pipeline is worth running.
+`SubZeroDev.Git` is a containerised service that makes many Git repositories reachable through one place, over three surfaces: an **operator console**, an **HTTP API**, and **MCP**. Target repositories are **declared, not hardcoded** — any repository named in a declaration is in scope, including ones outside the `SubZeroDev.*` estate, and each carries its own descriptive configuration. Lifespan: **maintained for years**, so the full design pipeline is worth running.
 
-**Owns** — the declaration format for a managed repository; the pre-defined git workflow the endpoints expose; the API surface and the MCP tool surface over that workflow.
+**Two deliverables, with different risk profiles.** Do not plan them as one kind of work.
 
-**Does not own** — the contents of the repositories it manages, or their build and deploy pipelines. It operates on them; it does not define what they contain.
+1. **The generic contract-first MCP runtime** — contract, compiler, registry, fingerprint, adapters, scope and capability enforcement, resource server, transports. Specified by `blog-mcp/MCP-NEXT.md`, which is a **plan, not a codebase**: it states "no behavior described in this document is implemented". This is new construction carrying design risk.
+2. **Generic git access** — the repository operations proven in `blog-mcp`, generalised from one repository to any declared one. This is extraction; the risk sits in the seam, not the behaviour.
 
-**Companions** — the `SubZeroDev.*` estate under `D:\Dropbox\Projects\`. `SubZeroDev.Blog` already runs a repository-specific MCP server over its own Docusaurus repo, exposing a fixed publishing workflow as tools (`blog_stage`, `blog_commit`, `blog_push`, `blog_create_pr`, `blog_wait_for_checks`, …). That is the closest existing implementation of what this repository generalises, and the first place to look before designing a tool surface here.
+**Owns** — the declaration format for a managed repository; the git operations the surfaces expose; the contract that fixes which operations a deployed instance may execute; the API, MCP and console surfaces over them.
 
-> This section was written from a setup interview, **not** from a ratified brief. `design/00-brief.md` outranks it — when the brief lands, correct this section against it rather than the other way round.
+**Does not own** — the contents of the repositories it manages, or their build and deploy pipelines. It operates on them; it does not define what they contain. It is **not a general workflow engine**: multi-step sequences are handwritten transactional composites, not a declarative feature. A flows layer on top is future work.
+
+**Mechanism** — the service performs git operations directly. **GitHub Actions is not the execution mechanism and is a non-goal**; the `gh` CLI is in scope as the route to pull requests, checks and merges. Local git works against any host; pull-request tooling is GitHub-only.
+
+**Companions** — the `SubZeroDev.*` estate under `D:\Dropbox\Projects\`. `SubZeroDev.Blog/tools/blog-mcp` is **load-bearing prior art, not inspiration**: ~40 test files, a React operator console, an OAuth 2.1 authorization server, a scheduler, a watcher, plus `MCP-NEXT.md` and `TODO-NEXT.md`. Read it before designing anything here. Its declaration format, clone-on-demand refusals, repository mutex, capability profiles, path allowlist and result envelope are all inherited. So is its central safety property — **the tool surface itself is the boundary**; see `design/90-decisions.md` for where this brief knowingly departs from that.
+
+> Corrected against `design/00-brief.md` on 2026-08-03, after the brief was ratified and interrogated with `/brief-check`. The brief still outranks this section — correct this against the brief, never the reverse.
 
 ## Source of truth
 
