@@ -38,10 +38,22 @@ growth that is not theirs.
 
 | What grows | Policy |
 |---|---|
-| Audit log (JSONL) | Rotated by size, retained for a configured window, oldest segment removed only after the window passes. Never truncated to make room — a trail that discards itself under pressure is not one. |
-| Operation journal | `settled` entries older than the window are deleted; `attention` entries are never deleted, because they are the ones an operator still has to resolve. |
-| Notification outbox | Delivered rows deleted after the window; failed rows retained until the operator clears them from the health view. |
-| Pre-migration store backups | The most recent *n* retained, older ones removed after a successful boot on the new schema — the rollback target item 18 needs is the latest one, not all of them. |
+| Audit log (JSONL) | Rotated at 64 MB per segment, retained **90 days**, oldest segment removed only after the window passes and only with its chain terminal preserved. Never truncated to make room — a trail that discards itself under pressure is not one. |
+| Operation journal | `settled` entries deleted after **30 days**; `attention` entries are never deleted, because they are the ones an operator still has to resolve. |
+| Notification outbox | Delivered rows deleted after **14 days**; failed rows retained until the operator clears them from the health view. |
+| Pre-migration store backups | The most recent **3** retained, older ones removed after a successful boot on the new schema — the rollback target item 18 needs is the latest one, not all of them. |
+
+All four windows are configuration with these as defaults, sized against a volume provisioned
+generously for the estate: of the order of 100 GB for roughly a dozen declarations, which is
+several times the working set.
+
+**Eviction is therefore an exceptional event, not routine housekeeping.** Two watermarks: at
+**85 %** a maintenance pass is requested, which applies retention first and evicts safe clones
+only if that was not enough; at **95 %** operations needing space are refused. Because the volume
+is sized so this should not happen, **an eviction fires the notifier** — a clone being released is
+information about the estate outgrowing its disk, not a routine event to log quietly. The
+interlock still earns its place at these thresholds; it simply should rarely trip, and the day it
+does is a day worth hearing about.
 
 Retention runs on the same maintenance pass as eviction, and the disk-full path reports which of
 the five — clones, audit, journal, outbox, backups — is actually consuming the volume.
@@ -292,6 +304,25 @@ One scrubbed JSON line per mutating call: timestamp, `operationId`, `declaration
 `actorRef`, result kind and changed paths. Best-effort append that never fails the call it
 describes, per the prior art. `actorRef` is what makes definition-of-done item 8's "attributable"
 true rather than asserted.
+
+**The log is hash-chained.** Every line carries a sequence number, the previous line's hash, and
+its own hash taken over its canonical serialisation together with that previous hash. Rotation
+does not break the chain: each new segment opens with the terminal hash of the one before it. The
+chain head is mirrored into the structured store on every append and surfaced in the health view,
+and boot verifies the chain end to end.
+
+A broken or short chain is **reported, never fatal**. Refusing to start on a corrupt trail would
+hand anyone able to corrupt it a way to stop the service, which is a worse property than running
+with a trail that says loudly where it was cut.
+
+What this buys, stated precisely because the escape hatch is the thing it is aimed at: truncation
+and single-line edits become detectable, because the chain no longer verifies and the store's
+mirrored head disagrees with the file. **It does not make the trail unforgeable.** Code reached
+through `git.raw` runs as the service and can rewrite the log and the mirrored head together,
+recomputing a consistent chain. Closing that needs the trail to leave the volume, which is
+deferred — see the decision log. Tamper-*evident* against everything short of a deliberate,
+service-privileged rewrite is what is claimed here, and it is the strongest claim available
+without a second service to depend on.
 
 **`git.raw` writes two lines, not one, because one line cannot do the job.** Result kind and
 changed paths are post-execution facts, so a single line containing them cannot also be written
@@ -670,10 +701,11 @@ runs as the service, on the volume the service owns, so it can read and write ev
 declaration's clone, the structured store, the audit log, and whatever a credential resolver can
 resolve. Three consequences follow, and none of them are what the words above appear to promise:
 
-- **Attributability is refusal-time, not durable.** The audit log is append-only by discipline,
-  not by storage: nothing in this design stops hatch-reached code rewriting or truncating the
-  JSONL after a line lands. The boundary table claims only that an unrecordable hatch use is
-  refused. Whether the trail survives the caller it describes is open question 5.
+- **Attributability is refusal-time, and tampering is evident rather than prevented.** The
+  boundary table claims only that an unrecordable hatch use is refused. Beyond that, the hash
+  chain makes truncation and edited lines detectable at boot and in the health view — but
+  hatch-reached code runs as the service and can rewrite the log and its mirrored chain head
+  together. Detection, not prevention, until the trail leaves the volume.
 - **The lattice binds the tool surface, not the process.** "No operation anywhere adds a
   capability to a set" is true of every dispatch path. It is not a claim about a process with
   write access to the grant rows.
@@ -951,26 +983,7 @@ store the atomic multi-row updates recovery classification needs. Rejected: *SQL
    service needs nothing more; if it does not, the service needs an online-backup operation, and
    that is scope neither the brief nor this document has allocated.
 
-5. **Should the audit log be tamper-evident?** Definition-of-done item 8 wants hatch use
-   attributable, and the hatch is the one surface that can rewrite the log recording it. The brief
-   declined a hard floor, but it never considered whether the evidence survives — so this is
-   unanswered rather than settled. Recommended: **a per-line hash chain, verified at boot and by
-   an operator-visible check**, which detects truncation and rewriting without needing storage the
-   service cannot reach. Alternatives: append the trail to an external sink the container cannot
-   edit, which is the only option that also survives volume loss and adds a deployment dependency
-   the brief has not scoped; or accept refusal-time attributability as the whole claim and say so
-   in the definition of done. This wants deciding before `/contract`, because the answer fixes the
-   audit line format, and retrofitting a chain over a written trail is a migration.
-
-6. **What is the real disk budget, and is eviction expected to fire?** "Unbounded and assumed to
-   grow" sets the design constraint, and the eviction machinery follows from it. The watermark
-   values, the retention windows for the audit log, journal, outbox and pre-migration backups,
-   and whether eviction is a routine event or a last resort that should notify you, all depend
-   on a number only you have. If the real answer is twenty repositories on a volume with room for
-   two hundred, the interlock still earns its place but the thresholds and the notification
-   posture are different.
-
-7. **Do the blog authoring views gain a repository dimension, or stay pinned to one declaration?**
+5. **Do the blog authoring views gain a repository dimension, or stay pinned to one declaration?**
    `ComposeView` is 38 KB of repository-implicit code. Under this design a view renders for the
    selected repository when the grant permits, which implies parameterising it. Pinning it to the
    blog declaration instead is less work and less general, and is defensible because blog
