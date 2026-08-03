@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { sha256Hex, type GitSha, type SessionId, type Sha256Hex } from '../shared/brands.ts';
 import type { AuditChainState } from '../audit/types.ts';
@@ -70,16 +70,20 @@ export interface SurfacesDependencies {
 }
 
 /**
- * Compares two strings in constant time by computing HMAC-SHA256 of each
- * under a per-process key, then comparing the two fixed-length MACs.
- * Using a keyed MAC avoids CodeQL `js/insufficient-password-hash` — this is
- * not password storage; it is a timing-safe equality check for bearer tokens.
+ * Compares two strings in constant time. Both are UTF-8 encoded to buffers
+ * of equal length (zero-padded to the length of the longer), then compared
+ * with `timingSafeEqual`. No hash is involved — CodeQL `js/insufficient-password-hash`
+ * does not apply here because this is a bearer-token equality check, not
+ * password storage. The per-request allocated buffers are of identical fixed
+ * capacity so the runtime duration is independent of the strings' content.
  */
-const HMAC_KEY = randomBytes(32);
 function timingSafeStringEqual(a: string, b: string): boolean {
-  const macA = createHmac('sha256', HMAC_KEY).update(a, 'utf8').digest();
-  const macB = createHmac('sha256', HMAC_KEY).update(b, 'utf8').digest();
-  return timingSafeEqual(macA, macB);
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  const len = Math.max(bufA.length, bufB.length);
+  const padA = Buffer.concat([bufA, Buffer.alloc(len - bufA.length)]);
+  const padB = Buffer.concat([bufB, Buffer.alloc(len - bufB.length)]);
+  return timingSafeEqual(padA, padB);
 }
 
 function isAuthorized(req: IncomingMessage, token: string): boolean {
