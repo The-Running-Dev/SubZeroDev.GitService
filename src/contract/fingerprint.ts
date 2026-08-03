@@ -1,32 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { Sha256Hex } from '../shared/brands.ts';
+import { canonicalize } from '../shared/canonical-json.ts';
 import type { CapabilityName, ContractCapabilitySet } from './capabilities.ts';
 import type { ToolDeclaration } from './tool-declaration.ts';
-
-/**
- * Deep, key-sorted JSON serialisation. Array order is preserved because the
- * only array this is applied to (`entries`) is already normalised to a fixed
- * order by the caller before hashing — sorting keys, not sorting sequences,
- * is what makes two semantically identical declarations hash identically
- * regardless of the property order they were written in.
- */
-function sortKeysDeep(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(sortKeysDeep);
-  }
-  if (value !== null && typeof value === 'object') {
-    const sorted: Record<string, unknown> = {};
-    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-      sorted[key] = sortKeysDeep((value as Record<string, unknown>)[key]);
-    }
-    return sorted;
-  }
-  return value;
-}
-
-function canonicalize(value: unknown): string {
-  return JSON.stringify(sortKeysDeep(value));
-}
 
 /**
  * Normalises `entries` into the fixed, content-derived order (by tool name)

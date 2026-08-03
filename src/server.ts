@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { gitSha, type GitSha } from './shared/brands.ts';
 import { systemClock } from './clock/clock.ts';
 import { createStructuredStore } from './store/structured-store.ts';
+import { createAudit } from './audit/audit.ts';
 import { createLifecycle } from './lifecycle/boot.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './surfaces/http-server.ts';
 
@@ -51,15 +52,18 @@ async function main(): Promise<void> {
   const port = resolvePort();
 
   const store = createStructuredStore({ volumeRoot, clock: systemClock });
+  const audit = createAudit({ volumeRoot, clock: systemClock });
   const lifecycle = createLifecycle({
     volumeRoot,
     buildDir,
     clock: systemClock,
     store,
+    audit,
     consoleFingerprint: NO_CONSOLE_FINGERPRINT,
     onTakeover: (previous, current) => {
-      // The durable `lease-takeover` audit record lands in S3; until the audit
-      // trail exists, the takeover is reported here so it is never silent.
+      // The durable `lease-takeover` audit record is written by boot itself
+      // (S3); this is operator-visible defense in depth, so a takeover is
+      // never silent even if the trail were somehow unwritable.
       console.warn(
         `server: took over the volume from instance ${previous.instanceId} on ${previous.hostName} ` +
           `(started ${previous.startedAt}), which did not release its lease. Now held by ${current.instanceId}.`,
@@ -86,6 +90,8 @@ async function main(): Promise<void> {
     contractFingerprint: booted.value.registryFingerprint,
     consoleFingerprint: booted.value.consoleFingerprint,
     ready: () => ready,
+    provisioningPending: () => booted.value.provisioningPending,
+    auditChain: () => audit.chainState(),
     operatorApiToken,
   });
 

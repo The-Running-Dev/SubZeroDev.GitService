@@ -5,6 +5,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { systemClock } from '../clock/clock.ts';
 import { compiler } from '../contract/compiler.ts';
+import { createAudit } from '../audit/audit.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
 import { NO_CONSOLE_FINGERPRINT } from '../surfaces/http-server.ts';
@@ -37,15 +38,17 @@ function writeBuildDir(root: string): string {
 
 function lifecycleFor(volume: string, acquirer?: LockAcquirer) {
   const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+  const audit = createAudit({ volumeRoot: volume, clock: systemClock });
   const lifecycle = createLifecycle({
     volumeRoot: volume,
     buildDir: writeBuildDir(volume),
     clock: systemClock,
     store,
+    audit,
     consoleFingerprint: NO_CONSOLE_FINGERPRINT,
     ...(acquirer ? { acquirer } : {}),
   });
-  return { store, lifecycle };
+  return { store, audit, lifecycle };
 }
 
 test('boot takes the lease, applies migrations and reports both', async () => {
@@ -155,6 +158,83 @@ test('a tampered registry artifact fails boot and releases the lease again', asy
   });
 });
 
+test('S3.8 — a lease takeover detected at boot writes a lease-takeover audit record, and the boot report reflects it', async () => {
+  await withVolumeAsync(async (volume) => {
+    // A stale lease left by a holder that died without releasing — written by
+    // hand rather than through acquireLease, so this exercises boot's own
+    // wiring rather than the lease module already covered in lease.test.ts.
+    const staleLease = {
+      instanceId: 'dead-instance',
+      bootId: 'dead-boot',
+      hostName: 'dead-host',
+      startedAt: '2026-01-01T00:00:00.000Z',
+    };
+    writeFileSync(path.join(volume, 'lease.json'), `${JSON.stringify(staleLease, null, 2)}\n`, 'utf8');
+
+    const { lifecycle, audit } = lifecycleFor(volume);
+    const booted = await lifecycle.boot();
+    try {
+      assert.equal(booted.ok, true, 'a takeover does not fail boot');
+      if (!booted.ok) return;
+
+      assert.equal(booted.value.auditChain.chainBreak, null);
+      assert.equal(booted.value.auditChain.verifiedThrough, 1, 'exactly the lease-takeover record');
+
+      const page = await audit.query({
+        declarationId: null,
+        tool: null,
+        actorSubject: null,
+        form: 'lease-takeover',
+        from: null,
+        to: null,
+        limit: 10,
+        cursor: null,
+      });
+      assert.equal(page.ok, true);
+      if (!page.ok) return;
+      assert.equal(page.value.records.length, 1);
+      const record = page.value.records[0] as unknown as { previousHolder: { instanceId: string } };
+      assert.equal(record.previousHolder.instanceId, 'dead-instance', 'names the previous holder');
+    } finally {
+      await lifecycle.shutdown('operator');
+    }
+  });
+});
+
+test('S3.4 — a chain break already present on disk does not fail boot; boot reports it', async () => {
+  await withVolumeAsync(async (volume) => {
+    // Seed a real trail, then corrupt it before this boot ever runs.
+    const seedStore = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    await seedStore.open();
+    await seedStore.migrate();
+    await seedStore.close();
+    const seedAudit = createAudit({ volumeRoot: volume, clock: systemClock });
+    await seedAudit.append({
+      at: systemClock.now(),
+      operationId: null,
+      declarationId: null,
+      generation: null,
+      tool: null,
+      actorRef: { kind: 'recovery', subject: 'system' as never, clientId: null, grantId: null },
+      context: 'recovery',
+      form: 'lease-takeover',
+      previousHolder: { instanceId: 'x', bootId: 'y', hostName: 'z', startedAt: '2026-01-01T00:00:00.000Z' as never },
+    });
+    const segPath = path.join(volume, 'audit', '000001.jsonl');
+    writeFileSync(segPath, 'not valid jsonl at all\n', 'utf8');
+
+    const { lifecycle } = lifecycleFor(volume);
+    const booted = await lifecycle.boot();
+    try {
+      assert.equal(booted.ok, true, 'boot still starts and serves despite a pre-existing chain break');
+      if (!booted.ok) return;
+      assert.notEqual(booted.value.auditChain.chainBreak, null, 'boot reports the break rather than hiding it');
+    } finally {
+      await lifecycle.shutdown('operator');
+    }
+  });
+});
+
 test('a boot that fails after opening the store closes it again, leaking no handle', async () => {
   await withVolumeAsync(async (volume) => {
     const seed = createStructuredStore({ volumeRoot: volume, clock: systemClock });
@@ -172,6 +252,7 @@ test('a boot that fails after opening the store closes it again, leaking no hand
       buildDir: writeBuildDir(volume),
       clock: systemClock,
       store: countingStore,
+      audit: createAudit({ volumeRoot: volume, clock: systemClock }),
       consoleFingerprint: NO_CONSOLE_FINGERPRINT,
     });
 
@@ -189,6 +270,7 @@ test('a registry that is absent reports registry-unreadable, not a mismatch with
       buildDir: path.join(volume, 'no-such-build-dir'),
       clock: systemClock,
       store,
+      audit: createAudit({ volumeRoot: volume, clock: systemClock }),
       consoleFingerprint: NO_CONSOLE_FINGERPRINT,
     });
 
