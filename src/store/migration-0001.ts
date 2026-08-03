@@ -101,7 +101,7 @@ CREATE TABLE operator_credential (
   singleton             INTEGER PRIMARY KEY CHECK (singleton = 1),
   subject               TEXT    NOT NULL,
   password_hash         TEXT    NOT NULL,
-  totp_secret_hash      TEXT    NOT NULL,
+  totp_secret_sealed    TEXT    NOT NULL,
   totp_reenrol_required INTEGER NOT NULL CHECK (totp_reenrol_required IN (0,1)),
   enrolled_at           TEXT    NOT NULL
 ) STRICT;
