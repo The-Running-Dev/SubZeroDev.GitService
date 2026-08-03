@@ -90,7 +90,7 @@ A red-team pass is an independent phase gate, not an iterative design loop.
 
 - One invocation authorizes exactly one complete pass.
 - Run at most one full red-team pass per materially changed design revision.
-- Never automatically recommend or start another full pass.
+- **Do recommend** another pass when you judge one is warranted, and say why. Never *start* one automatically — running it waits on my explicit request.
 - After a pass, stop and present findings one at a time for adjudication.
 - Classify each finding as a defect, an accepted risk, a brief conflict, or not sustained.
 - A known-and-retained decision is not a new defect unless new evidence shows that it contradicts a higher-precedence source or creates a consequence not already recorded. Name that new evidence or consequence.
