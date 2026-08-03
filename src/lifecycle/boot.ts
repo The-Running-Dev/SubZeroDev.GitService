@@ -8,6 +8,7 @@ import type { AuditChainState } from '../audit/types.ts';
 import type { Audit } from '../audit/audit.ts';
 import type { StructuredStore } from '../store/structured-store.ts';
 import type { StoreError } from '../store/errors.ts';
+import type { OperatorIdentity } from '../operator-identity/operator-identity.ts';
 import { acquireLease, type InstanceLease, type LeaseGuard, type LockAcquirer } from './lease.ts';
 import { verifyRegistryArtifact } from './registry-integrity.ts';
 
@@ -31,10 +32,12 @@ function bootError<T extends { readonly code: BootError['code'] }>(variant: T, s
  * S2 delivers boot steps 1, 4 and 8, and carries step 2 forward from S1. S3
  * adds the audit trail: a lease takeover is now a real, verifiable record,
  * and `auditChain` is boot's own `verify()` result rather than a placeholder.
- * The remaining `BootReport` members still belong to subsystems that do not
- * exist yet, and are reported at their empty values rather than invented:
+ * S4 makes `provisioningPending` a real read of the operator identity module
+ * rather than the constant `false` it reported before an operator credential
+ * had anywhere to live. The remaining `BootReport` members still belong to
+ * subsystems that do not exist yet, and are reported at their empty values
+ * rather than invented:
  *
- *   provisioningPending — operator identity, S4
  *   jobsResolved        — the scheduler, S16
  *   revalidation        — needs both of the above
  *   recoveryPending     — recovery, S8
@@ -81,6 +84,7 @@ export interface LifecycleDependencies {
   readonly clock: Clock;
   readonly store: StructuredStore;
   readonly audit: Audit;
+  readonly operatorIdentity: OperatorIdentity;
   readonly consoleFingerprint: Sha256Hex;
   readonly acquirer?: LockAcquirer;
   /** Fires alongside the durable `lease-takeover` audit record — operator-visible even if the trail itself cannot be written. */
@@ -207,6 +211,7 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       }
 
       const auditChain = await deps.audit.verify();
+      const provisioningPending = (await deps.operatorIdentity.provisioningState()) === 'pending';
 
       // Step 8 — re-derive clone state from disk. S5 owns clone directories;
       // with none declared, the derived set is genuinely empty.
@@ -216,7 +221,7 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         registryFingerprint: registry.value.contractFingerprint,
         consoleFingerprint: deps.consoleFingerprint,
         migrationsApplied: migrated.value,
-        provisioningPending: false,
+        provisioningPending,
         auditChain,
         jobsResolved: NO_JOBS,
         revalidation: { jobsParked: [], entriesParked: [] },

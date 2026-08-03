@@ -6,6 +6,7 @@ import { systemClock } from './clock/clock.ts';
 import { createStructuredStore } from './store/structured-store.ts';
 import { createAudit } from './audit/audit.ts';
 import { createLifecycle } from './lifecycle/boot.ts';
+import { createOperatorIdentity, SESSION_ABSOLUTE_SECONDS_DEFAULT } from './operator-identity/operator-identity.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './surfaces/http-server.ts';
 
 /**
@@ -48,17 +49,24 @@ async function main(): Promise<void> {
   }
 
   const volumeRoot = process.env.VOLUME_ROOT ?? path.join(repoRoot, 'volume');
+  // The credential mount is a second, separate mount from the data volume —
+  // the TOTP sealing key must never share a backup with the secret it opens
+  // (`20-contract.md` § `operator_credential`). `CREDENTIAL_MOUNT_ROOT`
+  // follows `VOLUME_ROOT`'s own convention rather than inventing a new one.
+  const credentialMountRoot = process.env.CREDENTIAL_MOUNT_ROOT ?? path.join(repoRoot, 'credentials');
   const commitSha = resolveCommitSha();
   const port = resolvePort();
 
   const store = createStructuredStore({ volumeRoot, clock: systemClock });
   const audit = createAudit({ volumeRoot, clock: systemClock });
+  const operatorIdentity = createOperatorIdentity({ volumeRoot, credentialMountRoot, clock: systemClock, audit });
   const lifecycle = createLifecycle({
     volumeRoot,
     buildDir,
     clock: systemClock,
     store,
     audit,
+    operatorIdentity,
     consoleFingerprint: NO_CONSOLE_FINGERPRINT,
     onTakeover: (previous, current) => {
       // The durable `lease-takeover` audit record is written by boot itself
@@ -90,9 +98,14 @@ async function main(): Promise<void> {
     contractFingerprint: booted.value.registryFingerprint,
     consoleFingerprint: booted.value.consoleFingerprint,
     ready: () => ready,
-    provisioningPending: () => booted.value.provisioningPending,
+    // Live, not `booted.value.provisioningPending`: that field is a one-time
+    // snapshot from boot, and enrolment can complete afterwards with no
+    // restart (`10-design.md` § First provisioning).
+    provisioningPending: () => operatorIdentity.provisioningState().then((state) => state === 'pending'),
     auditChain: () => audit.chainState(),
     operatorApiToken,
+    identity: operatorIdentity,
+    sessionAbsoluteSeconds: SESSION_ABSOLUTE_SECONDS_DEFAULT,
   });
 
   const shutdown = (signal: NodeJS.Signals): void => {

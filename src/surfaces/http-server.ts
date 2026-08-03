@@ -1,9 +1,11 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { sha256Hex, type GitSha, type Sha256Hex } from '../shared/brands.ts';
+import { timingSafeStringEqual } from '../shared/timing-safe.ts';
 import type { AuditChainState } from '../audit/types.ts';
 import type { CredentialFailureMark } from '../credentials/types.ts';
 import { NO_VOLUME_USAGE, type VolumeUsage } from '../store/volume-usage.ts';
+import { handleConsoleAuthRoute, type ConsoleAuthDependencies } from './console-auth-routes.ts';
 
 /**
  * `LivenessReport` is the sole unauthenticated payload in the whole service
@@ -51,12 +53,17 @@ export interface HealthReport {
   readonly volume: VolumeUsage;
 }
 
-export interface SurfacesDependencies {
+export interface SurfacesDependencies extends ConsoleAuthDependencies {
   readonly commitSha: GitSha;
   readonly contractFingerprint: Sha256Hex;
   readonly consoleFingerprint: Sha256Hex;
   readonly ready: () => boolean;
-  readonly provisioningPending: () => boolean;
+  /**
+   * Live, not a boot-time snapshot: enrolment can complete without a
+   * restart, so `/health` has to ask the operator identity module on every
+   * request rather than report what boot observed once.
+   */
+  readonly provisioningPending: () => Promise<boolean>;
   readonly auditChain: () => Promise<AuditChainState>;
   /**
    * A shared-secret bearer check standing in for the L4 Authorization module
@@ -64,19 +71,6 @@ export interface SurfacesDependencies {
    * "authenticated route, 401 without a credential" without building OAuth.
    */
   readonly operatorApiToken: string;
-}
-
-/**
- * Compares fixed-length digests rather than the raw strings, so a
- * length-mismatch early return (which `timingSafeEqual` itself requires,
- * since it rejects unequal-length buffers) never depends on the length of
- * the caller-presented secret — only on the length of a hash, which is
- * always 32 bytes.
- */
-function timingSafeStringEqual(a: string, b: string): boolean {
-  const digestA = createHash('sha256').update(a, 'utf8').digest();
-  const digestB = createHash('sha256').update(b, 'utf8').digest();
-  return timingSafeEqual(digestA, digestB);
 }
 
 function isAuthorized(req: IncomingMessage, token: string): boolean {
@@ -98,6 +92,11 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 
 async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://localhost');
+
+  if (url.pathname.startsWith('/auth/')) {
+    const handled = await handleConsoleAuthRoute(deps, req, res, url);
+    if (handled) return;
+  }
 
   if (req.method === 'GET' && url.pathname === '/healthz') {
     const report: LivenessReport = { ready: deps.ready(), commitSha: deps.commitSha };
@@ -127,7 +126,7 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
     const auditChain = await deps.auditChain();
     const report: HealthReport = {
       ready: deps.ready(),
-      provisioningPending: deps.provisioningPending(),
+      provisioningPending: await deps.provisioningPending(),
       version: { commitSha: deps.commitSha, contractFingerprint: deps.contractFingerprint, consoleFingerprint: deps.consoleFingerprint },
       auditChain,
       failedOutboxRows: 0,
