@@ -53,19 +53,58 @@ rg --files
 - Work on a focused branch.
 - Where guidance conflicts, follow the most specific applicable instruction.
 
-## Effort and model selection
+## Model, effort, and review budget
 
-Match capability and reasoning effort to the **task**, not to the tool that reached it and not to the number of files involved. Budget scales with **complexity, not size** — a one-line change to an invariant is architectural; a 500-line transcription against a settled contract is not.
+Model choice follows task complexity. The command being invoked does not determine the model.
 
-| Tier | Work | Effort |
-|---|---|---|
-| **Deep reasoning** | Architecture, contracts, API and seam design, root-cause analysis, multi-step planning, security and performance strategy, comparing materially different approaches | Strongest model, high or xhigh |
-| **Implementation** | Code against a settled contract, tests, refactors, bug fixes, CI and infrastructure, docs coupled to implementation | Mid tier; high effort for large or hard changes, standard for small ones |
-| **High volume** | Summaries, changelogs, commit messages, PR descriptions, formatting, triage, log and tool-output summarisation | Cheapest tier, default effort |
+Budget scales with **complexity, not size** — a one-line change to an invariant is architectural; a 500-line transcription against a settled contract is not.
+
+Use Claude Code's current model-family aliases rather than pinning an older version:
+
+| Tier | Model | Effort | Work |
+|---|---|---|---|
+| Deep reasoning | `opus` | `high` | Brief interrogation, architecture, contracts, slice planning, security, concurrency, recovery, root-cause analysis, and adjudicating design findings |
+| Exceptional fork | `opus` | `xhigh` | One specific unresolved architectural or security question that remained ambiguous at `high` |
+| Implementation | `sonnet` | `medium` by default; `high` when difficult | Code against a settled contract, tests, refactors, bug fixes, CI, infrastructure, and implementation-coupled documentation |
+| High volume | `haiku` | `low` | Summaries, formatting, changelogs, commit messages, PR descriptions, and mechanical triage |
+
+Do not use `max` effort unless I explicitly request it. Do not use `xhigh` for an entire design pipeline or as a substitute for a precise question.
+
+If the current session is weaker than the required tier, say which model and effort the task warrants before doing expensive work. If the current session is stronger than required, proceed without interruption.
 
 **Escalate rather than guess.** A high-volume task that raises an implementation question becomes implementation tier; an implementation task that raises an architectural question becomes deep reasoning. **Do not keep implementing while that uncertainty is unresolved** — that is stage 6 spending the savings stages 2–4 bought.
 
 **Division of control.** I set the session model. You set subagent models and scale your own reasoning depth. You cannot change your own session model — if a task warrants a different tier, say so rather than silently over- or under-spending.
+
+### Command routing
+
+- `/brief-check`, `/design`, `/contract`, and `/slices`: `opus`, `high`.
+- `/redteam`: preferably a strongest model from a different vendor than the design author. If Claude must be used, use a fresh `opus`, `high` session.
+- `/slice`: `sonnet`, normally `medium`; use `high` for a large or difficult slice.
+- `/reconcile`: `opus`, `high` while deciding which side of drift is correct; `sonnet`, `medium` for mechanical edits after I decide.
+- `/install`: `sonnet`, `medium`.
+
+### Red-team stopping rule
+
+A red-team pass is an independent phase gate, not an iterative design loop.
+
+- One invocation authorizes exactly one complete pass.
+- Run at most one full red-team pass per materially changed design revision.
+- Never automatically recommend or start another full pass.
+- After a pass, stop and present findings one at a time for adjudication.
+- Classify each finding as a defect, an accepted risk, a brief conflict, or not sustained.
+- A known-and-retained decision is not a new defect unless new evidence shows that it contradicts a higher-precedence source or creates a consequence not already recorded. Name that new evidence or consequence.
+- Repeat `/redteam` only when I explicitly request it and the design has materially changed since the previous pass.
+- Use targeted verification for local corrections; do not reread and red-team the entire design for wording-only changes.
+
+### Budget discipline
+
+- Full-document reads are for phase boundaries and explicitly requested drift passes.
+- Use targeted searches and section reads for routine verification.
+- Do not invoke a skill or command merely because it is available.
+- Do not spend additional reasoning to manufacture findings, alternatives, or open questions.
+- Once a policy decision is signed off and recorded, do not relitigate it without new evidence.
+- Spend frontier-model reasoning on decisions that are expensive to reverse, not on producing more prose.
 
 ## Hard rules
 
