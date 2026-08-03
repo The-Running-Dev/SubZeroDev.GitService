@@ -1902,9 +1902,179 @@ interface HostAdapter {
 `HostComment.body` and `HostReviewComment.body` are author-controlled text carried as data; any tool
 returning either is annotated `untrustedOutput`. There is no merge method and no rebase method on
 this interface, and by design there never will be — the host's own auto-merge is the only merge
-path. `CreatePullRequestInput`, `RemediatePullRequestThreadInput` and
-`RemediatePullRequestThreadData` are subject to the same `## Unresolved` item as the git
-operations' inputs.
+path. `CreatePullRequestInput` is subject to the same `## Unresolved` item as the git operations'
+inputs. The review-thread input and output types are fixed below; `RemediatePullRequestThreadInput`
+and `RemediatePullRequestThreadData` are also fixed below.
+
+#### Review-thread tool input and output types (S23, resolved 2026-08-03)
+
+```ts
+interface ReadReviewThreadsInput {
+  readonly pullRequestNumber: number;
+}
+
+interface ReadReviewThreadsData {
+  readonly threads: readonly HostReviewThread[];
+}
+
+interface ReplyToReviewThreadInput {
+  readonly threadId: string;
+  readonly body: string;
+}
+
+interface ReplyToReviewThreadData {
+  readonly comment: HostReviewComment;
+}
+
+interface ResolveReviewThreadInput {
+  readonly threadId: string;
+}
+
+interface ReopenReviewThreadInput {
+  readonly threadId: string;
+}
+
+interface RemediatePullRequestThreadInput {
+  readonly pullRequestNumber: number;
+  readonly threadId: string;
+  readonly replyBody: string;
+  readonly resolveAfterReply: boolean;
+}
+
+interface RemediatePullRequestThreadData {
+  readonly comment: HostReviewComment;
+  readonly resolved: boolean;
+}
+```
+
+#### S23 tool declarations (resolved 2026-08-03)
+
+Four tools. All four require a `host.pr.read` or `host.pr.write` capability. No new capability
+names are introduced. `maxResultBytes` for `pr_review_threads_read` is 131072 (128 KiB) by default
+and is configurable per-deployment via U6.
+
+**`pr_review_threads_read`** — list all review threads on a pull request.
+
+```ts
+{
+  name: 'pr_review_threads_read' as RegistryToolName,
+  description: 'List all review threads on a pull request, including their resolution state and comments.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      pullRequestNumber: { type: 'integer', minimum: 1 }
+    },
+    required: ['pullRequestNumber'],
+    additionalProperties: false
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      threads: { type: 'array', items: { $ref: '#/definitions/HostReviewThread' } }
+    },
+    required: ['threads'],
+    additionalProperties: false
+  },
+  scopes: ['read'] as readonly Scope[],
+  capabilities: ['host.pr.read'] as readonly CapabilityName[],
+  capabilityScope: 'declaration' as CapabilityScope,
+  executionClass: 'read' as ToolExecutionClass,
+  annotations: { schedulable: false, dropTarget: false, untrustedOutput: true },
+  limits: { timeoutSeconds: 30, maxResultBytes: 131072 },
+  target: { kind: 'module', target: 'host.pr.readReviewThreads' as ModuleTargetName }
+}
+```
+
+**`pr_review_thread_reply`** — post a reply comment on a review thread.
+
+```ts
+{
+  name: 'pr_review_thread_reply' as RegistryToolName,
+  description: 'Post a reply comment on a pull request review thread.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      threadId: { type: 'string', minLength: 1 },
+      body:     { type: 'string', minLength: 1 }
+    },
+    required: ['threadId', 'body'],
+    additionalProperties: false
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      comment: { $ref: '#/definitions/HostReviewComment' }
+    },
+    required: ['comment'],
+    additionalProperties: false
+  },
+  scopes: ['write'] as readonly Scope[],
+  capabilities: ['host.pr.write'] as readonly CapabilityName[],
+  capabilityScope: 'declaration' as CapabilityScope,
+  executionClass: 'mutating' as ToolExecutionClass,
+  annotations: { schedulable: false, dropTarget: false, untrustedOutput: true },
+  limits: { timeoutSeconds: 30, maxResultBytes: 16384 },
+  target: { kind: 'module', target: 'host.pr.replyToReviewThread' as ModuleTargetName }
+}
+```
+
+**`pr_review_thread_resolve`** — mark a review thread resolved.
+
+```ts
+{
+  name: 'pr_review_thread_resolve' as RegistryToolName,
+  description: 'Mark a pull request review thread as resolved.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      threadId: { type: 'string', minLength: 1 }
+    },
+    required: ['threadId'],
+    additionalProperties: false
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {},
+    additionalProperties: false
+  },
+  scopes: ['write'] as readonly Scope[],
+  capabilities: ['host.pr.write'] as readonly CapabilityName[],
+  capabilityScope: 'declaration' as CapabilityScope,
+  executionClass: 'mutating' as ToolExecutionClass,
+  annotations: { schedulable: false, dropTarget: false, untrustedOutput: false },
+  limits: { timeoutSeconds: 30, maxResultBytes: 256 },
+  target: { kind: 'module', target: 'host.pr.resolveReviewThread' as ModuleTargetName }
+}
+```
+
+**`pr_review_thread_reopen`** — reopen a resolved review thread.
+
+```ts
+{
+  name: 'pr_review_thread_reopen' as RegistryToolName,
+  description: 'Reopen a resolved pull request review thread.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      threadId: { type: 'string', minLength: 1 }
+    },
+    required: ['threadId'],
+    additionalProperties: false
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {},
+    additionalProperties: false
+  },
+  scopes: ['write'] as readonly Scope[],
+  capabilities: ['host.pr.write'] as readonly CapabilityName[],
+  capabilityScope: 'declaration' as CapabilityScope,
+  executionClass: 'mutating' as ToolExecutionClass,
+  annotations: { schedulable: false, dropTarget: false, untrustedOutput: false },
+  limits: { timeoutSeconds: 30, maxResultBytes: 256 },
+  target: { kind: 'module', target: 'host.pr.reopenReviewThread' as ModuleTargetName }
+}
+```
 
 ### L2 — scheduler
 
@@ -2777,9 +2947,15 @@ capability covers which operation family, and the annotations a tool may carry. 
 the tools or fix their input and output schemas. The brief fixes only the naming policy —
 operation-descriptive names, no `blog_` prefix on a base tool, a clean break at cutover — and gives
 `git_commit` and `repo_declare` as examples. The `*Input` and `*Data` types referenced under
-`### L2 — git operations`, `### L2 — composites` and `CreatePullRequestInput` carry only the fields
-the design and brief determine, and are lower bounds rather than complete declarations.
+`### L2 — git operations` and `CreatePullRequestInput` carry only the fields the design and brief
+determine, and are lower bounds rather than complete declarations.
 **This blocks any slice that compiles a contract.**
+
+*Partly resolved 2026-08-03:* The four S23 review-thread tools (`pr_review_threads_read`,
+`pr_review_thread_reply`, `pr_review_thread_resolve`, `pr_review_thread_reopen`) and their
+input/output types — including `RemediatePullRequestThreadInput` and
+`RemediatePullRequestThreadData` — are now fixed under `### L2 — host adapter`. This unblocks S23
+once the remaining U1 inventory (git operations and `CreatePullRequestInput`) is resolved.
 
 **U2 — The `OperatorScope` vocabulary.** The design states that an `operator-api` grant "carries
 operator scopes" and fixes the MCP scope set as `read`, `write`, `raw`, `schedule`. It does not
