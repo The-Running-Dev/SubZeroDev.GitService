@@ -2,8 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './http-server.ts';
-import type { GitSha, Sha256Hex } from '../shared/brands.ts';
+import type { GitSha, SessionId, Sha256Hex } from '../shared/brands.ts';
 import type { AuditChainState } from '../audit/types.ts';
+import type { OperatorIdentity, OperatorSession, OperatorIdentityError, ProvisioningState } from '../identity/types.ts';
+import type { Outcome } from '../shared/outcome.ts';
 
 const COMMIT_SHA = '0'.repeat(40) as GitSha;
 const CONTRACT_FINGERPRINT = '1'.repeat(64) as Sha256Hex;
@@ -166,5 +168,114 @@ test('/health reports the placeholder fields honestly as empty/zero', async () =
     assert.deepEqual(body.failingCredentialRefs, []);
     assert.equal(body.parkedOperations, 0);
     assert.equal(body.volume.totalBytes, 0);
+  });
+});
+
+// ─── S4 — console route tests ─────────────────────────────────────────────────
+
+const MOCK_SESSION: OperatorSession = {
+  id: 'sess-abc-123' as SessionId,
+  subject: 'alice' as never,
+  createdAt: '2026-01-01T00:00:00.000Z' as never,
+  lastSeenAt: '2026-01-01T00:00:00.000Z' as never,
+  idleExpiresAt: '2026-01-02T00:00:00.000Z' as never,
+  absoluteExpiresAt: '2026-01-02T00:00:00.000Z' as never,
+  revokedAt: null,
+};
+
+function makeStubIdentity(
+  state: ProvisioningState,
+  loginResult: Outcome<OperatorSession, OperatorIdentityError>,
+): OperatorIdentity {
+  return {
+    async provisioningState() { return state; },
+    async enrol() { return loginResult as Outcome<never, OperatorIdentityError>; },
+    async loginLocal() { return loginResult; },
+    async loginWithRecoveryCode() { return loginResult; },
+    async loginWithBreakGlass() { return loginResult; },
+    async beginOidc() { return { ok: false, error: { resultKind: 'authorization', retryable: false, summary: 'oidc', code: 'oidc-unavailable', reason: 'discovery' } as OperatorIdentityError }; },
+    async completeOidc() { return loginResult; },
+    async touch(_id) { return loginResult; },
+    async logout() { return { ok: true, value: undefined }; },
+    async revokeSession() { return { ok: true, value: undefined }; },
+    async listSessions() { return []; },
+    async runRetention() { return { module: 'stub', deletedRows: 0, freedBytes: 0, skipped: [] }; },
+  };
+}
+
+async function withIdentityServer<T>(
+  identity: OperatorIdentity,
+  fn: (baseUrl: string) => Promise<T>,
+): Promise<T> {
+  const server = createSurfacesServer({
+    commitSha: COMMIT_SHA,
+    contractFingerprint: CONTRACT_FINGERPRINT,
+    consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+    ready: () => true,
+    provisioningPending: () => false,
+    auditChain: async () => HEALTHY_CHAIN,
+    operatorApiToken: TOKEN,
+    operatorIdentity: identity,
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address() as AddressInfo;
+  try {
+    return await fn(`http://127.0.0.1:${address.port}`);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+test('S4 — POST /console/login returns 200 and Set-Cookie on success', async () => {
+  const identity = makeStubIdentity('complete', { ok: true, value: MOCK_SESSION });
+  await withIdentityServer(identity, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/console/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subject: 'alice', password: 'pw', totpCode: '000000' }),
+    });
+    assert.equal(response.status, 200);
+    const setCookie = response.headers.get('set-cookie');
+    assert.ok(setCookie?.includes('szg_session'), 'Set-Cookie must include session cookie');
+    assert.ok(setCookie?.includes('HttpOnly'), 'session cookie must be HttpOnly');
+    assert.ok(setCookie?.includes('Secure'), 'session cookie must be Secure');
+    assert.ok(setCookie?.includes('SameSite=Lax'), 'session cookie must be SameSite=Lax');
+  });
+});
+
+test('S4 — POST /console/login returns 401 on credentials-invalid', async () => {
+  const identity = makeStubIdentity('complete', {
+    ok: false,
+    error: { resultKind: 'authorization', retryable: false, summary: 'wrong', code: 'credentials-invalid' },
+  });
+  await withIdentityServer(identity, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/console/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subject: 'alice', password: 'wrong', totpCode: '000000' }),
+    });
+    assert.equal(response.status, 401);
+  });
+});
+
+test('S4 — /console/* returns 401 when no operatorIdentity dep is present', async () => {
+  await withServer({}, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/console/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(response.status, 401);
+  });
+});
+
+test('S4 — POST /console/logout without CSRF token returns 403', async () => {
+  const identity = makeStubIdentity('complete', { ok: true, value: MOCK_SESSION });
+  await withIdentityServer(identity, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/console/logout`, {
+      method: 'POST',
+      // No CSRF header, no CSRF cookie
+    });
+    assert.equal(response.status, 403);
   });
 });

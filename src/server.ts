@@ -7,6 +7,7 @@ import { createStructuredStore } from './store/structured-store.ts';
 import { createAudit } from './audit/audit.ts';
 import { createLifecycle } from './lifecycle/boot.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './surfaces/http-server.ts';
+import { createOperatorIdentity } from './identity/operator-identity.ts';
 
 /**
  * The composition root. It never imports the compiler (invariant B8, enforced
@@ -48,17 +49,21 @@ async function main(): Promise<void> {
   }
 
   const volumeRoot = process.env.VOLUME_ROOT ?? path.join(repoRoot, 'volume');
+  const credentialMount = process.env.CREDENTIAL_MOUNT ?? path.join(repoRoot, 'credentials');
+  const totpKeyPath = path.join(credentialMount, '_totp_sealing_key');
   const commitSha = resolveCommitSha();
   const port = resolvePort();
 
   const store = createStructuredStore({ volumeRoot, clock: systemClock });
   const audit = createAudit({ volumeRoot, clock: systemClock });
+  const operatorIdentity = createOperatorIdentity({ volumeRoot, totpKeyPath, clock: systemClock, audit });
   const lifecycle = createLifecycle({
     volumeRoot,
     buildDir,
     clock: systemClock,
     store,
     audit,
+    operatorIdentity,
     consoleFingerprint: NO_CONSOLE_FINGERPRINT,
     onTakeover: (previous, current) => {
       // The durable `lease-takeover` audit record is written by boot itself
@@ -93,6 +98,7 @@ async function main(): Promise<void> {
     provisioningPending: () => booted.value.provisioningPending,
     auditChain: () => audit.chainState(),
     operatorApiToken,
+    operatorIdentity,
   });
 
   const shutdown = (signal: NodeJS.Signals): void => {

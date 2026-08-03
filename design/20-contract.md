@@ -1358,8 +1358,8 @@ rule that a failing credential is marked for one declaration and never reference
 | Instance lease | `InstanceLease` as JSON | once at acquisition, while the lock above is held |
 | Audit segment | one `AuditRecord` JSON per line | append-only, rotated at `auditSegmentBytes` |
 | — its path | `audit/NNNNNN.jsonl` under the volume root, six zero-padded digits, numbered from `000001` | created on first append to that segment |
-| Provisioning file | an enrolment secret | by an operator with host access; burned at enrolment |
-| Break-glass file | a single-use token | by an operator with host access; consumed at next login |
+| Provisioning file — **path `provisioning.secret`** | an enrolment secret, one line | by an operator with host access; burned at enrolment |
+| Break-glass file — **path `break-glass.token`** | a single-use token, one line | by an operator with host access; consumed at next login |
 | TOTP sealing key — **in the credential mount, not on this volume** | 32 random bytes | by the deployment, before first enrolment; read at every local login, never written by the service |
 | Pending pull-request list, one per declaration | `PendingPullRequestList` as JSON | temp-then-rename on each tick |
 
