@@ -18,7 +18,8 @@
  * controls the mount location.
  */
 
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
+import { promisify } from 'node:util';
 import {
   existsSync,
   readFileSync,
@@ -92,6 +93,37 @@ function storeErr(cause: unknown): OperatorIdentityError {
 }
 
 // ─── Hashing helpers ─────────────────────────────────────────────────────────
+
+const scryptAsync = promisify(scrypt);
+
+/**
+ * scrypt parameters: N=32768, r=8, p=1, keylen=64.
+ * A 16-byte random salt is prepended to the hash as `salt$hash`, both
+ * hex-encoded. This format is never equal to the plaintext it covers.
+ */
+const SCRYPT_N = 16384;
+const SCRYPT_R = 8;
+const SCRYPT_P = 1;
+const SCRYPT_KEYLEN = 64;
+const SCRYPT_SALT_BYTES = 16;
+/** 32 MiB — enough headroom for N=16384, r=8, p=1 (requires ~16 MiB). */
+const SCRYPT_MAXMEM = 32 * 1024 * 1024;
+
+async function hashPassword(password: string): Promise<string> {
+  const salt = randomBytes(SCRYPT_SALT_BYTES);
+  const derived = await scryptAsync(password, salt, SCRYPT_KEYLEN, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P, maxmem: SCRYPT_MAXMEM }) as Buffer;
+  return `${salt.toString('hex')}$${derived.toString('hex')}`;
+}
+
+async function verifyPassword(password: string, stored: string): Promise<boolean> {
+  const parts = stored.split('$');
+  if (parts.length !== 2) return false;
+  const salt = Buffer.from(parts[0]!, 'hex');
+  const expected = Buffer.from(parts[1]!, 'hex');
+  if (salt.length !== SCRYPT_SALT_BYTES || expected.length !== SCRYPT_KEYLEN) return false;
+  const derived = await scryptAsync(password, salt, SCRYPT_KEYLEN, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P, maxmem: SCRYPT_MAXMEM }) as Buffer;
+  return timingSafeEqual(derived, expected);
+}
 
 function sha256Hex(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex');
@@ -305,7 +337,7 @@ export function createOperatorIdentity(options: OperatorIdentityOptions): Operat
           );
         }
 
-        const passwordHash = sha256Hex(request.password);
+        const passwordHash = await hashPassword(request.password);
         const { raw: totpRaw, base32: totpBase32 } = generateTotpSecret();
         const sealingKey = readSealingKey(totpKeyPath);
 
@@ -384,8 +416,8 @@ export function createOperatorIdentity(options: OperatorIdentityOptions): Operat
           return err(identityErr('not-provisioned', 'no operator credential'));
         }
 
-        const passwordHash = sha256Hex(request.password);
-        if (!timingSafeEqual64(passwordHash, credential.password_hash)) {
+        const passwordOk = await verifyPassword(request.password, credential.password_hash);
+        if (!passwordOk) {
           return err(identityErr('credentials-invalid', 'password incorrect'));
         }
 
@@ -429,8 +461,8 @@ export function createOperatorIdentity(options: OperatorIdentityOptions): Operat
           return err(identityErr('not-provisioned', 'no operator credential'));
         }
 
-        const passwordHash = sha256Hex(password);
-        if (!timingSafeEqual64(passwordHash, credential.password_hash)) {
+        const passwordOk = await verifyPassword(password, credential.password_hash);
+        if (!passwordOk) {
           return err(identityErr('credentials-invalid', 'password incorrect'));
         }
 

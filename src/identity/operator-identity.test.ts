@@ -389,7 +389,8 @@ test('S4 — totp-key-unavailable when key file absent (never fatal, returns 401
   await withVolumeAsync(async (volumeRoot) => {
     await bootedVolume(volumeRoot);
     writeProvisioningFile(volumeRoot, 's');
-    // Point to a non-existent key path
+    // Point to a non-existent key path — but use a correct provisioning secret
+    // so the check reaches the key read stage
     const identity = makeIdentity(volumeRoot, path.join(volumeRoot, 'nonexistent-key'));
     const result = await identity.enrol({ provisioningSecret: 's', subject: SUBJECT, password: PASSWORD });
     assert.ok(!result.ok);
