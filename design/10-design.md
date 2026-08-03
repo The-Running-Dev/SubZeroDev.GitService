@@ -617,9 +617,11 @@ the same reason Node makes it sufficient there. Sequence number, previous hash, 
 the mirrored head all happen inside it. No caller needs to know, and the best-effort contract is
 unchanged.
 
-**The log is hash-chained.** Every line carries a sequence number, the previous line's hash, and
-its own hash taken over its canonical serialisation together with that previous hash. Rotation
-does not break the chain: each new segment opens with the terminal hash of the one before it. The
+**The log is hash-chained.** Every line carries a sequence number and the previous line's hash as
+ordinary fields, and a `hash` computed over the record's own canonical serialisation — `20-contract.md`
+§ Audit fixes the exact rule (`hash = SHA256_hex(canonical(record))`, `previousHash` included among
+the fields hashed, not concatenated separately). Rotation does not break the chain: each new
+segment opens with the terminal hash of the one before it. The
 chain head is mirrored into the structured store on every append and surfaced in the health view,
 and boot verifies the chain end to end.
 
