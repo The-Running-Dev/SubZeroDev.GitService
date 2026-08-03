@@ -63,7 +63,14 @@ function parseCookies(header: string | undefined): Record<string, string> {
     if (eq === -1) continue;
     const name = part.slice(0, eq).trim();
     const value = part.slice(eq + 1).trim();
-    if (name) cookies[name] = decodeURIComponent(value);
+    if (!name) continue;
+    try {
+      cookies[name] = decodeURIComponent(value);
+    } catch {
+      // A malformed percent-escape in one cookie is not a reason to fail the
+      // whole header — skip it, so a garbled unrelated cookie can't turn
+      // into a 500 on every /auth/* route.
+    }
   }
   return cookies;
 }

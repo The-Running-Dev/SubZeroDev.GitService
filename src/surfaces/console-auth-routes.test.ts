@@ -115,6 +115,16 @@ test('S4.1 — console routes answer 401 with no session', async () => {
   });
 });
 
+test('a malformed Cookie header answers 401 rather than crashing the route with a 500', async () => {
+  await withVolumeAsync(async (volume) => {
+    await withServer(volume, async (baseUrl) => {
+      // `%` is not a valid percent-escape; decodeURIComponent throws on it.
+      const response = await fetch(`${baseUrl}/auth/session`, { headers: { Cookie: 'szg_session=%' } });
+      assert.equal(response.status, 401);
+    });
+  });
+});
+
 test('S4.2 — enrolment with the wrong secret answers 401; with the right secret it succeeds once', async () => {
   await withVolumeAsync(async (volume) => {
     writeProvisioningSecret(volume, PROVISIONING_SECRET);

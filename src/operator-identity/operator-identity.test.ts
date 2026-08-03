@@ -129,6 +129,24 @@ test('S4.2 — a second enrolment attempt answers already-provisioned', async ()
   });
 });
 
+test('two concurrent enrolments racing the same provisioning secret: exactly one wins, and the loser answers already-provisioned', async () => {
+  await withVolumeAsync(async (volume) => {
+    const rig = await rigIn(volume);
+    writeProvisioningSecret(volume, PROVISIONING_SECRET);
+
+    const [a, b] = await Promise.all([
+      rig.identity.enrol({ provisioningSecret: PROVISIONING_SECRET, subject: SUBJECT, password: PASSWORD }),
+      rig.identity.enrol({ provisioningSecret: PROVISIONING_SECRET, subject: SUBJECT, password: PASSWORD }),
+    ]);
+    const results = [a, b];
+    assert.equal(results.filter((r) => r.ok).length, 1, 'exactly one enrolment succeeds');
+    const loser = results.find((r) => !r.ok);
+    assert.ok(loser);
+    if (!loser || loser.ok) return;
+    assert.equal(loser.error.code, 'already-provisioned', 'the race loser gets the same answer a later caller would, not a bare store failure');
+  });
+});
+
 test('S4.3 — login with a correct password and no TOTP code fails; TOTP is never optional', async () => {
   await withVolumeAsync(async (volume) => {
     const rig = await rigIn(volume);
@@ -259,6 +277,21 @@ test('a wrong break-glass token is rejected and does not consume the real one', 
 
     const right = await rig.identity.loginWithBreakGlass('the-real-token');
     assert.equal(right.ok, true, 'the real token still works after a wrong guess');
+  });
+});
+
+test('two concurrent break-glass attempts with the correct token: exactly one succeeds', async () => {
+  await withVolumeAsync(async (volume) => {
+    const rig = await rigIn(volume);
+    await enrolled(rig);
+    writeBreakGlassToken(volume, 'the-real-token');
+
+    const [a, b] = await Promise.all([
+      rig.identity.loginWithBreakGlass('the-real-token'),
+      rig.identity.loginWithBreakGlass('the-real-token'),
+    ]);
+    const successes = [a, b].filter((r) => r.ok).length;
+    assert.equal(successes, 1, 'a single-use token grants exactly one session under concurrent use, never two');
   });
 });
 

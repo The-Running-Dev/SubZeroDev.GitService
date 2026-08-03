@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { HttpsUrl, IsoUtcTimestamp, SessionId, Subject } from '../shared/brands.ts';
@@ -159,7 +159,15 @@ function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): Outcome<T, 
     return ok(fn(db));
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
-    return err(operatorIdentityError({ code: 'store-failed', cause: storeError({ code: 'io-failed' }, message) }, message));
+    // Mirrors `StructuredStore.transaction`'s own classification (S2), so a
+    // constraint violation reaching this module carries the same distinct
+    // `StoreError` shape rather than collapsing into an opaque `io-failed` —
+    // `enrol`'s singleton race reads `constraint-violated` off this to
+    // report `already-provisioned` instead of a bare store failure.
+    const storeCause = /CHECK constraint|UNIQUE constraint|FOREIGN KEY|NOT NULL constraint/i.test(message)
+      ? storeError({ code: 'constraint-violated', constraint: message }, message)
+      : storeError({ code: 'io-failed' }, message);
+    return err(operatorIdentityError({ code: 'store-failed', cause: storeCause }, message));
   } finally {
     db.close();
   }
@@ -182,6 +190,50 @@ export function createOperatorIdentity(deps: OperatorIdentityDependencies): Oper
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Atomically claims the break-glass file before comparing it, so two
+   * concurrent requests can never both read-and-match the same token: a
+   * filesystem rename either succeeds for exactly one caller or fails for
+   * the rest, closing the check-then-delete window a plain read-then-unlink
+   * leaves open. A wrong guess renames the file back so it stays usable —
+   * consumption only ever happens on a real match, matching the file-burn
+   * behaviour `enrol`'s provisioning secret already has.
+   */
+  function claimBreakGlassToken(token: string): 'match' | 'mismatch' | 'absent' {
+    const claimPath = `${breakGlassFile}.claim-${crypto.randomUUID()}`;
+    try {
+      renameSync(breakGlassFile, claimPath);
+    } catch {
+      return 'absent';
+    }
+
+    let raw: Buffer;
+    try {
+      raw = readFileSync(claimPath);
+    } catch {
+      return 'absent';
+    }
+
+    const stored = raw.toString('utf8').trim();
+    if (stored.length > 0 && timingSafeStringEqual(stored, token)) {
+      try {
+        unlinkSync(claimPath);
+      } catch {
+        // Already claimed and matched; a leftover claim file is not a second
+        // usable token, since the check above only ever runs once per claim.
+      }
+      return 'match';
+    }
+
+    try {
+      renameSync(claimPath, breakGlassFile);
+    } catch {
+      // The claim can't be restored — the token is lost rather than reused,
+      // which is the safe direction for a single-use secret to fail in.
+    }
+    return 'mismatch';
   }
 
   function getCredentialRow(db: DatabaseSync): CredentialRow | null {
@@ -269,7 +321,19 @@ export function createOperatorIdentity(deps: OperatorIdentityDependencies): Oper
           throw cause;
         }
       });
-      if (!written.ok) return err(written.error);
+      if (!written.ok) {
+        // Two concurrent enrolments can both pass the `existing` check above
+        // and both attempt the insert; only one can win against the
+        // `operator_credential` singleton's own primary key. The loser hits
+        // a constraint violation, not an arbitrary store failure, and that
+        // is exactly the same condition the `existing` check above reports
+        // as `already-provisioned` — the race's loser gets the same answer
+        // a slightly later caller would have, rather than a bare 503.
+        if (written.error.code === 'store-failed' && written.error.cause.code === 'constraint-violated') {
+          return err(operatorIdentityError({ code: 'already-provisioned' }, 'an operator identity already exists'));
+        }
+        return err(written.error);
+      }
 
       // The secret is burned only once the credential is durably written —
       // an operator locked out mid-enrolment by a crash still has the file
@@ -380,16 +444,8 @@ export function createOperatorIdentity(deps: OperatorIdentityDependencies): Oper
       const credential = found.value;
       if (!credential) return err(operatorIdentityError({ code: 'not-provisioned' }, 'no operator identity exists yet'));
 
-      const stored = readTrimmedFile(breakGlassFile);
-      if (stored === null || !timingSafeStringEqual(stored, token)) {
+      if (claimBreakGlassToken(token) !== 'match') {
         return err(operatorIdentityError({ code: 'break-glass-invalid' }, 'the break-glass token is absent, stale or already consumed'));
-      }
-
-      try {
-        unlinkSync(breakGlassFile);
-      } catch {
-        // Best-effort single-use: the check above already required an exact
-        // match against the file that existed at read time.
       }
 
       await audit.append({
