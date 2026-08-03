@@ -42,13 +42,17 @@ export interface SurfacesDependencies {
   readonly operatorApiToken: string;
 }
 
+/**
+ * Compares fixed-length digests rather than the raw strings, so a
+ * length-mismatch early return (which `timingSafeEqual` itself requires,
+ * since it rejects unequal-length buffers) never depends on the length of
+ * the caller-presented secret — only on the length of a hash, which is
+ * always 32 bytes.
+ */
 function timingSafeStringEqual(a: string, b: string): boolean {
-  const bufA = Buffer.from(a, 'utf8');
-  const bufB = Buffer.from(b, 'utf8');
-  if (bufA.length !== bufB.length) {
-    return false;
-  }
-  return timingSafeEqual(bufA, bufB);
+  const digestA = createHash('sha256').update(a, 'utf8').digest();
+  const digestB = createHash('sha256').update(b, 'utf8').digest();
+  return timingSafeEqual(digestA, digestB);
 }
 
 function isAuthorized(req: IncomingMessage, token: string): boolean {

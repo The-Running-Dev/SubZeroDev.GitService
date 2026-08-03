@@ -29,6 +29,27 @@ test('the fingerprint is stable across repeated compiles and invariant to reorde
   assert.equal(run2.value.fingerprint, run3.value.fingerprint);
 });
 
+test('the fingerprint is invariant to the order of a single entry\'s capabilities and scopes', () => {
+  const a = fixtureTool({
+    name: 'git_status',
+    capabilities: ['repo.read', 'host.pr.read'],
+    scopes: ['read', 'raw'],
+  });
+  const b = fixtureTool({
+    name: 'git_status',
+    capabilities: ['host.pr.read', 'repo.read'],
+    scopes: ['raw', 'read'],
+  });
+
+  const resultA = compiler.compile([a]);
+  const resultB = compiler.compile([b]);
+  assert.equal(resultA.ok, true);
+  assert.equal(resultB.ok, true);
+  if (!resultA.ok || !resultB.ok) return;
+
+  assert.equal(resultA.value.fingerprint, resultB.value.fingerprint);
+});
+
 test('compiling a fixture set emits a sanitised manifest with no schemas, and documentation', () => {
   const tools = [fixtureTool({ name: 'git_status' }), fixtureTool({ name: 'git_log', target: moduleTarget('git_log') })];
   const result = compiler.compile(tools);

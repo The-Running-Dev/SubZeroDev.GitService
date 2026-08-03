@@ -15,6 +15,16 @@ import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './surfaces/http-se
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const buildDir = path.join(repoRoot, 'build');
 
+function resolvePort(): number {
+  const raw = process.env.PORT ?? '8080';
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    console.error(`server: PORT must be an integer between 0 and 65535 (got '${raw}')`);
+    process.exit(1);
+  }
+  return port;
+}
+
 function resolveCommitSha(): GitSha {
   const fromEnv = process.env.GIT_COMMIT_SHA;
   const raw = fromEnv ?? execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim();
@@ -48,7 +58,7 @@ async function main(): Promise<void> {
   }
 
   const commitSha = resolveCommitSha();
-  const port = Number(process.env.PORT ?? 8080);
+  const port = resolvePort();
 
   const server = createSurfacesServer({
     commitSha,

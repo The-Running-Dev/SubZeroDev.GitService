@@ -27,8 +27,13 @@ function targetKey(target: ExecutionTarget): string {
   return `${target.kind}:${targetIdentifier(target)}`;
 }
 
+// Every CompilerError variant means "these declarations do not satisfy the
+// contract" — the caller's input, not the build environment — so 'validation'
+// is the correct ResultKind (see `20-contract.md` § The result envelope: it
+// reads exactly "caller input does not satisfy the contract"), not
+// 'infrastructure', which `isError` treats as a service/environment failure.
 function moduleError<T extends { readonly code: CompilerError['code'] }>(base: T, summary: string): CompilerError {
-  return { resultKind: 'infrastructure', retryable: false, summary, ...base } as unknown as CompilerError;
+  return { resultKind: 'validation', retryable: false, summary, ...base } as unknown as CompilerError;
 }
 
 function validateOne(declaration: ToolDeclaration): CompilerError[] {

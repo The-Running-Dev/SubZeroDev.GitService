@@ -1,5 +1,5 @@
 import type { DeclarationId, Generation, OperationId } from '../shared/brands.ts';
-import { isError, type Finding, type ResultKind } from '../shared/result-kind.ts';
+import type { Finding, ResultKind } from '../shared/result-kind.ts';
 import type { CapabilityName } from '../contract/capabilities.ts';
 import type { LockHolder } from '../locks/types.ts';
 
@@ -67,8 +67,4 @@ export function timeout(summary: string, limitSeconds: number): ToolResult<never
 
 export function infrastructure(summary: string): ToolResult<never> {
   return { ok: false, kind: 'infrastructure', summary };
-}
-
-export function isErrorResult(result: ToolResult<unknown>): boolean {
-  return isError(result.kind);
 }
