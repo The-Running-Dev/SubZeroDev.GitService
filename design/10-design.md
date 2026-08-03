@@ -130,19 +130,20 @@ repository's working tree, generalising `.config/blog.json`.
 | `deployWorkflow` | string | repository |
 | `branchPrefixes` | string[] | repository |
 
-**Read from `origin/<base>`, never from the working tree.** The tree of a long-lived clone is
-wherever the last operation parked it, including a branch the calling agent created moments ago,
-so a working-tree read would let a caller author the configuration that governs its own call.
-`requiredChecks` grants no capability, but it defines what "green" means to the unwatched
-end-to-end flow of definition-of-done item 13 — a caller that commits `requiredChecks: []` on its
-own branch and is then told its change passed has defeated the gate without ever exceeding its
-grant. Reading from the base ref is the prior art's rule for `blog_log`, adopted here for the
-same reason. **The config path is excluded from `writablePathPrefixes` by default**, so changing
-it is an operator act on the base branch rather than a side effect of an agent's own commit.
+**Read from the working tree**, as `blog-mcp`'s `loadConfig(repoRoot)` does, so the file can
+differ per branch. The cache is keyed by declaration and `HEAD`, and is invalidated by any
+operation that moves `HEAD` or changes the tree — a stale copy surviving a checkout would make
+the service act on another branch's facts.
 
-The cache is invalidated on every fetch of the declaration and on any operation that moves
-`origin/<base>`, because an honest upstream change to `requiredChecks` must not sit stale
-behind a cached copy indefinitely.
+**Known and retained, not overlooked:** the tree of a long-lived clone is wherever the last
+operation parked it, including a branch the calling agent created moments ago, so a caller with
+`git.local.write` can author the configuration read for its own call. `requiredChecks` is the
+field where that bites, because it defines what "green" means to the unwatched flow of
+definition-of-done item 13. Two guards were proposed and declined when the brief was
+ratified — reading from `origin/<base>`, and excluding the config path from
+`writablePathPrefixes` — and both remain declined; `90-decisions.md` holds the entry, the reasons
+and the condition that reopens it. Neither guard is in this design, and the exposure is accepted
+knowingly rather than mitigated quietly.
 
 Nothing here grants authority. The invariant that makes this safe is stated once, here, and is
 checkable: **any field a caller could set that widens what the service will do lives in the
