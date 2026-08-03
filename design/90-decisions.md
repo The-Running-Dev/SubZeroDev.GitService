@@ -21,13 +21,20 @@ Append-only. Newest at the top. The rejected alternatives are the point — with
 - ~~**The per-process mutex is the only concurrency guarantee.**~~ — **resolved 2026-08-03 by `/design`.** An exclusive advisory OS lock on a lease file in the volume makes the process boundary enforceable, and stdio sessions own no storage at all. See the decision below.
 - ~~**Deployment-time workflow locking and the escape hatch have not been reconciled.**~~ — **resolved 2026-08-03 by `/design`.** The hatch is a capability inside the lock, withholdable at every layer, and unregistered wherever withheld. See the decision below.
 - **The kit lives at `D:\Downloads\agent-kit`**, which is a staging path, not a home. Re-running `/install` later depends on it still being there.
-- ~~**Seven questions `/design` could not answer.**~~ — **six resolved 2026-08-03**, each a decision below: audit-log tamper-evidence, the disk budget and retention defaults, credential-reference resolution, volume-loss coverage, the console view seam, and the notification transport. **One remains** in `10-design.md` § Open questions — the default posture of `git.raw` for MCP sessions, which is a configuration default either way and does not block `/contract`. **Nothing now blocks `/contract`.**
+- ~~**Seven questions `/design` could not answer.**~~ — **all seven resolved 2026-08-03**, each a decision below: audit-log tamper-evidence, the disk budget and retention defaults, credential-reference resolution, volume-loss coverage, the console view seam, the notification transport, and the `git.raw` posture for MCP sessions. `10-design.md` § Open questions is now empty. **Nothing blocks `/contract`.**
 
 ---
 
 > The block below was produced by triaging a second `/redteam` pass (Fable) on 2026-08-03.
 > Seventeen of its nineteen findings were confirmed against the text; two were adjusted. The
 > design changes they forced are recorded here, newest first.
+
+### 2026-08-03 — `git.raw` is reachable from MCP; the declaration layer carries the default-deny
+Context: The last open question in `10-design.md`. The design had recommended withholding the hatch from every MCP session profile and granting it to the operator console only — which, checked against the ratified brief, is the "hatch restricted to the console, never MCP" alternative that the brief had already considered and rejected. The recommendation had drifted toward a position the brief closed.
+Chosen: `git.raw` sits in the deployment ceiling and MCP session profiles do not exclude it, so an agent may hold it. It stays **default-deny at the declaration layer** — `capabilityGrant` must name it explicitly and a newly declared repository does not have it. Three of the four lattice layers admit it; the per-repository one is where the decision is made.
+Rejected: **Withheld from every MCP profile, console only** — the design's own prior recommendation, and console-only wearing different clothes, which the brief rejected. **On everywhere with per-declaration opt-out** — the most literal reading of "available by default for all git access", and it makes a newly declared repository immediately reachable by arbitrary git from any authorised session, which is a decision better made once per repository than inherited silently. **No per-declaration control at all** — simplest to document, and it removes the only layer still enforcing anything for this capability.
+Consequence: The prompt-injection property now rests entirely on one field per repository. Where the grant is absent it is structural and intact — the tool is not in the listing, so text in a PR comment cannot summon it. Where the grant is present it is gone. `capabilityGrant` naming `git.raw` is the most consequential entry in a declaration, and the design says so where the risk is described rather than only here.
+Reversibility: cheap as configuration; the property it trades away is not recoverable for any repository where the grant was live.
 
 ### 2026-08-03 — Credentials resolve from a mounted secrets directory
 Context: Open question 1, the last one blocking `/contract` — the declaration format cannot be written until the reference syntax the resolver accepts is fixed. Item 5 requires onboarding by declaration alone with no restart, which rules out credentials arriving through the container environment.

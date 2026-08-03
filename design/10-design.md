@@ -219,7 +219,7 @@ that adds a capability to a set.
 |---|---|
 | `repo.read` | status, log, branches, health, diff |
 | `git.local.write` | branch preparation, stage, commit, restore-paths |
-| `git.raw` | the escape hatch |
+| `git.raw` | the escape hatch. In the deployment ceiling and reachable from MCP sessions; **default-deny at the declaration layer**, so a repository has it only when its `capabilityGrant` names it |
 | `host.pr.read` | PR status, list, comments |
 | `host.pr.write` | create PR, enable auto-merge, reconcile after merge |
 | `host.checks.read` | check status, bounded waits, deploy status, published-URL verification |
@@ -744,8 +744,24 @@ directory, and rejects argument forms that select an executable or inject config
 `git.raw` can still reach command execution inside the container through git's own extension
 points. The brief considered and declined a hard floor no surface can cross, so this is recorded
 as known and retained rather than reopened. The mitigations that follow from it are the ones
-already in this design: `git.raw` is withheld by default at every layer, is unregistered wherever
-withheld, and refuses to run at all if its audit line cannot be written.
+already in this design: `git.raw` is unregistered for any session whose declaration has not been
+granted it, and refuses to run at all if its audit intent line cannot be written.
+
+**The mitigation is per declaration, not per surface.** The deployment ceiling includes `git.raw`
+and MCP session profiles do not exclude it, so an agent operating a declaration that has been
+granted the hatch sees it in `tools/list` and may call it. The brief settled that when it rejected
+restricting the hatch to the console; withholding it from every MCP profile would have been the
+console-only rule under another name. What remains is the declaration layer, and it is
+default-deny: `capabilityGrant` must name `git.raw` explicitly, and a newly declared repository
+does not have it.
+
+That places the whole weight of the prompt-injection property on one decision per repository.
+For a declaration without the grant the property is intact and structural — the tool is absent
+from the listing, so text embedded in a PR comment cannot talk it into existing. For a declaration
+with the grant it is gone, and an agent that reads repository content is one injection away from
+arbitrary git in that repository. Granting it is therefore a judgement about a specific
+repository's exposure, not a convenience toggle, and it is the single most consequential field in
+a declaration.
 
 **What that execution reaches, stated rather than left to be inferred.** The pinned working
 directory bounds where `git` operates; it does not confine a child process. Code reached this way
@@ -1007,10 +1023,7 @@ store the atomic multi-row updates recovery classification needs. Rejected: *SQL
 
 ## Open questions
 
-1. **Should `git.raw` be reachable from MCP sessions in the default deployment?** This design
-   makes it withholdable at every layer, and the brief has already declined making it structurally
-   console-only. What neither says is what the *default* should be. Recommended: **withheld from
-   every MCP session profile, granted to the operator console only**, changeable per declaration.
-   This is a configuration default either way, not a design change, so it does not block
-   `/contract` — but it is the one question in this document still unanswered, and it sets the
-   posture the safety story is read against.
+**None.** All seven questions this document opened are answered; each is a dated entry in
+`90-decisions.md` with its rejected alternatives. The last of them — whether `git.raw` is
+reachable from MCP sessions — is settled as reachable, with the declaration layer carrying the
+default-deny; see The escape hatch's residual risk for what that places on a single field.
