@@ -36,6 +36,24 @@ Append-only. Newest at the top. The rejected alternatives are the point — with
 
 - **`totp_reenrol_required` can be set but never cleared.** Burning a recovery code sets the flag, and `IdentityEvent` already includes `'totp-reenrolled'` — so the event was anticipated — but no `OperatorIdentity` method produces it, leaving that enum member unreachable and the flag write-only for the life of the credential. S4 only has to *set* it, so this does not block. **The re-enrolment route belongs with the console session work in S18**, which is where an operator would drive it; whichever slice takes it needs a contract amendment adding the signature first. Found by `/contract` 2026-08-04 while resolving the TOTP sealing gap.
 
+### 2026-08-04 — PR remediation stays an external MCP-client composite, not a runtime workflow engine
+Context: A requested “agent that runs on code PRs, validates changes with the best model, addresses
+PR issues, posts and resolves issues” risks crossing two binding boundaries at once: the brief's
+"not a general workflow engine" non-goal, and the non-goal against becoming a general GitHub API
+proxy. The existing host contract already covers PR status, comments, checks, deploy status and
+auto-merge, but not review-thread resolution or the ownership split for an agent doing remediation.
+Chosen: Keep model choice, issue classification, code-edit decisions, reply wording and resolve
+judgment outside the runtime in an MCP client. Extend the contract only with the minimum PR-specific
+review-thread operations and, if needed, a handwritten remediation composite with fixed reviewed
+steps. The runtime owns typed git/PR/check/comment/thread operations and journalling; the external
+agent owns reasoning and conversation.
+Rejected: **Run the agent inside GitHub Actions** — conflicts with the execution-model non-goal and
+moves the critical path onto a workflow runner. **Add a generic issue/discussion/projects surface** —
+solves more than the brief asked and crosses the "not a GitHub API proxy" line. **Let the runtime
+host a caller-authored remediation loop** — that is the workflow engine the brief excludes.
+Reversibility: cheap now, expensive after tools and consumers are published against a broader host
+surface.
+
 ---
 
 ### 2026-08-04 — The TOTP secret is sealed, not hashed, and its key lives in the credential mount

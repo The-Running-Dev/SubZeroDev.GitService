@@ -1816,6 +1816,7 @@ interface Composite<TInput, TData> {
 interface Composites {
   readonly prepareBranch: Composite<PrepareBranchInput, PrepareBranchData>;
   readonly reconcileAfterMerge: Composite<ReconcileAfterMergeInput, ReconcileAfterMergeData>;
+  readonly remediatePullRequestThread: Composite<RemediatePullRequestThreadInput, RemediatePullRequestThreadData>;
 }
 ```
 
@@ -1864,6 +1865,18 @@ interface HostComment {
   readonly createdAt: IsoUtcTimestamp;
 }
 
+interface HostReviewComment extends HostComment {
+  readonly id: string;
+}
+
+interface HostReviewThread {
+  readonly id: string;
+  readonly path: RepoRelativePath | null;
+  readonly line: number | null;
+  readonly isResolved: boolean;
+  readonly comments: readonly HostReviewComment[];
+}
+
 interface RequestBudget {
   readonly remaining: number;
   readonly resetsAt: IsoUtcTimestamp | null;
@@ -1875,6 +1888,10 @@ interface HostAdapter {
   readPullRequest(ctx: CallContext, number: number): Promise<Outcome<PullRequestStatus, HostError>>;
   listPullRequests(ctx: CallContext, state: PullRequestState | null): Promise<Outcome<readonly PullRequestStatus[], HostError>>;
   readPullRequestComments(ctx: CallContext, number: number): Promise<Outcome<readonly HostComment[], HostError>>;
+  readPullRequestReviewThreads(ctx: CallContext, number: number): Promise<Outcome<readonly HostReviewThread[], HostError>>;
+  replyToReviewThread(ctx: CallContext, threadId: string, body: string): Promise<Outcome<HostReviewComment, HostError>>;
+  resolveReviewThread(ctx: CallContext, threadId: string): Promise<Outcome<void, HostError>>;
+  reopenReviewThread(ctx: CallContext, threadId: string): Promise<Outcome<void, HostError>>;
   enableAutoMerge(ctx: CallContext, number: number): Promise<Outcome<void, HostError>>;
   readChecks(ctx: CallContext, ref: GitSha): Promise<Outcome<readonly CheckStatus[], HostError>>;
   readDeployStatus(ctx: CallContext, workflow: string, ref: GitSha): Promise<Outcome<DeployStatus, HostError>>;
@@ -1882,10 +1899,12 @@ interface HostAdapter {
 }
 ```
 
-`HostComment.body` is author-controlled text carried as data; the tool returning it is annotated
-`untrustedOutput`. There is no merge method and no rebase method on this interface, and by design
-there never will be — the host's own auto-merge is the only merge path. `CreatePullRequestInput` is
-subject to the same `## Unresolved` item as the git operations' inputs.
+`HostComment.body` and `HostReviewComment.body` are author-controlled text carried as data; any tool
+returning either is annotated `untrustedOutput`. There is no merge method and no rebase method on
+this interface, and by design there never will be — the host's own auto-merge is the only merge
+path. `CreatePullRequestInput`, `RemediatePullRequestThreadInput` and
+`RemediatePullRequestThreadData` are subject to the same `## Unresolved` item as the git
+operations' inputs.
 
 ### L2 — scheduler
 

@@ -769,3 +769,38 @@ Acceptance:
 
 Out of scope: an off-volume audit sink. Deferred by decision; reopening it is a brief change, not a
 slice.
+
+---
+
+## S23 — An external MCP client can remediate pull-request review threads conservatively
+
+Delivers: a narrow contract amendment and host integration for agent-assisted PR remediation, without
+turning the runtime into a general workflow engine or a general GitHub API proxy.
+
+Touches: Contract (L0), Host adapter (L2), Composites (L2), Dispatch pipeline (L4), consumer MCP
+client guidance.
+
+Depends on: S21. **Gated on U1.**
+
+Acceptance:
+- The contract names exactly the additional PR-facing operations needed for remediation: read review
+  threads, reply to a thread, resolve a thread, and reopen a thread. No generic issues, projects,
+  discussions or arbitrary host passthrough operation is added.
+- Returned review-thread and review-comment bodies are carried as data and every tool returning them
+  is annotated `untrustedOutput`.
+- The remediation path is split explicitly: the service owns typed git, PR, checks, comments and
+  review-thread operations plus any handwritten remediation composite; the external MCP client owns
+  finding selection, reasoning, code change choice, reply wording and the decision to resolve or
+  reopen a thread.
+- Any host mutation inside the remediation path writes its `applied` journal step before the network
+  call, so a kill between journal and host action parks rather than risking a silent duplicate reply
+  or resolution.
+- A thread is resolved only after the validating reads conclude success for the exact addressed
+  concern; ambiguous findings remain unresolved, and a later failing validation can reopen the same
+  thread.
+- Terminal states already fixed by S10 and S11 remain terminal here too: merge conflict, failed
+  required check, bounded-wait timeout, missing capability and host not-found all stop the
+  remediation path without inventing new recovery semantics.
+
+Out of scope: choosing or running a model inside the runtime; generic issue management; unattended
+workflow dispatch through GitHub Actions.

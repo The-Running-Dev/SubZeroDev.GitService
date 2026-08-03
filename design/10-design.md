@@ -579,6 +579,15 @@ inside the compiled registry, so an undeclared name does not exist. At fire time
 re-intersects `frozenGrant` with the current declaration grant and deployment ceiling; a job
 can lose capability between creation and firing but can never gain it.
 
+The same boundary holds for agent-assisted pull-request remediation. The service may expose a
+handwritten composite that carries one review thread from inspection through a bounded local
+mutation, validation readback and host reply/resolve steps, but the **agent remains outside** the
+runtime: it is an MCP client choosing whether to invoke that composite, which finding to accept,
+what change to make, what reply text to send, and whether a later validation result requires the
+thread to be reopened. The runtime owns only typed repository and host operations plus the fixed
+review-thread composite; it does not grow a generic issue engine, a caller-authored loop, or a
+model-selection policy.
+
 **The creating grant is a fourth term in that intersection, and it is the one that makes
 revocation mean something.** If the grant or client named by `createdBy` is revoked, the
 intersection is empty and the job moves to `cancelled` with a reason naming the revocation — it is
