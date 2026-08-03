@@ -1606,8 +1606,14 @@ interface Audit {
   verify(): Promise<AuditChainState>;
   chainState(): Promise<AuditChainState>;
   runRetention(): Promise<RetentionReport>;
+  close(): Promise<void>;
 }
 ```
+
+`close` releases the module's own handle on the structured store, mirroring `StructuredStore.close`.
+The lifecycle module calls it during shutdown: a module that opens a resource is the module that
+releases it, and leaving the handle to process exit makes an in-process restart hold a file open on
+a host that refuses to unlink open files.
 
 `append` never throws and never rejects. Every append passes through one writer inside the module,
 which is what assigns `sequence`, `previousHash` and `hash`.

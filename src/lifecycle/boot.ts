@@ -226,6 +226,9 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
     },
 
     async shutdown(_reason: ShutdownReason): Promise<void> {
+      // Audit before the store: both hold a handle on the same file, and the
+      // module that opened one is the module that releases it.
+      await deps.audit.close();
       await deps.store.close();
       if (guard) {
         guard.release();

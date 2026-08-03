@@ -27,6 +27,7 @@ export interface Audit {
   verify(): Promise<AuditChainState>;
   chainState(): Promise<AuditChainState>;
   runRetention(): Promise<RetentionReport>;
+  close(): Promise<void>;
 }
 
 /** The contract's stated default (`20-contract.md` § Deployment configuration). */
@@ -101,27 +102,33 @@ function readMirroredHead(db: DatabaseSync | null): ChainHeadRow | null {
 }
 
 /**
- * Re-derives the chain head from the segment files alone, by reading the last
- * parseable record of the highest-numbered segment. This is what makes the
- * trail appendable when the structured store is unreadable — without it, a
- * corrupt store silently stops the audit log, which is the opposite of what
- * an audit log outside that store is for.
+ * Derives the chain head from the segment files — the authoritative answer.
+ *
+ * This is not a fallback for when the mirror is missing; it is the source the
+ * mirror mirrors. A mirror write can fail and be swallowed (the file append
+ * already succeeded, so the record is durable and must not be discarded),
+ * which leaves the row behind the files. Trusting it then would chain the
+ * next record onto a predecessor two records back and reuse a sequence number
+ * already on disk — producing a duplicate that hash-linkage alone does not
+ * catch.
+ *
+ * Streams rather than slurps, so a 64 MiB segment costs constant memory.
  */
 function deriveHeadFromFiles(volumeRoot: string): ChainHeadRow | null {
   const segments = listSegments(volumeRoot);
   for (let i = segments.length - 1; i >= 0; i -= 1) {
-    const raw = readFileSync(segmentPath(volumeRoot, segments[i]!), 'utf8');
-    const lines = raw.split('\n').filter((l) => l.length > 0);
-    for (let j = lines.length - 1; j >= 0; j -= 1) {
+    let last: ChainHeadRow | null = null;
+    for (const line of streamSegmentLines(segmentPath(volumeRoot, segments[i]!))) {
       try {
-        const record = JSON.parse(lines[j]!) as AuditRecord;
+        const record = JSON.parse(line) as AuditRecord;
         if (typeof record.sequence === 'number' && typeof record.hash === 'string') {
-          return { sequence: record.sequence, headHash: record.hash };
+          last = { sequence: record.sequence, headHash: record.hash };
         }
       } catch {
-        // A torn final line is not the head; keep walking backwards.
+        // A torn final line is not the head; the last good record before it is.
       }
     }
+    if (last) return last;
   }
   return null;
 }
@@ -252,6 +259,20 @@ function verifyFromDisk(
         break outer;
       }
 
+      // Invariant S1: sequence numbers are contiguous. Hash linkage alone does
+      // not imply this — a record appended after a stale-mirror read chains
+      // onto the correct predecessor hash while *reusing* a sequence number
+      // already on disk, which reads as a healthy chain unless the numbering
+      // is checked in its own right.
+      if (parsed.sequence !== runningSequence + 1) {
+        chainBreak = {
+          atSequence: parsed.sequence,
+          expectedHash: runningHash ?? NO_PREDECESSOR_SENTINEL,
+          foundHash: claimedHash,
+        };
+        break outer;
+      }
+
       runningHash = claimedHash;
       runningSequence = parsed.sequence;
       sawAnyRecord = true;
@@ -312,7 +333,13 @@ export function createAudit(options: AuditOptions): Audit {
     // The files are authoritative. The mirror is a fast path; when it is
     // missing or unreadable the head is re-derived from the segments, so a
     // corrupt store slows the first append rather than stopping the trail.
-    head = readMirroredHead(chainHeadDb()) ?? deriveHeadFromFiles(volumeRoot);
+    // The files decide, always. Chaining onto the mirror would mean chaining
+    // onto a record we cannot see: if the mirror is behind (a swallowed write)
+    // the next append reuses a sequence already on disk, and if it is ahead
+    // (a truncated tail) it names a predecessor that no longer exists. The
+    // mirror's remaining job is telling `verify` about that truncation, which
+    // it does there — not here.
+    head = deriveHeadFromFiles(volumeRoot);
     const segments = listSegments(volumeRoot);
     currentSegment = segments.length > 0 ? Math.max(...segments) : 1;
     const currentPath = segmentPath(volumeRoot, currentSegment);
@@ -470,6 +497,19 @@ export function createAudit(options: AuditOptions): Audit {
     async runRetention(): Promise<RetentionReport> {
       // S17 owns retention and the anchors it writes. Nothing prunes yet.
       return { module: 'audit', deletedRows: 0, freedBytes: 0, skipped: ['retention lands in S17'] };
+    },
+
+    async close(): Promise<void> {
+      // The segment files hold no handle — every append opens, writes and
+      // closes. Only the mirror connection outlives a call, so it is the only
+      // thing to release. Re-openable afterwards: `chainHeadDb()` is lazy, and
+      // `dbUnavailable` is deliberately not set here, since a deliberate close
+      // is not evidence the store is broken.
+      if (db) {
+        db.close();
+        db = null;
+      }
+      initialized = false;
     },
   };
 }

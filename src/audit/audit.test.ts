@@ -7,6 +7,7 @@ import { systemClock } from '../clock/clock.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
 import { createAudit } from './audit.ts';
+import { computeAuditRecordHash } from './hash.ts';
 import type { AuditAppendInput } from './types.ts';
 import type { ActorRef } from '../shared/actor.ts';
 
@@ -292,6 +293,79 @@ test('verify() still reports a break when a prefix is pruned WITHOUT an anchor',
 
     const state = await audit.verify();
     assert.notEqual(state.chainBreak, null, 'an unanchored gap is still a break');
+  });
+});
+
+test('a stale chain-head mirror never causes a duplicate sequence: the files decide', async () => {
+  await withVolumeAsync(async (volume) => {
+    await migratedVolume(volume);
+    const first = createAudit({ volumeRoot: volume, clock: systemClock });
+    for (let i = 0; i < 3; i += 1) await first.append(leaseTakeoverInput());
+    await first.close();
+
+    // Simulate swallowed mirror writes: the row falls behind the durable
+    // JSONL. A mirror write can fail after the file append has already
+    // succeeded, and that failure is deliberately not fatal to the append.
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    db.prepare('UPDATE audit_chain_head SET sequence = 1').run();
+    db.close();
+
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const appended = await audit.append(leaseTakeoverInput());
+    assert.equal(appended.appended, true);
+    if (!appended.appended) return;
+    assert.equal(appended.sequence, 4, 'the next sequence continues from the files, not the stale mirror');
+
+    const sequences = readFileSync(path.join(volume, 'audit', '000001.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => (JSON.parse(l) as { sequence: number }).sequence);
+    assert.deepEqual(sequences, [1, 2, 3, 4], 'no duplicate sequence number on disk');
+    assert.equal((await audit.verify()).chainBreak, null);
+    await audit.close();
+  });
+});
+
+test('verify() reports a duplicate sequence number even when hash linkage is intact (invariant S1)', async () => {
+  await withVolumeAsync(async (volume) => {
+    await migratedVolume(volume);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    for (let i = 0; i < 3; i += 1) await audit.append(leaseTakeoverInput());
+
+    // Forge a fourth record that chains correctly by hash but reuses
+    // sequence 2 — what a stale-mirror append used to produce. Hash linkage
+    // alone reads as healthy, so contiguity has to be checked in its own right.
+    const segPath = path.join(volume, 'audit', '000001.jsonl');
+    const lines = readFileSync(segPath, 'utf8').trim().split('\n');
+    const third = JSON.parse(lines[2]!) as { hash: string };
+    const forged = JSON.parse(lines[1]!) as Record<string, unknown>;
+    forged.previousHash = third.hash;
+    delete forged.hash;
+    forged.hash = computeAuditRecordHash(forged as never);
+    writeFileSync(segPath, `${[...lines, JSON.stringify(forged)].join('\n')}\n`, 'utf8');
+
+    const state = await audit.verify();
+    assert.notEqual(state.chainBreak, null, 'a reused sequence number is a chain break');
+    assert.equal(state.chainBreak?.atSequence, 2);
+    await audit.close();
+  });
+});
+
+test('close() releases the mirror handle and the module still works afterwards', async () => {
+  await withVolumeAsync(async (volume) => {
+    await migratedVolume(volume);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    await audit.append(leaseTakeoverInput());
+    await audit.close();
+
+    // A deliberate close is not evidence the store is broken, so the lazy
+    // handle re-opens rather than latching into an unavailable state.
+    const appended = await audit.append(leaseTakeoverInput());
+    assert.equal(appended.appended, true);
+    if (!appended.appended) return;
+    assert.equal(appended.sequence, 2);
+    assert.equal((await audit.verify()).chainBreak, null);
+    await audit.close();
   });
 });
 
