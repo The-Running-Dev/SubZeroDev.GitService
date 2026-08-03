@@ -637,6 +637,47 @@ interface AuditPage {
 }
 ```
 
+**Canonical serialisation (resolves U9).** `hash` is `SHA256_hex(canonical(record))`, where
+`record` is the full flattened `AuditRecord` — `AuditRecordBase` merged with whichever
+`AuditRecordBody` variant applies, exactly as the type appears — with its own `hash` field omitted
+and every other field present, `sequence` and `previousHash` included. `SHA256_hex` hashes the
+UTF-8 byte encoding of the string `canonical()` returns.
+
+`canonical(value)` is defined operationally, over ECMAScript values, not by a named external
+format:
+
+1. If `value` is an array, map `canonical` over its elements and join with `,`, wrapped in `[` `]`.
+   Element order is preserved — an array like `changedPaths` or `argv` is ordered content, not a
+   set.
+2. If `value` is an object, take `Object.keys(value)`, sort it with the default `Array.prototype.sort`
+   comparator (each key converted to a string, compared by UTF-16 code unit), and for each key in
+   that order emit `JSON.stringify(key)`, `:`, `canonical(value[key])`, joined with `,`, wrapped in
+   `{` `}`.
+3. Otherwise (`string`, `number`, `boolean`, `null`), emit `JSON.stringify(value)` — one JSON token,
+   no added whitespace.
+
+This is exactly `JSON.stringify` applied to `value` after every object's own keys have been
+re-inserted in sorted order at every nesting level, with no `space` argument, so no whitespace is
+ever inserted around a delimiter — the same algorithm `src/contract/fingerprint.ts` implements for
+the compiler's registry fingerprint, restated here byte-precisely because two independent
+implementations disagreeing here is exactly what U9 exists to prevent. It is a TypeScript
+definition because the contract itself is: `20-contract.md`'s opening line fixes the language, and
+`JSON.stringify`'s string-escaping and number formatting are themselves the specification, not a
+convention layered on top of one.
+
+The genesis record (`previousHash: null`, the first line of the first segment) hashes the same way;
+`null` is step 3, like any other value, with no special case.
+
+Every field participates in the hash except `hash` itself. Including `sequence` means a record
+whose sequence number alone was edited is still caught by the hash, redundantly with invariant S1's
+separate contiguity check.
+
+File storage is a distinct concern the hash does not fix: each line is `JSON.stringify(record)` in
+whatever key order, compact and one record per line, so segment-byte accounting against
+`auditSegmentBytes` is exact. `verify` parses each line, re-derives the canonical form, and
+re-hashes — the on-disk encoding never has to match the hashed encoding, only round-trip through
+the same parser.
+
 ### Content drops
 
 ```ts
@@ -2696,6 +2737,6 @@ the canonical serialisation the hash is taken over. Two implementations that dis
 recovery classification wrong across an upgrade, so this is a contract fact rather than an
 implementation detail.
 
-**U9 — The audit record's canonical serialisation.** The same class of gap as U8 and with the same
-consequence: the hash is taken over the record's canonical serialisation together with the previous
-hash, and the chain is unverifiable across versions unless that serialisation is fixed here.
+~~**U9 — The audit record's canonical serialisation.**~~ — **resolved 2026-08-03.** Deep key-sorted
+JSON over the full flattened `AuditRecord` excluding only `hash` itself, reusing the compiler's
+fingerprint canonicalisation. See `### Audit` above. This unblocks S3.
