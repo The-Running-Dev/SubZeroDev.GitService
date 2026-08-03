@@ -21,13 +21,38 @@ Append-only. Newest at the top. The rejected alternatives are the point — with
 - ~~**The per-process mutex is the only concurrency guarantee.**~~ — **resolved 2026-08-03 by `/design`.** An exclusive advisory OS lock on a lease file in the volume makes the process boundary enforceable, and stdio sessions own no storage at all. See the decision below.
 - ~~**Deployment-time workflow locking and the escape hatch have not been reconciled.**~~ — **resolved 2026-08-03 by `/design`.** The hatch is a capability inside the lock, withholdable at every layer, and unregistered wherever withheld. See the decision below.
 - **The kit lives at `D:\Downloads\agent-kit`**, which is a staging path, not a home. Re-running `/install` later depends on it still being there.
-- **Five questions `/design` could not answer** and that `/contract` inherits, listed in `10-design.md` § Open questions: credential-reference resolution without a restart (blocks the declaration format), the default posture of `git.raw` for MCP sessions, the notification transport, volume backup ownership, and whether the blog authoring views gain a repository dimension. Two of the original seven were answered on 2026-08-03 and are decisions below — audit-log tamper-evidence and the disk budget, both of which had to land before `/contract` because they fix a line format and a set of retention defaults respectively. **Credential-reference resolution is now the only one that blocks `/contract`.**
+- ~~**Seven questions `/design` could not answer.**~~ — **six resolved 2026-08-03**, each a decision below: audit-log tamper-evidence, the disk budget and retention defaults, credential-reference resolution, volume-loss coverage, the console view seam, and the notification transport. **One remains** in `10-design.md` § Open questions — the default posture of `git.raw` for MCP sessions, which is a configuration default either way and does not block `/contract`. **Nothing now blocks `/contract`.**
 
 ---
 
 > The block below was produced by triaging a second `/redteam` pass (Fable) on 2026-08-03.
 > Seventeen of its nineteen findings were confirmed against the text; two were adjusted. The
 > design changes they forced are recorded here, newest first.
+
+### 2026-08-03 — Credentials resolve from a mounted secrets directory
+Context: Open question 1, the last one blocking `/contract` — the declaration format cannot be written until the reference syntax the resolver accepts is fixed. Item 5 requires onboarding by declaration alone with no restart, which rules out credentials arriving through the container environment.
+Chosen: A read-only mount whose file names are reference names, matched by `^[a-z0-9][a-z0-9._-]{0,63}$`, read at point of use and passed into a child process's environment by name. No restart to onboard, no secret in the structured store (so the pre-migration backups carry none), and rotation is a file write the next operation observes — which is what lets a failing credential reference clear itself.
+Rejected: **Encrypt at rest in the structured store** — one storage system instead of two and fully self-describing declarations; rejected because the store backups would then contain secrets, so backup handling inherits secret handling, and key rotation becomes its own operation. **An external secret store** — the only option with real per-reference access control, and the only one that would let per-declaration credential isolation become an enforced boundary rather than a lookup convention; rejected for now because it adds a runtime dependency an unwatched instance would depend on, and a network round trip inside every credentialed operation. Held as the upgrade path if isolation is ever promoted.
+Reversibility: cheap to swap the resolver behind the interface; expensive to change the reference *syntax* once declarations exist.
+
+### 2026-08-03 — Volume loss is an accepted risk; no online backup ships
+Context: Open question 4. Item 18's rollback is covered by the pre-migration store copy, but that copy is on the same volume and protects nothing against losing it. Item 20 requires backup and recovery documentation, which requires knowing what the recovery actually is.
+Chosen: Accept it, and write down exactly what it costs — clones re-cloned from remotes with unpushed work lost, declarations re-declared by hand, every MCP client re-authorising, and the audit log and journal gone. Documentation names that as the recovery path rather than describing a backup that does not exist.
+Rejected: **The host snapshots the volume** — the recommended option and the cheapest if true; not taken, so nothing in the design may assume it. **An online-backup operation** — makes the service responsible for its own durability, and is scope neither the brief nor the design allocated.
+Consequence: The audit trail does not survive the instance, and the hash chain cannot help — a chain proves a surviving trail was not edited, not that a destroyed one existed. This is the same requirement the deferred external audit sink would satisfy; if either is revisited, both should be, together.
+Reversibility: cheap to add a backup operation later; the data lost before that point is not recoverable.
+
+### 2026-08-03 — Console views are parameterised by the selected repository, never bound to one
+Context: Open question 5. Under the lattice a view renders for the selected repository when its grant permits, which implies parameterising it — but `ComposeView` is 38 KB of repository-implicit code, and pinning the blog views to the blog declaration is defensible because blog authoring genuinely applies to exactly one repository.
+Chosen: A registered view receives the selected declaration and never declares one it belongs to. One rule in the seam, answered by capabilities alone.
+Rejected: **Pin views to a declaration** — much less work, and it puts a second mechanism into the seam competing with the capabilities that already answer "may this render here", which every future consumer would then have to learn. **Support both, with blog pinning initially** — most flexible, and it ships two answers to one question before either is proven.
+Reversibility: expensive — it is the shape of a seam published as a versioned package to consumer builds.
+
+### 2026-08-03 — One notification transport: an HTTP webhook
+Context: Open question 3. The brief put outbound notification in scope with the mechanism undecided, because an unwatched run stopping at a terminal state has to be able to reach the operator.
+Chosen: An HTTP webhook, and only that. It covers Slack, Discord, Teams and most else that accepts an incoming hook, and it is what the design already assumed.
+Rejected: **Webhook plus an email relay** — email reaches you when a chat client is closed overnight, which is exactly the 03:00 case; rejected for now as SMTP configuration and a second delivery path for a benefit one webhook already mostly provides. **Ship the interface and decide at deployment** — honest, and it defers a question that is cheap to answer now.
+Reversibility: cheap — the outbox already models delivery, so a second transport is additive.
 
 ### 2026-08-03 — The audit log is hash-chained: tamper-evident, not tamper-proof
 Context: Open question 5, raised when triaging the first redteam pass. Item 8 wants hatch use attributable, and `git.raw` is the one surface that can rewrite the log recording it. The answer had to land before `/contract`, because it fixes the audit line format and retrofitting a chain over a written trail is a migration.

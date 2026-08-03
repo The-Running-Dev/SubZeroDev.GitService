@@ -58,6 +58,24 @@ does is a day worth hearing about.
 Retention runs on the same maintenance pass as eviction, and the disk-full path reports which of
 the five — clones, audit, journal, outbox, backups — is actually consuming the volume.
 
+**Volume loss is an accepted risk, not a covered one.** The pre-migration store copy is a rollback
+target for a bad image; it is on the same volume and protects nothing against losing it. No
+online-backup operation ships. What losing the volume costs, written down so the decision is a
+decision rather than a discovery:
+
+| Lost | Recovery |
+|---|---|
+| Working clones | Re-cloned from their remotes. Unpushed work in a clone is gone — the one genuinely unrecoverable case. |
+| Declarations | Re-declared by hand. They are small and operator-authored, but there is no export today. |
+| OAuth clients, grants, tokens | Gone. Every MCP client re-authorises, which is a visible outage for unattended agents rather than a silent one. |
+| Audit log | Gone, and the hash chain cannot help — a chain proves a surviving trail was not edited, not that a destroyed one existed. |
+| Journal | Gone. Any operation in flight at the moment of loss is unclassifiable. |
+
+The mitigations that are actually load-bearing here are external: whatever the host does with the
+volume, and the fact that clones are replicas of remotes rather than originals. Revisit if the
+audit trail ever needs to survive the instance — that is the same requirement the deferred
+external sink would satisfy, and the two should be answered together rather than separately.
+
 ### Entities
 
 #### `Declaration` — a managed repository
@@ -69,7 +87,7 @@ Operator-owned authority. Persisted. Identity is `id`, chosen by the operator, i
 | `id` | string, `^[a-z0-9][a-z0-9-]{0,62}$` | Identity. Appears in the MCP resource URI and every API path, so it is URL-safe by validation rather than by escaping. Renaming is delete-then-create. |
 | `cloneUrl` | string | Operator intent. Its host must be on the deployment's remote-host allowlist. |
 | `host` | `github` \| `generic` | Determines which host capabilities the grant may contain. `generic` gets local git only. |
-| `credentialRef` | string | A *name*, never a value. Resolved at point of use. Carries its own allowed-host constraint. |
+| `credentialRef` | string | A *name*, never a value: `^[a-z0-9][a-z0-9._-]{0,63}$`, matching a file name in the secrets mount. Resolved at point of use. Carries its own allowed-host constraint. |
 | `capabilityGrant` | set of capability names | The per-repository layer of the lattice. Must be a subset of the deployment ceiling at write time. |
 | `writablePathPrefixes` | string[] | Path allowlist for every write against this repository. Operator-side, because this is authority and not a repository fact. |
 | `pinned` | boolean | When true the clone is never evictable. |
@@ -135,6 +153,31 @@ into the repository-side format.
 A missing config file is not an error — every field defaults, and a declaration with no config
 file at all is fully operable. That is what keeps the format from encoding `SubZeroDev.*`
 habits.
+
+#### Credential resolution — a mounted secrets directory
+
+A read-only mount whose **file names are reference names**. `Declaration.credentialRef` names a
+file; the resolver reads it at the moment of use and passes the value into a child process's
+environment by name, never returning it to a handler. Nothing else in the design touches a secret
+value.
+
+Three properties follow, and they are why this resolver ships rather than the alternatives:
+
+- **No restart to onboard.** A new declaration names a new file, and the file is already there or
+  is dropped in without touching the container. Definition-of-done item 5 fails outright if
+  credentials come from the container environment.
+- **No secret in the structured store**, so the pre-migration backups the rollback path depends on
+  carry none either. Backup handling does not inherit secret handling.
+- **Rotation is a file write.** The resolver reads at point of use, so a replaced file takes
+  effect on the next operation — which is what lets a failing credential reference clear itself
+  rather than waiting for a restart.
+
+**Stated plainly, because it bounds what per-declaration isolation means:** every reference in the
+mount is readable by the service, so code reached through `git.raw` can read all of them. The
+brief already defers whether isolation is ever an enforced boundary and claims only that a
+credential is not *given* to an operation outside its declaration. This resolver keeps that claim
+and does not strengthen it. An external secret store with per-reference access control is the
+option that would, and it is not shipped.
 
 #### `Clone` — a materialised working copy
 
@@ -391,7 +434,7 @@ L0  Contract        contract types  |  compiler  |  generated registry
 | **Exec** (L1) | Every subprocess. Fixed executables, argument vectors never strings, no shell, pinned working directory, secret scrubbing of captured output, credentials passed by environment name so they never appear in a process listing. | Result, errors. | Guarded `git` and `gh` runners. |
 | **Locks** (L1) | The global mutation mutex, the per-declaration materialisation mutex, and the per-declaration active-operation count. | Nothing. | Two acquire functions with bounded waits, and a non-blocking pin. |
 | **Declarations** (L1) | The declaration table, the lattice intersection, the remote-host allowlist. | Structured store, result. | Read, write, and the effective-grant computation. |
-| **Credentials** (L1) | Reference-to-secret resolution and the allowed-host constraint on each reference. | The configured resolver. | Resolution that returns a value only into an exec environment, never to a handler. |
+| **Credentials** (L1) | Reference-to-secret resolution and the allowed-host constraint on each reference. Ships one resolver — the mounted secrets directory — behind an interface a second could satisfy. | The configured resolver. | Resolution that returns a value only into an exec environment, never to a handler. |
 | **Clone store** (L1) | Materialisation, the safe-to-evict predicate, eviction, disk-pressure watermarks, remote cross-check, and the maintenance pass that applies eviction and retention outside any mutation-locked region. | Exec, declarations, locks, journal, audit. | Ensure, evict-if-safe, describe, request-maintenance. |
 | **Journal** (L1) | Intent records and the boot recovery classification. | Structured store, clock. | Begin, step, settle, recover. |
 | **Audit** (L1) | The append-only scrubbed log. | Exec's scrubber, clock. | Append. Never throws. |
@@ -399,7 +442,7 @@ L0  Contract        contract types  |  compiler  |  generated registry
 | **Composites** (L2) | Handwritten, fixed-sequence transactional operations — branch preparation, reconcile-after-merge. Each declares its journal steps and its resume behaviour. | Git operations, host adapter, journal. | Domain functions. |
 | **Host adapter** (L2) | Pull requests, checks, merges, deploy monitoring; the per-credential request budget and backoff. One implementation, GitHub via `gh`. | Exec, credentials. | A host-shaped interface a second implementation could satisfy. |
 | **Scheduler** (L2) | Due-job selection, missed-tick policy, grant re-intersection. | Declarations, journal, notifier — and the dispatch pipeline **by injection**, never by import. | A tick engine. |
-| **Notifier** (L2) | Terminal-state notification, bounded retry, outbox. | Structured store. | Notify. Never blocks a caller. |
+| **Notifier** (L2) | Terminal-state notification, bounded retry, outbox. **One transport: an HTTP webhook**, which is what Slack, Discord, Teams and most else accept; no second transport ships. | Structured store. | Notify. Never blocks a caller. |
 | **Module adapter** (L3) | Invoking a registry entry whose execution target is in-process. Holds a handler catalogue keyed by target name, **populated by registration at composition time, never by importing a handler.** | L1, contract types. | Register, and an invoke the pipeline calls. |
 | **Http adapter** (L3) | Invoking a registry entry whose execution target is a declared HTTP endpoint: request shaping, the declared timeout, response mapping into the envelope. | L1, contract types. | Invoke. |
 | **Dispatch pipeline** (L4) | The one canonical call path: identify, authenticate, enforce scopes, enforce capabilities, validate input, apply limits and cancellation, invoke adapter, validate output, scrub, audit, envelope. | L3, L1, the registry artifact. **Not L2** — see the acyclicity argument. | Dispatch. |
@@ -452,6 +495,15 @@ A view declares the capabilities it needs. The console renders it for the select
 only when that repository's grant contains them. The blog consumer's authoring views therefore
 appear for the blog declaration and are absent for every other one, using the same lattice as
 the tools rather than a second mechanism.
+
+**A registered view receives the selected declaration; it never declares one it belongs to.**
+That is the whole of the seam, and keeping it to one rule is the point: a view bound to a named
+declaration would be a second way to answer "may this render here", competing with the
+capabilities that already answer it. The cost is real and lands on the consumer — `ComposeView`
+is 38 KB of repository-implicit code that has to take the repository as an input — but it is
+paid once, inside the consumer, rather than by every future consumer having to learn which of two
+mechanisms a given view uses. It also keeps the base-published console package free of any
+assumption that some views belong to one repository.
 
 ---
 
@@ -955,38 +1007,10 @@ store the atomic multi-row updates recovery classification needs. Rejected: *SQL
 
 ## Open questions
 
-1. **How does a credential reference resolve without a restart?** Definition-of-done item 5
-   requires onboarding a repository by declaration alone, with no restart. If credentials come
-   from the container environment, a new declaration needs a new secret needs a restart, and item
-   5 fails. This design fixes the *shape* — a named reference and a pluggable resolver — but not
-   which resolver ships as the default. Recommended: **a mounted secrets directory read at point
-   of use**, so no secret enters the structured store and no restart is needed. Alternatives:
-   encrypt-at-rest in the store with a key from the environment; an external secret store, which
-   the decision log already holds as a live option. This blocks `/contract`, because the
-   declaration format has to name the reference syntax the resolver accepts.
-
-2. **Should `git.raw` be reachable from MCP sessions in the default deployment?** This design
+1. **Should `git.raw` be reachable from MCP sessions in the default deployment?** This design
    makes it withholdable at every layer, and the brief has already declined making it structurally
    console-only. What neither says is what the *default* should be. Recommended: **withheld from
    every MCP session profile, granted to the operator console only**, changeable per declaration.
-   This is a configuration default either way, not a design change.
-
-3. **Is there an endpoint the notifier should target?** The brief puts outbound notification in
-   scope with the mechanism undecided, because an unwatched run stopping at a terminal state must
-   be able to reach you. This design assumes an HTTP webhook as the first and only shipped
-   transport. If you already run a chat webhook or a mail relay, that changes which one is worth
-   building first, and whether one is enough.
-
-4. **Who backs up the volume?** Item 18 requires a tested rollback and item 20 requires backup and
-   recovery documentation. This design takes a pre-migration copy of the structured store, which
-   covers image rollback. It does not cover volume loss. If the host snapshots the volume the
-   service needs nothing more; if it does not, the service needs an online-backup operation, and
-   that is scope neither the brief nor this document has allocated.
-
-5. **Do the blog authoring views gain a repository dimension, or stay pinned to one declaration?**
-   `ComposeView` is 38 KB of repository-implicit code. Under this design a view renders for the
-   selected repository when the grant permits, which implies parameterising it. Pinning it to the
-   blog declaration instead is less work and less general, and is defensible because blog
-   authoring genuinely applies to exactly one repository. The answer changes the shape of the
-   view-registration seam — whether a registered view receives the selected repository or declares
-   the one it belongs to — so it is a contract question rather than a preference.
+   This is a configuration default either way, not a design change, so it does not block
+   `/contract` — but it is the one question in this document still unanswered, and it sets the
+   posture the safety story is read against.
