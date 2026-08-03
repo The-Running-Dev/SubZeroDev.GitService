@@ -10,7 +10,8 @@
     "test": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test",
     "build:registry": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/build-registry.ts",
     "check:layering": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/check-no-compiler-in-runtime.ts",
-    "build": "npm run typecheck && npm run build:registry && npm run check:layering",
+    "check:migration": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/check-migration-matches-contract.ts",
+    "build": "npm run typecheck && npm run build:registry && npm run check:layering && npm run check:migration",
     "start": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON src/server.ts"
   },
   "devDependencies": {
