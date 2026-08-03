@@ -31,6 +31,21 @@ timestamped backup **before** each migration runs. Definition-of-done item 18 re
 rollback to a previous image; a forward-only schema makes that impossible without a
 pre-migration copy to restore alongside it.
 
+**Retention, because everything here appends and the lifespan is years.** Four things grow
+without a natural bound and each gets a stated policy, since the disk-pressure machinery only
+knows how to evict clones and would otherwise name innocent declarations as the blockers for
+growth that is not theirs.
+
+| What grows | Policy |
+|---|---|
+| Audit log (JSONL) | Rotated by size, retained for a configured window, oldest segment removed only after the window passes. Never truncated to make room — a trail that discards itself under pressure is not one. |
+| Operation journal | `settled` entries older than the window are deleted; `attention` entries are never deleted, because they are the ones an operator still has to resolve. |
+| Notification outbox | Delivered rows deleted after the window; failed rows retained until the operator clears them from the health view. |
+| Pre-migration store backups | The most recent *n* retained, older ones removed after a successful boot on the new schema — the rollback target item 18 needs is the latest one, not all of them. |
+
+Retention runs on the same maintenance pass as eviction, and the disk-full path reports which of
+the five — clones, audit, journal, outbox, backups — is actually consuming the volume.
+
 ### Entities
 
 #### `Declaration` — a managed repository
@@ -57,6 +72,22 @@ Re-declaring an `id` whose orphaned clone points at a different remote is refuse
 that clone is a separate, explicitly flagged, audited operation that itself refuses when the
 clone holds unpushed work.
 
+**Orphaning is detachment, not removal, so every subsystem keyed by `declarationId` needs a
+stated answer.** Without one, each invents its own and the ghost declaration keeps being acted
+on in four different ways.
+
+| Dependent | On orphaning |
+|---|---|
+| Clone | Left on disk, untouched, and becomes evictable under the ordinary safety interlock. |
+| Pending `ScheduledJob`s | Moved to `cancelled` with a reason naming the orphaning. Not fired, and not silently dropped. |
+| `Grant`s and `Token`s whose resource is `/mcp/{id}` | Revoked, and the declaration's `grantEpoch` bumped, so live sessions bound to it close on their next call rather than continuing against a repository the operator has retired. |
+| Unsettled journal entries | Retained and reported. They are the record of work that may still be in the clone. |
+
+**Re-declaring the same `id` does not inherit any of it.** A new declaration gets a fresh
+`grantEpoch` and no authorization records, and unsettled journal entries from the previous era
+are not recovery candidates for it — recovery would otherwise classify an interruption belonging
+to a declaration this one only shares a name with.
+
 #### `RepositoryConfig` — repository-supplied facts
 
 **Derived, in-memory, cached, never persisted as truth.** Read from a file in the target
@@ -68,6 +99,20 @@ repository's working tree, generalising `.config/blog.json`.
 | `requiredChecks` | string[] | repository |
 | `deployWorkflow` | string | repository |
 | `branchPrefixes` | string[] | repository |
+
+**Read from `origin/<base>`, never from the working tree.** The tree of a long-lived clone is
+wherever the last operation parked it, including a branch the calling agent created moments ago,
+so a working-tree read would let a caller author the configuration that governs its own call.
+`requiredChecks` grants no capability, but it defines what "green" means to the unwatched
+end-to-end flow of definition-of-done item 13 — a caller that commits `requiredChecks: []` on its
+own branch and is then told its change passed has defeated the gate without ever exceeding its
+grant. Reading from the base ref is the prior art's rule for `blog_log`, adopted here for the
+same reason. **The config path is excluded from `writablePathPrefixes` by default**, so changing
+it is an operator act on the base branch rather than a side effect of an agent's own commit.
+
+The cache is invalidated on every fetch of the declaration and on any operation that moves
+`origin/<base>`, because an honest upstream change to `requiredChecks` must not sit stale
+behind a cached copy indefinitely.
 
 Nothing here grants authority. The invariant that makes this safe is stated once, here, and is
 checkable: **any field a caller could set that widens what the service will do lives in the
@@ -86,7 +131,7 @@ Metadata persisted in the structured store; the tree itself is a directory.
 | Field | Type | Derived? |
 |---|---|---|
 | `declarationId` | string | identity, 1:1 with `Declaration` |
-| `state` | `absent` \| `materialising` \| `ready` \| `dirty` \| `needs-attention` \| `evicted` | derived from disk at boot, then maintained |
+| `state` | `absent` \| `materialising` \| `ready` \| `dirty` \| `recovery-pending` \| `needs-attention` \| `evicted` | derived from disk at boot, then maintained. `recovery-pending` means unsettled journal entries exist and lazy recovery has not reached this declaration yet; it serves reads and refuses mutations |
 | `path` | string | derived from `declarationId` |
 | `sizeBytes` | number | derived, refreshed after each mutation |
 | `lastOperationAt` | ISO 8601 UTC | eviction ordering key |
@@ -125,6 +170,8 @@ that adds a capability to a set.
 | `host.checks.read` | check status, bounded waits, deploy status, published-URL verification |
 | `scheduler.manage` | create, list, cancel held operations |
 | `declaration.manage` | declare, amend, orphan a repository |
+| `auth.manage` | list and revoke OAuth clients, grants and live sessions |
+| `attention.resolve` | inspect a parked journal entry, resolve it, return a clone to `ready` |
 | `content.*` | reserved for consumer domains; the blog consumer adds its own under this prefix |
 
 `host.*` capabilities are only ever present in a grant when `Declaration.host` supports them.
@@ -144,7 +191,8 @@ capabilities are what the server side enabled; both must permit the call.
 | `kind` | `operator` \| `mcp` \| `scheduler` \| `watcher` | |
 | `actorRef` | `{ kind, subject, clientId? }` | Passed by value into every context. Audit and journal never import the authorization module — see Module boundaries. |
 | `repositoryBinding` | string? | **Set for `mcp`, absent for `operator`.** |
-| `grant` | set of capability names | Layer 4, computed at session establishment and frozen for the session's lifetime. |
+| `grant` | set of capability names | Layer 4, computed at session establishment and frozen for the session's lifetime — frozen against *widening*. See the grant epoch for how a narrowing still reaches a live session. |
+| `frozenAtEpoch` | number | The declaration's `grantEpoch` when the grant was computed. Compared on every dispatch. |
 
 An MCP session binds to exactly one repository at `initialize`, because the MCP resource
 indicator *is* the repository: the canonical URI is `/mcp/{declarationId}`. That is what lets
@@ -154,6 +202,45 @@ declaration, because the console has to aggregate across them.
 
 Freezing the grant at session establishment inherits the prior art's rule that a token tier is
 fixed at `initialize` for the session's lifetime.
+
+#### `OAuthClient`, `Grant`, `Token` — the authorization records
+
+Durable grants are definition-of-done item 12's headline departure from the prior art, and item
+20 requires revocation to be documented — which requires it to exist. All three are persisted in
+the structured store.
+
+| Entity | Identity | Notes |
+|---|---|---|
+| `OAuthClient` | `clientId` | Dynamically registered. Redirect URIs, registration time, `revokedAt`. |
+| `Grant` | `grantId` | `clientId`, subject, `resource` (the `/mcp/{declarationId}` URI), granted scopes, `createdAt`, `lastUsedAt`, `revokedAt`. Durable, so a client reconnects after a restart without re-authorising. |
+| `Token` | `jti` | `grantId`, `kind` (`access` \| `refresh`), `expiresAt`, `revokedAt`. Access tokens are short-lived; refresh tokens are durable, which is the half of item 12 that survives a restart. |
+
+Three rules govern them:
+
+- **Revocation is a timestamp, never a delete.** A store that forgets what was revoked cannot
+  answer the question the revocation was raised to answer.
+- **Cascade is evaluated at check time, not written as a batch.** A revoked client's grants and a
+  revoked grant's tokens are dead because the check walks upward, so there is no partially
+  applied cascade to recover from.
+- **A revoked grant's resource is released, but its history is not.** Orphaning a declaration
+  revokes every grant whose resource names it — see the orphaning cascade.
+
+**The grant epoch — how a frozen session still narrows.** Freezing at establishment is what makes
+"nothing at runtime widens" true, and on its own it also means nothing narrows: an operator
+watching an agent misbehave could remove a capability and watch the live session keep using it.
+Both properties are wanted, so the freeze is kept and a version counter is added. Every
+declaration carries a `grantEpoch`, incremented on any change to `capabilityGrant`, on orphaning,
+and on any revocation naming that resource. A session records the epoch it froze at; dispatch
+compares before invoking a handler. If the epoch has moved the session recomputes its grant, and
+because that computation is an intersection of four layers it can only ever narrow — a widened
+declaration grant does not reach a live session, while a narrowed one takes effect on the very
+next call. A call the recomputed grant no longer admits returns `authorization`. If the grant or
+its client was revoked outright, the session is closed and the transport answers `401` with the
+resource-metadata challenge, because the caller now needs to re-authorise rather than retry.
+
+Revocation is reachable only from the console, under `auth.manage`, for the same structural
+reason declaration management is: an MCP session is bound to one repository and revoking the
+authority of *other* sessions is not an operation on that repository.
 
 #### `OperationJournalEntry` — the recovery record
 
@@ -185,7 +272,7 @@ The publish-shaped scheduler becomes an operation-shaped one — a redesign rath
 | `id` | string | identity |
 | `declarationId` | string | |
 | `tool` | string | **must name a tool in the compiled registry annotated schedulable** |
-| `input` | JSON | validated against that tool's input schema *at creation*, not at fire time |
+| `input` | JSON | validated against that tool's input schema at creation **and again at fire time**, because the scheduler dispatches through the same pipeline as everyone else and the registry can change under a pending job. Boot re-validates pending jobs too — see the boot path |
 | `notBefore` | ISO 8601 UTC | |
 | `onMissed` | `{ mode: 'catch_up' }` \| `{ mode: 'skip_if_older_than', seconds }` | explicit per job, never an implicit default — inherited whole |
 | `frozenGrant` | set of capability names | the creator's effective set, captured at creation |
@@ -201,10 +288,20 @@ can lose capability between creation and firing but can never gain it.
 
 #### `AuditEntry`
 
-One scrubbed JSON line per mutating call and per escape-hatch use: timestamp, `operationId`,
-`declarationId`, `tool`, `actorRef`, result kind, changed paths, and — for `git.raw` only — the
-argument vector. Best-effort append that never fails the call it describes, per the prior art.
-`actorRef` is what makes definition-of-done item 8's "attributable" true rather than asserted.
+One scrubbed JSON line per mutating call: timestamp, `operationId`, `declarationId`, `tool`,
+`actorRef`, result kind and changed paths. Best-effort append that never fails the call it
+describes, per the prior art. `actorRef` is what makes definition-of-done item 8's "attributable"
+true rather than asserted.
+
+**`git.raw` writes two lines, not one, because one line cannot do the job.** Result kind and
+changed paths are post-execution facts, so a single line containing them cannot also be written
+before execution — and "refuses to run if its line cannot be written" is only meaningful for a
+line written first. The hatch therefore appends an **intent** line carrying the argument vector
+before the child process starts, and an **outcome** line carrying the result once it finishes,
+correlated by `operationId`. The intent append is the one that can abort the call. A failed
+outcome append leaves the use recorded and its result unknown, which is a gap in the trail rather
+than an unlogged execution, and the state left behind is whatever the command did — not the
+"none" a pre-execution refusal leaves.
 
 #### `InstanceLease`
 
@@ -261,10 +358,10 @@ L0  Contract        contract types  |  compiler  |  generated registry
 | **Compiler** (L0, build-time only) | Normalisation, semantic safety validation, deterministic emission, SHA-256 fingerprint. | Contract types. | A registry artifact, a sanitised manifest, a fingerprint, generated documentation. **Not present at runtime.** |
 | **Result / errors / clock** (L1) | The envelope, the eight kinds, the error classes, injectable time. | Nothing. | Constructors and predicates. |
 | **Exec** (L1) | Every subprocess. Fixed executables, argument vectors never strings, no shell, pinned working directory, secret scrubbing of captured output, credentials passed by environment name so they never appear in a process listing. | Result, errors. | Guarded `git` and `gh` runners. |
-| **Locks** (L1) | The global mutation mutex and the per-declaration materialisation mutex. | Nothing. | Two acquire functions with bounded waits. |
+| **Locks** (L1) | The global mutation mutex, the per-declaration materialisation mutex, and the per-declaration active-operation count. | Nothing. | Two acquire functions with bounded waits, and a non-blocking pin. |
 | **Declarations** (L1) | The declaration table, the lattice intersection, the remote-host allowlist. | Structured store, result. | Read, write, and the effective-grant computation. |
 | **Credentials** (L1) | Reference-to-secret resolution and the allowed-host constraint on each reference. | The configured resolver. | Resolution that returns a value only into an exec environment, never to a handler. |
-| **Clone store** (L1) | Materialisation, the safe-to-evict predicate, eviction, disk-pressure watermarks, remote cross-check. | Exec, declarations, locks, journal, audit. | Ensure, evict-if-safe, describe. |
+| **Clone store** (L1) | Materialisation, the safe-to-evict predicate, eviction, disk-pressure watermarks, remote cross-check, and the maintenance pass that applies eviction and retention outside any mutation-locked region. | Exec, declarations, locks, journal, audit. | Ensure, evict-if-safe, describe, request-maintenance. |
 | **Journal** (L1) | Intent records and the boot recovery classification. | Structured store, clock. | Begin, step, settle, recover. |
 | **Audit** (L1) | The append-only scrubbed log. | Exec's scrubber, clock. | Append. Never throws. |
 | **Git operations** (L2) | Every repository-generic git behaviour: status, log, branches, health, diff, stage, commit, restore-paths, push, and the seven protected-base invariants. | L1. | Domain functions returning `ToolResult`. |
@@ -272,10 +369,12 @@ L0  Contract        contract types  |  compiler  |  generated registry
 | **Host adapter** (L2) | Pull requests, checks, merges, deploy monitoring; the per-credential request budget and backoff. One implementation, GitHub via `gh`. | Exec, credentials. | A host-shaped interface a second implementation could satisfy. |
 | **Scheduler** (L2) | Due-job selection, missed-tick policy, grant re-intersection. | Declarations, journal, notifier — and the dispatch pipeline **by injection**, never by import. | A tick engine. |
 | **Notifier** (L2) | Terminal-state notification, bounded retry, outbox. | Structured store. | Notify. Never blocks a caller. |
-| **Dispatch pipeline** (L4) | The one canonical call path: identify, authenticate, enforce scopes, enforce capabilities, validate input, apply limits and cancellation, invoke adapter, validate output, scrub, audit, envelope. | L3, L2, L1, the registry artifact. | Dispatch. |
-| **Authorization** (L4) | Resource-server token verification, the embedded provider, durable clients and grants. | Structured store. | MCP session establishment. |
+| **Module adapter** (L3) | Invoking a registry entry whose execution target is in-process. Holds a handler catalogue keyed by target name, **populated by registration at composition time, never by importing a handler.** | L1, contract types. | Register, and an invoke the pipeline calls. |
+| **Http adapter** (L3) | Invoking a registry entry whose execution target is a declared HTTP endpoint: request shaping, the declared timeout, response mapping into the envelope. | L1, contract types. | Invoke. |
+| **Dispatch pipeline** (L4) | The one canonical call path: identify, authenticate, enforce scopes, enforce capabilities, validate input, apply limits and cancellation, invoke adapter, validate output, scrub, audit, envelope. | L3, L1, the registry artifact. **Not L2** — see the acyclicity argument. | Dispatch. |
+| **Authorization** (L4) | Resource-server token verification, the embedded provider, durable clients and grants, revocation and the grant-epoch check. | Structured store. | MCP session establishment, and revocation the console calls. |
 | **Operator identity** (L4) | Password, enforced TOTP, recovery codes, break-glass, OIDC relying party, subject allowlist. | Structured store. | Operator session establishment. |
-| **Surfaces** (L5) | Transport framing, routing, session lifecycle, static console assets. | L4 only. | Nothing inward. |
+| **Surfaces** (L5) | Transport framing, routing, session lifecycle, cookie attributes, CSRF defence, static console assets. | L4 only. | Nothing inward. |
 
 ### The acyclicity argument
 
@@ -293,6 +392,15 @@ import anything from L2.** The runtime is generic; the git domain is a consumer 
 the seam `MCP-NEXT.md` Phase 8 exists to eventually cut, and it stops being cuttable the first
 time the dispatch pipeline knows what a branch is. It is enforced by a dependency-direction
 check in CI, not by intent.
+
+**The composition root is what makes that rule satisfiable.** The dispatch pipeline has to end up
+calling a git operation without importing one, so a single module — the program entry point, not
+a layer — imports both the domain and the runtime, registers every L2 handler into the module
+adapter's catalogue by target name, injects the pipeline into the scheduler, and starts the
+surfaces. It is the only file exempt from the dependency-direction check, and the exemption is by
+path, so widening it is a visible diff rather than a habit. Everything above L2 therefore reaches
+the domain through a name resolved at startup instead of a symbol resolved at compile time, which
+is the same mechanism already chosen for the scheduler's identical problem.
 
 With those cuts every edge points strictly downward, so the graph is acyclic by construction.
 
@@ -327,22 +435,28 @@ the tools rather than a second mechanism.
    grant, the deployment ceiling and the contract set. Frozen for the session.
 4. `tools/list` returns exactly the registry entries whose required capabilities are a subset of
    the grant. A tool the session may not call is not merely refused — it is not there.
-5. `tools/call` arrives. The pipeline re-checks capabilities (a stale catalogue or a by-name
-   call must not reach a handler), validates input against the schema, and applies the declared
-   timeout and result-size limits.
+5. `tools/call` arrives. The pipeline compares the declaration's `grantEpoch` against the one the
+   session froze at and recomputes the grant if it moved — a recomputation that can only narrow.
+   It then re-checks capabilities (a stale catalogue or a by-name call must not reach a handler),
+   validates input against the schema, and applies the declared timeout and result-size limits.
 6. The clone store ensures materialisation, taking the **materialisation** lock for this
-   declaration. If the clone is absent it clones — outside the global mutation lock, so every
-   other repository keeps serving, which is what definition-of-done item 5 requires. The
-   observed remote is cross-checked against `Declaration.cloneUrl`; a mismatch refuses rather
-   than repointing an existing checkout.
+   declaration and **holding it for the rest of the operation**. If the clone is absent it clones
+   — outside the global mutation lock, so every other repository keeps serving, which is what
+   definition-of-done item 5 requires. The observed remote is cross-checked against
+   `Declaration.cloneUrl`; a mismatch refuses rather than repointing an existing checkout. The
+   declaration's active-operation count is incremented here, which is what stops an eviction pass
+   removing this clone while the operation runs.
 7. Mutating tools acquire the **global mutation** lock, bounded. Reads and monitoring waits skip
    this step entirely.
 8. The journal writes intent: pre-state captured under the lock, entry written, **then** the
    first side effect.
 9. The domain function runs. Composites journal each sub-step. Credentials resolve at the moment
    of use and reach only a child process's environment, by name.
-10. Journal marked `applied`, audit line appended, lock released, envelope returned, journal
-    marked `settled`.
+10. Journal marked `applied`, audit line appended, **locks released in reverse acquisition order**
+    — mutation, then materialisation — the active-operation count decremented, envelope returned,
+    journal marked `settled`. A disk-pressure watermark reading taken here only *requests* a
+    maintenance pass; eviction never runs on this path, because it would acquire a materialisation
+    lock after a mutation lock.
 11. On a terminal state an unwatched caller cannot see — merge conflict, failed required check,
     wait timeout — the notifier fires.
 
@@ -363,33 +477,67 @@ implementation of any operation.
 4. Each view calls a repository-scoped API route, which calls **the same dispatch pipeline and
    the same domain functions** as the MCP path. No surface reimplements a variant of an
    operation. The API is an explicit route table, never a call-any-tool-by-name proxy.
-5. Declaration management is reachable only here. `declaration.manage` is withheld from every
-   MCP session profile by deployment default, because a caller able to declare a repository
-   could point an existing credential reference at a remote it controls and harvest the token
-   from the push. The remote-host allowlist is the second, independent guard, so an operator
-   slip cannot do it either.
+5. Declaration management is reachable only here, and **structurally so rather than by
+   configuration**: an MCP session binds to one declaration at `initialize`, so a tool that
+   creates a declaration has nothing to bind to, and amending or orphaning a *different*
+   declaration is not an operation on the bound one. `declaration.manage`, `auth.manage` and
+   `attention.resolve` are therefore absent from every MCP session profile as a consequence of
+   the session model, not as a default a deployment could flip. The reason it is worth stating
+   twice: a caller able to declare a repository could point an existing credential reference at a
+   remote it controls and harvest the token from the push. The remote-host allowlist is the
+   second, independent guard, so an operator slip cannot do it either.
+6. **Three operator-only views exist because three states have no other exit.** A grants view
+   lists clients, grants and live sessions with last use, and revokes any of them under
+   `auth.manage`. A parked-operations view shows every journal entry in `attention` with its
+   `preState`, the observed current state and the diff between them, and offers exactly two
+   resolutions under `attention.resolve` — mark the entry settled and return the clone to
+   `ready`, or keep it parked. Neither resolution touches the repository: the operator fixes the
+   tree with ordinary git operations first, then records that it is fixed, because a console
+   button that rewrites a working tree is the arbitrary-mutation route the non-goals forbid. A
+   health view surfaces failed notification-outbox rows and failing credential references, both
+   of which are otherwise only visible in logs.
 
 ### 3. Boot and recovery — triggered by process start
 
-1. Open the lease file and take the exclusive advisory OS lock. While held, a second instance
-   refuses to start; the kernel releases it on death including `SIGKILL`, so an unclean kill
-   leaves no stale lock to reason about. The refusal names the holder from the lease contents.
+1. Open the lease file and take the exclusive advisory OS lock, then **self-test it** — a second
+   acquire from this process must fail. A filesystem that grants both is not one this service can
+   run on safely, and refusing here is the only way definition-of-done item 9 fails loudly rather
+   than silently. While the lease is held a second instance refuses to start; the kernel releases
+   it on death including `SIGKILL`, so an unclean kill leaves no stale lock to reason about. The
+   refusal names the holder from the lease contents.
 2. Load the generated registry, verify its fingerprint, verify the console asset manifest. A
    mismatch is fatal — the service must never start with a smaller accidental tool set.
 3. Verify the deployment ceiling names only capabilities in the contract set. Verify every
    registry operation has exactly one executor.
 4. Open the structured store; back it up, then run forward-only migrations.
-5. Re-derive every clone's state from disk. The stored value is a report, not a source of truth.
-6. **Recovery pass, per declaration, before that declaration serves anything.** For each journal
-   entry not `settled`, re-derive actual state and compare against `preState` and the
-   operation's expected post-state:
+5. **Re-validate every pending scheduled job against the registry just loaded.** An image upgrade
+   can rename a tool, remove one, or change its input schema while jobs referencing the old shape
+   sit pending; without this sweep the failure surfaces weeks later at fire time, with its cause
+   an upgrade nobody is still thinking about. A job whose tool no longer exists, or whose stored
+   input no longer validates, becomes `needs-attention` with the reason naming the upgrade, and
+   the operator sees it next to the fingerprint checks that caused it rather than at 03:00.
+6. Re-derive every clone's state from disk. The stored value is a report, not a source of truth.
+7. **Readiness passes and transports start**, before any recovery work runs. Recovery is
+   per-declaration and lazy: a declaration with unsettled journal entries is marked
+   `recovery-pending` and recovers on first use or on a background sweep, whichever comes first,
+   and refuses mutations until it has. Eager recovery across every declaration would make restart
+   cost scale with estate size — minutes of total unavailability at a few hundred clones, to
+   recover state concerning at most one of them — which would make operators avoid the restart
+   that definition-of-done item 14 exists to make safe.
+8. **The recovery pass itself, per declaration, before that declaration serves a mutation.** For
+   each journal entry not `settled`, re-derive actual state and compare against `preState` and
+   the operation's expected post-state:
    - pre-state matches and no step is `applied` — nothing happened; mark `settled`;
-   - expected post-state matches — it completed and only the settle was lost; mark `settled`;
+   - expected post-state matches — it completed and only the settle was lost; mark `settled`,
+     **and fire the notifier if the operation reached a terminal state the caller never saw.**
+     The caller's connection died with the process; the notification is the only thing that can
+     still reach them, and suppressing it here recreates "unwatched means unnoticed" inside the
+     recovery path;
    - neither — the operation either declares a resume step or it does not. If it does, run it
      and re-classify. If it does not, mark the entry `attention`, put the clone in
      `needs-attention`, block mutations against that declaration, report it in status, and
-     notify.
-7. Readiness passes. **Only then** do transports start.
+     notify. The operator's route back out is the parked-operations view under
+     `attention.resolve`; without it the only exit is hand-editing the store.
 
 Recovery never discards work to reach a clean state. "Recovers" here means the interruption is
 deterministically classified and either resumed or safely parked — never rolled back by
@@ -404,6 +552,48 @@ short-lived process is not it.
 
 ---
 
+## Operator identity and the console session
+
+One operator, no second account to let them back in, TOTP enforced rather than offered, on a
+publicly reachable origin. That combination makes two things load-bearing that a multi-user
+service would treat as routine.
+
+### Lockout recovery
+
+Definition-of-done item 10 requires a working path, and there are two, deliberately independent
+of each other and of the identity provider.
+
+- **Recovery codes.** Ten single-use codes generated at first enrolment, displayed exactly once,
+  stored only as hashes. Using one authenticates, burns the code, writes an audit line, and
+  forces TOTP re-enrolment. They work while the identity provider is down, because they are
+  local.
+- **Break-glass.** A short-lived single-use token an operator with host access writes into the
+  volume, consumed at the next login and audited. This is the path for a lost TOTP device *and*
+  lost recovery codes, and it is the reason volume access is the ultimate authority rather than
+  re-provisioning the instance.
+
+The case worth naming, because the failure-mode table's answer to a broken identity provider is
+"local password plus TOTP still works": that answer is no help when TOTP is precisely what was
+lost. Recovery codes cover an unavailable provider, break-glass covers a lost second factor, and
+neither depends on the other. No path requires the identity provider to restore local access, and
+no path requires a working TOTP device to burn a recovery code.
+
+### Console session
+
+The console is an ambient-authority browser session driving routes that mutate repositories, so
+its lifecycle is part of the security design rather than a framework default.
+
+- **Cookie:** `HttpOnly`, `Secure`, `SameSite=Lax`, host-scoped, no subdomain sharing.
+- **CSRF:** an `Origin` check plus a double-submit token on every mutating route. The API is an
+  explicit route table over repository mutations; without this, a cross-site request from any page
+  the operator happens to have open reaches those routes with the operator's own session.
+- **Lifetime:** an idle timeout and a shorter absolute lifetime, both configurable, plus an
+  explicit logout that invalidates server-side rather than only clearing the cookie.
+- **Visibility:** operator sessions appear in the same grants view as MCP sessions and are
+  revocable there, so "revoke everything and re-authenticate" is one screen during an incident.
+
+---
+
 ## Failure modes
 
 ### External dependencies
@@ -411,14 +601,14 @@ short-lived process is not it.
 | Dependency | What fails | Detected by | System does | Caller sees | State left behind |
 |---|---|---|---|---|---|
 | **Remote git host** | Unreachable, DNS, TLS | Non-zero exit from a bounded `git` invocation (clone capped at 300 s) | No retry inside the call | `upstream` | Initial clone: partial directory removed, clone `absent`. Fetch: refs unchanged, since git updates refs atomically. |
-| | Auth rejected | Exit code plus scrubbed stderr | Marks the credential reference failing; never retries with a different one | `upstream`, naming the reference, never the secret | Unchanged |
+| | Auth rejected | Exit code plus scrubbed stderr | Marks the credential reference failing; never retries with a different one. The mark is per reference, so every declaration sharing it fails fast rather than each discovering it in turn. It clears when the resolver observes a changed secret, and the operator can clear it by hand from the health view — a rotated token must not need a restart to be noticed, or the no-restart onboarding property dies quietly | `upstream`, naming the reference, never the secret | Unchanged |
 | | Clone timeout | The 300 s cap | Removes the partial directory under the materialisation lock | `timeout` | `absent` |
 | | Base diverged from local | Ancestry check in branch preparation | Reports; changes nothing | `precondition` naming both SHAs | Unchanged; every commit still reachable |
 | **GitHub via `gh`** | Rate limit | Response headers and exit code | Trips the per-credential budget; monitoring waits back off with jitter | `precondition` with a retry-after — a rate limit is repository-state-shaped, not a service fault | Unchanged |
 | | 5xx or transport error | Exit code | Up to three retries with backoff, **read operations only** | `upstream` after exhaustion | Unchanged |
 | | Merge conflict | PR state | **Terminal.** No rebase tool exists and by design never will | `precondition` naming the branch and both heads | Branch and commits intact; notifier fires |
 | | Required check failed | Check status | Terminal for the operation | `precondition` | PR open, nothing merged; notifier fires |
-| **Filesystem / volume** | Disk full | Watermark check before clone and after each mutation | Attempts eviction of safe clones only; if none are safe, refuses the operation that needed the space | `precondition` naming the declarations blocking eviction | Nothing deleted. **The service never deletes to make room.** |
+| **Filesystem / volume** | Disk full | Watermark check before clone and after each mutation | Requests a maintenance pass — **never evicts inline**, which would take a materialisation lock after a mutation lock. The pass evicts safe clones and applies retention; if nothing is safe to release, the operation that needed the space is refused | `precondition` naming what is consuming the volume — clones, audit, journal, outbox or backups — and, when clones are the cause, the declarations blocking eviction | Nothing deleted beyond retention. **The service never deletes repository work to make room.** |
 | | Corrupt clone | `rev-parse --git-dir` fails at materialisation | Refuses; does not clone over it | `precondition` telling the operator to inspect or move it aside | Directory untouched |
 | | Permission denied | Syscall error | Fatal at boot; `infrastructure` at runtime | `infrastructure` | Unchanged |
 | **Structured store** | Locked or busy | SQLite busy | Bounded retry with backoff | `infrastructure` after exhaustion | Transaction rolled back |
@@ -426,7 +616,7 @@ short-lived process is not it.
 | | Migration fails | Non-zero from the migration step | Refuses to start; the backup was taken first | No service | The backup is the rollback target for item 18 |
 | **Identity provider** | Unreachable, key rotation, clock skew | Discovery or JWKS fetch failure; signature or validity-window failure | Federated login fails; **local password plus TOTP still works** | `401` with a reason | No session |
 | **Deploy target** (published-URL verification) | Deploy unfinished, wrong commit serving | Explicit poll for the exact merge commit SHA | Polls to the 1800 s cap | `precondition` classified as `stale-runtime`, `mixed-runtime`, `verification-credential` or `unexpected-profile-or-catalog` | Unchanged. **No code path returns a URL in a success position without a confirmed successful deploy for that exact commit.** |
-| **Notifier endpoint** | Unreachable, non-2xx | HTTP status | Outbox retries with backoff, bounded, then drops and logs | Nothing — it never blocks the operation it describes | Outbox row marked failed |
+| **Notifier endpoint** | Unreachable, non-2xx | HTTP status | Outbox retries with backoff, bounded, then stops retrying and **surfaces the row in the health view and the status endpoint**. It is not dropped: an endpoint down overnight is exactly when the 03:00 merge conflict lands, and a notification that fails silently recreates the unwatched-means-unnoticed failure one level up | Nothing — it never blocks the operation it describes | Outbox row marked failed, retained until the operator clears it |
 
 ### Boundaries
 
@@ -440,7 +630,8 @@ short-lived process is not it.
 | **Path allowlist** | `-A`, `--all`, `.`, a path containing `..` or `;`, or a path outside `writablePathPrefixes` | Rejects outright | `validation` | None |
 | **Journal** | Cannot write the intent record | **Aborts the operation before acting.** An unrecoverable mutation is worse than a refused one | `infrastructure` | None |
 | **Audit** | Cannot append | Proceeds. Best-effort by design — a logging failure must never fail the call it describes | Nothing | Call completed, line missing |
-| | Cannot append **for `git.raw`** | **Aborts the hatch call.** Item 8 claims exactly one property for the hatch, and an unlogged use forfeits it | `infrastructure` | None |
+| | Cannot append the **`git.raw` intent line** | **Aborts before the child process starts.** A hatch use the service cannot record must not run. The claim is refusal at call time only, not that a recorded use stays recorded — see The escape hatch's residual risk | `infrastructure` | None |
+| | Cannot append the **`git.raw` outcome line** | Proceeds; the intent line already records the use and its argument vector | The envelope the command produced | Whatever the command did. The trail says what was attempted, not what it achieved |
 | **Output validation** | Handler returns something the schema does not admit | Rejects before any structured content reaches the client | `infrastructure` | Side effects already happened; the journal records them |
 | **Instance lease** | Second instance, live holder | Refuses to start, naming the holder | No service | Untouched |
 | | Lease file present, OS lock free | Takes over, audits the takeover, runs recovery | No service until ready | Recovered per the boot path |
@@ -473,27 +664,74 @@ as known and retained rather than reopened. The mitigations that follow from it 
 already in this design: `git.raw` is withheld by default at every layer, is unregistered wherever
 withheld, and refuses to run at all if its audit line cannot be written.
 
+**What that execution reaches, stated rather than left to be inferred.** The pinned working
+directory bounds where `git` operates; it does not confine a child process. Code reached this way
+runs as the service, on the volume the service owns, so it can read and write every other
+declaration's clone, the structured store, the audit log, and whatever a credential resolver can
+resolve. Three consequences follow, and none of them are what the words above appear to promise:
+
+- **Attributability is refusal-time, not durable.** The audit log is append-only by discipline,
+  not by storage: nothing in this design stops hatch-reached code rewriting or truncating the
+  JSONL after a line lands. The boundary table claims only that an unrecordable hatch use is
+  refused. Whether the trail survives the caller it describes is open question 5.
+- **The lattice binds the tool surface, not the process.** "No operation anywhere adds a
+  capability to a set" is true of every dispatch path. It is not a claim about a process with
+  write access to the grant rows.
+- **Per-declaration credential isolation stays a lookup convention.** The brief defers whether it
+  is ever an enforced boundary and claims only that a credential is not *given* to an operation
+  outside its declaration. Reaching one this way is inside what is claimed, not a departure from
+  it. The no-cross-repository non-goal is likewise a scope statement about operations, not a
+  containment guarantee — the hatch is authority the operator granted, exercised where it was
+  granted.
+
 ---
 
 ## Concurrency and ordering
 
-Two locks, and a fixed acquisition order.
+Two locks, one counter, and a fixed acquisition order.
 
-| Lock | Scope | Covers | Held for |
+| Mechanism | Scope | Covers | Held for |
 |---|---|---|---|
-| **Global mutation mutex** | Process-wide, across every declaration | Working-tree, index, `HEAD` and ref mutations; fetch; pull-request and merge mutations | Milliseconds to seconds |
-| **Per-declaration materialisation mutex** | One declaration | Initial clone, eviction | Up to the 300 s clone cap |
+| **Global mutation mutex** | Process-wide, across every declaration | Working-tree, index, `HEAD` and ref mutations; fetch; pull-request and merge mutations | The whole operation, including its network transfer — see the throughput ceiling below |
+| **Per-declaration materialisation mutex** | One declaration | Initial clone, eviction | The whole operation for a caller; up to the 300 s clone cap for a clone |
+| **Per-declaration active-operation count** | One declaration | Reads, monitoring waits, and every operation in flight | Not a lock. A non-blocking counter that never makes a caller wait; eviction refuses while it is non-zero |
 
-**Acquisition order is always materialisation before mutation, never the reverse.** That is the
-whole deadlock argument: with a fixed order over two lock classes, no cycle can form.
+### The lock protocol
+
+The deadlock argument depends on all four rules, not on the order alone. Stated separately
+because three of them are the ones an implementer would otherwise have to invent.
+
+1. **Acquisition order is always materialisation before mutation, never the reverse.**
+2. **A caller holds the materialisation lock for the whole operation**, not just for the ensure
+   step, and releases in reverse acquisition order. Releasing it early would let eviction remove
+   the clone between the ensure and the journal write, producing an intent record for a working
+   tree that no longer exists — a state recovery cannot classify, because its pre-state is no
+   longer re-derivable.
+3. **Eviction never runs while the global mutation lock is held.** The disk-pressure watermark
+   check after a mutation records the pressure and requests a maintenance pass; the pass runs
+   with no mutation lock held and takes materialisation locks in its own right. Without this
+   rule the post-mutation check acquires materialisation *after* mutation, which is exactly the
+   reverse the order forbids, and the bounded waits would degrade the resulting cycle into
+   spurious `conflict`s rather than a visible hang.
+4. **Eviction refuses while a declaration's active-operation count is non-zero.** Reads take no
+   lock, so nothing else stops eviction deleting a directory a read's subprocess has open. The
+   counter is checked on the eviction side precisely because the read side cannot afford to
+   block: an evicting pass that finds a non-zero count skips that declaration and moves on.
+
+With the order fixed over two lock classes and no path that acquires them in reverse, no cycle
+can form.
 
 What runs simultaneously:
 
 - **Reads and monitoring waits.** Lock-free. A bounded wait capped at 1800 s must not hold every
-  repository for half an hour.
+  repository for half an hour. They increment the active-operation count, which blocks eviction
+  but never blocks another caller.
 - **Initial clone of one declaration and mutation of another.** Required by definition-of-done
-  item 5. Safe because a materialising declaration is not yet servable — no session can name it
-  until its clone reaches `ready`.
+  item 5. Safe because a clone takes only that declaration's materialisation lock and never the
+  global mutation lock, and any operation against the cloning declaration queues behind that same
+  materialisation lock. It is **not** safe because the declaration is unservable — under
+  clone-on-demand a session names a declaration precisely in order to materialise it. See
+  Servability of an unmaterialised declaration.
 - **Any number of MCP sessions, the console, the scheduler tick and the watcher.** They contend
   for the same mutation lock and are ordered FIFO by arrival. There is no priority and no
   fairness beyond arrival order.
@@ -515,11 +753,47 @@ Honest limits, stated rather than left to be discovered:
   `operationId` of the last settled mutation and a `mutationInFlight` flag, so a caller can tell
   whether what it read was stable. Reads are not made atomic, because taking the lock to read
   reintroduces exactly the blocking the read exemption exists to avoid.
-- **The advisory OS lock protects one host.** A volume bind-mounted from two hosts is not
-  protected. That is the "no distributed or multi-node concurrency" non-goal, restated where it
-  bites.
+- **Throughput is one mutation at a time across the whole estate, and the lock is held across
+  network transfers.** Fetch and push take the global mutex and carry their own caps — 300 s
+  each, alongside the 300 s clone cap — so the worst-case hold is a slow transfer, not the
+  milliseconds a local commit takes. At a hundred declarations with several active callers, a
+  one-line commit on an idle repository can queue behind a transfer in flight on any other one,
+  and a full queue returns `conflict` on repositories that are themselves doing nothing.
+  Accepted rather than fixed: a per-declaration mutation lock would raise throughput and would
+  also break the invariant every other part of this design is written against — that a crash
+  leaves exactly one half-done operation, which is what makes the journal's recovery
+  classification tractable. Revisit only with that invariant reopened.
+- **The advisory OS lock protects one host, and only on a filesystem that implements it.** A
+  volume bind-mounted from two hosts is not protected — the "no distributed or multi-node
+  concurrency" non-goal, restated where it bites. Less obviously, the storage volume **must be a
+  container-managed named volume, not a bind mount of a host path**: this is a Linux container on
+  a Windows host, and advisory locking over a bind-mounted Windows path has historically been
+  unreliable enough that two instances can both believe they hold the lease. Boot therefore
+  self-tests the lock — acquire, verify a second acquire from the same process fails, release —
+  and refuses to start if the filesystem does not honour it, because definition-of-done item 9
+  otherwise fails silently in the configuration a Windows operator is most likely to choose.
 - **Node is single-threaded**, so the mutation mutex only has to serialise await points, not real
   parallel execution. A promise-chain queue is sufficient, as it is in the prior art.
+
+### Servability of an unmaterialised declaration
+
+**A session may name a declaration whose clone does not exist yet.** Definition-of-done item 5
+requires onboarding by declaration alone, and clone-on-demand means the `tools/call` *is* the
+trigger — so the alternative reading, that nothing is servable until its clone is `ready`, would
+leave item 5 with no trigger at all and headless onboarding would fail.
+
+What that costs is one paragraph of analysis the ordering argument used to get for free. Session
+establishment, `tools/list` and capability filtering all run against a declaration with no tree,
+and all three are well-defined without one, because every input they use is declaration data
+rather than repository data: the grant is the four-layer intersection, and none of its layers
+reads the working copy. `RepositoryConfig` is the one repository-supplied input, and a missing
+config file already defaults every field, so discovery against an unmaterialised declaration
+yields the same tool list it will yield once the clone lands.
+
+Three states are therefore distinct and must not be conflated: a declaration with no clone is
+**servable and will materialise on first use**; a declaration whose clone is materialising makes
+callers wait on its materialisation lock; a declaration in `needs-attention` is servable for
+reads and refuses mutations until the parked entry is resolved.
 
 ---
 
@@ -604,11 +878,41 @@ anything fingerprinted, which defeats the reason image-build extension was chose
 consumer forks the base console* — nothing to maintain across the seam, and every base
 improvement becomes a merge.
 
-**Declaration management is operator-only.** Rejected: *declaration tools exposed over MCP* — the
-symmetric reading of "one canonical service per operation", and it hands an injected agent a route
-to attach an existing credential reference to a remote it controls and harvest the token from the
-push. The remote-host allowlist is the second, independent guard, so the property does not rest on
-the capability alone.
+**Declaration management is operator-only, structurally.** Rejected: *declaration tools exposed
+over MCP* — the symmetric reading of "one canonical service per operation", and it hands an
+injected agent a route to attach an existing credential reference to a remote it controls and
+harvest the token from the push. The remote-host allowlist is the second, independent guard, so
+the property does not rest on the capability alone. Also rejected: *presenting this as a
+deployment default that could be flipped* — it cannot be, because a repository-bound session has
+nothing to bind a declaration-creating call to, and the honest statement is that the session model
+forbids it. Calling it a default invites someone to enable it later and either fail or punch a
+non-repository resource URI through the model to make it work.
+
+**One lock protocol, stated as four rules rather than one ordering.** Rejected: *the acquisition
+order alone is the deadlock argument* — how this design read before review, and it is false: the
+post-mutation disk-pressure check evicts under a materialisation lock taken after a mutation lock,
+which is the reverse of the stated order. Also rejected: *releasing the materialisation lock after
+the ensure step* — the intuitive reading of a lock that guards materialisation, and it opens a
+window where eviction removes a clone between the ensure and the journal write, leaving an intent
+record whose pre-state is no longer re-derivable. Also rejected: *making reads take the
+materialisation lock so eviction cannot race them* — correct and unaffordable, since it
+reintroduces the blocking the read exemption exists to remove; the exclusion lives on the eviction
+side as a counter instead.
+
+**Boot starts transports first and recovers lazily.** Rejected: *recover every declaration before
+readiness* — the stronger guarantee, and it makes restart cost scale with estate size, so at a few
+hundred clones the operator stops doing the restart that item 14 exists to make safe. A
+declaration carrying unsettled entries is `recovery-pending`, serves reads, and refuses mutations
+until it has recovered — which keeps the guarantee where it is load-bearing and drops it where it
+was only tidy.
+
+**A frozen session grant plus a declaration grant epoch.** Rejected: *recompute the grant on every
+call* — simplest to describe, and it discards the prior-art rule that a token tier is fixed at
+`initialize`, so a widened declaration grant would reach a live session. Also rejected: *freeze
+and accept that revocation waits for the session to end* — what this design said before review,
+and it leaves the operator restarting the container as their only revocation mechanism during an
+incident. The epoch keeps the freeze's one-way property and still lets a narrowing land on the
+next call.
 
 **SQLite for structured state, JSONL for audit.** Rejected: *JSON files for everything* — no new
 dependency, matching the prior art's `schedule.json`, and it cannot give the journal and the grant
@@ -647,14 +951,26 @@ store the atomic multi-row updates recovery classification needs. Rejected: *SQL
    service needs nothing more; if it does not, the service needs an online-backup operation, and
    that is scope neither the brief nor this document has allocated.
 
-5. **What is the real disk budget, and is eviction expected to fire?** "Unbounded and assumed to
+5. **Should the audit log be tamper-evident?** Definition-of-done item 8 wants hatch use
+   attributable, and the hatch is the one surface that can rewrite the log recording it. The brief
+   declined a hard floor, but it never considered whether the evidence survives — so this is
+   unanswered rather than settled. Recommended: **a per-line hash chain, verified at boot and by
+   an operator-visible check**, which detects truncation and rewriting without needing storage the
+   service cannot reach. Alternatives: append the trail to an external sink the container cannot
+   edit, which is the only option that also survives volume loss and adds a deployment dependency
+   the brief has not scoped; or accept refusal-time attributability as the whole claim and say so
+   in the definition of done. This wants deciding before `/contract`, because the answer fixes the
+   audit line format, and retrofitting a chain over a written trail is a migration.
+
+6. **What is the real disk budget, and is eviction expected to fire?** "Unbounded and assumed to
    grow" sets the design constraint, and the eviction machinery follows from it. The watermark
-   values, and whether eviction is a routine event or a last resort that should notify you, depend
+   values, the retention windows for the audit log, journal, outbox and pre-migration backups,
+   and whether eviction is a routine event or a last resort that should notify you, all depend
    on a number only you have. If the real answer is twenty repositories on a volume with room for
    two hundred, the interlock still earns its place but the thresholds and the notification
    posture are different.
 
-6. **Do the blog authoring views gain a repository dimension, or stay pinned to one declaration?**
+7. **Do the blog authoring views gain a repository dimension, or stay pinned to one declaration?**
    `ComposeView` is 38 KB of repository-implicit code. Under this design a view renders for the
    selected repository when the grant permits, which implies parameterising it. Pinning it to the
    blog declaration instead is less work and less general, and is defensible because blog
