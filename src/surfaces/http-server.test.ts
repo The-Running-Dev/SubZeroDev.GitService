@@ -123,6 +123,36 @@ test('S3.4 — the authenticated health report shows an AuditChainBreak', async 
   });
 });
 
+test('a throwing handler answers 500 and leaves the process serving, rather than crashing it', async () => {
+  // `createServer` takes a synchronous callback, so an async handler's
+  // rejection has nowhere to go unless the call site catches it. Without that
+  // catch this test kills the whole test run via an unhandled rejection —
+  // which is also what it would do to the service in production, handing
+  // anyone able to make a handler throw a way to stop it.
+  const server = createSurfacesServer({
+    commitSha: COMMIT_SHA,
+    contractFingerprint: CONTRACT_FINGERPRINT,
+    consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+    ready: () => true,
+    provisioningPending: () => false,
+    auditChain: async () => {
+      throw new Error('file is not a database');
+    },
+    operatorApiToken: TOKEN,
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    assert.equal(response.status, 500, 'the throw becomes a 500, not a process exit');
+
+    const after = await fetch(`http://127.0.0.1:${port}/healthz`);
+    assert.equal(after.status, 200, 'and the server is still serving afterwards');
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test('/health reports the placeholder fields honestly as empty/zero', async () => {
   await withServer({}, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });

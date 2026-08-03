@@ -36,6 +36,54 @@ Append-only. Newest at the top. The rejected alternatives are the point — with
 
 ---
 
+### 2026-08-03 — The audit segment files are the trail; `audit_chain_head` is an advisory mirror
+Context: Found by `/reconcile` after S3. The implementation read the chain head from `audit_chain_head` and treated it as the source of truth, so a corrupt structured store stopped the audit log entirely — `append` returned `{appended:false}` and `verify` threw. Verified directly. That contradicts S3's own Delivers line ("survives corruption of the structured store"), which is the reason the log is a separate storage kind rather than another table. The design says the head is "mirrored into the structured store"; it never says which side wins, and the implementation guessed wrong.
+Chosen: The segment files are authoritative. The head is re-derived from the last parseable record of the highest-numbered segment whenever the mirror is absent or unreadable, and every read of the store from the audit module is best-effort. The mirror keeps two jobs — a fast head read, and detecting a cleanly truncated tail, which leaves no torn line for the parser to catch. Both documents now state the direction explicitly.
+Rejected: **Keep the store authoritative and only stop `verify` throwing** — satisfies the contract's no-error-type signature and leaves the trail unwritable while the store is corrupt, so the stated property stays false. **Amend S3 to drop the survival claim** — cheapest, and it discards a property the design chose deliberately and paid for with a separate storage kind. **Mirror into a second file instead of the store** — removes the dependency, and duplicates the trail's own tamper surface for a fast read that re-derivation already provides.
+Reversibility: cheap in code; expensive in consequence, since the failure it fixes is invisible until the store is actually corrupt.
+
+### 2026-08-03 — `verify` resumes from a `RetainedAnchor` when a prefix has been pruned
+Context: `verify` assumed the chain begins with `previousHash === null`. S17's retention will prune early segments, after which the first surviving record has a non-null `previousHash` — so the first pruning run would have produced a false tamper alert on a trail nobody touched. Invariant S2 already requires a segment's terminal hash to be written as a `RetainedAnchor` before deletion, and `audit_retained_anchor` is already in migration 0001, so the mechanism existed and was simply unread.
+Chosen: When the earliest segment on disk is not segment 1, `verify` looks for the anchor of the segment immediately before it and resumes from its terminal hash and sequence. `AuditChainState.retainedAnchors` is populated from the table rather than hardcoded empty. A pruned prefix with **no** anchor is still a break, so the fix cannot be mistaken for a licence to delete segments.
+Rejected: **Leave it for S17** — keeps S3 tight, and buries a landmine that surfaces as a spurious tamper alert on the day retention first runs, which is exactly when trust in the signal matters. **Assert loudly instead of resuming** — makes the gap undeniable, and turns a solved problem into a startup failure.
+Reversibility: cheap.
+
+### 2026-08-03 — No route handler may take the process down
+Context: `createSurfacesServer` invoked its async handler as `void handleRequest(...)`. `createServer` takes a synchronous callback, so a rejection had nowhere to go and became an unhandled rejection — which exits the process. Combined with the bug above, an attacker able to corrupt the structured store could stop the service with an authenticated health check. Verified directly. Introduced while refactoring a `.then/.catch` chain to `async/await`: the `.catch` was dropped and nothing failed, because no test made a handler throw.
+Chosen: Catch at the handler boundary and answer `500`, independent of any individual handler's own error handling. The contract now states it as a rule for every surface. A regression test makes a handler throw and asserts both the `500` and that the server still serves afterwards — without the fix that test hangs the whole run, which is the same failure mode it is guarding against.
+Rejected: **Rely on the audit fix making the throw unreachable** — true today, and it leaves every future route one unguarded throw from the same crash. **A process-level `unhandledRejection` handler** — catches everything, and converts a specific bug into a swallowed class of them.
+Reversibility: cheap.
+
+### 2026-08-03 — `chainState()` is a full `verify()`, and segments are streamed
+Context: The contract gives `chainState` and `verify` the same return type and says nothing about cost or freshness. `/health` calls `chainState` on every request, and `verify` walks every segment.
+Chosen: `chainState` re-derives from disk exactly as `verify` does, so the health report can never serve a cached state that predates a corruption. Segment reading is streamed line-by-line rather than slurped, so peak memory is constant instead of a function of `auditSegmentBytes` (64 MiB by default). The remaining cost is proportional to trail length, bounded in practice by S17's `auditDays` of 90.
+Rejected: **Cache the verified state and invalidate on append** — much cheaper per request, and a corruption arriving between appends would not surface until the next one, which defeats the point of reporting it. **Have `chainState` return only the mirrored head** — cheapest, and it reports a head without verifying anything, so a broken chain would read as healthy.
+Reversibility: cheap.
+
+### 2026-08-03 — Audit holds its own connection to the structured store
+Context: The audit module needs `audit_chain_head` and `audit_retained_anchor`. `StructuredStore` exposes no query interface — `StoreTransaction` is opaque (`{id: string}`), and four contract signatures that take one are synchronous, which reads as "each module holds its own handle" rather than "the store hands out a cursor".
+Chosen: A second `DatabaseSync` handle to the same file, opened lazily and treated as optional throughout. This also falls out of the advisory-mirror decision: a module that must keep working when the store is unreadable cannot depend on another module's successfully-opened handle.
+Rejected: **Add a query method to `StructuredStore`** — the tidier dependency, and it invents public contract surface the contract does not have, which `AGENTS.md` forbids without an amendment. **Pass the head in and out through `Lifecycle`** — no new handle, and it puts the chain's integrity in a caller's hands.
+Reversibility: cheap.
+
+### 2026-08-03 — Audit segment layout is fixed in the contract
+Context: The segment layout is an on-disk format a reimplementation must match to read an existing trail — the same class of fact as U9, which was worth a contract amendment for the same reason. The contract fixed the lease files precisely but said only "one `AuditRecord` JSON per line" about segments.
+Chosen: `audit/NNNNNN.jsonl` under the volume root, six zero-padded digits from `000001`, one compact record per line with a trailing newline, and rotation **before** writing a record that would exceed the cap — so a segment only exceeds `auditSegmentBytes` when a single record does. Recorded in the contract's file table beside the lease.
+Rejected: **Leave it to the code** — nothing else parses these files today, and "today" is the whole problem with unbackfillable formats. **Rotate after exceeding the cap** — one fewer branch, and it makes the cap advisory rather than a bound.
+Reversibility: expensive once a trail exists — every segment path and the trailing-newline convention are baked into files on disk.
+
+### 2026-08-03 — A failed mirror write never fails the append it describes
+Context: The file append is the durable record; the `audit_chain_head` update follows it. If the store write fails, the record is already on disk.
+Chosen: Swallow the mirror failure. The append is reported as succeeded because it did succeed, and the next `verify` — or the next append's re-derivation — recovers the head from the files.
+Rejected: **Fail the append** — keeps the two in lockstep, and would discard a record already written, turning a store problem into a hole in the audit trail. **Roll back the file write** — impossible on an append-only log without violating what append-only means.
+Reversibility: cheap.
+
+### 2026-08-03 — `NO_PREDECESSOR_SENTINEL` for a break with no real predecessor
+Context: `AuditChainBreak.expectedHash` is a non-nullable `Sha256Hex`, but a break at the very first record has no predecessor hash to expect.
+Chosen: The SHA-256 of the empty string, the same well-known constant used for `NO_CONSOLE_FINGERPRINT`. It is a valid `Sha256Hex`, so the brand's invariant holds, and it is recognisable as a sentinel to anyone who looks it up.
+Rejected: **Widen `expectedHash` to nullable** — most honest, and it changes a contract type to accommodate one edge case. **An all-zero string** — obviously a placeholder, and not a valid SHA-256, so it would have to bypass the brand's own validator.
+Reversibility: cheap.
+
 ### 2026-08-03 — U9 is resolved: the audit record's canonical serialisation
 Context: `30-slices.md` gates S3 on U9 explicitly, and states the trail is unbackfillable — two implementations that disagree about what the hash covers make every chain unverifiable across an upgrade, permanently, the same class of consequence as U8. `/slice S3` halted on it rather than inventing a serialisation silently.
 Chosen: `hash = SHA256_hex(canonical(record))`, where `record` is the full flattened `AuditRecord` — `AuditRecordBase` merged with whichever `AuditRecordBody` variant applies — with only its own `hash` field omitted; `sequence` and `previousHash` are included like every other field. `canonical()` is deep key-sorted JSON, array order preserved, reusing the compiler's registry-fingerprint canonicalisation rather than inventing a second one. The genesis record (`previousHash: null`) hashes the same way, with no special case. File storage is unconstrained by this: each line is plain `JSON.stringify(record)`, and `verify` re-derives the canonical form from the parsed object before re-hashing.

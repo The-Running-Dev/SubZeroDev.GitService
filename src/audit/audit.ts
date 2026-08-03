@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs';
 import { appendFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
-import { sha256Hex, type Sha256Hex } from '../shared/brands.ts';
+import { sha256Hex, type IsoUtcTimestamp, type Sha256Hex } from '../shared/brands.ts';
 import type { Outcome } from '../shared/outcome.ts';
 import { ok, err } from '../shared/outcome.ts';
 import type { Clock } from '../clock/clock.ts';
@@ -18,6 +18,7 @@ import type {
   AuditPage,
   AuditQuery,
   AuditRecord,
+  RetainedAnchor,
 } from './types.ts';
 
 export interface Audit {
@@ -76,14 +77,75 @@ interface ChainHeadRow {
   readonly headHash: Sha256Hex;
 }
 
-function readMirroredHead(db: DatabaseSync): ChainHeadRow | null {
-  const rows = db.prepare('SELECT sequence, head_hash FROM audit_chain_head WHERE singleton = 1').all() as {
-    sequence: number;
-    head_hash: string;
-  }[];
-  const row = rows[0];
-  if (!row) return null;
-  return { sequence: row.sequence, headHash: row.head_hash as Sha256Hex };
+/**
+ * The mirror is **advisory**. The segment files are the trail; this row is a
+ * fast read and a tamper cross-check, and the whole point of keeping the log
+ * outside the structured store is that it survives that store's corruption.
+ * So every read of it is best-effort: a store that cannot be opened, or whose
+ * schema is not there yet, yields `null` and the caller re-derives from the
+ * files instead.
+ */
+function readMirroredHead(db: DatabaseSync | null): ChainHeadRow | null {
+  if (!db) return null;
+  try {
+    const rows = db.prepare('SELECT sequence, head_hash FROM audit_chain_head WHERE singleton = 1').all() as {
+      sequence: number;
+      head_hash: string;
+    }[];
+    const row = rows[0];
+    if (!row) return null;
+    return { sequence: row.sequence, headHash: row.head_hash as Sha256Hex };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Re-derives the chain head from the segment files alone, by reading the last
+ * parseable record of the highest-numbered segment. This is what makes the
+ * trail appendable when the structured store is unreadable — without it, a
+ * corrupt store silently stops the audit log, which is the opposite of what
+ * an audit log outside that store is for.
+ */
+function deriveHeadFromFiles(volumeRoot: string): ChainHeadRow | null {
+  const segments = listSegments(volumeRoot);
+  for (let i = segments.length - 1; i >= 0; i -= 1) {
+    const raw = readFileSync(segmentPath(volumeRoot, segments[i]!), 'utf8');
+    const lines = raw.split('\n').filter((l) => l.length > 0);
+    for (let j = lines.length - 1; j >= 0; j -= 1) {
+      try {
+        const record = JSON.parse(lines[j]!) as AuditRecord;
+        if (typeof record.sequence === 'number' && typeof record.hash === 'string') {
+          return { sequence: record.sequence, headHash: record.hash };
+        }
+      } catch {
+        // A torn final line is not the head; keep walking backwards.
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Best-effort for the same reason as `readMirroredHead`: the anchors live in
+ * the structured store, and a trail whose verification depended on that store
+ * being readable would not survive its corruption.
+ */
+function readRetainedAnchors(db: DatabaseSync | null): readonly RetainedAnchor[] {
+  if (!db) return [];
+  try {
+    const rows = db
+      .prepare('SELECT segment, terminal_sequence, terminal_hash, retained_at FROM audit_retained_anchor ORDER BY segment')
+      .all() as { segment: number; terminal_sequence: number; terminal_hash: string; retained_at: string }[];
+    return rows.map((r) => ({
+      segment: r.segment,
+      terminalSequence: r.terminal_sequence,
+      terminalHash: r.terminal_hash as Sha256Hex,
+      retainedAt: r.retained_at as IsoUtcTimestamp,
+    }));
+  } catch {
+    return [];
+  }
 }
 
 function writeMirroredHead(db: DatabaseSync, sequence: number, headHash: Sha256Hex, updatedAt: string): void {
@@ -93,23 +155,75 @@ function writeMirroredHead(db: DatabaseSync, sequence: number, headHash: Sha256H
   ).run(sequence, headHash, updatedAt);
 }
 
-/** Reads every record across every segment, in chain order, verifying as it goes. */
-function verifyFromDisk(volumeRoot: string, mirrored: ChainHeadRow | null): AuditChainState {
+/**
+ * Yields a segment's lines without holding the whole file in memory. Segments
+ * are capped at `auditSegmentBytes` (64 MiB by default) and `verify` walks
+ * every one of them, so slurping each in full made peak memory a function of
+ * segment size rather than a constant.
+ *
+ * A well-formed file ends with a trailing newline, so the final chunk is
+ * empty and is dropped. A mid-line truncation leaves a non-empty malformed
+ * final chunk, which reaches the caller and is reported as a break rather
+ * than silently discarded.
+ */
+function* streamSegmentLines(filePath: string): Generator<string> {
+  const CHUNK = 1 << 16;
+  const fd = openSync(filePath, 'r');
+  try {
+    const buffer = Buffer.allocUnsafe(CHUNK);
+    let carry = '';
+    for (;;) {
+      const read = readSync(fd, buffer, 0, CHUNK, null);
+      if (read === 0) break;
+      carry += buffer.subarray(0, read).toString('utf8');
+      let newlineAt = carry.indexOf('\n');
+      while (newlineAt !== -1) {
+        yield carry.slice(0, newlineAt);
+        carry = carry.slice(newlineAt + 1);
+        newlineAt = carry.indexOf('\n');
+      }
+    }
+    if (carry.length > 0) yield carry;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Walks every record across every segment, in chain order, verifying as it
+ * goes.
+ *
+ * `anchors` is what makes this survive retention. Once S17 prunes an early
+ * segment, the first surviving record's `previousHash` is no longer `null`,
+ * and a verifier that assumed a `null` genesis would report a chain break
+ * that never happened. Invariant S2 guarantees a segment is only ever deleted
+ * after its terminal hash is written as a `RetainedAnchor`, so the anchor for
+ * the segment preceding the first surviving one is the hash this walk should
+ * start from.
+ */
+function verifyFromDisk(
+  volumeRoot: string,
+  mirrored: ChainHeadRow | null,
+  anchors: readonly RetainedAnchor[],
+): AuditChainState {
   const segments = listSegments(volumeRoot);
-  let runningHash: Sha256Hex | null = null;
-  let runningSequence = 0;
+  const firstSegment = segments[0];
+
+  // If the earliest segment on disk is not segment 1, the ones before it were
+  // pruned, and the anchor for the segment immediately before it carries the
+  // hash and sequence this chain legitimately resumes from.
+  const resumeAnchor =
+    firstSegment !== undefined && firstSegment > 1
+      ? (anchors.find((a) => a.segment === firstSegment - 1) ?? null)
+      : null;
+
+  let runningHash: Sha256Hex | null = resumeAnchor?.terminalHash ?? null;
+  let runningSequence = resumeAnchor?.terminalSequence ?? 0;
   let chainBreak: AuditChainBreak | null = null;
+  let sawAnyRecord = false;
 
   outer: for (const segment of segments) {
-    const raw = readFileSync(segmentPath(volumeRoot, segment), 'utf8');
-    const lines = raw.split('\n');
-    // A well-formed file ends with a trailing newline, producing one empty
-    // trailing element; drop only that. A mid-line truncation leaves a
-    // non-empty malformed final element, which is handled as a break below,
-    // not silently dropped.
-    if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
-
-    for (const line of lines) {
+    for (const line of streamSegmentLines(segmentPath(volumeRoot, segment))) {
       let parsed: AuditRecord;
       try {
         parsed = JSON.parse(line) as AuditRecord;
@@ -140,21 +254,23 @@ function verifyFromDisk(volumeRoot: string, mirrored: ChainHeadRow | null): Audi
 
       runningHash = claimedHash;
       runningSequence = parsed.sequence;
+      sawAnyRecord = true;
     }
   }
 
-  // Every readable record verified, but the store's mirror claims more than
-  // the files hold: the tail was truncated cleanly (no partial line to catch
-  // the parse-failure branch above).
+  // Every readable record verified, but the mirror claims more than the files
+  // hold: the tail was truncated cleanly, leaving no partial line for the
+  // parse-failure branch above to catch. Only meaningful when the mirror was
+  // actually readable — an absent mirror proves nothing either way.
   if (chainBreak === null && mirrored !== null && runningSequence < mirrored.sequence) {
     chainBreak = { atSequence: mirrored.sequence, expectedHash: mirrored.headHash, foundHash: null };
   }
 
   return {
     verifiedThrough: runningSequence,
-    headHash: runningSequence === 0 ? null : runningHash,
+    headHash: sawAnyRecord || resumeAnchor !== null ? runningHash : null,
     mirroredHeadHash: mirrored?.headHash ?? null,
-    retainedAnchors: [],
+    retainedAnchors: anchors,
     chainBreak,
   };
 }
@@ -165,9 +281,24 @@ export function createAudit(options: AuditOptions): Audit {
   const dbPath = path.join(volumeRoot, 'store.sqlite');
 
   let db: DatabaseSync | null = null;
-  function chainHeadDb(): DatabaseSync {
-    if (!db) db = new DatabaseSync(dbPath);
-    return db;
+  let dbUnavailable = false;
+
+  /**
+   * Returns `null` rather than throwing when the structured store cannot be
+   * opened. The audit log deliberately lives outside that store so it can
+   * outlive its corruption; making the trail's own operation conditional on
+   * opening it would defeat the arrangement entirely.
+   */
+  function chainHeadDb(): DatabaseSync | null {
+    if (db) return db;
+    if (dbUnavailable) return null;
+    try {
+      db = new DatabaseSync(dbPath);
+      return db;
+    } catch {
+      dbUnavailable = true;
+      return null;
+    }
   }
 
   let head: ChainHeadRow | null | undefined; // undefined = not yet hydrated
@@ -178,7 +309,10 @@ export function createAudit(options: AuditOptions): Audit {
   function ensureInitialized(): void {
     if (initialized) return;
     mkdirSync(path.join(volumeRoot, AUDIT_DIR), { recursive: true });
-    head = readMirroredHead(chainHeadDb());
+    // The files are authoritative. The mirror is a fast path; when it is
+    // missing or unreadable the head is re-derived from the segments, so a
+    // corrupt store slows the first append rather than stopping the trail.
+    head = readMirroredHead(chainHeadDb()) ?? deriveHeadFromFiles(volumeRoot);
     const segments = listSegments(volumeRoot);
     currentSegment = segments.length > 0 ? Math.max(...segments) : 1;
     const currentPath = segmentPath(volumeRoot, currentSegment);
@@ -227,7 +361,8 @@ export function createAudit(options: AuditOptions): Audit {
       currentSegmentBytes += lineBytes;
 
       try {
-        writeMirroredHead(chainHeadDb(), record.sequence, record.hash, clock.now());
+        const mirror = chainHeadDb();
+        if (mirror) writeMirroredHead(mirror, record.sequence, record.hash, clock.now());
       } catch {
         // The file write — the durable record — already succeeded. The store
         // row is a mirror the design describes for fast reads; a failure to
@@ -242,6 +377,29 @@ export function createAudit(options: AuditOptions): Audit {
     }
   }
 
+  function safeChainState(): AuditChainState {
+    try {
+      ensureInitialized();
+      const mirror = chainHeadDb();
+      return verifyFromDisk(volumeRoot, readMirroredHead(mirror), readRetainedAnchors(mirror));
+    } catch (cause) {
+      // Nothing readable at all — not even the segment directory. Report it as
+      // a break at the head rather than throwing, so the health view says the
+      // trail is unverifiable instead of the process falling over.
+      return {
+        verifiedThrough: null,
+        headHash: null,
+        mirroredHeadHash: null,
+        retainedAnchors: [],
+        chainBreak: {
+          atSequence: 0,
+          expectedHash: NO_PREDECESSOR_SENTINEL,
+          foundHash: null,
+        },
+      };
+    }
+  }
+
   return {
     append(input: AuditAppendInput): Promise<AuditAppendOutcome> {
       const result = queue.then(() => doAppend(input));
@@ -252,10 +410,14 @@ export function createAudit(options: AuditOptions): Audit {
       return result;
     },
 
+    // Neither of these may throw: the contract types both as returning an
+    // `AuditChainState` with no error type, and the design requires a broken
+    // or unreadable trail to be *reported*, never fatal — refusing to serve
+    // on a corrupt trail would hand anyone able to corrupt it a way to stop
+    // the service. Every store read below is already best-effort; this guard
+    // covers an unreadable segment file too.
     async verify(): Promise<AuditChainState> {
-      ensureInitialized();
-      const mirrored = readMirroredHead(chainHeadDb());
-      return verifyFromDisk(volumeRoot, mirrored);
+      return safeChainState();
     },
 
     // Nothing in the contract distinguishes chainState()'s freshness or cost
@@ -264,9 +426,7 @@ export function createAudit(options: AuditOptions): Audit {
     // scheduled verify() — is what guarantees the health report in S3's
     // acceptance criteria always reflects a real break the moment it exists.
     async chainState(): Promise<AuditChainState> {
-      ensureInitialized();
-      const mirrored = readMirroredHead(chainHeadDb());
-      return verifyFromDisk(volumeRoot, mirrored);
+      return safeChainState();
     },
 
     async query(filter: AuditQuery): Promise<Outcome<AuditPage, AuditError>> {
@@ -301,10 +461,7 @@ export function createAudit(options: AuditOptions): Audit {
         const page = matches.slice(0, filter.limit);
         const nextCursor = page.length === filter.limit && page.length > 0 ? String(page[page.length - 1]!.sequence) : null;
 
-        const mirrored = readMirroredHead(chainHeadDb());
-        const chain = verifyFromDisk(volumeRoot, mirrored);
-
-        return ok({ records: page, nextCursor, chain });
+        return ok({ records: page, nextCursor, chain: safeChainState() });
       } catch {
         return err({ resultKind: 'infrastructure', retryable: false, summary: 'audit query failed', code: 'query-failed' });
       }

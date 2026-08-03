@@ -144,6 +144,18 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
 
 export function createSurfacesServer(deps: SurfacesDependencies): Server {
   return createServer((req, res) => {
-    void handleRequest(deps, req, res);
+    // The rejection path is load-bearing, not defensive tidiness. `createServer`
+    // takes a synchronous callback, so an async handler's rejection has nowhere
+    // to go: without this it becomes an unhandled rejection and Node exits the
+    // process. That would hand anyone who can make a handler throw — by
+    // corrupting the audit trail, say — a way to stop the service, which is
+    // exactly the property `10-design.md` refuses for a broken chain.
+    handleRequest(deps, req, res).catch(() => {
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      sendJson(res, 500, { error: 'internal-error' });
+    });
   });
 }

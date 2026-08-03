@@ -68,6 +68,18 @@ and preferences belong in `AGENTS.md`.
   for an `EPERM` in `rmSync` while every assertion in them had passed — Windows refuses to
   unlink a file with an open handle, and SQLite does not always release on `close()`. Cost a
   full rewrite of the test file to discover that the failures were cleanup, not behaviour.
+- **`void somethingAsync()` discards the rejection path.** Converting a `.then/.catch` chain
+  to `async/await` inside a `void`-invoked handler silently deleted the `.catch`, and
+  nothing failed, because no test made the handler throw. It would have shipped a remote
+  process-crash reachable by an authenticated health check — on the exact failure the design
+  says must never be fatal. The `void fn()` call site is the checkable tell: it throws the
+  promise away, so every rejection inside must already be handled. Found by `/reconcile`,
+  not by the tests that were passing.
+- **Do not verify long-lived servers by backgrounding them from Git Bash on this host.**
+  `kill %1` and `$!` do not reliably reach the grandchild, so servers outlive the script.
+  Cost a two-minute command timeout and a scatter of orphaned `node` processes that could
+  not be safely reaped — twice, in S2 and again in S3. Drive multi-process scenarios from
+  `node:test` with Node's own child-process APIs, where every such check already passes.
 
 ## Token economy
 

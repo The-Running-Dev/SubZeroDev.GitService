@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, truncateSync, statSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, truncateSync, statSync, rmSync } from 'node:fs';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { systemClock } from '../clock/clock.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
@@ -206,6 +207,91 @@ test('verify() on a never-appended log is verified-empty, not "never verified"',
     assert.equal(state.chainBreak, null);
     assert.equal(state.verifiedThrough, 0);
     assert.equal(state.headHash, null);
+  });
+});
+
+test('the trail survives corruption of the structured store: verify() and append() both keep working', async () => {
+  await withVolumeAsync(async (volume) => {
+    await migratedVolume(volume);
+    const first = createAudit({ volumeRoot: volume, clock: systemClock });
+    await first.append(leaseTakeoverInput());
+    await first.append(leaseTakeoverInput());
+
+    // The audit log lives outside the structured store precisely so it can
+    // outlive it. Corrupt the store, leave the segments untouched.
+    writeFileSync(path.join(volume, 'store.sqlite'), 'not a database at all', 'utf8');
+
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+
+    const state = await audit.verify();
+    assert.equal(state.chainBreak, null, 'a corrupt store is not a chain break');
+    assert.equal(state.verifiedThrough, 2, 'the head is re-derived from the segment files');
+    assert.equal(state.mirroredHeadHash, null, 'the mirror is unreadable, and says so rather than throwing');
+
+    const appended = await audit.append(leaseTakeoverInput());
+    assert.equal(appended.appended, true, 'the trail can still be written to');
+    if (!appended.appended) return;
+    assert.equal(appended.sequence, 3, 'and continues the sequence from the files');
+
+    const after = await audit.verify();
+    assert.equal(after.chainBreak, null, 'the chain written without the mirror still verifies');
+    assert.equal(after.verifiedThrough, 3);
+  });
+});
+
+test('verify() reports rather than throws when the audit directory itself is unreadable', async () => {
+  await withVolumeAsync(async (volume) => {
+    await migratedVolume(volume);
+    // A file where the segment directory belongs: nothing is readable at all.
+    writeFileSync(path.join(volume, 'audit'), 'not a directory', 'utf8');
+
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const state = await audit.verify();
+    assert.notEqual(state.chainBreak, null, 'an unverifiable trail is reported as a break');
+    assert.equal(state.verifiedThrough, null);
+  });
+});
+
+test('verify() resumes from a RetainedAnchor when early segments have been pruned', async () => {
+  await withVolumeAsync(async (volume) => {
+    await migratedVolume(volume);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock, segmentBytes: 200 });
+    for (let i = 0; i < 6; i += 1) await audit.append(leaseTakeoverInput());
+
+    // Simulate what S17's retention will do: record the terminal hash of
+    // segment 1 as an anchor (invariant S2 requires this *before* deletion),
+    // then delete the segment.
+    const seg1Path = path.join(volume, 'audit', '000001.jsonl');
+    const seg1Lines = readFileSync(seg1Path, 'utf8').trim().split('\n');
+    const terminal = JSON.parse(seg1Lines[seg1Lines.length - 1]!) as { sequence: number; hash: string };
+
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    db.prepare(
+      'INSERT INTO audit_retained_anchor (segment, terminal_sequence, terminal_hash, retained_at) VALUES (?, ?, ?, ?)',
+    ).run(1, terminal.sequence, terminal.hash, systemClock.now());
+    db.close();
+    rmSync(seg1Path);
+
+    const state = await audit.verify();
+    assert.equal(state.chainBreak, null, 'a pruned prefix is not a chain break when its anchor is present');
+    assert.equal(state.verifiedThrough, 6, 'verification resumes from the anchor and reaches the head');
+    assert.equal(state.retainedAnchors.length, 1, 'the anchors are reported');
+    assert.equal(state.retainedAnchors[0]?.segment, 1);
+  });
+});
+
+test('verify() still reports a break when a prefix is pruned WITHOUT an anchor', async () => {
+  await withVolumeAsync(async (volume) => {
+    await migratedVolume(volume);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock, segmentBytes: 200 });
+    for (let i = 0; i < 6; i += 1) await audit.append(leaseTakeoverInput());
+
+    // Deleting a segment without first writing its anchor violates invariant
+    // S2, and must not be mistaken for a legitimately retained trail.
+    rmSync(path.join(volume, 'audit', '000001.jsonl'));
+
+    const state = await audit.verify();
+    assert.notEqual(state.chainBreak, null, 'an unanchored gap is still a break');
   });
 });
 
