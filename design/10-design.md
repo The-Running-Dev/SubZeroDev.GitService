@@ -1231,9 +1231,20 @@ every console route except enrolment, and reports in its logs and status endpoin
 waiting to be provisioned.
 
 This is the same trust root as break-glass, deliberately: volume access is already the ultimate
-authority in this design, so provisioning introduces no new one. **No HTTP route is ever
-unauthenticated**, at any point in the lifecycle — enrolment included, which is what the secret
-buys and what a token printed to the logs and exchanged over an open setup route would not.
+authority in this design, so provisioning introduces no new one. **No HTTP route exposing
+repository, credential, audit, volume or operator state is ever unauthenticated**, at any point in
+the lifecycle — enrolment included, which is what the secret buys and what a token printed to the
+logs and exchanged over an open setup route would not.
+
+**The liveness probe is the one exception, and it is an exception because of what it carries rather
+than where it sits.** It answers readiness and the running commit, and nothing else: item 15's
+companion check polls it before it holds a session, and a reverse proxy needs it to decide whether
+to send traffic at all. The operator health report — failing credential references, audit chain
+state, volume usage by consumer, parked operation counts — is a **separate authenticated route**,
+not the same payload. An earlier reading had them as one, which would have put an inventory of
+declaration ids, credential reference names, whether audit tampering had been detected, and current
+disk pressure on an unauthenticated endpoint of a publicly reachable origin. The rule above is
+about the data, so splitting the payload is what satisfies it rather than what evades it.
 
 ### Lockout recovery
 
