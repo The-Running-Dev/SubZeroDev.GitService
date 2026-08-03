@@ -36,13 +36,18 @@ without a natural bound and each gets a stated policy, since the disk-pressure m
 knows how to evict clones and would otherwise name innocent declarations as the blockers for
 growth that is not theirs.
 
-This list is not the same list as the **seven consumers of the volume** the disk-full path
-reports — clones, audit, journal, outbox, backups, drop directories, and the live structured
-store. Retention windows are about unbounded growth; the consumer list is about who is holding
-the bytes right now. Several retention windows live inside one consumer, and the live store is a
-consumer with no window of its own. They are stated separately because reconciling them is a
-mistake — an earlier draft said "four" in the prose over an eight-row table and "six" in the
-disk-full path, which is what a count maintained by memory does.
+This list is not the same list as the **five consumers of the volume** the disk-full path reports
+— clones, the audit log, the structured store, backups and snapshots, and drop directories.
+Retention windows are about unbounded growth; the consumer list is about which *files* hold the
+bytes. Most windows live inside one consumer: journal entries, outbox rows, tokens, grants,
+operator sessions and terminal jobs are all rows in the structured store, so the store is reported
+as one consumer **with a breakdown by table** rather than as several peers. An earlier draft
+counted journal and outbox as consumers alongside the store they live in, attributing one file
+three ways.
+
+They are stated separately because reconciling them is a mistake, and because a count maintained
+by memory drifts — an earlier draft said "four" in prose over an eight-row table and "six" in the
+disk-full path.
 
 | What grows | Policy |
 |---|---|
@@ -86,18 +91,44 @@ delete is indistinguishable from truncation — either boot reports corruption e
 runs, or prefix truncation stops being detectable at all.
 
 **Retention runs on the maintenance pass, but each module prunes its own rows.** The pass is a
-schedule, not an owner: it is driven from the composition root with no mutation lock held, and it
-calls a `runRetention()` on audit, journal, authorization, the outbox and the snapshot keeper in
-turn, then asks the clone store to evict if that was not enough. Every deletion happens inside the
-module that owns the rows and knows their invariants — audit writes its retained anchor as it
-drops a segment, authorization walks the revocation cascade before deleting a `Grant`. The
-alternative, one pass reaching into ten tables, would put an L1 module in charge of deleting L4's
-authorization records, which is the dependency direction the CI check exists to catch.
+schedule, not an owner: the lifecycle module drives it with no mutation lock held, calling a
+`runRetention()` on each owning module in turn, then asking the clone store to evict if that was
+not enough. Every deletion happens inside the module that owns the rows and knows their
+invariants — audit writes its retained anchor as it drops a segment, authorization walks the
+revocation cascade before deleting a `Grant`. The alternative, one pass reaching into twelve
+tables, would put an L1 module in charge of deleting L4's authorization records, which is the
+dependency direction the CI check exists to catch.
 
-The disk-full path reports which of the **seven consumers of the volume** is actually taking the
-space — clones, audit, journal, outbox, backups, drop directories, and the live structured store
-itself. The store was missing from that list, which is precisely the case where eviction frees
-nothing and the refusal would otherwise blame innocent declarations.
+Every window that prunes automatically has an owner that does the pruning. Two do not prune at
+all — orphaned declarations and `failed/` drops are cleared by the operator, deliberately, because
+both are the only copy of something someone expected to keep:
+
+| Owner | Prunes |
+|---|---|
+| Audit | Log segments, writing the retained anchor first |
+| Journal | Settled entries |
+| Authorization | Expired and revoked tokens, revoked grants and clients |
+| Notifier | Delivered outbox rows |
+| Operator identity | Expired and revoked operator sessions |
+| Scheduler | Terminal jobs |
+| Structured store | Its own pre-migration copies and daily snapshots |
+| Watcher | `processed/` drops |
+| Clone store | Evicts clones, and only if the above was not enough |
+
+**Store retention ends with a compaction step, because deleting rows does not free disk.** SQLite
+returns freed pages to its own freelist rather than to the filesystem, so a pass that deleted a
+year of expired tokens would report success, free nothing on the volume, and escalate to evicting
+clones — naming innocent declarations as the blockers for growth that was never theirs, which is
+the exact failure the consumer breakdown exists to prevent. The store therefore runs an
+incremental vacuum after its own deletes and reports what was actually returned. Auto-vacuum was
+the alternative and is rejected: it must be chosen before any data exists and it costs write
+amplification on every transaction for the life of the service, to solve a problem that occurs on
+a scheduled pass.
+
+The disk-full path reports which of the **five consumers of the volume** is taking the space, with
+the store broken down by table. The store was missing from that list entirely in an earlier draft,
+which is precisely the case where eviction frees nothing and the refusal blames innocent
+declarations.
 
 **Volume loss is an accepted risk, not a covered one.** Two store copies exist and neither changes
 that: the pre-migration copy is the rollback target for a bad image, and the daily snapshot is the
@@ -181,6 +212,12 @@ Removing an orphaned declaration and removing its clone are two operations, both
   `rev-parse --git-dir` fails, so the predicate cannot be computed at all — and still refuses when
   the tree holds commits unreachable from `origin/<base>`. Without the override a corrupt clone is
   unevictable, unremovable and permanently blocking, with no exit short of host access.
+
+  **It never becomes a way to discard unpushed work**, which is why orphaned declarations stay
+  operable above. The refusal and the remedy would otherwise share one predicate: work too
+  valuable to evict is work too valuable to remove, and the operator would be left with a
+  repository that can be neither reused nor released. Making the work pushable is the exit;
+  making it discardable is not.
 - **`declaration.remove`** deletes an orphaned declaration record, and refuses while a clone for
   it remains. Its history in the audit log is unaffected; the retention window above is what
   eventually clears that.
@@ -192,6 +229,7 @@ on in four different ways.
 | Dependent | On orphaning |
 |---|---|
 | Clone | Left on disk, untouched, and becomes evictable under the ordinary safety interlock. |
+| Servability | **Reads and the typed write and push tools remain available to the operator console** under `declaration.manage`. Orphaning withdraws a repository from ordinary service; it does not strand whatever is still in its tree. Without this the clone is unreachable from every surface, and an orphan holding an unpushed branch is refused adoption *and* refused removal by the same predicate — a dead end whose only exit is host access. The exit is now: push the outstanding work, then `clone.remove`, then `declaration.remove`. |
 | Pending `ScheduledJob`s | Moved to `cancelled` with a reason naming the orphaning. Not fired, and not silently dropped. |
 | `Grant`s and `Token`s whose resource is `/mcp/{id}` | Revoked, and the declaration's `grantEpoch` bumped, so live sessions bound to it close on their next call rather than continuing against a repository the operator has retired. |
 | Unsettled journal entries | Retained and reported. They are the record of work that may still be in the clone. |
@@ -325,23 +363,34 @@ one above:
 4. **Session grant** — the actor profile (operator console, MCP client, scheduler, watcher)
    intersected with the OAuth scopes actually granted.
 
-The effective set for a call is the intersection of all four. There is no operation anywhere
-that adds a capability to a set.
+The effective set for a call is the intersection of every layer that applies to it — all four for
+a declaration-scoped capability, and layers 1, 2 and 4 for an instance-scoped one, which has no
+declaration to intersect against. There is no operation anywhere that adds a capability to a set.
 
-| Capability | Covers |
-|---|---|
-| `repo.read` | status, log, branches, health, diff |
-| `git.local.write` | branch preparation, stage, commit, restore-paths |
-| `git.raw` | the escape hatch. In the deployment ceiling and reachable from MCP sessions; **default-deny at the declaration layer**, so a repository has it only when its `capabilityGrant` names it |
-| `host.pr.read` | PR status, list, comments |
-| `host.pr.write` | create PR, enable auto-merge, reconcile after merge |
-| `host.checks.read` | check status, bounded waits, deploy status, published-URL verification |
-| `scheduler.manage` | create, list, cancel held operations |
-| `declaration.manage` | declare, amend, orphan a repository; remove an orphaned declaration; remove a clone |
-| `auth.manage` | list and revoke OAuth clients, grants, operator API tokens and live sessions |
-| `audit.read` | read the audit trail and its chain-verification state |
-| `attention.resolve` | inspect a parked journal entry, drive the repair session, resolve it, return a clone to `ready` |
-| `content.*` | reserved for consumer domains; the blog consumer adds its own under this prefix |
+**Capabilities are typed by what they are an operation *on*.** A **declaration-scoped** capability
+authorises an operation against one repository and intersects all four layers. An
+**instance-scoped** one authorises an operation on the service itself, has no declaration to
+intersect against, and therefore intersects layers 1, 2 and 4 only — taking its target, where it
+has one, as a parameter. Without that distinction the intersection is not merely imprecise but
+wrong: amending a declaration would require that declaration to have pre-granted
+`declaration.manage`, and repairing a parked clone would require it to have pre-granted its own
+repair, so a declaration could put itself permanently beyond management.
+
+| Capability | Scope | Covers |
+|---|---|---|
+| `repo.read` | declaration | status, log, branches, health, diff |
+| `git.local.write` | declaration | branch preparation, stage, commit, restore-paths |
+| `git.remote.write` | declaration | push, fetch, base-sync. **Separate from `git.local.write` on purpose**, so a profile can write locally without reaching a remote — the distinction `blog-mcp`'s `remote` flag already draws, and what lets an unattended actor commit without publishing. Git-level rather than host-level, so a `generic` declaration can hold it: local git works against any host |
+| `git.raw` | declaration | the escape hatch. In the deployment ceiling and reachable from MCP sessions; **default-deny at the declaration layer**, so a repository has it only when its `capabilityGrant` names it |
+| `host.pr.read` | declaration | PR status, list, comments |
+| `host.pr.write` | declaration | create PR, enable auto-merge, reconcile after merge |
+| `host.checks.read` | declaration | check status, bounded waits, deploy status, published-URL verification |
+| `scheduler.manage` | declaration | create, list, cancel held operations |
+| `content.*` | declaration | reserved for consumer domains; the blog consumer adds its own under this prefix |
+| `declaration.manage` | **instance** | declare, amend, orphan a repository; remove an orphaned declaration; remove a clone; operate an orphaned declaration's clone to get work out of it |
+| `auth.manage` | **instance** | list and revoke OAuth clients, grants, operator API tokens and live sessions |
+| `audit.read` | **instance** | read the audit trail and its chain-verification state |
+| `attention.resolve` | **instance** | inspect a parked journal entry, drive the repair session, resolve it, return a clone to `ready` |
 
 `host.*` capabilities are only ever present in a grant when `Declaration.host` supports them.
 That is how a per-declaration tool set varies by host without the contract varying by
@@ -458,6 +507,8 @@ interruption whose intent was never recorded.
 | `tool` | string | registry name |
 | `input` | JSON | scrubbed |
 | `actorRef` | `{ kind, subject, clientId? }` | |
+| `scheduledJobId` | string? | Set by the pipeline when the call context carries one, so a scheduled job's journal entry is findable by the job that caused it. See `ScheduledJob` for why the correlation points this way and not the other. |
+| `context` | `normal` \| `repair` \| `recovery` \| `hatch` | What kind of action this was, not just which tool. Mirrors `AuditEntry.context`. |
 | `preState` | `{ branch, headSha, upstreamSha, indexDigest, worktreeDigest }` | Captured under the lock, before acting. **Digests, not booleans.** `indexDigest` hashes the index's own entries — path, mode, blob id and stage number — rather than the tree they would write; `worktreeDigest` covers tracked paths that differ from the index, plus the untracked set. |
 | `steps` | array of `{ name, state, at }` | composites journal each sub-step, and **every operation that mutates anything outside the local clone journals a step marked `applied` before the call that does it** — see below |
 | `state` | `intended` \| `applied` \| `settled` \| `attention` | |
@@ -518,7 +569,7 @@ The publish-shaped scheduler becomes an operation-shaped one — a redesign rath
 | `onMissed` | `{ mode: 'catch_up' }` \| `{ mode: 'skip_if_older_than', seconds }` | explicit per job, never an implicit default — inherited whole |
 | `frozenGrant` | set of capability names | the creator's effective set, captured at creation |
 | `status` | `pending` \| `running` \| `done` \| `skipped` \| `cancelled` \| `needs-attention` | |
-| `operationId` | string? | **Written when the job transitions to `running`, before dispatch.** Without it a job caught mid-flight by a restart has no link to the journal entry that records what it actually did. |
+| ~~`operationId`~~ | — | **Removed.** The correlation runs the other way: the pipeline stamps `scheduledJobId` onto the journal entry it creates, and boot finds the entry by querying on the job id. A job cannot record the id of an entry that does not exist yet, so writing it "before dispatch" was impossible; and having the scheduler pre-generate one and pass it in would give a single caller an identity input on the canonical call path, which is exactly what "no privileged route" denies it. The job id travels in the call context by value, as `actorRef` already does, and the entry that records it is the one write guaranteed to precede the first side effect. |
 | `reason` | string? | set on `skipped` or `needs-attention` |
 | `createdBy` | `actorRef` | Carries the creating `grantId` where there was one, so the authority behind a queued job is re-checkable at fire time rather than only attributable after it. |
 
@@ -541,9 +592,18 @@ same reason every other cascade here is: there is no partially applied batch to 
 #### `AuditEntry`
 
 One scrubbed JSON line per mutating call: timestamp, `operationId`, `declarationId`, `generation`,
-`tool`, `actorRef`, result kind and changed paths. Best-effort append that never fails the call it
-describes, per the prior art. `actorRef` is what makes definition-of-done item 8's "attributable"
-true rather than asserted.
+`tool`, `actorRef`, `context`, result kind and changed paths. Best-effort append that never fails
+the call it describes, per the prior art. `actorRef` is what makes definition-of-done item 8's
+"attributable" true rather than asserted.
+
+**`context` — `normal`, `repair`, `recovery` or `hatch` — records what kind of action a line
+describes, which the tool name alone cannot.** Four things this design already treats as distinct
+were indistinguishable in the trail without it: a write to a parked clone under
+`attention.resolve`, which control flow calls "audited as repair" and which otherwise produces a
+line identical to an ordinary commit; a settle or resume driven by boot recovery with no caller
+present; the `git.raw` intent and outcome pair, whose entire value is standing out; and everything
+else. It is set at dispatch from the session and the operation, and it has to exist before lines
+are written, because the trail is append-only and unbackfillable by design.
 
 **Every append goes through one writer inside the audit module.** Appends are not confined to the
 globally serialised mutation path: a capability rejection at dispatch is audited and happens on
@@ -762,9 +822,9 @@ Six layers. **Dependencies point downward only.**
 L5  Surfaces        MCP transport  |  HTTP API  |  console host
 L4  Runtime         dispatch pipeline  |  authorization  |  operator identity
 L3  Adapters        module adapter  |  http adapter
-L2  Domain          git operations | composites | host adapter | scheduler | watcher | notifier
-L1  Platform        declarations | credentials | clone store | exec | locks
-                    journal | recovery catalogue | audit | result | errors | clock
+L2  Domain          git operations | composites | host adapter | scheduler | watcher
+L1  Platform        declarations | credentials | clone store | exec | locks | lifecycle
+                    journal | recovery catalogue | audit | notifier | result | errors | clock
 L0  Contract        contract types  |  compiler  |  generated registry
 ```
 
@@ -781,12 +841,13 @@ L0  Contract        contract types  |  compiler  |  generated registry
 | **Journal** (L1) | Intent records, and the *classification rule* applied to a state observation it is handed. **It does not read git.** | Structured store, clock. | Begin, step, settle, a pure `classify(entry, observedState, descriptor)`, and `runRetention`. |
 | **Recovery catalogue** (L1) | A registry of per-tool recovery descriptors — expected post-state predicate and optional resume step — keyed by registry tool name. **Populated by registration at composition time, never by importing a domain module.** | Nothing. | Register, look up. |
 | **Audit** (L1) | The append-only scrubbed log, its hash chain, its single-writer append queue, and the read query the console view uses. | Exec's scrubber, clock. | Append (never throws), query, verify, `runRetention`. |
+| **Notifier** (L1) | Terminal-state notification, bounded retry, the outbox, and the `attention` / `info` severity split. **One transport: an HTTP webhook**, which is what Slack, Discord, Teams and most else accept; no second transport ships. **At L1, not L2** — see the notifier's placement below. | Structured store, clock. | Notify. Never blocks a caller. `runRetention`. |
+| **Lifecycle** (L1) | The boot sequence, the maintenance-pass schedule and the order it drives each module's `runRetention` in, and the snapshot cadence. Receives every collaborator by injection. **A checked module, not part of the composition root** — these are ordering decisions with failure modes, not wiring. | Whatever it is handed. | Boot, run-maintenance, shutdown. |
 | **Git operations** (L2) | Every repository-generic git behaviour: status, log, branches, health, diff, stage, commit, restore-paths, push, and the seven protected-base invariants. | L1. | Domain functions returning `ToolResult`. |
 | **Composites** (L2) | Handwritten, fixed-sequence transactional operations — branch preparation, reconcile-after-merge. Each declares its journal steps and its recovery descriptor. | Git operations, host adapter, journal. | Domain functions, and a recovery descriptor per operation. |
 | **Host adapter** (L2) | Pull requests, checks, merges, deploy monitoring; the per-credential request budget and backoff. One implementation, GitHub via `gh`. | Exec, credentials. | A host-shaped interface a second implementation could satisfy. |
 | **Scheduler** (L2) | Due-job selection, missed-tick policy, grant re-intersection. | Declarations, journal, notifier — and the dispatch pipeline **by injection**, never by import. | A tick engine. |
-| **Watcher** (L2) | Per-declaration content drop directories: the poll loop, the claim-and-move directory state machine, interrupted-claim recovery, and the pending-pull-request follow-up list. | Declarations, clone store — and the dispatch pipeline **by injection**, never by import, exactly as the scheduler takes it. Every git and host step goes through that injected pipeline, so it depends on neither git operations nor the host adapter directly. | A watch engine. |
-| **Notifier** (L2) | Terminal-state notification, bounded retry, outbox, and the `attention` / `info` severity split. **One transport: an HTTP webhook**, which is what Slack, Discord, Teams and most else accept; no second transport ships. | Structured store. | Notify. Never blocks a caller. `runRetention`. |
+| **Watcher** (L2) | Per-declaration content drop directories: the poll loop, the claim-and-move directory state machine, interrupted-claim recovery, and the pending-pull-request follow-up list. | Declarations, clone store — and the dispatch pipeline **by injection**, never by import, exactly as the scheduler takes it. Every git and host step goes through that injected pipeline, so it depends on neither git operations nor the host adapter directly. | A watch engine. `runRetention` for `processed/`. |
 | **Module adapter** (L3) | Invoking a registry entry whose execution target is in-process. Holds a handler catalogue keyed by target name, **populated by registration at composition time, never by importing a handler.** | L1, contract types. | Register, and an invoke the pipeline calls. |
 | **Http adapter** (L3) | Invoking a registry entry whose execution target is a declared HTTP endpoint: request shaping, the declared timeout, response mapping into the envelope. Its consumer is published-URL verification — see below. | L1, contract types. | Invoke. |
 | **Dispatch pipeline** (L4) | The one canonical call path: identify, authenticate, enforce scopes, enforce capabilities, validate input, apply limits and cancellation, invoke adapter, validate output, scrub, audit, envelope. | L3, L1, the registry artifact. **Not L2** — see the acyclicity argument. | Dispatch. |
@@ -811,6 +872,14 @@ Two edges would obviously become cycles, and are cut deliberately:
   `classify`, and acts on the verdict. Neither the git-state interpretation nor the
   classification rule is duplicated, and no edge reverses. Without this split the obvious
   implementation gives journal a dependency on clone store and closes a cycle.
+- **The notifier has to be reachable from both ends of the stack**, and at L2 it was reachable
+  from neither. Terminal-state notification fires from the dispatch pipeline at L4, which may not
+  import L2 at all, and from boot recovery at L1, which sits below it — and neither declared it as
+  a dependency. It belongs at **L1**: it holds no git or host knowledge, takes a terminal state
+  and a reason as plain values, and depends only on the structured store and the clock, which is
+  the same test that places audit and journal there. Both callers then point downward with no
+  injection, and the rule that the outbox row is written in the same store transaction as the
+  journal settle becomes an intra-L1 write rather than a cross-layer one.
 - **Recovery also needs to know what each operation was supposed to achieve**, and that is L2
   knowledge sitting above both of them. Expected post-state for `git_commit`, and the resume step
   for `prepare_publish_branch`, are facts about the domain; the two modules that drive recovery
@@ -828,14 +897,21 @@ the seam `MCP-NEXT.md` Phase 8 exists to eventually cut, and it stops being cutt
 time the dispatch pipeline knows what a branch is. It is enforced by a dependency-direction
 check in CI, not by intent.
 
-**The composition root is what makes that rule satisfiable.** The dispatch pipeline has to end up
-calling a git operation without importing one, so a single module — the program entry point, not
-a layer — imports both the domain and the runtime, registers every L2 handler into the module
-adapter's catalogue by target name, registers every recovery descriptor into the recovery
-catalogue by the same key, injects the pipeline into the scheduler and the watcher, drives the
-maintenance pass across each module's own `runRetention`, and starts the surfaces. It is the only
-file exempt from the dependency-direction check, and the exemption is by path, so widening it is a
-visible diff rather than a habit. Everything above L2 therefore reaches
+**The composition root is what makes that rule satisfiable, and it does wiring only.** The
+dispatch pipeline has to end up calling a git operation without importing one, so a single module
+— the program entry point, not a layer — imports both the domain and the runtime, registers every
+L2 handler into the module adapter's catalogue by target name, registers every recovery descriptor
+into the recovery catalogue by the same key, injects the pipeline into the scheduler and the
+watcher, constructs the lifecycle module and hands it its collaborators, and starts the surfaces.
+It is the only file exempt from the dependency-direction check, and the exemption is by path, so
+widening it is a visible diff rather than a habit.
+
+**What it does not own is ordering.** The boot sequence, the order the maintenance pass drives
+each module's retention in, and the snapshot cadence are decisions with failure modes rather than
+wiring, and they live in the lifecycle module, which the dependency check examines like anything
+else. An earlier draft put them in the root, which made the code most able to create illegal edges
+the code no check looks at — and turned the exemption from a file into a subsystem, which this
+document had already rejected as an alternative before doing it by accretion. Everything above L2 therefore reaches
 the domain through a name resolved at startup instead of a symbol resolved at compile time, which
 is the same mechanism already chosen for the scheduler's identical problem.
 
@@ -848,13 +924,27 @@ path inside the contract fingerprint without a single slice ever exercising it. 
 standard applies to a whole adapter as much as to a validator: one that has never run is not known
 to do anything.
 
-**Published-URL verification is that consumer.** The final step of deployment verification is an
-HTTPS GET of the published URL, confirming a 200 and that the commit being served is the expected
-merge commit. It is genuinely an HTTP request rather than a `gh` invocation, so routing it through
-`exec` was always the odd shape; it is unauthenticated, so the adapter needs no credential
-dependency and its L1-only dependency list stands; and it already has a classified failure set —
-`stale-runtime`, `mixed-runtime`, `verification-credential`, `unexpected-profile-or-catalog` — so
-the response-mapping path is exercised across more than a success case.
+**Published-URL verification is that consumer.** The final step of verifying a *managed
+repository's* deployment is an HTTPS GET of its published URL, confirming a 200 and that the
+commit being served is the expected merge commit. It is genuinely an HTTP request rather than a
+`gh` invocation, so routing it through `exec` was always the odd shape, and it is unauthenticated,
+so the adapter needs no credential dependency and its L1-only dependency list stands. Its failure
+set is what an unauthenticated GET can actually distinguish: unreachable or non-2xx, a 200 serving
+a commit other than the expected one, and the declared timeout.
+
+**That is not the same verification as definition-of-done item 15, and an earlier draft conflated
+them.** Item 15 is about *this service* serving the expected build, and the four classifications
+the brief names — `stale-runtime`, `mixed-runtime`, `verification-credential`,
+`unexpected-profile-or-catalog` — come from its companion script, which polls `/healthz` until the
+commit SHA is stable and then runs a real authenticated `initialize → tools/list → repo_status`
+session. None of them is reachable by an unauthenticated GET of somebody else's site:
+`verification-credential` names a credential failure for a call with no credential, and
+`unexpected-profile-or-catalog` requires an MCP session against the thing being verified.
+
+So item 15 stays what the brief calls it — **an executable check that ships alongside the service,
+not a tool in the registry** — and keeps all four classifications. Attaching them to a target
+repository's published-URL check would have left item 15 with no owner anywhere in the design while
+giving the http adapter a failure set half of which it could never produce.
 
 Check and deploy **status** polling stays on the host adapter through `gh`. It is authenticated
 GitHub API surface, and moving it would put credentials at L3 and cut against keeping `gh` behind
@@ -1001,6 +1091,15 @@ operation.
    whose job is to unpark it. No console button rewrites a working tree, so the arbitrary-mutation
    route the non-goals forbid stays closed.
 
+   **What it does not resolve is an unmerged index**, and that boundary is stated rather than left
+   to be discovered. Nothing here edits file content, `commit` fails on a conflicted index, and
+   staging a conflicted path stages the markers. The exits are `git.raw` or host access — which is
+   coherent rather than a gap, because **the base tool surface cannot produce that state**: there
+   is no merge tool and no rebase tool, and by design there never will be. A conflicted index is
+   reachable only through the hatch or from outside the service, so requiring the hatch to leave
+   it asks for nothing that was not already granted deliberately. The repair session covers what
+   the base surface can actually create.
+
 ### 3. Boot and recovery — triggered by process start
 
 1. Open the lease file and take the exclusive advisory OS lock, then **self-test it with a real
@@ -1026,31 +1125,38 @@ operation.
 3. Verify the deployment ceiling names only capabilities in the contract set. Verify every
    registry operation has exactly one executor.
 4. Open the structured store; take the pre-migration copy, then run forward-only migrations.
-5. **If no operator credential exists, look for a provisioning file on the volume.** Its absence
-   is not fatal but readiness does not pass, and the log says what is missing. Its presence arms
-   a single first login that enrols the password and the mandatory TOTP factor, issues the
-   recovery codes once, and burns the file. See Operator identity.
+5. **If no operator credential exists, note that provisioning is pending.** Readiness still
+   passes: it reports whether the service can serve, not whether an operator exists yet, and
+   failing it would withhold traffic from the very enrolment route that resolves the condition.
+   Every console route answers `401` except enrolment, which requires the secret carried in the
+   provisioning file. See Operator identity.
 6. **Resolve every job left `running` by the previous process, before anything else touches the
-   scheduler** — recovering exactly the journal entries those jobs name, and nothing else. A job
-   that reached `running` wrote its `operationId` first, so its outcome is whatever the journal
-   says: an entry that recovery settles makes the job `done`, one that parks as `attention` makes
-   the job `needs-attention` with the same reason, and a job whose journal entry does not exist
-   never dispatched and returns to `pending`. **A `running` job is never simply fired again** —
-   its side effect may have been a push, a pull request or a merge, and re-running blind is how a
-   scheduled operation becomes a duplicate one.
+   scheduler** — from the journal alone, running no resume steps. A job that reached `running`
+   dispatched, and the pipeline stamped its `scheduledJobId` onto the journal entry it created, so
+   the entry is findable by querying on the job id. An entry recovery can settle makes the job
+   `done`; one that parks as `attention` makes the job `needs-attention` with the same reason; and
+   a job with no entry at all never dispatched and returns to `pending`. **A `running` job is
+   never simply fired again** — its side effect may have been a push, a pull request or a merge,
+   and re-running blind is how a scheduled operation becomes a duplicate one.
 
-   The recovery here is **targeted at those entries by `operationId`**, not a per-declaration
-   pass. Resolving a job needs a classification, and classifications come from recovery — so
-   without that scoping this step would either depend on the lazy pass below, which by design has
-   not run, or force an eager pass over the whole estate, which is the cost that pass exists to
-   avoid. Targeted recovery makes the boot cost scale with the number of interrupted jobs, which
-   is normally zero.
-7. **Re-validate every pending scheduled job against the registry just loaded.** An image upgrade
-   can rename a tool, remove one, or change its input schema while jobs referencing the old shape
-   sit pending; without this sweep the failure surfaces weeks later at fire time, with its cause
-   an upgrade nobody is still thinking about. A job whose tool no longer exists, or whose stored
-   input no longer validates, becomes `needs-attention` with the reason naming the upgrade, and
-   the operator sees it next to the fingerprint checks that caused it rather than at 03:00.
+   **This step classifies; it never resumes.** Running a resume step here would put a domain
+   mutation before the transports start, and a composite's resume can touch the host — which
+   would make boot depend on host reachability and a live credential, the exact cost for which
+   probing the host during recovery was rejected. Any entry needing a resume is left for the lazy
+   pass, and its job simply stays `running` until that happens, which is a state the console
+   shows rather than one that silently fires.
+7. **Re-validate every pending scheduled job — and every unsettled journal entry — against the
+   registry and catalogue just loaded.** An image upgrade can rename a tool, remove one, or change
+   its input schema while jobs referencing the old shape sit pending; without this sweep the
+   failure surfaces weeks later at fire time, with its cause an upgrade nobody is still thinking
+   about. A job whose tool no longer exists, or whose stored input no longer validates, becomes
+   `needs-attention` with the reason naming the upgrade.
+
+   The same upgrade can remove the **recovery descriptor** an unsettled entry depends on, and the
+   sweep catches that too: an entry whose tool has no descriptor in the new catalogue is parked as
+   `attention` here rather than falling into a lookup the recovery ladder has no branch for. Both
+   are store queries rather than git work, so the sweep costs nothing against lazy recovery, and
+   the operator sees both next to the fingerprint checks that caused them rather than at 03:00.
 8. Re-derive every clone's state from disk. The stored value is a report, not a source of truth.
 9. **Readiness passes and transports start**, before any recovery work runs. Recovery is
    per-declaration and lazy: a declaration with unsettled journal entries is marked
@@ -1071,8 +1177,14 @@ operation.
       The caller's connection died with the process; the notification is the only thing that can
       still reach them, and suppressing it here recreates "unwatched means unnoticed" inside the
       recovery path;
+    - no descriptor is found at all — park as `attention`. The boot sweep should have caught this,
+      and this is the backstop for an entry written between the sweep and now;
     - neither — the descriptor either declares a resume step or it does not. If it does, run it
-      and re-classify. If it does not, mark the entry `attention`, put the clone in
+      **as an ordinary operation through the pipeline, taking the global mutation lock for
+      itself**, never nested inside a triggering caller's lock: recovery-on-first-use runs to
+      completion *before* the triggering call acquires anything, so a non-reentrant mutex is never
+      re-entered and two mutations are never in flight. Then re-classify. If there is no resume
+      step, mark the entry `attention`, put the clone in
       `needs-attention`, block ordinary mutations against that declaration, report it in status,
       and notify at `attention` severity. The operator's route back out is the parked-operations
       view under `attention.resolve`, including the repair session that view now carries; without
@@ -1105,16 +1217,23 @@ leave undescribed — it is either an open setup route or a service nobody can l
 one it is should be a decision.
 
 **The first credential is consumed from a provisioning file on the volume**, written by an
-operator with host access. Boot looks for it only when no operator credential exists; while
-neither is present readiness does not pass and the log names what is missing, so the failure mode
-is a service that will not serve rather than one anybody can claim. The file arms exactly one
-login, which enrols the password and the mandatory TOTP factor, displays the ten recovery codes
-once, and burns the file.
+operator with host access. The file **carries a secret, and the enrolment route demands it** — its
+presence alone authorises nothing. That is the whole difference between a bootstrap and an open
+window: on a publicly reachable origin, a route that enrols whoever reaches it first while a file
+happens to exist is a race. Enrolment sets the password, enrols the mandatory TOTP factor, shows
+the ten recovery codes once, and burns the file.
+
+**Readiness passes while provisioning is pending.** Readiness reports whether the service can
+serve, not whether an operator exists yet — and behind the reverse proxy the brief mandates, a
+failed readiness is precisely what would withhold traffic from the enrolment route that resolves
+the condition. An earlier draft asserted both at once. The service comes up, answers `401` on
+every console route except enrolment, and reports in its logs and status endpoint that it is
+waiting to be provisioned.
 
 This is the same trust root as break-glass, deliberately: volume access is already the ultimate
 authority in this design, so provisioning introduces no new one. **No HTTP route is ever
-unauthenticated**, at any point in the lifecycle — which is the property a token printed to the
-logs and exchanged over an open setup route would not have.
+unauthenticated**, at any point in the lifecycle — enrolment included, which is what the secret
+buys and what a token printed to the logs and exchanged over an open setup route would not.
 
 ### Lockout recovery
 
@@ -1170,14 +1289,16 @@ its lifecycle is part of the security design rather than a framework default.
 | | 5xx or transport error | Exit code | Up to three retries with backoff, **read operations only** | `upstream` after exhaustion | Unchanged |
 | | Merge conflict | PR state | **Terminal.** No rebase tool exists and by design never will | `precondition` naming the branch and both heads | Branch and commits intact; notifier fires |
 | | Required check failed | Check status | Terminal for the operation | `precondition` | PR open, nothing merged; notifier fires |
-| **Filesystem / volume** | Disk full | Watermark check before clone and after each mutation | Requests a maintenance pass — **never evicts inline**, which would take a materialisation lock after a mutation lock. The pass applies each module's retention and evicts safe clones; if nothing is safe to release, the operation that needed the space is refused | `precondition` naming which of the seven consumers is taking the volume, and, when clones are the cause, the declarations blocking eviction | Nothing deleted beyond retention. **The service never deletes repository work to make room.** |
+| **Filesystem / volume** | Disk full | Watermark check before clone and after each mutation | Requests a maintenance pass — **never evicts inline**, which would take a materialisation lock after a mutation lock. The pass applies each module's retention and evicts safe clones; if nothing is safe to release, the operation that needed the space is refused | `precondition` naming which of the five consumers is taking the volume, with the store broken down by table, and, when clones are the cause, the declarations blocking eviction | Nothing deleted beyond retention. **The service never deletes repository work to make room.** |
 | | Corrupt clone | `rev-parse --git-dir` fails at materialisation | Refuses; does not clone over it | `precondition` naming `clone.remove` with its override as the exit, since the safe-to-evict predicate cannot be computed on a tree git will not read, and without an exit the declaration is blocked and the disk unreclaimable for the life of the instance | Directory untouched |
 | | Permission denied | Syscall error | Fatal at boot; `infrastructure` at runtime | `infrastructure` | Unchanged |
 | **Structured store** | Locked or busy | SQLite busy | Bounded retry with backoff | `infrastructure` after exhaustion | Transaction rolled back |
 | | Corrupt | Integrity check at boot | **Refuses to start**, naming the newest daily snapshot **and its age**, alongside the pre-migration copy. The two are for different failures: the pre-migration copy is a rollback target for a bad image and can be months old, so offering it as the answer to corruption would silently propose reverting every declaration, grant and journal entry written since the last upgrade | No service | Volume untouched; the audit log is still readable, which is why it does not live in this store |
 | | Migration fails | Non-zero from the migration step | Refuses to start; the backup was taken first | No service | The backup is the rollback target for item 18 |
 | **Identity provider** | Unreachable, key rotation, clock skew | Discovery or JWKS fetch failure; signature or validity-window failure | Federated login fails; **local password plus TOTP still works** | `401` with a reason | No session |
-| **Deploy target** (published-URL verification) | Deploy unfinished, wrong commit serving | Explicit poll for the exact merge commit SHA | Polls to the 1800 s cap | `precondition` classified as `stale-runtime`, `mixed-runtime`, `verification-credential` or `unexpected-profile-or-catalog` | Unchanged. **No code path returns a URL in a success position without a confirmed successful deploy for that exact commit.** |
+| **Deploy target** (a managed repository's published URL) | Unreachable or non-2xx | HTTP status from the http adapter | No retry inside the call | `upstream` | Unchanged |
+| | 200, but serving a commit other than the expected merge commit | Explicit check of the served commit against the expected SHA | Polls to the 1800 s cap | `precondition` naming both SHAs | Unchanged. **No code path returns a URL in a success position without a confirmed successful deploy for that exact commit.** |
+| **This service's own deployment** (definition-of-done item 15) | Stale or mixed runtime, wrong catalogue, verification credential rejected | The companion check: poll `/healthz` until the commit SHA is stable, then run a real `initialize → tools/list → repo_status` session | Classifies rather than reporting a bare pass | `stale-runtime`, `mixed-runtime`, `verification-credential`, `unexpected-profile-or-catalog`, or `verified`. **Not a registry tool** — an executable check shipped alongside the service, as the brief describes | Unchanged |
 | **Notifier endpoint** | Unreachable, non-2xx | HTTP status | Outbox retries with backoff, bounded, then stops retrying and **surfaces the row in the health view and the status endpoint**. It is not dropped: an endpoint down overnight is exactly when the 03:00 merge conflict lands, and a notification that fails silently recreates the unwatched-means-unnoticed failure one level up | Nothing — it never blocks the operation it describes | Outbox row marked failed, retained until the operator clears it |
 | **Content drop** (watcher) | Incomplete input — the target tool's schema is not satisfied | Validation before any git action | Moves the file to `failed/` with a sibling `.error.txt`, audits, notifies at `attention` | Nothing — there is no caller | File preserved in `failed/`. Nothing is ever deleted |
 | | Any later step fails — branch, write, stage, commit, push, PR, auto-merge | The step's own envelope | Same: `failed/` plus the reason, naming which step and what it returned | Nothing | Whatever the completed steps did. A commit may exist and be unpushed, or a PR may be open with auto-merge not enabled — the `.error.txt` says which |
@@ -1196,7 +1317,8 @@ its lifecycle is part of the security design rather than a framework default.
 | **Global mutation lock** | Held past the acquire timeout | Gives up waiting | `conflict`, naming the holding operation and its repository | None — the queued call never started |
 | | Queue depth exceeded | Immediate refusal | `conflict` | None |
 | **Materialisation lock** | Another caller is cloning the same declaration | Waits, bounded by the clone timeout | `conflict`, or the successful clone | The clone completes exactly once |
-| **Path allowlist** | `-A`, `--all`, `.`, a path containing `..` or `;`, or a path outside `writablePathPrefixes` | Rejects outright | `validation` | None |
+| **Path allowlist** | `-A`, `--all`, `.`, or a path containing `..` or `;` | Rejects outright | `validation` — the input is malformed, and no authority could ever permit it | None |
+| | A well-formed path outside the declaration's `writablePathPrefixes`, or inside it but stripped by the acting profile | Rejects outright; **audits it** | `authorization` — insufficient authority, not malformed input, per the envelope's generating rule. This is the refusal that indicates an unattended actor probing its unlock paths, so it takes the audited authority path rather than reading as a caller typo | None |
 | **Journal** | Cannot write the intent record | **Aborts the operation before acting.** An unrecoverable mutation is worse than a refused one | `infrastructure` | None |
 | **Audit** | Cannot append | Proceeds. Best-effort by design — a logging failure must never fail the call it describes | Nothing | Call completed, line missing |
 | | Cannot append the **`git.raw` intent line** | **Aborts before the child process starts.** A hatch use the service cannot record must not run. The claim is refusal at call time only, not that a recorded use stays recorded — see The escape hatch's residual risk | `infrastructure` | None |
@@ -1338,8 +1460,8 @@ Two locks, one counter, and a fixed acquisition order.
 
 ### The lock protocol
 
-The deadlock argument depends on all four rules, not on the order alone. Stated separately
-because three of them are the ones an implementer would otherwise have to invent.
+The deadlock argument depends on all five rules, not on the order alone. Stated separately
+because four of them are the ones an implementer would otherwise have to invent.
 
 1. **Acquisition order is always materialisation before mutation, never the reverse.**
 2. **A mutating caller holds the materialisation lock for the whole operation**, not just for the
@@ -1361,6 +1483,14 @@ because three of them are the ones an implementer would otherwise have to invent
    lock, so nothing else stops eviction deleting a directory a read's subprocess has open. The
    counter is checked on the eviction side precisely because the read side cannot afford to
    block: an evicting pass that finds a non-zero count skips that declaration and moves on.
+5. **A recovery resume step is an ordinary operation and takes the mutation lock for itself,
+   never inside another operation's hold.** Recovery-on-first-use completes *before* the
+   triggering call acquires anything, rather than running nested within it. Both halves matter:
+   nested, it would re-enter a promise-chain queue that is not reentrant; unlocked, it would be a
+   second repository mutation in flight, breaking the invariant that a crash leaves exactly one
+   half-done operation — which is the invariant that makes the journal's classification tractable
+   in the first place. The background sweep is subject to the same rule and is simply another
+   caller.
 
 With the order fixed over two lock classes and no path that acquires them in reverse, no cycle
 can form.
@@ -1658,6 +1788,65 @@ safe-to-evict predicate, so every drop-enabled declaration would become a standi
 blocker. The prior art carries the sequence through to a pull request with auto-merge on by
 default, and following it to a terminal state the producer can see is the whole point.
 
+**Orphaned declarations stay operable to the operator.** Rejected: *a second `clone.remove`
+override that discards unpushed work* — simplest, and it puts the one refusal the brief and the
+prior art both treat as absolute behind a flag. Rejected: *a narrower adoption predicate than the
+removal predicate*, so a clone ahead of upstream can be re-adopted — removes the trap for the
+commit case and re-opens what the adoption refusal closed, since the adopting grant inherits
+commits it never authorised. The trap existed because refusal and remedy shared one predicate:
+work too valuable to evict was work too valuable to remove, with nothing able to reach it in
+between.
+
+**Capabilities are typed declaration-scoped or instance-scoped.** Rejected: *every declaration
+grant implicitly contains the four operator capabilities* — one sentence and no new concept, and
+it fills `capabilityGrant` with entries that mean nothing, weakening the framing `git.raw` depends
+on. Rejected: *operator sessions skip layer 3 entirely* — neat and small, and it means a
+declaration grant can never narrow the operator, `git.raw` included.
+
+**`git.remote.write` is its own capability.** Rejected: *fold push into `git.local.write`* — one
+fewer thing to get wrong, and it hands push to every profile that can commit, including the
+unattended ones, collapsing the distinction `WATCHER_CAPABILITIES`'s separate `remote` flag draws
+today. Rejected: *fold push into `host.pr.write`* — groups everything that reaches the network,
+and leaves a `generic` declaration unable to push at all, contradicting "local git operations work
+against any host".
+
+**The notifier is at L1.** Rejected: *keep it at L2 and inject it into dispatch and recovery* —
+consistent with the mechanism already used three times, and it gives the composition root a fourth
+wiring job for a module with no domain knowledge to justify the placement. Rejected: *split
+enqueue from delivery across two layers* — satisfies the same-transaction rule cleanly, and gives
+"who notifies" two answers.
+
+**Lifecycle is a checked module; the composition root wires only.** Rejected: *keep boot,
+retention order and snapshot cadence in the root and widen the exemption* — zero restructuring,
+and it makes the code most able to create illegal edges the code no check examines. Rejected:
+*one composition root per concern* — each stays small, and three exempt paths is more surface
+outside the check rather than less.
+
+**Recovery resumes as an ordinary locked operation, ahead of its trigger.** Rejected: *forbid
+resume steps from touching the host* — removes the boot-path question entirely, and weakens
+recovery for composites, which span local and host steps by definition. Rejected: *hold the global
+mutex across the whole recovery pass* — nothing to interleave, and it serialises recovery against
+all other traffic, which is what lazy recovery exists to avoid.
+
+**The provisioning file carries a secret; readiness passes.** Rejected: *out-of-band enrolment via
+a CLI subcommand, no HTTP route at all* — the strongest reading of the no-unauthenticated-route
+property, and it requires container exec while the design elsewhere treats the console as the only
+operator surface. Rejected: *the file's presence is the authorisation* — nothing to manage, and it
+is an open enrolment window on a public origin for as long as it lasts.
+
+**Store retention ends in an incremental vacuum.** Rejected: *auto-vacuum at schema creation* —
+set once and forgotten, at the cost of write amplification on every transaction forever, decided
+before any data exists. Rejected: *accept that store retention frees no disk* — honest and
+simplest, and it lets the fastest-growing table drive the volume to 95 % with no remedy but
+evicting innocent clones.
+
+**The journal entry carries the scheduled job id, not the reverse.** Rejected: *dispatch accepts a
+caller-supplied `operationId`* — the most direct reading of the old text, and it is a
+caller-controlled identity input on the canonical call path, which is what "no privileged route"
+denies the scheduler. Rejected: *two-phase, where dispatch returns the id and the job records it
+after* — no privileged input, and it reintroduces the crash window the write-before-dispatch rule
+exists to close.
+
 **The drop dispatches a declaration-named registry tool, not a file copy.** Rejected: *the
 watcher copies dropped files to repository paths under the write allowlist* — the obvious reading
 of "file delivery", and it makes the watcher the one actor that chooses repository paths, with the
@@ -1699,8 +1888,9 @@ with its own named consumer.
 reachable from MCP sessions — is settled as reachable, with the declaration layer carrying the
 default-deny; see The escape hatch's residual risk for what that places on a single field.
 
-The fourth `/redteam` pass raised twenty-nine findings and every one is resolved in the text
-above rather than deferred here. Two of those resolutions add scope the earlier drafts did not
-carry — a content-drop watcher, and published-URL verification moving onto the http adapter —
-and both need sizing when `/slices` runs, rather than being assumed free because they arrived as
-review outcomes.
+The fourth `/redteam` pass raised twenty-nine findings and the fifth raised twenty-one against the
+fourth's repair; every one is resolved in the text above rather than deferred here. Two
+resolutions add scope the earlier drafts did not carry — a content-drop watcher, generalised from
+`blog-mcp`'s running one, and published-URL verification moving onto the http adapter — and both
+need sizing when `/slices` runs, rather than being assumed free because they arrived as review
+outcomes.
