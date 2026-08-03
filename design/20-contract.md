@@ -969,6 +969,12 @@ Defaults the design fixes: `auditSegmentBytes` 67108864, `auditDays` 90, `journa
 `watcher.enabled` false, `remoteOperationsPermitted` false. The remaining values are deployment-set
 and the design declines to fix them — see `## Unresolved`.
 
+Two of those U6 values acquire **defaults, not resolutions**, because the console session cannot be
+built without them: `sessionIdleSeconds` 3600 and `sessionAbsoluteSeconds` 43200. Both stay
+deployment-overridable and U6 still owns the question of what a deployment should choose; these are
+what the service uses when it is not told otherwise. They are bounded by `operatorSessionDays`,
+which retention already fixes at 7.
+
 ### Contract types (L0)
 
 ```ts
@@ -1181,7 +1187,7 @@ CREATE TABLE operator_credential (
   singleton             INTEGER PRIMARY KEY CHECK (singleton = 1),
   subject               TEXT    NOT NULL,
   password_hash         TEXT    NOT NULL,
-  totp_secret_hash      TEXT    NOT NULL,
+  totp_secret_sealed    TEXT    NOT NULL,
   totp_reenrol_required INTEGER NOT NULL CHECK (totp_reenrol_required IN (0,1)),
   enrolled_at           TEXT    NOT NULL
 ) STRICT;
@@ -1207,6 +1213,26 @@ CREATE INDEX operator_session_retention ON operator_session (absolute_expires_at
 
 `operator_credential` is a singleton table. The `CHECK` is what makes "one operator identity, no
 accounts table" enforceable rather than asserted.
+
+**`password_hash` is a one-way hash; `totp_secret_sealed` is not, and cannot be.** Verifying a
+password compares hashes, but verifying a TOTP code recomputes `HMAC-SHA1(secret, timeStep)` on
+every login and therefore needs the secret's bytes back. A one-way hash would make the factor
+enrollable once and unverifiable thereafter, which is why the column is sealed rather than hashed.
+
+The seal is authenticated symmetric encryption (AES-256-GCM), and **its key is a file in the
+credential mount, never on the data volume**. That placement is forced by two rules this document
+already carries: invariant S5 forbids a secret value in a persisted row, and the design's credential
+resolution requires that the structured store hold no secret so the pre-migration backups do not
+inherit secret handling. Those backups live on the data volume, so a key stored there would put the
+sealed secret and the means to open it in the same copy, and neither rule would hold.
+
+The key's reference name begins with `_`, which `CredentialRef`'s own pattern
+(`^[a-z0-9][a-z0-9._-]{0,63}$`) cannot produce. A declaration therefore **cannot** name it, by
+construction rather than by a rule somebody has to remember.
+
+When the key is absent or unreadable, `loginLocal` fails with `totp-key-unavailable`. This is not
+fatal at boot: the operator's route back in is break-glass, which needs the service running, and
+refusing to start would remove the recovery path for the very misconfiguration that caused it.
 
 ```sql
 CREATE TABLE scheduled_job (
@@ -1334,6 +1360,7 @@ rule that a failing credential is marked for one declaration and never reference
 | — its path | `audit/NNNNNN.jsonl` under the volume root, six zero-padded digits, numbered from `000001` | created on first append to that segment |
 | Provisioning file | an enrolment secret | by an operator with host access; burned at enrolment |
 | Break-glass file | a single-use token | by an operator with host access; consumed at next login |
+| TOTP sealing key — **in the credential mount, not on this volume** | 32 random bytes | by the deployment, before first enrolment; read at every local login, never written by the service |
 | Pending pull-request list, one per declaration | `PendingPullRequestList` as JSON | temp-then-rename on each tick |
 
 A missing or unparseable pending pull-request list is treated as empty and never thrown — a bad
@@ -2529,6 +2556,7 @@ type OperatorIdentityError = ModuleErrorBase & (
   | { readonly code: 'provisioning-secret-invalid' }
   | { readonly code: 'credentials-invalid' }
   | { readonly code: 'totp-invalid' }
+  | { readonly code: 'totp-key-unavailable' }
   | { readonly code: 'recovery-code-invalid' }
   | { readonly code: 'recovery-code-used' }
   | { readonly code: 'break-glass-invalid' }
@@ -2546,6 +2574,7 @@ type OperatorIdentityError = ModuleErrorBase & (
 | `not-provisioned` | Any console route except enrolment, before enrolment | no | `401`. Readiness still passes, because failing it would withhold traffic from the route that resolves the condition |
 | `already-provisioned`, `provisioning-secret-invalid` | Enrolment after the file was burned, or with the wrong secret | no | `401`. The file's presence authorises nothing |
 | `credentials-invalid`, `totp-invalid` | Local login | no | `401` with a reason. TOTP is enforced, not offered |
+| `totp-key-unavailable` | The sealing key is absent or unreadable, so no TOTP code can be verified | by the operator, after restoring the key | `401` naming the missing key. **Never fatal at boot** — break-glass is the way back in, and it needs the service running |
 | `recovery-code-invalid`, `recovery-code-used` | Recovery-code login | no | `401`. A successful use burns the code, audits, and forces TOTP re-enrolment |
 | `break-glass-invalid` | The token is absent, stale or already consumed | no | `401`. Consumption is audited |
 | `oidc-unavailable` | Discovery, JWKS, signature or validity-window failure | by the operator, later | `401` with a reason. **Local password plus TOTP still works** |
@@ -2759,6 +2788,11 @@ returned with a `401` challenge, are not stated.
 notifier's retry bound and backoff schedule, and the default `maxResultBytes`. The design says
 these "belong with the other operational numbers rather than in this document". The types are fixed
 above; the values are not.
+
+*Partly narrowed 2026-08-04:* `sessionIdleSeconds` and `sessionAbsoluteSeconds` now carry defaults
+(3600 and 43200, above), because S4's console session cannot exist without a number. U6 still owns
+what a deployment ought to choose — a default is what the service falls back to, not an answer to
+the question.
 
 **U7 — The console package's element type and build entry.** `ConsoleViewRegistration` is generic
 over the element type because the design fixes what a view receives and what it declares, but not
