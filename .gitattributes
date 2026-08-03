@@ -1,0 +1,21 @@
+# Line endings are LF in the repository and LF in the working tree, on every
+# host. This overrides core.autocrlf, which is `true` on the primary Windows
+# development host and would otherwise check every file out with CRLF.
+#
+# This is not a style preference. A shell script checked out with CRLF fails
+# inside a Linux container with a bad-interpreter error that names neither the
+# script nor the line endings, and this project ships a container with an
+# entrypoint script.
+* text=auto eol=lf
+
+# Binary assets: never touched, never diffed as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.woff binary
+*.woff2 binary

@@ -104,7 +104,9 @@ Today it lives in the browser: `ComposeView` calls `/api/branch` → `/api/posts
 
 ### Tool naming and the breaking-change cost
 
-Generic tools should not keep a `blog_` prefix; tool names describe operations (`git_commit`, `repo_declare`). But `MCP-NEXT.md` §7.5 states that tool names are public API identifiers, that renaming or removing one is a breaking change, and that it requires a documented deprecation period or an explicit major version change. Renaming ~30 tools is therefore a real migration cost with a real policy attached, not a rename. `/design` must decide whether `SubZeroDev.Blog` sees a compatibility shim, a deprecation window, or a clean break.
+Generic tools do not keep a `blog_` prefix; tool names describe operations (`git_commit`, `repo_declare`). `MCP-NEXT.md` §7.5 states that tool names are public API identifiers, that renaming one is a breaking change, and that it requires a documented deprecation period or an explicit major version change.
+
+**Resolved: a clean break at cutover.** New names only, with `SubZeroDev.Blog` migrating in the same coordinated change. No aliases and no deprecation window. §7.5's protection exists for consumers an author does not control; here both repositories and the only operator are the same person, so a window buys nothing and every alias would be a removable name sitting in `tools/list` for an agent to pick. Gated as definition-of-done item 21.
 
 ## Prior art
 
@@ -272,6 +274,7 @@ Twenty checkable statements. Nothing here is aspirational; each is either demons
 18. **Rollback is tested.** Returning `SubZeroDev.Blog` to its current server is documented and has been done once.
 19. **The console is verified in a real browser**, every view driven end to end against a real repository. The prior art records two genuine bugs found only this way, because its tests drove the API directly and never exercised client-side sequencing.
 20. **Operator documentation exists** — configuration, onboarding a repository, backup and recovery, revocation, rollback.
+21. **No tool ships under a name intended for removal.** Generic tools carry operation-descriptive names (`git_commit`, `repo_declare`), never a `blog_` prefix, from their first release. `SubZeroDev.Blog` migrates to the new names in the same coordinated cutover — a clean break, no aliases, no deprecation window.
 
 ## Environment
 

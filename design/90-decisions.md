@@ -24,6 +24,19 @@ Append-only. Newest at the top. The rejected alternatives are the point — with
 
 ---
 
+### 2026-08-03 — `.gitattributes` pins LF; `core.autocrlf` overridden per repository
+Context: Every commit warned "LF will be replaced by CRLF the next time Git touches it". `core.autocrlf` is `true` on the primary Windows host, so checkouts would carry CRLF while the house convention in `AGENTS.md` is LF. This project ships a container with an entrypoint script, and a shell script checked out with CRLF fails inside a Linux container with a bad-interpreter error naming neither the script nor the line endings.
+Chosen: `* text=auto eol=lf` in `.gitattributes`, plus explicit `binary` for raster and archive types. One file, effective on every host and every clone regardless of local git configuration.
+Rejected: **Force LF for scripts only** — narrower, and it leaves two rules to remember whenever a new file type appears. **Defer until the first script exists** — which is exactly when someone is already debugging a container that will not start. **Set `core.autocrlf=input` globally on the host** — fixes every repository at once and silently changes behaviour for the other twelve in the estate.
+Reversibility: cheap, though a later change would rewrite the working tree of every clone.
+
+### 2026-08-03 — Tool renaming is a clean break at cutover, no aliases
+Context: Roughly 30 repository-generic tools carry a `blog_` prefix. `MCP-NEXT.md` §7.5 makes tool names public API identifiers and requires a documented deprecation period or an explicit major version change to rename one. `SubZeroDev.Blog` is a live consumer of every one of them.
+Chosen: Operation-descriptive names from first release, with `SubZeroDev.Blog` migrating in the same coordinated cutover. No aliases, no deprecation window. Gated as definition-of-done item 21: no tool ships under a name intended for removal.
+Rejected: **Aliases for a stated window, then removed** — follows §7.5 literally and lets the two repositories move independently; rejected because every alias is a removable name sitting in `tools/list` for an agent to pick, and doubling the tool list during the window works against the registration-is-the-boundary principle. **Aliases kept permanently** — nothing ever breaks, and the generic surface carries `blog_` names forever, which is the coupling this extraction exists to remove. **Defer to `/contract`** — naming is a contract concern, but the policy determines how the Blog cutover is sequenced and was needed sooner.
+Reversibility: expensive after release — a shipped name is a published identifier.
+Note: §7.5's protection exists for consumers an author does not control. Here both repositories and the sole operator are the same person, so a deprecation window buys nothing that a coordinated change does not.
+
 ### 2026-08-03 — Deliverable 1 is new construction; `MCP-NEXT.md` is a plan, not a codebase
 Context: `/brief-check` found the brief asserting "both are extractions of working code, not new invention" while `MCP-NEXT.md` opens with "Status: proposed; no behavior described in this document is implemented until the corresponding phase is merged and validated." The contract, compiler, registry, fingerprint, adapters and resource server do not exist anywhere.
 Chosen: Build MCP Next in this repository. Deliverable 1 is eight phases of new construction carrying design risk; deliverable 2 remains extraction of proven code carrying migration risk. The false claim has been struck from the brief rather than softened.
