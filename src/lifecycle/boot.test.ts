@@ -9,8 +9,26 @@ import { createAudit } from '../audit/audit.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
 import { NO_CONSOLE_FINGERPRINT } from '../surfaces/http-server.ts';
+import { createOperatorIdentity } from '../operator-identity/operator-identity.ts';
+import type { Audit } from '../audit/audit.ts';
 import { createLifecycle } from './boot.ts';
 import type { LeaseAcquisition, LockAcquirer } from './lease.ts';
+
+/**
+ * A subdirectory of the test volume stands in for the credential mount. The
+ * contract requires the mount live outside the data volume in a real
+ * deployment (the TOTP sealing key must not share a backup with the sealed
+ * secret it opens); nothing at the type level enforces that separation, and
+ * a nested temp directory needs no cleanup of its own beyond `withVolumeAsync`'s.
+ */
+function operatorIdentityFor(volume: string, audit: Audit) {
+  return createOperatorIdentity({
+    volumeRoot: volume,
+    credentialMountRoot: path.join(volume, '_credential-mount'),
+    clock: systemClock,
+    audit,
+  });
+}
 
 /**
  * Writes the artifact boot step 2 verifies. The compiler is build-time only,
@@ -45,6 +63,7 @@ function lifecycleFor(volume: string, acquirer?: LockAcquirer) {
     clock: systemClock,
     store,
     audit,
+    operatorIdentity: operatorIdentityFor(volume, audit),
     consoleFingerprint: NO_CONSOLE_FINGERPRINT,
     ...(acquirer ? { acquirer } : {}),
   });
@@ -246,13 +265,15 @@ test('a boot that fails after opening the store closes it again, leaking no hand
     const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
     let closed = 0;
     const countingStore = { ...store, close: async () => { closed += 1; await store.close(); } };
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
 
     const lifecycle = createLifecycle({
       volumeRoot: volume,
       buildDir: writeBuildDir(volume),
       clock: systemClock,
       store: countingStore,
-      audit: createAudit({ volumeRoot: volume, clock: systemClock }),
+      audit,
+      operatorIdentity: operatorIdentityFor(volume, audit),
       consoleFingerprint: NO_CONSOLE_FINGERPRINT,
     });
 
@@ -265,12 +286,14 @@ test('a boot that fails after opening the store closes it again, leaking no hand
 test('a registry that is absent reports registry-unreadable, not a mismatch with invented digests', async () => {
   await withVolumeAsync(async (volume) => {
     const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
     const lifecycle = createLifecycle({
       volumeRoot: volume,
       buildDir: path.join(volume, 'no-such-build-dir'),
       clock: systemClock,
       store,
-      audit: createAudit({ volumeRoot: volume, clock: systemClock }),
+      audit,
+      operatorIdentity: operatorIdentityFor(volume, audit),
       consoleFingerprint: NO_CONSOLE_FINGERPRINT,
     });
 
