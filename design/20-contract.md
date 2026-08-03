@@ -1977,6 +1977,11 @@ implementation:
 ```ts
 declare const MCP_RESOURCE_URI_TEMPLATE: '/mcp/{declarationId}';
 
+interface LivenessReport {
+  readonly ready: boolean;
+  readonly commitSha: GitSha;
+}
+
 interface VersionReport {
   readonly commitSha: GitSha;
   readonly contractFingerprint: Sha256Hex;
@@ -1994,6 +1999,12 @@ interface HealthReport {
   readonly volume: VolumeUsage;
 }
 ```
+
+`LivenessReport` is the **only** payload served without authentication, on `/healthz`. It carries
+readiness and the running commit and nothing else. `VersionReport` and `HealthReport` are
+authenticated console routes: the fingerprints, the chain state, the failing credential references
+and the volume breakdown are all operator data, and item 15's companion check reaches the catalogue
+through an authenticated `tools/list` rather than through the probe.
 
 A bearer route accepts no cookie and a cookie route accepts no bearer. The route table itself is
 not fixed here — see `## Unresolved`.
@@ -2551,7 +2562,7 @@ responsible for maintaining it.
 | E5 | No code path returns a published URL in a success position without a confirmed successful deploy for that exact commit. | Host adapter, Http adapter |
 | E6 | A bearer-authenticated route accepts no cookie, and a cookie-authenticated route accepts no bearer. | Surfaces |
 | E7 | Every mutating cookie route requires an `Origin` check and a double-submit token. | Surfaces |
-| E8 | No HTTP route is unauthenticated at any point in the lifecycle, enrolment included. | Surfaces, Operator identity |
+| E8 | No route exposing repository, credential, audit, volume or operator state is unauthenticated at any point in the lifecycle, enrolment included. `LivenessReport` on `/healthz` is the sole unauthenticated payload and carries only `ready` and `commitSha`. | Surfaces, Operator identity |
 
 ### Build and layering
 

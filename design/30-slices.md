@@ -41,26 +41,22 @@ first acceptance criterion, not an implementation detail.
 | **U6** — the deferred operational numbers | S15, S17 | S15 for `hatchSeconds`, S17 for the rest |
 | **U7** — the console element type and build entry | S19 | S19 |
 
-## A contradiction to adjudicate before S1
+## A contradiction found while slicing, since resolved
 
-`20-contract.md` invariant **E8** says no HTTP route is unauthenticated at any point in the
-lifecycle. `10-design.md` § Failure modes has definition-of-done item 15's companion check **poll
-`/healthz` unauthenticated** until the commit SHA is stable. Both cannot be true.
-
-The design's sentence sits inside the operator-identity section and is arguing about enrolment; E8
-generalised it to every route, which is where the conflict came from. Two readings are defensible —
-the health and version routes are exempt because they carry no repository data and item 15 needs
-them before a session exists, or the companion check authenticates and E8 stands as written.
-**Not resolved here.** S1 declares the routes and their payloads either way; the reading that wins
-changes only whether a credential is required, and the decision belongs to whoever owns E8.
+Writing S1's acceptance criteria surfaced a conflict between contract invariant **E8** — no HTTP
+route unauthenticated — and the design's own item 15 companion check polling `/healthz`
+unauthenticated. **Resolved 2026-08-03 by splitting the payload**, not by picking a reading: the
+probe carries `LivenessReport`, which is `ready` and `commitSha` and nothing else, and the operator
+health report is a separate authenticated route. Both documents are amended and the decision log
+carries the reasoning. S1 below reflects the resolution.
 
 ---
 
 ## S1 — The contract compiles, and the service refuses to start on a mismatch
 
 Delivers: a build that turns tool declarations into a fingerprinted registry, and a service that
-starts, answers `/healthz` and a version endpoint reporting its commit SHA and contract
-fingerprint, and refuses to start when the registry does not match.
+starts, answers `/healthz` with readiness and its running commit, reports its contract fingerprint
+on an authenticated version route, and refuses to start when the registry does not match.
 
 Touches: Contract types (L0), Compiler (L0), Clock and the result envelope (L1), Lifecycle (L1 —
 boot steps 2 and 3 only), Surfaces (L5 — health and version routes only), composition root.
@@ -79,13 +75,17 @@ Acceptance:
   is not known to constrain anything.
 - Editing one byte of the emitted registry artifact makes boot exit non-zero with
   `fingerprint-mismatch` naming the expected and found hashes, and no transport starts.
-- `/healthz` returns 200 with `ready: true`, and `version.contractFingerprint` equals the value the
-  build printed.
+- `/healthz` returns 200 with a `LivenessReport` carrying exactly two fields, `ready` and
+  `commitSha`. A test asserts the serialised body contains no other key — this is the route the
+  contradiction above was resolved against, and the guard is what keeps operator data from
+  accreting onto it later.
+- The version route returns `contractFingerprint` equal to the value the build printed, and answers
+  `401` without a credential.
 - A check fails the build if any runtime module imports the compiler (invariant B8).
 
 Out of scope: declaring any product tool — the inventory is U1 and nothing before S6 needs one; the
-module and http adapters; the deployment ceiling check (S5); the console asset manifest (S19);
-resolving the E8 contradiction above.
+module and http adapters; the deployment ceiling check (S5); the console asset manifest (S19); the
+full `HealthReport` payload, which needs subsystems that do not exist until S3 and S11.
 
 ---
 
@@ -140,8 +140,8 @@ Acceptance:
 - 500 concurrent appends produce 500 lines with no duplicate sequence number and a chain that
   verifies — the single-writer queue holding under overlap that a lock-free path would break.
 - Deleting one line from the middle of a segment makes `verify` return an `AuditChainBreak` naming
-  the sequence, the expected hash and the found hash; `/healthz` reports it; **boot still starts and
-  serves.**
+  the sequence, the expected hash and the found hash; the authenticated health report shows it;
+  **boot still starts and serves.**
 - Truncating the file at any point produces the same outcome. Editing one field of one line
   produces the same outcome.
 - Rotation at `auditSegmentBytes` opens a new segment beginning with the previous segment's
