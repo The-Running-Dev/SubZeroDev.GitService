@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { ok, err, type Outcome } from '../shared/outcome.ts';
@@ -57,6 +57,17 @@ export interface Declarations {
 }
 
 /**
+ * `cloneExists: false` is the only reading of "no conflict" — a clone that
+ * was never materialised has nothing to repoint. `cloneExists: true` with
+ * `remote: null` means a directory is present but its origin could not be
+ * verified (an unreadable tree, a missing/unreadable `origin` remote), which
+ * must refuse adoption rather than pass as "nothing to compare against":
+ * conflating "unknown" with "no conflict" is what let an unverifiable
+ * directory be adopted silently (review finding #3).
+ */
+export type ObservedRemoteCheck = { readonly cloneExists: false } | { readonly cloneExists: true; readonly remote: CloneUrl | null };
+
+/**
  * The one piece of clone-directory knowledge `declare()` needs (adoption
  * safety, remote cross-check) and cannot compute itself — that is entirely
  * `CloneStore`'s domain, which the design's own module table lists as
@@ -68,7 +79,7 @@ export interface Declarations {
  * surface stays legible.
  */
 export interface CloneAdoptionCheck {
-  observedRemote(declarationId: DeclarationId): Promise<CloneUrl | null>;
+  observedRemote(declarationId: DeclarationId): Promise<ObservedRemoteCheck>;
   isSafeToAdopt(declarationId: DeclarationId): Promise<SafeToEvictVerdict>;
 }
 
@@ -240,9 +251,28 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
 
       if (existing && existing.state === 'orphaned') {
         const check = deps.cloneAdoptionCheck();
-        const observed = await check.observedRemote(input.id);
-        if (observed !== null && observed !== input.cloneUrl) {
-          return err(declarationError({ code: 'remote-mismatch', declared: input.cloneUrl, observed }, `orphaned clone remote '${observed}' does not match declared '${input.cloneUrl}'`));
+        const remoteCheck = await check.observedRemote(input.id);
+        if (remoteCheck.cloneExists) {
+          if (remoteCheck.remote === null) {
+            // A directory exists but its remote could not be verified — fail
+            // closed rather than treat "unknown" as "no conflict" (review
+            // finding #3). Not `remote-mismatch`: there is no second remote
+            // value to report, only an inability to confirm the one on disk.
+            return err(
+              declarationError(
+                { code: 'adoption-refused', blockers: [{ kind: 'corrupt-tree' }] },
+                `the orphaned clone for '${input.id}' exists but its remote could not be verified`,
+              ),
+            );
+          }
+          if (remoteCheck.remote !== input.cloneUrl) {
+            return err(
+              declarationError(
+                { code: 'remote-mismatch', declared: input.cloneUrl, observed: remoteCheck.remote },
+                `orphaned clone remote '${remoteCheck.remote}' does not match declared '${input.cloneUrl}'`,
+              ),
+            );
+          }
         }
         const verdict = await check.isSafeToAdopt(input.id);
         if (!verdict.safe) {
@@ -403,7 +433,14 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
         return rows[0] ?? null;
       });
       if (!cloneCheck.ok) return err(declarationError({ code: 'store-failed', cause: cloneCheck.error }, cloneCheck.error.summary));
-      if (cloneCheck.value && cloneCheck.value.state !== 'absent' && cloneCheck.value.state !== 'evicted') {
+      const rowSaysPresent = cloneCheck.value !== null && cloneCheck.value.state !== 'absent' && cloneCheck.value.state !== 'evicted';
+      // The row is a report, not a source of truth (the same rule
+      // `CloneStore` itself follows): a clone directory can exist with no
+      // row at all — `ensure()` died before its first write, or the row was
+      // otherwise lost — and a DB-only check would let `declaration.remove`
+      // through while an untracked clone is left on disk (review finding #4).
+      const directoryPresent = existsSync(path.join(volumeRoot, 'clones', id));
+      if (rowSaysPresent || directoryPresent) {
         return err(declarationError({ code: 'clone-still-present' }, `a clone for '${id}' still exists — run clone.remove first`));
       }
 

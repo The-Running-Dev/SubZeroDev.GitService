@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { systemClock } from '../clock/clock.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
@@ -42,7 +43,7 @@ function declarationsFor(
   opts: { readonly remoteHostAllowlist?: readonly RemoteHost[]; readonly ceiling?: DeploymentCeiling; readonly adoptionCheck?: CloneAdoptionCheck } = {},
 ) {
   const adoptionCheck: CloneAdoptionCheck = opts.adoptionCheck ?? {
-    observedRemote: async () => null,
+    observedRemote: async () => ({ cloneExists: false }),
     isSafeToAdopt: async () => ({ safe: true }),
   };
   return createDeclarations({
@@ -150,8 +151,14 @@ test('declaring an id that is already active returns already-exists', async () =
 test('re-declaring an id whose orphaned clone is dirty returns adoption-refused naming the blockers', async () => {
   await withMigratedVolume(async (volume) => {
     const dirtyVerdict: SafeToEvictVerdict = { safe: false, blockers: [{ kind: 'worktree-dirty' }] };
+    // A clone that exists and matches the declared remote (so the remote
+    // check itself passes cleanly) but whose working tree is dirty per
+    // `isSafeToAdopt` — the case this test targets.
     const declarations = declarationsFor(volume, {
-      adoptionCheck: { observedRemote: async () => null, isSafeToAdopt: async () => dirtyVerdict },
+      adoptionCheck: {
+        observedRemote: async () => ({ cloneExists: true, remote: `https://github.com/example/repo-6.git` as never }),
+        isSafeToAdopt: async () => dirtyVerdict,
+      },
     });
 
     const declared = await declarations.declare(declareInputFor('repo-6'), OPERATOR);
@@ -175,7 +182,7 @@ test('re-declaring an id whose orphaned clone points at a different remote retur
   await withMigratedVolume(async (volume) => {
     const declarations = declarationsFor(volume, {
       adoptionCheck: {
-        observedRemote: async () => 'https://github.com/example/elsewhere.git' as never,
+        observedRemote: async () => ({ cloneExists: true, remote: 'https://github.com/example/elsewhere.git' as never }),
         isSafeToAdopt: async () => ({ safe: true }),
       },
     });
@@ -188,6 +195,34 @@ test('re-declaring an id whose orphaned clone points at a different remote retur
     const readopted = await declarations.declare(declareInputFor('repo-6b'), OPERATOR);
     assert.equal(readopted.ok, false);
     if (!readopted.ok) assert.equal(readopted.error.code, 'remote-mismatch');
+  });
+});
+
+test('re-declaring an id whose orphaned clone exists but whose remote could not be verified is refused, not silently adopted', async () => {
+  await withMigratedVolume(async (volume) => {
+    // `cloneExists: true, remote: null` — a directory is present but its
+    // origin is unreadable. Must refuse, not pass as "nothing to compare
+    // against" (review finding #3).
+    const declarations = declarationsFor(volume, {
+      adoptionCheck: {
+        observedRemote: async () => ({ cloneExists: true, remote: null }),
+        isSafeToAdopt: async () => ({ safe: true }),
+      },
+    });
+
+    const declared = await declarations.declare(declareInputFor('repo-6c'), OPERATOR);
+    assert.equal(declared.ok, true);
+    const orphaned = await declarations.orphan('repo-6c' as DeclareInput['id'], OPERATOR);
+    assert.equal(orphaned.ok, true);
+
+    const readopted = await declarations.declare(declareInputFor('repo-6c'), OPERATOR);
+    assert.equal(readopted.ok, false);
+    if (!readopted.ok) {
+      assert.equal(readopted.error.code, 'adoption-refused');
+      if (readopted.error.code === 'adoption-refused') {
+        assert.deepEqual(readopted.error.blockers, [{ kind: 'corrupt-tree' }]);
+      }
+    }
   });
 });
 
@@ -209,6 +244,25 @@ test('declaration.remove refuses while a clone remains, and succeeds once it doe
     upsertCloneRow(volume, 'repo-7', 'absent');
     const removedAgain = await declarations.remove('repo-7' as DeclareInput['id'], OPERATOR);
     assert.equal(removedAgain.ok, true);
+  });
+});
+
+test('declaration.remove refuses when a clone directory exists on disk with no row in the clone table', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declarations = declarationsFor(volume);
+    const declared = await declarations.declare(declareInputFor('repo-7b'), OPERATOR);
+    assert.equal(declared.ok, true);
+
+    // No row in `clone` at all — simulates `ensure()` dying before its first
+    // write, or a row otherwise lost. Only the directory is evidence.
+    mkdirSync(path.join(volume, 'clones', 'repo-7b'), { recursive: true });
+
+    const orphaned = await declarations.orphan('repo-7b' as DeclareInput['id'], OPERATOR);
+    assert.equal(orphaned.ok, true);
+
+    const removed = await declarations.remove('repo-7b' as DeclareInput['id'], OPERATOR);
+    assert.equal(removed.ok, false);
+    if (!removed.ok) assert.equal(removed.error.code, 'clone-still-present');
   });
 });
 

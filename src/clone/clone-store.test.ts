@@ -326,7 +326,7 @@ test('orphaning marks the declaration orphaned and leaves the clone directory un
       clock: systemClock,
       remoteHostAllowlist: [],
       ceiling: new Set() as unknown as DeploymentCeiling,
-      cloneAdoptionCheck: () => ({ observedRemote: async () => null, isSafeToAdopt: async () => ({ safe: true }) }),
+      cloneAdoptionCheck: () => ({ observedRemote: async () => ({ cloneExists: false }), isSafeToAdopt: async () => ({ safe: true }) }),
     });
     const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations });
 
@@ -399,5 +399,73 @@ test('clone.remove refuses a tree holding commits unreachable from origin/<base>
     if (!withOverride.ok) assert.equal(withOverride.error.code, 'not-safe-to-remove');
 
     assert.equal(existsSync(clonePath), true, 'nothing was removed on either attempt');
+  });
+});
+
+test('ensure() reconciles a stale clone-row generation to the declaration actually passed in', async () => {
+  await withMigratedVolume(async (volume) => {
+    const remote = createBareGitRemote();
+    const genOne = fixtureDeclaration('repo-regen', remote);
+    const exec = createExec({ volumeRoot: volume });
+    const locks = createLocks();
+    // Both generations resolve to the same declaration id, so a single
+    // `declarationsStubFor` swap is enough to represent "this id got
+    // re-declared under a new generation" without exercising `declare()`.
+    let current = genOne;
+    const declarations: Pick<Declarations, 'get'> = { async get(id) { return id === current.id ? current : null; } };
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations });
+
+    const first = await cloneStore.ensure(genOne, fixtureHolder(genOne.id), noopSignal());
+    assert.equal(first.ok, true);
+    if (!first.ok) return;
+    assert.equal(first.value.clone.generation, 1);
+    first.value.materialisationLock.release();
+
+    const genTwo: Declaration = { ...genOne, generation: 2 as Declaration['generation'] };
+    current = genTwo;
+
+    const second = await cloneStore.ensure(genTwo, fixtureHolder(genTwo.id), noopSignal());
+    assert.equal(second.ok, true);
+    if (!second.ok) return;
+    assert.equal(second.value.clone.generation, 2, 'the ready-clone short-circuit reconciles to the passed declaration\'s generation');
+    second.value.materialisationLock.release();
+
+    const described = await cloneStore.describe(genOne.id);
+    assert.equal(described.ok, true);
+    if (described.ok) assert.equal(described.value.generation, 2, 'and the persisted row reflects it too');
+  });
+});
+
+test('computeBlockers fails closed: a failed git status check refuses removal rather than reporting no blockers', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declaration = fixtureDeclaration('repo-failclosed', createBareGitRemote());
+    const real = createExec({ volumeRoot: volume });
+    const locks = createLocks();
+
+    // A clean clone with no real safety issue at all — if the fail-open bug
+    // were still present, `git status` failing would report zero blockers
+    // and `remove()` would proceed to delete a perfectly fine clone.
+    const flaky: Exec = {
+      ...real,
+      async runGit(request: ExecRequest): Promise<Outcome<ExecResult, ExecError>> {
+        if (request.argv[0] === 'status') {
+          return { ok: false, error: execError({ code: 'nonzero-exit', exitCode: 1, stderr: 'simulated status failure' }, 'forced failure for test') };
+        }
+        return real.runGit(request);
+      },
+    };
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec: real, locks, declarations: declarationsStubFor(declaration) });
+
+    const ensured = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(ensured.ok, true);
+    if (!ensured.ok) return;
+    ensured.value.materialisationLock.release();
+
+    const flakyCloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec: flaky, locks, declarations: declarationsStubFor(declaration) });
+    const actor = { kind: 'operator' as const, subject: 'op' as never, clientId: null, grantId: null };
+    const removed = await flakyCloneStore.remove(declaration.id, { permitCorruptTree: false }, actor);
+    assert.equal(removed.ok, false, 'a git command that cannot be verified must refuse, not silently allow removal');
+    if (!removed.ok) assert.equal(removed.error.code, 'not-safe-to-remove');
+    assert.equal(existsSync(ensured.value.clone.path), true, 'nothing was removed while safety could not be established');
   });
 });

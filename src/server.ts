@@ -111,7 +111,13 @@ async function main(): Promise<void> {
       return {
         observedRemote: async (id) => {
           const described = await store.describe(id);
-          return described.ok ? described.value.observedRemote : null;
+          // A failed lookup can't be reported as "no clone" — that would
+          // let adoption through on unverifiable data. Fail closed: report
+          // a clone as present with an unknown remote, which `declare()`
+          // refuses (review finding #3).
+          if (!described.ok) return { cloneExists: true, remote: null };
+          if (described.value.state === 'absent') return { cloneExists: false };
+          return { cloneExists: true, remote: described.value.observedRemote };
         },
         isSafeToAdopt: async (id) => {
           const verdict = await store.isSafeToEvict(id, true);

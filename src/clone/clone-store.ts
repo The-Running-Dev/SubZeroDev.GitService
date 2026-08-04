@@ -128,16 +128,23 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
     return path.join(clonesRoot, declarationId) as ClonePath;
   }
 
-  function getRow(declarationId: DeclarationId): CloneRow | null {
-    const result = withDb(volumeRoot, (db) => {
+  /**
+   * `null` means "no row" — a real, distinct answer from a failure to read
+   * the store at all, which is `err(...)`. Callers must not conflate the two
+   * (review finding #1): a store failure reported as "no row" would let
+   * `describe()` claim `absent` for a repository that may well be cloned,
+   * inviting a duplicate clone or an unsafe eviction decision made on
+   * fabricated data.
+   */
+  function getRow(declarationId: DeclarationId): Outcome<CloneRow | null, StoreError> {
+    return withDb(volumeRoot, (db) => {
       const rows = db.prepare('SELECT * FROM clone WHERE declaration_id = ?').all(declarationId) as unknown as CloneRow[];
       return rows[0] ?? null;
     });
-    return result.ok ? result.value : null;
   }
 
-  function upsertRow(row: Omit<CloneRow, 'generation'> & { readonly generation: number }): void {
-    withDb(volumeRoot, (db) => {
+  function upsertRow(row: Omit<CloneRow, 'generation'> & { readonly generation: number }): Outcome<void, StoreError> {
+    return withDb(volumeRoot, (db) => {
       db.prepare(
         `INSERT INTO clone (declaration_id, generation, state, path, size_bytes, last_operation_at, observed_remote, attention_reason)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -149,8 +156,8 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
     });
   }
 
-  function deleteRow(declarationId: DeclarationId): void {
-    withDb(volumeRoot, (db) => {
+  function deleteRow(declarationId: DeclarationId): Outcome<void, StoreError> {
+    return withDb(volumeRoot, (db) => {
       db.prepare('DELETE FROM clone WHERE declaration_id = ?').run(declarationId);
     });
   }
@@ -169,9 +176,11 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
     };
   }
 
-  async function describeInternal(declarationId: DeclarationId): Promise<Clone> {
+  /** The store-failed path callers must not paper over — see `getRow`'s doc comment. */
+  async function describeInternal(declarationId: DeclarationId): Promise<Outcome<Clone, CloneStoreError>> {
     const row = getRow(declarationId);
-    return row ? toClone(row) : synthesizedAbsent(declarationId);
+    if (!row.ok) return err(cloneStoreError({ code: 'store-failed', cause: row.error }, row.error.summary));
+    return ok(row.value ? toClone(row.value) : await synthesizedAbsent(declarationId));
   }
 
   function removePartial(clonePath: string): void {
@@ -194,6 +203,16 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
     return result.ok;
   }
 
+  /**
+   * `null` is only a truthful answer when the caller already knows no clone
+   * exists. For a directory that *does* exist, a failed `remote get-url`
+   * must not be read as "no conflict" (review finding #3) — an unreadable
+   * origin is exactly the case invariant "never repoint an existing
+   * checkout" exists to guard, and silently adopting it would be repointing
+   * blind. Every call site below only calls this after confirming the
+   * directory is present, so a failure here is always treated as refusing,
+   * never as "nothing to compare against".
+   */
   async function readObservedRemote(clonePath: string, signal: AbortSignal): Promise<CloneUrl | null> {
     const result = await exec.runGit({
       argv: ['remote', 'get-url', 'origin'],
@@ -237,6 +256,20 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
     };
   }
 
+  /**
+   * Fails closed (review finding #2): every safety-relevant probe — `status`,
+   * `stash list`, the unreachable-commits count against `origin/<base>` —
+   * returns `'corrupt'` on its own failure rather than silently contributing
+   * zero blockers. A command that cannot run is not evidence of safety, and
+   * treating it as "nothing to report" is exactly what let `remove()`/
+   * eviction delete a tree whose safety was never actually established.
+   *
+   * The upstream-ahead check (`@{u}`) is the one exception: a branch with no
+   * configured upstream fails that command legitimately and constantly, and
+   * there is nothing to be "ahead of" when there is no upstream to compare
+   * against — the unpushed-work risk that check would catch is already
+   * covered by the unreachable-commits check above it.
+   */
   async function computeBlockers(declarationId: DeclarationId, clonePath: string, signal: AbortSignal): Promise<readonly EvictionBlocker[] | 'corrupt'> {
     if (!(await gitDirReadable(clonePath, signal))) return 'corrupt';
 
@@ -245,13 +278,13 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
     if (declaration?.pinned) blockers.push({ kind: 'pinned' });
 
     const statusResult = await exec.runGit({ argv: ['status', '--porcelain=v1'], cwd: clonePath as ClonePath, timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS, credential: null, signal });
-    if (statusResult.ok && statusResult.value.stdout.trim().length > 0) blockers.push({ kind: 'worktree-dirty' });
+    if (!statusResult.ok) return 'corrupt';
+    if (statusResult.value.stdout.trim().length > 0) blockers.push({ kind: 'worktree-dirty' });
 
     const stashResult = await exec.runGit({ argv: ['stash', 'list'], cwd: clonePath as ClonePath, timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS, credential: null, signal });
-    if (stashResult.ok) {
-      const count = stashResult.value.stdout.split('\n').filter((l) => l.trim().length > 0).length;
-      if (count > 0) blockers.push({ kind: 'stash-present', count });
-    }
+    if (!stashResult.ok) return 'corrupt';
+    const stashCount = stashResult.value.stdout.split('\n').filter((l) => l.trim().length > 0).length;
+    if (stashCount > 0) blockers.push({ kind: 'stash-present', count: stashCount });
 
     const baseBranch = ('main' as BranchName); // `RepositoryConfig` loading is `GitOperations`' (S6+); default until then.
     const branchResult = await exec.runGit({ argv: ['rev-parse', '--abbrev-ref', 'HEAD'], cwd: clonePath as ClonePath, timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS, credential: null, signal });
@@ -264,10 +297,9 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
       credential: null,
       signal,
     });
-    if (unreachableResult.ok) {
-      const count = Number(unreachableResult.value.stdout.trim());
-      if (Number.isFinite(count) && count > 0) blockers.push({ kind: 'unreachable-commits', base: baseBranch, count });
-    }
+    if (!unreachableResult.ok) return 'corrupt';
+    const unreachableCount = Number(unreachableResult.value.stdout.trim());
+    if (Number.isFinite(unreachableCount) && unreachableCount > 0) blockers.push({ kind: 'unreachable-commits', base: baseBranch, count: unreachableCount });
 
     const upstreamAheadResult = await exec.runGit({
       argv: ['rev-list', '--count', '@{u}..HEAD'],
@@ -300,13 +332,47 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
       const materialisationLock = lockResult.value;
 
       const current = await describeInternal(declaration.id);
-      if (current.state === 'ready') {
+      if (!current.ok) {
+        materialisationLock.release();
+        return current;
+      }
+
+      if (current.value.state === 'ready') {
+        // Reconcile a stale row (review finding #5): adoption bumps
+        // `Declaration.generation`, and a clone materialised under a
+        // previous era must not keep reporting that previous era's
+        // generation once its declaration has moved on.
+        if (current.value.generation !== declaration.generation) {
+          const reconciled = upsertRow({
+            declaration_id: declaration.id,
+            generation: declaration.generation,
+            state: 'ready',
+            path: current.value.path,
+            size_bytes: current.value.sizeBytes,
+            last_operation_at: current.value.lastOperationAt,
+            observed_remote: current.value.observedRemote,
+            attention_reason: current.value.attentionReason,
+          });
+          if (!reconciled.ok) {
+            materialisationLock.release();
+            return err(cloneStoreError({ code: 'store-failed', cause: reconciled.error }, reconciled.error.summary));
+          }
+          const afterReconcile = await describeInternal(declaration.id);
+          if (!afterReconcile.ok) {
+            materialisationLock.release();
+            return afterReconcile;
+          }
+          const pin = locks.pinActiveOperation(declaration.id);
+          return ok({ clone: afterReconcile.value, materialisationLock, activePin: pin });
+        }
         const pin = locks.pinActiveOperation(declaration.id);
-        return ok({ clone: current, materialisationLock, activePin: pin });
+        return ok({ clone: current.value, materialisationLock, activePin: pin });
       }
 
       const clonePath = clonePathFor(declaration.id);
-      const declarationRecord = { id: declaration.id, generation: current.generation, cloneUrl: declaration.cloneUrl };
+      // `declaration.generation` — the caller's authoritative value — never
+      // the possibly-stale row's, per review finding #5.
+      const declarationRecord = { id: declaration.id, generation: declaration.generation, cloneUrl: declaration.cloneUrl };
 
       // Adoption: a directory already on disk (left by a previous era) — never re-clone over it.
       if (existsSync(clonePath)) {
@@ -315,21 +381,37 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
           return err(cloneStoreError({ code: 'corrupt-tree' }, `'${clonePath}' exists but git cannot read it — use clone.remove with its override`));
         }
         const observed = await readObservedRemote(clonePath, signal);
-        if (observed !== null && observed !== declarationRecord.cloneUrl) {
+        if (observed === null) {
+          materialisationLock.release();
+          return err(cloneStoreError({ code: 'corrupt-tree' }, `'${clonePath}' exists but its remote could not be verified — use clone.remove with its override`));
+        }
+        if (observed !== declarationRecord.cloneUrl) {
           materialisationLock.release();
           return err(cloneStoreError({ code: 'remote-mismatch', declared: declarationRecord.cloneUrl, observed }, `the existing clone's remote does not match the declared one`));
         }
         const bytes = directoryBytes(clonePath);
         const now = clock.now();
-        upsertRow({ declaration_id: declaration.id, generation: declarationRecord.generation, state: 'ready', path: clonePath, size_bytes: bytes, last_operation_at: now, observed_remote: observed, attention_reason: null });
+        const written = upsertRow({ declaration_id: declaration.id, generation: declarationRecord.generation, state: 'ready', path: clonePath, size_bytes: bytes, last_operation_at: now, observed_remote: observed, attention_reason: null });
+        if (!written.ok) {
+          materialisationLock.release();
+          return err(cloneStoreError({ code: 'store-failed', cause: written.error }, written.error.summary));
+        }
         const readyClone = await describeInternal(declaration.id);
+        if (!readyClone.ok) {
+          materialisationLock.release();
+          return readyClone;
+        }
         const pin = locks.pinActiveOperation(declaration.id);
-        return ok({ clone: readyClone, materialisationLock, activePin: pin });
+        return ok({ clone: readyClone.value, materialisationLock, activePin: pin });
       }
 
       // Fresh clone.
       mkdirSync(clonesRoot, { recursive: true });
-      upsertRow({ declaration_id: declaration.id, generation: declarationRecord.generation, state: 'materialising', path: clonePath, size_bytes: 0, last_operation_at: null, observed_remote: null, attention_reason: null });
+      const materialising = upsertRow({ declaration_id: declaration.id, generation: declarationRecord.generation, state: 'materialising', path: clonePath, size_bytes: 0, last_operation_at: null, observed_remote: null, attention_reason: null });
+      if (!materialising.ok) {
+        materialisationLock.release();
+        return err(cloneStoreError({ code: 'store-failed', cause: materialising.error }, materialising.error.summary));
+      }
 
       const cloneResult = await exec.runGit({
         argv: ['clone', '--', declaration.cloneUrl, clonePath],
@@ -351,7 +433,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
 
       const bytes = directoryBytes(clonePath);
       const now = clock.now();
-      upsertRow({
+      const written = upsertRow({
         declaration_id: declaration.id,
         generation: declarationRecord.generation,
         state: 'ready',
@@ -361,13 +443,21 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
         observed_remote: declarationRecord.cloneUrl,
         attention_reason: null,
       });
+      if (!written.ok) {
+        materialisationLock.release();
+        return err(cloneStoreError({ code: 'store-failed', cause: written.error }, written.error.summary));
+      }
       const readyClone = await describeInternal(declaration.id);
+      if (!readyClone.ok) {
+        materialisationLock.release();
+        return readyClone;
+      }
       const pin = locks.pinActiveOperation(declaration.id);
-      return ok({ clone: readyClone, materialisationLock, activePin: pin });
+      return ok({ clone: readyClone.value, materialisationLock, activePin: pin });
     },
 
     async describe(declarationId): Promise<Outcome<Clone, CloneStoreError>> {
-      return ok(await describeInternal(declarationId));
+      return describeInternal(declarationId);
     },
 
     async deriveAllStatesFromDisk(): Promise<readonly Clone[]> {
@@ -405,48 +495,55 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
 
     async observeGitState(declarationId): Promise<Outcome<ObservedGitState, CloneStoreError>> {
       const row = getRow(declarationId);
-      if (!row || row.state === 'absent') {
+      if (!row.ok) return err(cloneStoreError({ code: 'store-failed', cause: row.error }, row.error.summary));
+      if (!row.value || row.value.state === 'absent') {
         return err(cloneStoreError({ code: 'needs-attention', reason: 'no clone to observe' }, `'${declarationId}' has no clone to observe`));
       }
-      const observed = await observeInternal(declarationId, row.path, new AbortController().signal);
+      const observed = await observeInternal(declarationId, row.value.path, new AbortController().signal);
       if (!observed) return err(cloneStoreError({ code: 'corrupt-tree' }, `could not observe git state for '${declarationId}'`));
       return ok(observed);
     },
 
     async isSafeToEvict(declarationId, _acrossAllGenerations): Promise<Outcome<SafeToEvictVerdict, CloneStoreError>> {
       const row = getRow(declarationId);
-      if (!row || row.state === 'absent' || row.state === 'evicted') return ok({ safe: true });
+      if (!row.ok) return err(cloneStoreError({ code: 'store-failed', cause: row.error }, row.error.summary));
+      if (!row.value || row.value.state === 'absent' || row.value.state === 'evicted') return ok({ safe: true });
 
-      const blockers = await computeBlockers(declarationId, row.path, new AbortController().signal);
+      const blockers = await computeBlockers(declarationId, row.value.path, new AbortController().signal);
       if (blockers === 'corrupt') return err(cloneStoreError({ code: 'corrupt-tree' }, `'${declarationId}' cannot be evaluated — git cannot read the tree`));
       return blockers.length === 0 ? ok({ safe: true }) : ok({ safe: false, blockers });
     },
 
     async evictIfSafe(declarationId): Promise<Outcome<EvictionOutcome, CloneStoreError>> {
       const row = getRow(declarationId);
-      if (!row || row.state === 'absent' || row.state === 'evicted') {
+      if (!row.ok) return err(cloneStoreError({ code: 'store-failed', cause: row.error }, row.error.summary));
+      if (!row.value || row.value.state === 'absent' || row.value.state === 'evicted') {
         return ok({ declarationId, evicted: false, freedBytes: 0, blockers: [] });
       }
-      const blockers = await computeBlockers(declarationId, row.path, new AbortController().signal);
+      const blockers = await computeBlockers(declarationId, row.value.path, new AbortController().signal);
       if (blockers === 'corrupt' || blockers.length > 0) {
         return ok({ declarationId, evicted: false, freedBytes: 0, blockers: blockers === 'corrupt' ? [{ kind: 'corrupt-tree' }] : blockers });
       }
-      const freedBytes = directoryBytes(row.path);
-      removePartial(row.path);
-      upsertRow({ ...row, state: 'evicted', size_bytes: 0, observed_remote: null });
+      const freedBytes = directoryBytes(row.value.path);
+      removePartial(row.value.path);
+      const updated = upsertRow({ ...row.value, state: 'evicted', size_bytes: 0, observed_remote: null });
+      if (!updated.ok) return err(cloneStoreError({ code: 'store-failed', cause: updated.error }, updated.error.summary));
       return ok({ declarationId, evicted: true, freedBytes, blockers: [] });
     },
 
     async remove(declarationId, override, _actor): Promise<Outcome<void, CloneStoreError>> {
       const row = getRow(declarationId);
+      if (!row.ok) return err(cloneStoreError({ code: 'store-failed', cause: row.error }, row.error.summary));
+
       // The stored row is a report, not a source of truth (boot step 8's own
       // rule, applied here too): a directory can exist without a row —
       // orphaned before `ensure()` ever wrote one, or left by a process that
       // died mid-materialisation — and `remove()` must still reach it rather
       // than reporting nothing to do.
-      const clonePath = row?.path ?? clonePathFor(declarationId);
-      if ((!row || row.state === 'absent' || row.state === 'evicted') && !existsSync(clonePath)) {
-        deleteRow(declarationId);
+      const clonePath = row.value?.path ?? clonePathFor(declarationId);
+      if ((!row.value || row.value.state === 'absent' || row.value.state === 'evicted') && !existsSync(clonePath)) {
+        const deleted = deleteRow(declarationId);
+        if (!deleted.ok) return err(cloneStoreError({ code: 'store-failed', cause: deleted.error }, deleted.error.summary));
         return ok(undefined);
       }
 
@@ -467,21 +564,26 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
       }
 
       removePartial(clonePath);
-      deleteRow(declarationId);
+      const deleted = deleteRow(declarationId);
+      if (!deleted.ok) return err(cloneStoreError({ code: 'store-failed', cause: deleted.error }, deleted.error.summary));
       return ok(undefined);
     },
 
     async markAttention(declarationId, reason): Promise<Outcome<void, CloneStoreError>> {
       const row = getRow(declarationId);
-      if (!row) return err(cloneStoreError({ code: 'needs-attention', reason }, `no clone for '${declarationId}'`));
-      upsertRow({ ...row, state: 'needs-attention', attention_reason: reason });
+      if (!row.ok) return err(cloneStoreError({ code: 'store-failed', cause: row.error }, row.error.summary));
+      if (!row.value) return err(cloneStoreError({ code: 'needs-attention', reason }, `no clone for '${declarationId}'`));
+      const updated = upsertRow({ ...row.value, state: 'needs-attention', attention_reason: reason });
+      if (!updated.ok) return err(cloneStoreError({ code: 'store-failed', cause: updated.error }, updated.error.summary));
       return ok(undefined);
     },
 
     async clearAttention(declarationId, _actor): Promise<Outcome<void, CloneStoreError>> {
       const row = getRow(declarationId);
-      if (!row) return err(cloneStoreError({ code: 'needs-attention', reason: 'no such clone' }, `no clone for '${declarationId}'`));
-      upsertRow({ ...row, state: 'ready', attention_reason: null });
+      if (!row.ok) return err(cloneStoreError({ code: 'store-failed', cause: row.error }, row.error.summary));
+      if (!row.value) return err(cloneStoreError({ code: 'needs-attention', reason: 'no such clone' }, `no clone for '${declarationId}'`));
+      const updated = upsertRow({ ...row.value, state: 'ready', attention_reason: null });
+      if (!updated.ok) return err(cloneStoreError({ code: 'store-failed', cause: updated.error }, updated.error.summary));
       return ok(undefined);
     },
 
