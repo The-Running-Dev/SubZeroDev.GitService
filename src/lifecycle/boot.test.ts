@@ -11,6 +11,8 @@ import { withVolumeAsync } from '../store/volume-fixture.ts';
 import { NO_CONSOLE_FINGERPRINT } from '../surfaces/http-server.ts';
 import { createOperatorIdentity } from '../operator-identity/operator-identity.ts';
 import type { Audit } from '../audit/audit.ts';
+import type { CapabilityName, DeploymentCeiling } from '../contract/capabilities.ts';
+import { fixtureTool } from '../contract/fixtures.ts';
 import { createLifecycle } from './boot.ts';
 import type { LeaseAcquisition, LockAcquirer } from './lease.ts';
 
@@ -35,10 +37,10 @@ function operatorIdentityFor(volume: string, audit: Audit) {
  * so this mirrors what `scripts/build-registry.ts` emits rather than being
  * called from the runtime.
  */
-function writeBuildDir(root: string): string {
+function writeBuildDir(root: string, declarations: Parameters<typeof compiler.compile>[0] = []): string {
   const buildDir = path.join(root, 'build');
   mkdirSync(buildDir, { recursive: true });
-  const compiled = compiler.compile([]);
+  const compiled = compiler.compile(declarations);
   if (!compiled.ok) throw new Error('fixture registry failed to compile');
   const json = JSON.stringify(
     compiled.value.registry,
@@ -54,17 +56,24 @@ function writeBuildDir(root: string): string {
   return buildDir;
 }
 
-function lifecycleFor(volume: string, acquirer?: LockAcquirer) {
+const EMPTY_CEILING = new Set() as unknown as DeploymentCeiling;
+
+function lifecycleFor(
+  volume: string,
+  acquirer?: LockAcquirer,
+  options: { readonly ceiling?: DeploymentCeiling; readonly registryDeclarations?: Parameters<typeof compiler.compile>[0] } = {},
+) {
   const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
   const audit = createAudit({ volumeRoot: volume, clock: systemClock });
   const lifecycle = createLifecycle({
     volumeRoot: volume,
-    buildDir: writeBuildDir(volume),
+    buildDir: writeBuildDir(volume, options.registryDeclarations ?? []),
     clock: systemClock,
     store,
     audit,
     operatorIdentity: operatorIdentityFor(volume, audit),
     consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+    ceiling: options.ceiling ?? EMPTY_CEILING,
     ...(acquirer ? { acquirer } : {}),
   });
   return { store, audit, lifecycle };
@@ -275,6 +284,7 @@ test('a boot that fails after opening the store closes it again, leaking no hand
       audit,
       operatorIdentity: operatorIdentityFor(volume, audit),
       consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+      ceiling: EMPTY_CEILING,
     });
 
     const booted = await lifecycle.boot();
@@ -295,6 +305,7 @@ test('a registry that is absent reports registry-unreadable, not a mismatch with
       audit,
       operatorIdentity: operatorIdentityFor(volume, audit),
       consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+      ceiling: EMPTY_CEILING,
     });
 
     const booted = await lifecycle.boot();
@@ -325,5 +336,39 @@ test('a corrupt store fails boot with store-failed carrying the corrupt cause', 
     assert.equal(booted.error.cause.code, 'corrupt');
 
     await lifecycle.shutdown('operator');
+  });
+});
+
+test('S5 — boot exits non-zero with ceiling-outside-contract when the deployment ceiling names a capability absent from the registry', async () => {
+  await withVolumeAsync(async (volume) => {
+    // The registry declares exactly one capability, `repo.read` (via the one
+    // fixture tool below) — a ceiling naming `git.raw`, which nothing in the
+    // registry grants, must be fatal at boot per `20-contract.md` § Boot.
+    const registryDeclarations = [fixtureTool({ name: 'fixture_read', capabilities: ['repo.read'] })];
+    const outsideCeiling = new Set(['git.raw']) as unknown as DeploymentCeiling;
+
+    const { lifecycle } = lifecycleFor(volume, undefined, { ceiling: outsideCeiling, registryDeclarations });
+    const booted = await lifecycle.boot();
+
+    assert.equal(booted.ok, false, 'a ceiling capability absent from the registry is fatal');
+    if (booted.ok) return;
+    assert.equal(booted.error.code, 'ceiling-outside-contract');
+    if (booted.error.code !== 'ceiling-outside-contract') return;
+    assert.deepEqual(booted.error.capabilities, ['git.raw'] as unknown as CapabilityName[]);
+  });
+});
+
+test('S5 — boot succeeds when the ceiling is a subset of the registry contract set', async () => {
+  await withVolumeAsync(async (volume) => {
+    const registryDeclarations = [fixtureTool({ name: 'fixture_read', capabilities: ['repo.read'] })];
+    const withinCeiling = new Set(['repo.read']) as unknown as DeploymentCeiling;
+
+    const { lifecycle } = lifecycleFor(volume, undefined, { ceiling: withinCeiling, registryDeclarations });
+    try {
+      const booted = await lifecycle.boot();
+      assert.equal(booted.ok, true, 'a ceiling that is a subset of the contract set is fine');
+    } finally {
+      await lifecycle.shutdown('operator');
+    }
   });
 });

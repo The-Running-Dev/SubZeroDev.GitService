@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { err, ok, type Outcome } from '../shared/outcome.ts';
 import { sha256Hex, type Sha256Hex } from '../shared/brands.ts';
+import type { CapabilityName, ContractCapabilitySet } from '../contract/capabilities.ts';
 
 /**
  * Boot steps 2 and 3 (`10-design.md` § Boot and recovery): "Load the
@@ -35,6 +36,7 @@ export type RegistryIntegrityError = RegistryFingerprintMismatch | RegistryUnrea
 
 export interface VerifiedRegistry {
   readonly contractFingerprint: Sha256Hex;
+  readonly contractCapabilitySet: ContractCapabilitySet;
 }
 
 export async function verifyRegistryArtifact(buildDir: string): Promise<Outcome<VerifiedRegistry, RegistryIntegrityError>> {
@@ -71,5 +73,16 @@ export async function verifyRegistryArtifact(buildDir: string): Promise<Outcome<
     return err({ code: 'registry-unreadable', reason: 'registry.json has no valid fingerprint field' });
   }
 
-  return ok({ contractFingerprint: fingerprintResult.value });
+  // `build-registry.ts` serialises `contractCapabilitySet` (a `Set`) as a
+  // sorted JSON array (`JSON.stringify`'s replacer in that script) — this is
+  // the inverse read.
+  const capabilitiesField = (parsed as { readonly contractCapabilitySet?: unknown }).contractCapabilitySet;
+  if (!Array.isArray(capabilitiesField) || !capabilitiesField.every((c) => typeof c === 'string')) {
+    return err({ code: 'registry-unreadable', reason: 'registry.json has no valid contractCapabilitySet field' });
+  }
+
+  return ok({
+    contractFingerprint: fingerprintResult.value,
+    contractCapabilitySet: new Set(capabilitiesField as CapabilityName[]) as unknown as ContractCapabilitySet,
+  });
 }

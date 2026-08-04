@@ -6,6 +6,7 @@ import type { AuditChainState } from '../audit/types.ts';
 import type { CredentialFailureMark } from '../credentials/types.ts';
 import { NO_VOLUME_USAGE, type VolumeUsage } from '../store/volume-usage.ts';
 import { handleConsoleAuthRoute, type ConsoleAuthDependencies } from './console-auth-routes.ts';
+import { handleDeclarationRoute, type DeclarationRoutesDependencies } from './declaration-routes.ts';
 
 /**
  * `LivenessReport` is the sole unauthenticated payload in the whole service
@@ -53,7 +54,7 @@ export interface HealthReport {
   readonly volume: VolumeUsage;
 }
 
-export interface SurfacesDependencies extends ConsoleAuthDependencies {
+export interface SurfacesDependencies extends ConsoleAuthDependencies, Pick<DeclarationRoutesDependencies, 'declarations' | 'cloneStore'> {
   readonly commitSha: GitSha;
   readonly contractFingerprint: Sha256Hex;
   readonly consoleFingerprint: Sha256Hex;
@@ -95,6 +96,11 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
 
   if (url.pathname.startsWith('/auth/')) {
     const handled = await handleConsoleAuthRoute(deps, req, res, url);
+    if (handled) return;
+  }
+
+  if (url.pathname.startsWith('/declarations')) {
+    const handled = await handleDeclarationRoute(deps, req, res, url);
     if (handled) return;
   }
 

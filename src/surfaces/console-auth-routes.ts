@@ -114,7 +114,7 @@ function loginCookies(session: OperatorSession, sessionAbsoluteSeconds: number):
  * invariant E8 wants covered by every route this module owns, not just the
  * ones with acceptance tests naming it.
  */
-async function requireSession(deps: ConsoleAuthDependencies, req: IncomingMessage, res: ServerResponse): Promise<OperatorSession | null> {
+export async function requireSession(deps: ConsoleAuthDependencies, req: IncomingMessage, res: ServerResponse): Promise<OperatorSession | null> {
   const cookies = parseCookies(req.headers.cookie);
   const raw = cookies[SESSION_COOKIE];
   if (!raw) {
@@ -158,7 +158,7 @@ function originOk(req: IncomingMessage): boolean {
  * (a CSRF problem) — the two are different failures and the design gives
  * both a named response.
  */
-function csrfOk(req: IncomingMessage): boolean {
+export function csrfOk(req: IncomingMessage): boolean {
   if (!originOk(req)) return false;
 
   const cookies = parseCookies(req.headers.cookie);
