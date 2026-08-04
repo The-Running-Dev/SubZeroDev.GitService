@@ -1,12 +1,17 @@
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { gitSha, type GitSha } from './shared/brands.ts';
+import { gitSha, type GitSha, type RemoteHost } from './shared/brands.ts';
+import type { CapabilityName, DeploymentCeiling } from './contract/capabilities.ts';
 import { systemClock } from './clock/clock.ts';
 import { createStructuredStore } from './store/structured-store.ts';
 import { createAudit } from './audit/audit.ts';
 import { createLifecycle } from './lifecycle/boot.ts';
 import { createOperatorIdentity, SESSION_ABSOLUTE_SECONDS_DEFAULT } from './operator-identity/operator-identity.ts';
+import { createExec } from './exec/exec.ts';
+import { createLocks } from './locks/locks.ts';
+import { createDeclarations, type Declarations } from './declarations/declarations.ts';
+import { createCloneStore, type CloneStore } from './clone/clone-store.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './surfaces/http-server.ts';
 
 /**
@@ -27,6 +32,28 @@ function resolvePort(): number {
     process.exit(1);
   }
   return port;
+}
+
+/** `DeploymentConfig.remoteHostAllowlist` (`20-contract.md` § Deployment configuration) — a deployment-set value with no fixed default; empty until configured means nothing can be declared, which is the safe direction to fail in. */
+function resolveRemoteHostAllowlist(): readonly RemoteHost[] {
+  const raw = process.env.REMOTE_HOST_ALLOWLIST;
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((h) => h.trim().toLowerCase())
+    .filter((h) => h.length > 0) as RemoteHost[];
+}
+
+/** `DeploymentConfig.ceiling` — same reasoning: empty until configured, which is always valid against the contract set (Ø ⊆ anything). */
+function resolveCeiling(): DeploymentCeiling {
+  const raw = process.env.DEPLOYMENT_CEILING;
+  const names = raw
+    ? raw
+        .split(',')
+        .map((c) => c.trim())
+        .filter((c) => c.length > 0)
+    : [];
+  return new Set(names as CapabilityName[]) as unknown as DeploymentCeiling;
 }
 
 function resolveCommitSha(): GitSha {
@@ -60,6 +87,42 @@ async function main(): Promise<void> {
   const store = createStructuredStore({ volumeRoot, clock: systemClock });
   const audit = createAudit({ volumeRoot, clock: systemClock });
   const operatorIdentity = createOperatorIdentity({ volumeRoot, credentialMountRoot, clock: systemClock, audit });
+  const exec = createExec({ volumeRoot });
+  const locks = createLocks();
+  const ceiling = resolveCeiling();
+  const remoteHostAllowlist = resolveRemoteHostAllowlist();
+
+  // `Declarations` and `CloneStore` depend on each other for different
+  // reasons (`declarations.ts`'s `CloneAdoptionCheck` doc comment): adoption
+  // safety needs `CloneStore`, and `CloneStore.ensure`/`describe` need
+  // `Declarations` to resolve a bare id into a full record. Neither is
+  // called during construction, only once both exist and boot has run, so a
+  // mutable forward reference breaks the cycle without either module
+  // depending on the other's factory function.
+  let cloneStoreRef: CloneStore | null = null;
+  const declarations: Declarations = createDeclarations({
+    volumeRoot,
+    clock: systemClock,
+    remoteHostAllowlist,
+    ceiling,
+    cloneAdoptionCheck: () => {
+      const store = cloneStoreRef;
+      if (!store) throw new Error('cloneStore accessed before composition finished');
+      return {
+        observedRemote: async (id) => {
+          const described = await store.describe(id);
+          return described.ok ? described.value.observedRemote : null;
+        },
+        isSafeToAdopt: async (id) => {
+          const verdict = await store.isSafeToEvict(id, true);
+          return verdict.ok ? verdict.value : { safe: false, blockers: [{ kind: 'corrupt-tree' }] };
+        },
+      };
+    },
+  });
+  const cloneStore = createCloneStore({ volumeRoot, clock: systemClock, exec, locks, declarations });
+  cloneStoreRef = cloneStore;
+
   const lifecycle = createLifecycle({
     volumeRoot,
     buildDir,
@@ -68,6 +131,8 @@ async function main(): Promise<void> {
     audit,
     operatorIdentity,
     consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+    ceiling,
+    deriveCloneStatesFromDisk: () => cloneStore.deriveAllStatesFromDisk(),
     onTakeover: (previous, current) => {
       // The durable `lease-takeover` audit record is written by boot itself
       // (S3); this is operator-visible defense in depth, so a takeover is
@@ -106,6 +171,8 @@ async function main(): Promise<void> {
     operatorApiToken,
     identity: operatorIdentity,
     sessionAbsoluteSeconds: SESSION_ABSOLUTE_SECONDS_DEFAULT,
+    declarations,
+    cloneStore,
   });
 
   const shutdown = (signal: NodeJS.Signals): void => {

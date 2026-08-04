@@ -51,3 +51,36 @@ export function capabilityScopeOf(capability: CapabilityName): CapabilityScope {
 export type McpScope = 'read' | 'write' | 'raw' | 'schedule';
 export type OperatorScope = Brand<string, 'OperatorScope'>;
 export type Scope = McpScope | OperatorScope;
+
+/**
+ * `Declaration.host` (`20-contract.md` § Declaration). Declared here, not in
+ * the declarations module, so `hostSupportedCapabilities` below has no
+ * import back onto a module that itself depends on this file.
+ */
+export type HostKind = 'github' | 'generic';
+
+const HOST_ONLY: ReadonlySet<CapabilityName> = new Set<CapabilityName>(['host.pr.read', 'host.pr.write', 'host.checks.read']);
+
+/**
+ * `github` supports every declaration-scoped capability; `generic` gets
+ * local git only — every capability except the three `host.*` ones. Neither
+ * host affects the instance-scoped four, which have nothing to do with a
+ * repository's remote.
+ */
+export function hostSupportedCapabilities(host: HostKind): CapabilitySet {
+  const all: CapabilityName[] = [
+    'repo.read',
+    'git.local.write',
+    'git.remote.write',
+    'git.raw',
+    'host.pr.read',
+    'host.pr.write',
+    'host.checks.read',
+    'scheduler.manage',
+    'declaration.manage',
+    'auth.manage',
+    'audit.read',
+    'attention.resolve',
+  ];
+  return new Set(host === 'github' ? all : all.filter((c) => !HOST_ONLY.has(c)));
+}

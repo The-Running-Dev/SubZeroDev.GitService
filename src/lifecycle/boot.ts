@@ -1,7 +1,7 @@
 import { err, ok, type Outcome } from '../shared/outcome.ts';
 import type { DeclarationId, OperationId, RegistryToolName, ScheduledJobId, Sha256Hex, Subject } from '../shared/brands.ts';
 import type { ModuleErrorBase } from '../shared/result-kind.ts';
-import type { CapabilityName } from '../contract/capabilities.ts';
+import type { CapabilityName, DeploymentCeiling } from '../contract/capabilities.ts';
 import type { Clock } from '../clock/clock.ts';
 import type { Clone } from '../clone/types.ts';
 import type { AuditChainState } from '../audit/types.ts';
@@ -34,16 +34,15 @@ function bootError<T extends { readonly code: BootError['code'] }>(variant: T, s
  * and `auditChain` is boot's own `verify()` result rather than a placeholder.
  * S4 makes `provisioningPending` a real read of the operator identity module
  * rather than the constant `false` it reported before an operator credential
- * had anywhere to live. The remaining `BootReport` members still belong to
- * subsystems that do not exist yet, and are reported at their empty values
- * rather than invented:
+ * had anywhere to live. S5 adds step 3's ceiling check and delivers step 8
+ * for real: `clones` is `CloneStore.deriveAllStatesFromDisk()`'s result
+ * rather than the always-empty placeholder it used to be. The remaining
+ * `BootReport` members still belong to subsystems that do not exist yet, and
+ * are reported at their empty values rather than invented:
  *
  *   jobsResolved        — the scheduler, S16
  *   revalidation        — needs both of the above
  *   recoveryPending     — recovery, S8
- *   clones              — step 8 re-derives from disk; S5 owns clone
- *                         directories, so with none declared this is empty,
- *                         which is the correct answer rather than a stub
  */
 export interface BootJobReport {
   readonly markedDone: readonly ScheduledJobId[];
@@ -86,6 +85,9 @@ export interface LifecycleDependencies {
   readonly audit: Audit;
   readonly operatorIdentity: OperatorIdentity;
   readonly consoleFingerprint: Sha256Hex;
+  readonly ceiling: DeploymentCeiling;
+  /** Step 8 re-derives clone state from disk. Optional so a `Lifecycle` used only up through S4's concerns need not supply one. */
+  readonly deriveCloneStatesFromDisk?: () => Promise<readonly Clone[]>;
   readonly acquirer?: LockAcquirer;
   /** Fires alongside the durable `lease-takeover` audit record — operator-visible even if the trail itself cannot be written. */
   readonly onTakeover?: (previousHolder: InstanceLease, current: InstanceLease) => void;
@@ -157,6 +159,22 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         );
       }
 
+      // Step 3 — the deployment ceiling must name only capabilities the
+      // contract set actually has. Checked here, ahead of the store, because
+      // a ceiling naming a capability nothing in the registry grants is a
+      // deployment configuration error, not a runtime one.
+      const outsideContract = [...deps.ceiling].filter((c) => !registry.value.contractCapabilitySet.has(c));
+      if (outsideContract.length > 0) {
+        guard.release();
+        guard = null;
+        return err(
+          bootError(
+            { code: 'ceiling-outside-contract', capabilities: outsideContract },
+            `the deployment ceiling names ${outsideContract.length} capabilit(y/ies) absent from the contract set: ${outsideContract.join(', ')}`,
+          ),
+        );
+      }
+
       // Step 4 — open the store, integrity-check it, take the pre-migration
       // copy, then run forward-only migrations. The copy is taken before
       // migrate on purpose: it is item 18's rollback target.
@@ -213,8 +231,10 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       const auditChain = await deps.audit.verify();
       const provisioningPending = (await deps.operatorIdentity.provisioningState()) === 'pending';
 
-      // Step 8 — re-derive clone state from disk. S5 owns clone directories;
-      // with none declared, the derived set is genuinely empty.
+      // Step 8 — re-derive clone state from disk. The stored value is a
+      // report, not a source of truth (`10-design.md` § Boot and recovery).
+      const clones = deps.deriveCloneStatesFromDisk ? await deps.deriveCloneStatesFromDisk() : [];
+
       return ok({
         lease: leaseResult.value.lease,
         leaseSelfTestPassed: leaseResult.value.selfTestPassed,
@@ -225,7 +245,7 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         auditChain,
         jobsResolved: NO_JOBS,
         revalidation: { jobsParked: [], entriesParked: [] },
-        clones: [],
+        clones,
         recoveryPending: [],
       });
     },

@@ -82,3 +82,93 @@ export function isoUtcTimestamp(value: string): Outcome<IsoUtcTimestamp, Validat
   }
   return { ok: true, value: value as IsoUtcTimestamp };
 }
+
+// The five validators below are S5's (`30-slices.md` § S5, Declarations):
+// the first module that needs `DeclarationId`, `Generation`, `GrantEpoch`,
+// `CredentialRef`, `RepoRelativePath`, `PathPrefix` and `CloneUrl` for real,
+// rather than typechecking against them as placeholders.
+
+const DECLARATION_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+export function declarationId(value: string): Outcome<DeclarationId, ValidationFailure> {
+  if (!DECLARATION_ID_PATTERN.test(value)) {
+    return { ok: false, error: fail('DeclarationId', DECLARATION_ID_PATTERN.source, value) };
+  }
+  return { ok: true, value: value as DeclarationId };
+}
+
+export function generation(value: number): Outcome<Generation, ValidationFailure> {
+  if (!Number.isInteger(value) || value < 1) {
+    return { ok: false, error: fail('Generation', 'integer >= 1', String(value)) };
+  }
+  return { ok: true, value: value as Generation };
+}
+
+export function grantEpoch(value: number): Outcome<GrantEpoch, ValidationFailure> {
+  if (!Number.isInteger(value) || value < 0) {
+    return { ok: false, error: fail('GrantEpoch', 'integer >= 0', String(value)) };
+  }
+  return { ok: true, value: value as GrantEpoch };
+}
+
+const CREDENTIAL_REF_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+export function credentialRef(value: string): Outcome<CredentialRef, ValidationFailure> {
+  if (!CREDENTIAL_REF_PATTERN.test(value)) {
+    return { ok: false, error: fail('CredentialRef', CREDENTIAL_REF_PATTERN.source, value) };
+  }
+  return { ok: true, value: value as CredentialRef };
+}
+
+/**
+ * `repoRelativePath()`'s rule set, per `20-contract.md`'s brand table: non-empty,
+ * no leading `/`, no segment `..`, no `;`, not `.`, not `-A`, not `--all`. This
+ * is also the rule `GitOperations.validateWritePath`'s `malformed` branch maps
+ * to `validation` — S7 owns that call site; this is the shared predicate.
+ */
+export function repoRelativePath(value: string): Outcome<RepoRelativePath, ValidationFailure> {
+  const rule = 'non-empty, no leading /, no .. segment, no ;, not ".", "-A" or "--all"';
+  if (value.length === 0 || value === '.' || value === '-A' || value === '--all') {
+    return { ok: false, error: fail('RepoRelativePath', rule, value) };
+  }
+  if (value.startsWith('/') || value.includes(';')) {
+    return { ok: false, error: fail('RepoRelativePath', rule, value) };
+  }
+  if (value.split('/').includes('..')) {
+    return { ok: false, error: fail('RepoRelativePath', rule, value) };
+  }
+  return { ok: true, value: value as RepoRelativePath };
+}
+
+/** A `RepoRelativePath` ending in `/`, or a `RepoRelativePath` naming one file — any valid one qualifies as both readings. */
+export function pathPrefix(value: string): Outcome<PathPrefix, ValidationFailure> {
+  const asRepoPath = repoRelativePath(value);
+  if (!asRepoPath.ok) {
+    return { ok: false, error: fail('PathPrefix', asRepoPath.error.rule, value) };
+  }
+  return { ok: true, value: value as PathPrefix };
+}
+
+const HTTPS_CLONE_URL_PATTERN = /^https:\/\/([^/@\s]+)\/.+$/;
+// scp-style: user@host:path — the classic `git@github.com:owner/repo.git` form.
+const SCP_CLONE_URL_PATTERN = /^[\w.-]+@([a-zA-Z0-9.-]+):.+$/;
+
+function cloneUrlHost(value: string): string | null {
+  const https = HTTPS_CLONE_URL_PATTERN.exec(value);
+  if (https) return https[1]!.toLowerCase();
+  const scp = SCP_CLONE_URL_PATTERN.exec(value);
+  if (scp) return scp[1]!.toLowerCase();
+  return null;
+}
+
+export function cloneUrl(value: string, allowed: readonly RemoteHost[]): Outcome<CloneUrl, ValidationFailure> {
+  const host = cloneUrlHost(value);
+  if (host === null) {
+    return { ok: false, error: fail('CloneUrl', 'https or scp-style remote', value) };
+  }
+  const allowedLower = new Set(allowed.map((h) => (h as string).toLowerCase()));
+  if (!allowedLower.has(host)) {
+    return { ok: false, error: fail('CloneUrl', 'host on the deployment remote-host allowlist', value) };
+  }
+  return { ok: true, value: value as CloneUrl };
+}
