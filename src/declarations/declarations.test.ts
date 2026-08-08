@@ -276,3 +276,63 @@ test('declaration.remove on an active declaration returns not-orphaned', async (
     if (!removed.ok) assert.equal(removed.error.code, 'not-orphaned');
   });
 });
+
+/** An open, migrated store — `withMigratedVolume` closes its own, and these tests need one live to hold a transaction. */
+async function withOpenStore<T>(fn: (volume: string, store: ReturnType<typeof createStructuredStore>) => Promise<T>): Promise<T> {
+  return withVolumeAsync(async (volume) => {
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    await store.open();
+    await store.migrate();
+    try {
+      return await fn(volume, store);
+    } finally {
+      await store.close();
+    }
+  });
+}
+
+function grantEpochOnDisk(volume: string, declarationId: string): number {
+  const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+  const rows = db.prepare('SELECT grant_epoch FROM declaration WHERE id = ?').all(declarationId) as unknown as { grant_epoch: number }[];
+  db.close();
+  return rows[0]?.grant_epoch ?? -1;
+}
+
+test('bumpGrantEpoch writes inside the caller transaction: a committed one raises the epoch, and the value returned is the new one', async () => {
+  await withOpenStore(async (volume, store) => {
+    const declarations = declarationsFor(volume);
+    assert.equal((await declarations.declare(declareInputFor('repo-e1'), OPERATOR)).ok, true);
+    const before = grantEpochOnDisk(volume, 'repo-e1');
+
+    const result = await store.transaction(async (tx) => declarations.bumpGrantEpoch('repo-e1' as DeclareInput['id'], tx));
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+
+    assert.equal(grantEpochOnDisk(volume, 'repo-e1'), before + 1, 'the increment committed with the caller');
+    // The read-back is the half `run` alone could not deliver: a second
+    // connection cannot see the caller's uncommitted increment, so it would
+    // have returned the stale epoch — the one value this member exists for.
+    assert.equal(result.value, before + 1, 'and the epoch returned is the one just written, not the value before it');
+  });
+});
+
+test('bumpGrantEpoch writes inside the caller transaction: a rolled-back one leaves the epoch untouched', async () => {
+  await withOpenStore(async (volume, store) => {
+    const declarations = declarationsFor(volume);
+    assert.equal((await declarations.declare(declareInputFor('repo-e2'), OPERATOR)).ok, true);
+    const before = grantEpochOnDisk(volume, 'repo-e2');
+
+    // The regression for the defect this member shipped with. Opening a
+    // private connection here made the bump survive this rollback — every
+    // outstanding grant invalidated for a change that never happened, and
+    // this member returns `GrantEpoch` rather than an `Outcome`, so there is
+    // no channel through which a caller could ever learn it.
+    const result = await store.transaction(async (tx) => {
+      declarations.bumpGrantEpoch('repo-e2' as DeclareInput['id'], tx);
+      throw new Error('the caller failed after bumping the epoch');
+    });
+    assert.equal(result.ok, false, 'the transaction faulted, as the test intends');
+
+    assert.equal(grantEpochOnDisk(volume, 'repo-e2'), before, 'the epoch rolled back with the caller');
+  });
+});

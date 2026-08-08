@@ -261,3 +261,42 @@ test('the schema enforces D10 — at most one active generation per declaration 
     }
   });
 });
+
+test('tx.all reads the transaction it belongs to, including writes not yet committed', async () => {
+  await withVolumeAsync(async (volume) => {
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    await store.open();
+    await store.migrate();
+    try {
+      // This is the property `run` alone could not provide, and the reason
+      // `all` was added rather than leaving participants to open their own
+      // connection for the read half. A member like `Declarations.bumpGrantEpoch`
+      // must return the value it just wrote; a second connection cannot see an
+      // uncommitted write, so it would return the stale one.
+      const result = await store.transaction(async (tx) => {
+        tx.run(
+          `INSERT INTO notification_outbox (id, severity, declaration_id, payload, status, attempts, last_attempt_at, last_error, created_at, delivered_at)
+           VALUES ('uncommitted-row', 'info', NULL, '{}', 'pending', 0, NULL, NULL, ?, NULL)`,
+          systemClock.now(),
+        );
+
+        const seenInside = tx.all(`SELECT id FROM notification_outbox WHERE id = ?`, 'uncommitted-row') as { id: string }[];
+        assert.equal(seenInside.length, 1, 'the transaction can see its own uncommitted write');
+
+        // A second connection, mid-transaction, is what a participant holding
+        // only `run` would have been forced to use. It cannot see the row.
+        const outside = new DatabaseSync(path.join(volume, 'store.sqlite'));
+        try {
+          const seenOutside = outside.prepare(`SELECT id FROM notification_outbox WHERE id = ?`).all('uncommitted-row');
+          assert.equal(seenOutside.length, 0, 'and a separate connection cannot — which is exactly why the read seam exists');
+        } finally {
+          outside.close();
+        }
+        return 'done';
+      });
+      assert.equal(result.ok, true);
+    } finally {
+      await store.close();
+    }
+  });
+});

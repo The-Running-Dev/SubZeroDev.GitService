@@ -19,14 +19,23 @@ export type SqlParameter = string | number | bigint | null | Uint8Array;
  * the write would land outside — surviving the caller's rollback, or being
  * refused as busy and lost silently.
  *
+ * `all` is there because writing is only half of participating: three of the
+ * four `tx`-taking members have to read inside the transaction to produce what
+ * they return — the epoch just incremented, the ids just cancelled, the ids
+ * just revoked. A second connection can answer none of those, since it cannot
+ * see the caller's uncommitted write and may be refused as busy against the
+ * write lock the caller already holds.
+ *
  * No `BEGIN`, `COMMIT` or `ROLLBACK` is exposed, deliberately. The module that
  * opened the transaction is the only one permitted to end it; a participant
  * able to commit its caller's transaction would be a worse defect than the one
- * this replaces.
+ * this replaces. Reading does not widen that — it cannot end a transaction, and
+ * a participant that can already write can already observe its own effects.
  */
 export interface StoreTransaction {
   readonly id: string;
   run(sql: string, ...parameters: readonly SqlParameter[]): void;
+  all(sql: string, ...parameters: readonly SqlParameter[]): readonly unknown[];
 }
 
 export type StoreTableName =
@@ -281,6 +290,9 @@ export function createStructuredStore(options: StructuredStoreOptions): Structur
         id: createHash('sha256').update(String(clock.monotonicMs())).digest('hex').slice(0, 16),
         run(sql: string, ...parameters: readonly SqlParameter[]): void {
           database.prepare(sql).run(...parameters);
+        },
+        all(sql: string, ...parameters: readonly SqlParameter[]): readonly unknown[] {
+          return database.prepare(sql).all(...parameters);
         },
       };
       try {
