@@ -1,9 +1,11 @@
 import type { Clock } from '../clock/clock.ts';
 import type { CallContext, DomainOperation } from '../shared/call-context.ts';
-import type { GitSha } from '../shared/brands.ts';
+import type { GitSha, OperationId } from '../shared/brands.ts';
 import type { Journal } from '../journal/journal.ts';
-import type { Exec } from '../exec/exec.ts';
-import { success, precondition, timeout as timeoutResult, upstream, infrastructure, type Diagnostics, type ToolResult } from '../result/envelope.ts';
+import type { CredentialBinding, Exec } from '../exec/exec.ts';
+import { success, validation, authorization, precondition, timeout as timeoutResult, upstream, infrastructure, type Diagnostics, type ToolResult } from '../result/envelope.ts';
+import type { Outcome } from '../shared/outcome.ts';
+import type { ModuleErrorBase } from '../shared/result-kind.ts';
 import type { HostAdapter } from './github-adapter.ts';
 import type { HostError } from './errors.ts';
 import type {
@@ -46,6 +48,25 @@ export interface HostOperationsDependencies {
   readonly journal?: Pick<Journal, 'appendStep'>;
   /** Reads the clone's current head, for the two check tools' null `ref`. */
   readonly headShaFor: (ctx: CallContext) => Promise<GitSha | null>;
+  /**
+   * The three-step credential preparation — declaration, the reference's own
+   * allowed-host check, resolution — run **here** rather than inside the
+   * adapter, and mapped through `moduleErrorToToolResult` so the error keeps
+   * its own kind. An allowed-host denial is `authorization`: a permanent
+   * refusal that no retry will fix. Inside the adapter it could only have come
+   * back as a `HostError`, whose every variant is either `upstream` or a
+   * repository-state `precondition` — so the denial would have read as a
+   * retryable dependency failure, and the git path (which does exactly this,
+   * one layer up) and the host path would disagree about the same failure.
+   */
+  readonly prepareCredential?: (ctx: CallContext) => Promise<Outcome<CredentialBinding | null, ModuleErrorBase>>;
+  /**
+   * Where a prepared binding is left for the adapter to read, keyed by
+   * `operationId` so concurrent calls never see each other's. The composition
+   * root owns the map and hands the same one to both — the same seam
+   * `credentialEnv` already is between `CredentialResolver` and `Exec`.
+   */
+  readonly credentialBindings?: Map<OperationId, CredentialBinding | null>;
   readonly exec?: Pick<Exec, 'runGit'>;
   readonly pollIntervalSeconds?: number;
   /** Injectable so a wait test does not spend real seconds. */
@@ -63,6 +84,24 @@ function diagnosticsFor(ctx: CallContext, startedAtMs: number, clock: Clock): Di
     generation: ctx.generation,
     durationMs: Math.max(0, Date.parse(clock.now()) - startedAtMs),
   };
+}
+
+/** Maps any `ModuleErrorBase`-shaped error by its own `resultKind` — which is the whole point: an `authorization` denial stays `authorization`. */
+function moduleErrorToToolResult(error: ModuleErrorBase): ToolResult<never> {
+  switch (error.resultKind) {
+    case 'validation':
+      return validation(error.summary, []);
+    case 'precondition':
+      return precondition(error.summary, []);
+    case 'authorization':
+      return authorization(error.summary, []);
+    case 'upstream':
+      return upstream(error.summary, null);
+    case 'timeout':
+      return timeoutResult(error.summary, 0);
+    default:
+      return infrastructure(error.summary);
+  }
 }
 
 /**
@@ -139,47 +178,75 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
     return requested ?? (await deps.headShaFor(ctx));
   }
 
+  /**
+   * Prepares the credential, leaves it where the adapter will find it, runs
+   * the call, and clears it again — cleared in a `finally`, so a thrown error
+   * cannot leave a resolved binding sitting in a process-lifetime map.
+   *
+   * A preparation failure never reaches the adapter at all. It is mapped here,
+   * where `authorization` survives as `authorization`.
+   */
+  async function withCredential<TData>(ctx: CallContext, call: () => Promise<ToolResult<TData>>): Promise<ToolResult<TData>> {
+    if (!deps.prepareCredential || !deps.credentialBindings) return call();
+
+    const prepared = await deps.prepareCredential(ctx);
+    if (!prepared.ok) return moduleErrorToToolResult(prepared.error);
+
+    deps.credentialBindings.set(ctx.operationId, prepared.value);
+    try {
+      return await call();
+    } finally {
+      deps.credentialBindings.delete(ctx.operationId);
+    }
+  }
+
   return {
     async createPullRequest(ctx, input): Promise<ToolResult<PrOpenData>> {
       const startedAtMs = Date.parse(clock.now());
-      return hostMutation(ctx, 'host.createPullRequest', async () => {
+      return withCredential(ctx, () => hostMutation(ctx, 'host.createPullRequest', async () => {
         const created = await adapter.createPullRequest(ctx, input);
         if (!created.ok) return hostErrorToToolResult(created.error);
         return success(`opened pull request #${created.value.number}`, { ref: created.value }, diagnosticsFor(ctx, startedAtMs, clock));
-      });
+      }));
     },
 
     async readPullRequest(ctx, input): Promise<ToolResult<PrStatusData>> {
       const startedAtMs = Date.parse(clock.now());
-      const status = await adapter.readPullRequest(ctx, input.number);
-      if (!status.ok) return hostErrorToToolResult(status.error);
-      return success(`pull request #${input.number} is ${status.value.state}`, { status: status.value }, diagnosticsFor(ctx, startedAtMs, clock));
+      return withCredential(ctx, async () => {
+        const status = await adapter.readPullRequest(ctx, input.number);
+        if (!status.ok) return hostErrorToToolResult(status.error);
+        return success(`pull request #${input.number} is ${status.value.state}`, { status: status.value }, diagnosticsFor(ctx, startedAtMs, clock));
+      });
     },
 
     async listPullRequests(ctx, input): Promise<ToolResult<PrListData>> {
       const startedAtMs = Date.parse(clock.now());
-      const listed = await adapter.listPullRequests(ctx, input.state);
-      if (!listed.ok) return hostErrorToToolResult(listed.error);
-      return success(`${listed.value.length} pull request(s)`, { pullRequests: listed.value }, diagnosticsFor(ctx, startedAtMs, clock));
+      return withCredential(ctx, async () => {
+        const listed = await adapter.listPullRequests(ctx, input.state);
+        if (!listed.ok) return hostErrorToToolResult(listed.error);
+        return success(`${listed.value.length} pull request(s)`, { pullRequests: listed.value }, diagnosticsFor(ctx, startedAtMs, clock));
+      });
     },
 
     async readPullRequestComments(ctx, input): Promise<ToolResult<PrCommentsData>> {
       const startedAtMs = Date.parse(clock.now());
-      const comments = await adapter.readPullRequestComments(ctx, input.number);
-      if (!comments.ok) return hostErrorToToolResult(comments.error);
-      // Bodies are carried through verbatim as data. Nothing here reads them,
-      // and the registry entry is annotated `untrustedOutput` so no consumer
-      // mistakes them for instructions.
-      return success(
-        `${comments.value.length} comment(s) on pull request #${input.number}`,
-        { comments: comments.value },
-        diagnosticsFor(ctx, startedAtMs, clock),
-      );
+      return withCredential(ctx, async () => {
+        const comments = await adapter.readPullRequestComments(ctx, input.number);
+        if (!comments.ok) return hostErrorToToolResult(comments.error);
+        // Bodies are carried through verbatim as data. Nothing here reads them,
+        // and the registry entry is annotated `untrustedOutput` so no consumer
+        // mistakes them for instructions.
+        return success(
+          `${comments.value.length} comment(s) on pull request #${input.number}`,
+          { comments: comments.value },
+          diagnosticsFor(ctx, startedAtMs, clock),
+        );
+      });
     },
 
     async enableAutoMerge(ctx, input): Promise<ToolResult<PrEnableAutoMergeData>> {
       const startedAtMs = Date.parse(clock.now());
-      return hostMutation(ctx, 'host.enableAutoMerge', async () => {
+      return withCredential(ctx, () => hostMutation(ctx, 'host.enableAutoMerge', async () => {
         const enabled = await adapter.enableAutoMerge(ctx, input.number);
         if (!enabled.ok) return hostErrorToToolResult(enabled.error);
         return success(
@@ -187,16 +254,18 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
           { number: input.number, autoMergeEnabled: true },
           diagnosticsFor(ctx, startedAtMs, clock),
         );
-      });
+      }));
     },
 
     async readChecks(ctx, input): Promise<ToolResult<ChecksStatusData>> {
       const startedAtMs = Date.parse(clock.now());
       const ref = await resolveRef(ctx, input.ref);
       if (ref === null) return precondition('no commit to read checks for: the clone has no resolvable head', []);
-      const checks = await adapter.readChecks(ctx, ref);
-      if (!checks.ok) return hostErrorToToolResult(checks.error);
-      return success(`${checks.value.length} check(s) at ${ref}`, { ref, checks: checks.value }, diagnosticsFor(ctx, startedAtMs, clock));
+      return withCredential(ctx, async () => {
+        const checks = await adapter.readChecks(ctx, ref);
+        if (!checks.ok) return hostErrorToToolResult(checks.error);
+        return success(`${checks.value.length} check(s) at ${ref}`, { ref, checks: checks.value }, diagnosticsFor(ctx, startedAtMs, clock));
+      });
     },
 
     /**
@@ -217,6 +286,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
       const deadlineMs = startedAtMs + Math.max(0, input.timeoutSeconds) * 1000;
       let lastChecks: readonly ChecksAwaitData['checks'][number][] = [];
 
+      return withCredential(ctx, async () => {
       for (;;) {
         const checks = await adapter.readChecks(ctx, ref);
         if (!checks.ok) {
@@ -266,6 +336,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
         }
         await sleep(pollIntervalSeconds * 1000);
       }
+      });
     },
   };
 }

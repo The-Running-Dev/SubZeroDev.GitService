@@ -497,7 +497,7 @@ test('review: an exhausted per-credential budget raises rate-limited before the 
     exec: gh.exec,
     sleep: async () => {},
     requestBudget: 2,
-    credentialFor: async () => ok({ ref: 'token' as never, declarationId: DECLARATION, variableName: 'V' as never }),
+    credentialFor: () => ({ ref: 'token' as never, declarationId: DECLARATION, variableName: 'V' as never }),
   });
   const ops = createHostOperations({ clock: systemClock, adapter, journal: recordingJournal().journal, headShaFor: async () => HEAD, sleep: async () => {} });
 
@@ -538,4 +538,110 @@ test('review: a wait clamps its rate-limit backoff to the remaining deadline', a
     false,
     'no sleep may outlast the wait it belongs to',
   );
+});
+
+// --- Review finding #8: credential-preparation errors keep their own kind ---
+
+function operationsWithPreparation(
+  gh: ReturnType<typeof stubGh>,
+  prepare: () => Promise<Outcome<null, { readonly resultKind: string; readonly retryable: boolean; readonly summary: string }>>,
+) {
+  const bindings = new Map<OperationId, never>();
+  const adapter = createGitHubAdapter({
+    clock: systemClock,
+    exec: gh.exec,
+    sleep: async () => {},
+    baseBranchFor: async () => 'main' as never,
+    credentialFor: (ctx) => bindings.get(ctx.operationId) ?? null,
+  });
+  return createHostOperations({
+    clock: systemClock,
+    adapter,
+    journal: recordingJournal().journal,
+    headShaFor: async () => HEAD,
+    pollIntervalSeconds: 0,
+    sleep: async () => {},
+    prepareCredential: prepare as never,
+    credentialBindings: bindings as never,
+  });
+}
+
+test('review: an allowed-host denial stays authorization, not a retryable-looking upstream', async () => {
+  const gh = stubGh([{ when: () => true, reply: () => stdout(PR_JSON) }]);
+  const ops = operationsWithPreparation(gh, async () => ({
+    ok: false,
+    error: { resultKind: 'authorization', retryable: false, summary: "credential reference 'token' is not permitted to reach 'evil.example'" },
+  }));
+
+  const result = await ops.readPullRequest(context(), { number: 7 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.kind, 'authorization', 'a permanent refusal must not read as a retryable dependency failure');
+  assert.equal(gh.calls.length, 0, 'nothing may reach the host once preparation has refused');
+});
+
+test('review: a precondition from preparation stays precondition', async () => {
+  const gh = stubGh([{ when: () => true, reply: () => stdout(PR_JSON) }]);
+  const ops = operationsWithPreparation(gh, async () => ({
+    ok: false,
+    error: { resultKind: 'precondition', retryable: false, summary: "declaration 'repo-a' no longer exists" },
+  }));
+
+  const result = await ops.readPullRequest(context(), { number: 7 });
+
+  assert.equal(result.kind, 'precondition');
+});
+
+test('review: a mutation refuses before its journal step when preparation fails', async () => {
+  const gh = stubGh([{ when: () => true, reply: () => stdout('https://github.com/acme/repo/pull/7\n') }]);
+  const bindings = new Map<OperationId, never>();
+  const adapter = createGitHubAdapter({
+    clock: systemClock,
+    exec: gh.exec,
+    sleep: async () => {},
+    baseBranchFor: async () => 'main' as never,
+    credentialFor: (ctx) => bindings.get(ctx.operationId) ?? null,
+  });
+  const recorder = recordingJournal();
+  const ops = createHostOperations({
+    clock: systemClock,
+    adapter,
+    journal: recorder.journal,
+    headShaFor: async () => HEAD,
+    sleep: async () => {},
+    prepareCredential: (async () => ({
+      ok: false,
+      error: { resultKind: 'authorization', retryable: false, summary: 'not permitted' },
+    })) as never,
+    credentialBindings: bindings as never,
+  });
+
+  const result = await ops.createPullRequest(context(), { title: 't', body: 'b', headBranch: null, draft: false });
+
+  assert.equal(result.kind, 'authorization');
+  assert.deepEqual(recorder.steps, [], 'a call that cannot authenticate never had intent worth recording');
+  assert.equal(gh.calls.length, 0);
+});
+
+test('review: a prepared binding is cleared once the call is over, and is never left in the map', async () => {
+  const gh = stubGh([{ when: () => true, reply: () => stdout(PR_JSON) }]);
+  const bindings = new Map<OperationId, never>();
+  const adapter = createGitHubAdapter({
+    clock: systemClock,
+    exec: gh.exec,
+    sleep: async () => {},
+    credentialFor: (ctx) => bindings.get(ctx.operationId) ?? null,
+  });
+  const ops = createHostOperations({
+    clock: systemClock,
+    adapter,
+    journal: recordingJournal().journal,
+    headShaFor: async () => HEAD,
+    sleep: async () => {},
+    prepareCredential: (async () => ({ ok: true, value: { ref: 'token', declarationId: DECLARATION, variableName: 'V' } })) as never,
+    credentialBindings: bindings as never,
+  });
+
+  assert.equal((await ops.readPullRequest(context(), { number: 7 })).ok, true);
+  assert.equal(bindings.size, 0, 'a resolved binding must not outlive the call it was prepared for');
 });

@@ -70,11 +70,21 @@ export interface GitHubAdapterDependencies {
   readonly clock: Clock;
   readonly exec: Pick<Exec, 'runGh'>;
   /**
-   * Resolves the declaration's credential at point of use, exactly as the
-   * remote git operations do. Null for a declaration with no `credentialRef`
-   * — a public repository read is a legitimate configuration.
+   * Reads the binding **already prepared for this call** — it does not resolve
+   * one, and it cannot fail.
+   *
+   * Preparation lives one layer up, in `host-operations.ts`, because it is not
+   * a host failure: the declaration lookup, the reference's own allowed-host
+   * check and the resolution all happen before any network contact, and
+   * `HostError` has no variant that could honestly carry an authorization
+   * denial. Reporting one as `unreachable` would make a permanent refusal look
+   * like a retryable dependency failure. L2 maps it through `ToolResult`
+   * instead, preserving the kind, exactly as the remote git operations do.
+   *
+   * Null for a declaration with no `credentialRef` — a public repository read
+   * is a legitimate configuration, not a refusal.
    */
-  readonly credentialFor?: (ctx: CallContext) => Promise<Outcome<CredentialBinding | null, HostError>>;
+  readonly credentialFor?: (ctx: CallContext) => CredentialBinding | null;
   /**
    * The declaration's `RepositoryConfig.baseBranch`. **Required for
    * `createPullRequest`**: without it, `gh pr create` falls back to the host's
@@ -250,9 +260,8 @@ export function createGitHubAdapter(deps: GitHubAdapterDependencies): HostAdapte
     state.resetsAt = new Date(Date.parse(deps.clock.now()) + retryAfterSeconds * 1000).toISOString() as IsoUtcTimestamp;
   }
 
-  async function credentialFor(ctx: CallContext): Promise<Outcome<CredentialBinding | null, HostError>> {
-    if (!deps.credentialFor) return ok(null);
-    return deps.credentialFor(ctx);
+  function credentialFor(ctx: CallContext): CredentialBinding | null {
+    return deps.credentialFor ? deps.credentialFor(ctx) : null;
   }
 
   /**
@@ -271,8 +280,7 @@ export function createGitHubAdapter(deps: GitHubAdapterDependencies): HostAdapte
     }
     const cwd = ctx.cloneRoot as ClonePath;
 
-    const credential = await credentialFor(ctx);
-    if (!credential.ok) return err(credential.error);
+    const credential = credentialFor(ctx);
 
     const retryLimit = kind === 'read' ? READ_RETRY_LIMIT : MUTATION_RETRY_LIMIT;
     const timeoutSeconds = kind === 'read' ? HOST_READ_TIMEOUT_SECONDS : HOST_MUTATION_TIMEOUT_SECONDS;
@@ -284,7 +292,7 @@ export function createGitHubAdapter(deps: GitHubAdapterDependencies): HostAdapte
       // same error the host would, before the request is made rather than
       // after it is refused. A budget that is counted but never consulted
       // bounds nothing.
-      const exhausted = budgetExhausted(credential.value);
+      const exhausted = budgetExhausted(credential);
       if (exhausted !== null) {
         return err(
           hostError(
@@ -295,13 +303,13 @@ export function createGitHubAdapter(deps: GitHubAdapterDependencies): HostAdapte
       }
 
       attempts += 1;
-      chargeBudget(credential.value);
+      chargeBudget(credential);
 
       const result = await deps.exec.runGh({
         argv,
         cwd,
         timeoutSeconds,
-        credential: credential.value,
+        credential: credential,
         signal: ctx.signal,
       });
 
@@ -319,7 +327,7 @@ export function createGitHubAdapter(deps: GitHubAdapterDependencies): HostAdapte
 
       if (looksRateLimited(text)) {
         const retryAfterSeconds = retryAfterSecondsIn(text, nowMs);
-        exhaustBudget(credential.value, retryAfterSeconds);
+        exhaustBudget(credential, retryAfterSeconds);
         return err(
           hostError(
             { code: 'rate-limited', retryAfterSeconds },
@@ -331,7 +339,7 @@ export function createGitHubAdapter(deps: GitHubAdapterDependencies): HostAdapte
         return err(hostError({ code: 'unreachable' }, `the host could not be reached: ${text.trim().slice(0, 200)}`));
       }
       if (looksAuthRejected(text)) {
-        const bound = credential.value;
+        const bound = credential;
         if (bound === null) {
           return err(hostError({ code: 'unreachable' }, 'the host requires authentication and this declaration carries no credential reference'));
         }
