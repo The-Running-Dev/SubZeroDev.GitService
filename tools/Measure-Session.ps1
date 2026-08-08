@@ -200,6 +200,12 @@ function Format-Row {
         $Label, $S.Calls, $S.Input, $S.CacheCreate, $S.CacheRead, $S.Output
 }
 
+function Format-Duration {
+    param([timespan]$Value)
+
+    '{0}:{1:mm\:ss}' -f [math]::Floor($Value.TotalHours), $Value
+}
+
 if ($Hook) {
     # SessionEnd delivers its JSON on stdin. Failing loudly here would put an
     # error in front of the user at the moment they are closing the session, so
@@ -225,8 +231,8 @@ if ($Hook) {
             $session.Id
             $session.Models
             $sum.Calls
-            ('{0:hh\:mm\:ss}' -f $session.Span)
-            ('{0:hh\:mm\:ss}' -f $session.Active)
+            (Format-Duration $session.Span)
+            (Format-Duration $session.Active)
             $sum.Input, $sum.CacheCreate, $sum.CacheRead, $sum.Output
         ) -join "`t"
 
@@ -278,8 +284,8 @@ foreach ($file in ($files | Sort-Object LastWriteTime)) {
     $shortId = if ($session.Id.Length -gt 8) { $session.Id.Substring(0, 8) } else { $session.Id }
     ''
     "Session {0}   {1}" -f $shortId, $session.Models
-    "  started {0:yyyy-MM-dd HH:mm}   span {1:hh\:mm\:ss}   active {2:hh\:mm\:ss} (gaps over {3} min excluded)" -f
-        $session.Started, $session.Span, $session.Active, $IdleThresholdMinutes
+    "  started {0:yyyy-MM-dd HH:mm}   span {1}   active {2} (gaps over {3} min excluded)" -f
+        $session.Started, (Format-Duration $session.Span), (Format-Duration $session.Active), $IdleThresholdMinutes
     ''
     $header
     ('-' * $header.Length)
