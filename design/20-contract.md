@@ -1604,6 +1604,7 @@ type SqlParameter = string | number | bigint | null | Uint8Array;
 interface StoreTransaction {
   readonly id: string;
   run(sql: string, ...parameters: readonly SqlParameter[]): void;
+  all(sql: string, ...parameters: readonly SqlParameter[]): readonly unknown[];
 }
 
 interface BackupStamp {
@@ -1638,9 +1639,18 @@ reach the open transaction, so it opens its own connection instead and the write
 then either survives the caller's rollback, or is refused as busy and lost silently, since three of
 the four return no error channel. Participants therefore write through `run`.
 
+**`all` is there because writing is only half of participating.** Three of the four members have to
+read inside the transaction to produce what they return: `bumpGrantEpoch` returns the epoch it just
+incremented, and `cancelForDeclaration` and `revokeGrantsForResource` each return the ids they just
+affected. A second connection cannot answer any of those — it cannot see the caller's uncommitted
+write, and it may be refused as busy against the write lock the caller already holds. A member given
+`run` alone is therefore still forced outside the transaction to compute its own return value, which
+is the same defect wearing a different shape.
+
 It exposes no `BEGIN`, `COMMIT` or `ROLLBACK` **by design**: the module that opened the transaction
 is the only one permitted to end it. A participant that could commit its caller's transaction is a
-worse defect than the one this replaces.
+worse defect than the one this replaces. `all` does not widen that: reading cannot end a transaction,
+and a participant that can already write can already observe its own effects.
 
 ### L1 — clone store
 

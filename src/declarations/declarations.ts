@@ -496,25 +496,27 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
     },
 
     /**
-     * Cannot honour `tx`'s transactional participation: `StoreTransaction`
-     * (`store/structured-store.ts`) is an opaque `{ id: string }` token, and
-     * `StructuredStore.transaction`'s own callback never receives the real
-     * `DatabaseSync` handle either — there is no seam through which this
-     * synchronous call could join an externally-held transaction. Runs its
-     * own short-lived write instead. Not exercised by this slice (S14 is
-     * where the grant epoch reaches a live session); flagged for whoever
-     * builds S14, not fixed here since `StructuredStore` is outside S5's
-     * `Touches`.
+     * Writes and reads through `tx`, never around it. Bumping the epoch is how
+     * a declaration's outstanding grants are invalidated, so it has to commit
+     * with whatever the caller is committing — an epoch raised outside the
+     * caller's transaction survives its rollback, leaving every grant revoked
+     * for a change that never happened, and this member returns `GrantEpoch`
+     * rather than an `Outcome`, so a write refused as busy has no channel to
+     * report itself.
+     *
+     * The read-back goes through `tx.all` for the same reason, and it is why
+     * `run` alone was not enough: a second connection cannot see the caller's
+     * uncommitted increment, so it would return a stale epoch — the one value
+     * this member exists to produce.
+     *
+     * Still not exercised end to end (S14 is where the grant epoch reaches a
+     * live session), but it is now correct when it is.
      */
-    bumpGrantEpoch(id: DeclarationId, _tx: StoreTransaction): GrantEpoch {
-      let result: GrantEpoch = 0 as GrantEpoch;
-      withDb(volumeRoot, (db) => {
-        db.prepare("UPDATE declaration SET grant_epoch = grant_epoch + 1, updated_at = ? WHERE id = ? AND state = 'active'").run(clock.now(), id);
-        const rows = db.prepare("SELECT grant_epoch FROM declaration WHERE id = ? AND state = 'active'").all(id) as unknown as { grant_epoch: number }[];
-        const epoch = validateGrantEpoch(rows[0]?.grant_epoch ?? 0);
-        result = epoch.ok ? epoch.value : (0 as GrantEpoch);
-      });
-      return result;
+    bumpGrantEpoch(id: DeclarationId, tx: StoreTransaction): GrantEpoch {
+      tx.run("UPDATE declaration SET grant_epoch = grant_epoch + 1, updated_at = ? WHERE id = ? AND state = 'active'", clock.now(), id);
+      const rows = tx.all("SELECT grant_epoch FROM declaration WHERE id = ? AND state = 'active'", id) as { grant_epoch: number }[];
+      const epoch = validateGrantEpoch(rows[0]?.grant_epoch ?? 0);
+      return epoch.ok ? epoch.value : (0 as GrantEpoch);
     },
 
     remoteHostAllowlist(): readonly RemoteHost[] {
