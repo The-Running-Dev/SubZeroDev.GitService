@@ -14,6 +14,7 @@ import { createDeclarations, type Declarations } from './declarations/declaratio
 import { createCloneStore, type CloneStore } from './clone/clone-store.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './surfaces/http-server.ts';
 import { createGitOperations } from './git/git-operations.ts';
+import { createJournal } from './journal/journal.ts';
 import { createModuleAdapter, toModuleHandler } from './module-adapter/module-adapter.ts';
 import { createDispatchPipeline } from './dispatch/dispatch-pipeline.ts';
 import { PRODUCTION_TOOL_DECLARATIONS } from './composition-root/production-declarations.ts';
@@ -136,17 +137,22 @@ async function main(): Promise<void> {
   const cloneStore = createCloneStore({ volumeRoot, clock: systemClock, exec, locks, declarations });
   cloneStoreRef = cloneStore;
 
-  // The five S6 read tools: git operations dispatched through a module
-  // adapter and the dispatch pipeline. `PRODUCTION_TOOL_DECLARATIONS` is
-  // plain data (no compiler call), which is what keeps invariant B8 (the
-  // compiler absent from the runtime image) intact here.
-  const gitOperations = createGitOperations({ clock: systemClock, exec, locks });
+  // The five S6 read tools plus S7's three local mutating tools: git
+  // operations dispatched through a module adapter and the dispatch
+  // pipeline. `PRODUCTION_TOOL_DECLARATIONS` is plain data (no compiler
+  // call), which is what keeps invariant B8 (the compiler absent from the
+  // runtime image) intact here.
+  const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+  const journal = createJournal({ volumeRoot, clock: systemClock });
   const moduleAdapter = createModuleAdapter();
   moduleAdapter.register('git.status' as ModuleTargetName, toModuleHandler(gitOperations.status));
   moduleAdapter.register('git.log' as ModuleTargetName, toModuleHandler(gitOperations.log));
   moduleAdapter.register('git.branches' as ModuleTargetName, toModuleHandler(gitOperations.branches));
   moduleAdapter.register('git.health' as ModuleTargetName, toModuleHandler(gitOperations.health));
   moduleAdapter.register('git.diff' as ModuleTargetName, toModuleHandler(gitOperations.diff));
+  moduleAdapter.register('git.stage' as ModuleTargetName, toModuleHandler(gitOperations.stage));
+  moduleAdapter.register('git.commit' as ModuleTargetName, toModuleHandler(gitOperations.commit));
+  moduleAdapter.register('git.restorePaths' as ModuleTargetName, toModuleHandler(gitOperations.restorePaths));
 
   const contractCapabilitySet = new Set(PRODUCTION_TOOL_DECLARATIONS.flatMap((e) => e.capabilities)) as unknown as ContractCapabilitySet;
 
@@ -201,6 +207,7 @@ async function main(): Promise<void> {
     cloneStore,
     locks,
     audit,
+    journal,
     clock: systemClock,
   });
 

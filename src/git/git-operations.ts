@@ -1,29 +1,37 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { isoUtcTimestamp, type BranchName, type ClonePath, type CloneUrl, type GitSha, type IsoUtcTimestamp, type RepoRelativePath } from '../shared/brands.ts';
+import { isoUtcTimestamp, repoRelativePath, type BranchName, type ClonePath, type CloneUrl, type GitSha, type IsoUtcTimestamp, type RepoRelativePath } from '../shared/brands.ts';
 import { isJsonObject, type JsonValue } from '../contract/json.ts';
 import { ok, err, type Outcome } from '../shared/outcome.ts';
 import type { CallContext, DomainOperation } from '../shared/call-context.ts';
 import type { Clock } from '../clock/clock.ts';
 import type { Exec } from '../exec/exec.ts';
 import type { Locks } from '../locks/locks.ts';
-import { success, infrastructure, precondition, type ToolResult, type ReadStamp, type Diagnostics } from '../result/envelope.ts';
+import type { Audit } from '../audit/audit.ts';
+import { success, validation, authorization, infrastructure, precondition, type ToolResult, type ReadStamp, type Diagnostics } from '../result/envelope.ts';
 import { REPOSITORY_CONFIG_DEFAULTS, type RepositoryConfig } from '../declarations/types.ts';
 import { gitOperationsError, type GitOperationsError } from './errors.ts';
 import type {
   BranchSummary,
   BranchesData,
   BranchesInput,
+  GitCommitData,
+  GitCommitInput,
   GitDiffData,
   GitDiffInput,
   GitLogData,
   GitLogEntry,
   GitLogInput,
+  GitStageData,
+  GitStageInput,
+  PathRejection,
   RepoHealthData,
   RepoHealthInput,
   RepoStatusData,
   RepoStatusEntry,
   RepoStatusInput,
+  RestorePathsData,
+  RestorePathsInput,
   StaleBranchSummary,
 } from './types.ts';
 
@@ -45,6 +53,8 @@ export interface GitOperationsDependencies {
   readonly clock: Clock;
   readonly exec: Pick<Exec, 'runGit'>;
   readonly locks: Pick<Locks, 'currentMutationHolder'>;
+  /** Optional so every pre-S7 call site (read-only, never rejects a path) keeps compiling unchanged; a caller of `stage`/`restorePaths` that omits it simply gets no audit trail for a rejected path. */
+  readonly audit?: Pick<Audit, 'append'>;
 }
 
 export interface GitOperations {
@@ -53,13 +63,21 @@ export interface GitOperations {
   readonly branches: DomainOperation<BranchesInput, BranchesData>;
   readonly health: DomainOperation<RepoHealthInput, RepoHealthData>;
   readonly diff: DomainOperation<GitDiffInput, GitDiffData>;
+  readonly stage: DomainOperation<GitStageInput, GitStageData>;
+  readonly commit: DomainOperation<GitCommitInput, GitCommitData>;
+  readonly restorePaths: DomainOperation<RestorePathsInput, RestorePathsData>;
   loadRepositoryConfig(ctx: CallContext): Promise<Outcome<RepositoryConfig, GitOperationsError>>;
+  validateWritePath(ctx: CallContext, rawPath: string): Outcome<RepoRelativePath, PathRejection>;
 }
 
 function readStampFor(ctx: CallContext, locks: Pick<Locks, 'currentMutationHolder'>): ReadStamp {
   const holder = locks.currentMutationHolder();
   return {
-    // The journal does not exist until S7 — an honest absence, not a stub.
+    // `Journal` (S7) has no "last settled operation for this declaration"
+    // query in its contract signature — only `unsettled`/`allUnsettled`,
+    // scoped the other way. An honest absence, not a stub: filling this in
+    // needs either a contract amendment or a derived index, neither of
+    // which is this slice's `Touches`.
     lastSettledOperationId: null,
     mutationInFlight: holder !== null && ctx.declarationId !== null && holder.declarationId === ctx.declarationId,
   };
@@ -97,6 +115,63 @@ function daysSince(iso: IsoUtcTimestamp | null, clock: Clock): number | null {
 
 export function createGitOperations(deps: GitOperationsDependencies): GitOperations {
   const { clock, exec, locks } = deps;
+  const audit: Pick<Audit, 'append'> = deps.audit ?? { append: async () => ({ appended: true, sequence: 0 }) };
+
+  /**
+   * `20-contract.md` § L2 — git operations: `malformed` for anything
+   * `repoRelativePath` itself rejects (`-A`, `--all`, `.`, a `..` segment, a
+   * `;`) — the exact predicate the brand validator's own doc comment names
+   * this call site against. `outside-allowlist` for a well-formed path not
+   * under any of `ctx.writablePathPrefixes`, which is already the
+   * declaration's grant intersected with the actor profile's strip list
+   * (`Declarations.effectiveWritablePrefixes`, computed by the dispatch
+   * pipeline before this ever runs) — so a prefix stripped for an
+   * unattended actor is simply absent from that list by the time it
+   * reaches here, indistinguishable at this layer from one never granted.
+   * `stripped-by-profile` is therefore not reachable from this call site;
+   * it stays in `PathRejection` for whatever surface has both lists to
+   * compare.
+   */
+  function validateWritePath(ctx: CallContext, rawPath: string): Outcome<RepoRelativePath, PathRejection> {
+    const parsed = repoRelativePath(rawPath);
+    if (!parsed.ok) return err({ kind: 'malformed', rule: parsed.error.rule });
+    const candidate = parsed.value;
+    const allowed = ctx.writablePathPrefixes.some((prefix) => candidate === (prefix as unknown as string) || candidate.startsWith(prefix as unknown as string));
+    if (!allowed) return err({ kind: 'outside-allowlist', prefixes: ctx.writablePathPrefixes });
+    return ok(candidate);
+  }
+
+  async function auditPathRejection(ctx: CallContext, rejectedPath: RepoRelativePath): Promise<void> {
+    await audit.append({
+      at: clock.now(),
+      operationId: ctx.operationId,
+      declarationId: ctx.declarationId,
+      generation: ctx.generation,
+      tool: null,
+      actorRef: ctx.actorRef,
+      context: ctx.context,
+      form: 'authorization-rejection',
+      missing: [],
+      rejectedPath,
+    });
+  }
+
+  /** Validates every path before any side effect runs — the first rejection wins and nothing is attempted. */
+  async function validateWritePaths(ctx: CallContext, rawPaths: readonly string[]): Promise<Outcome<readonly RepoRelativePath[], ToolResult<never>>> {
+    const validated: RepoRelativePath[] = [];
+    for (const rawPath of rawPaths) {
+      const result = validateWritePath(ctx, rawPath);
+      if (!result.ok) {
+        if (result.error.kind === 'malformed') {
+          return err(validation(`'${rawPath}' is not a valid repository-relative path`, [{ path: 'paths', rule: result.error.rule, message: rawPath }]));
+        }
+        await auditPathRejection(ctx, rawPath as RepoRelativePath);
+        return err(authorization(`'${rawPath}' is outside this declaration's writable path prefixes`, []));
+      }
+      validated.push(result.value);
+    }
+    return ok(validated);
+  }
 
   async function git(cwd: ClonePath, args: readonly string[], signal: AbortSignal) {
     return exec.runGit({ argv: args, cwd, timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS, credential: null, signal });
@@ -337,6 +412,66 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       return success(diffText.trim() === '' ? 'no changes' : `${diffText.split('\n').length} diff line(s)`, data, diagnosticsFor(ctx, startedAtMs, clock));
     },
 
+    async stage(ctx, input: GitStageInput): Promise<ToolResult<GitStageData>> {
+      const startedAtMs = Date.now();
+      if (ctx.cloneRoot === null) return infrastructure('no clone materialised for this operation');
+      const cwd = ctx.cloneRoot;
+      const signal = ctx.signal;
+
+      const validated = await validateWritePaths(ctx, input.paths);
+      if (!validated.ok) return validated.error;
+
+      const addResult = await git(cwd, ['add', '--', ...validated.value], signal);
+      if (!addResult.ok) {
+        return precondition(`could not stage ${validated.value.length} path(s)`, [{ path: 'paths', rule: 'stageable', message: addResult.error.summary }]);
+      }
+
+      const data: GitStageData = { staged: validated.value };
+      return success(`staged ${validated.value.length} path(s)`, data, diagnosticsFor(ctx, startedAtMs, clock));
+    },
+
+    async commit(ctx, input: GitCommitInput): Promise<ToolResult<GitCommitData>> {
+      const startedAtMs = Date.now();
+      if (ctx.cloneRoot === null) return infrastructure('no clone materialised for this operation');
+      const cwd = ctx.cloneRoot;
+      const signal = ctx.signal;
+
+      const commitResult = await git(cwd, ['commit', '-m', input.message], signal);
+      if (!commitResult.ok) {
+        return precondition('commit failed — is anything staged?', [{ path: 'message', rule: 'stagedChangesExist', message: commitResult.error.summary }]);
+      }
+
+      const shaResult = await git(cwd, ['rev-parse', 'HEAD'], signal);
+      const branch = await currentBranch(cwd, signal);
+      const changedResult = await git(cwd, ['diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'], signal);
+
+      const data: GitCommitData = {
+        sha: (shaResult.ok ? shaResult.value.stdout.trim() : '') as GitSha,
+        branch: branch ?? ('HEAD' as BranchName),
+        changedPaths: changedResult.ok ? (changedResult.value.stdout.split('\n').filter((l) => l.length > 0) as RepoRelativePath[]) : [],
+      };
+      return success(`committed ${data.sha}`, data, diagnosticsFor(ctx, startedAtMs, clock));
+    },
+
+    async restorePaths(ctx, input: RestorePathsInput): Promise<ToolResult<RestorePathsData>> {
+      const startedAtMs = Date.now();
+      if (ctx.cloneRoot === null) return infrastructure('no clone materialised for this operation');
+      const cwd = ctx.cloneRoot;
+      const signal = ctx.signal;
+
+      const validated = await validateWritePaths(ctx, input.paths);
+      if (!validated.ok) return validated.error;
+
+      const restoreResult = await git(cwd, ['restore', '--source=HEAD', '--staged', '--worktree', '--', ...validated.value], signal);
+      if (!restoreResult.ok) {
+        return precondition(`could not restore ${validated.value.length} path(s)`, [{ path: 'paths', rule: 'restorable', message: restoreResult.error.summary }]);
+      }
+
+      const data: RestorePathsData = { restored: validated.value };
+      return success(`restored ${validated.value.length} path(s)`, data, diagnosticsFor(ctx, startedAtMs, clock));
+    },
+
     loadRepositoryConfig,
+    validateWritePath,
   };
 }

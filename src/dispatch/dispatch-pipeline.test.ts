@@ -1,11 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { writeFileSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import { systemClock } from '../clock/clock.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
 import { createExec } from '../exec/exec.ts';
 import { createLocks } from '../locks/locks.ts';
 import { createAudit } from '../audit/audit.ts';
+import { createJournal } from '../journal/journal.ts';
+import { journalError, type JournalError } from '../journal/errors.ts';
 import { createDeclarations, type Declarations } from '../declarations/declarations.ts';
 import { createCloneStore, type CloneStore } from '../clone/clone-store.ts';
 import { createBareGitRemote } from '../clone/testing/git-fixture.ts';
@@ -17,10 +21,12 @@ import type { JsonSchema } from '../contract/json.ts';
 import { createModuleAdapter, toModuleHandler } from '../module-adapter/module-adapter.ts';
 import { createGitOperations } from '../git/git-operations.ts';
 import { success } from '../result/envelope.ts';
+import { err, ok, type Outcome } from '../shared/outcome.ts';
 import type { Session } from '../shared/session.ts';
 import { createDispatchPipeline } from './dispatch-pipeline.ts';
 
 const CAPABILITY_SET = new Set(['repo.read']) as unknown as DeploymentCeiling;
+const MUTATION_CAPABILITY_SET = new Set(['repo.read', 'git.local.write']) as unknown as DeploymentCeiling;
 
 function sessionWith(grant: readonly DeclarationScopedCapability[]): Session {
   return {
@@ -113,6 +119,15 @@ function registryOf(entries: readonly ToolDeclaration[]): CompiledRegistry {
     compiledAt: systemClock.now(),
     entries,
     contractCapabilitySet: CAPABILITY_SET as unknown as CompiledRegistry['contractCapabilitySet'],
+  };
+}
+
+function mutatingRegistryOf(entries: readonly ToolDeclaration[]): CompiledRegistry {
+  return {
+    fingerprint: 'a'.repeat(64) as never,
+    compiledAt: systemClock.now(),
+    entries,
+    contractCapabilitySet: MUTATION_CAPABILITY_SET as unknown as CompiledRegistry['contractCapabilitySet'],
   };
 }
 
@@ -439,5 +454,388 @@ test('two dispatched reads of the same repository run concurrently — the mater
     })();
     await Promise.all([a, b]);
     assert.ok(secondStarted < firstOfPairFinished, 'the second dispatch started before the first finished — neither held the materialisation lock for its duration');
+  });
+});
+
+function grantWrite(fixture: { current: Declaration | null }, writablePathPrefixes: readonly string[]): void {
+  fixture.current = {
+    ...fixture.current!,
+    capabilityGrant: new Set(['repo.read', 'git.local.write']) as unknown as Declaration['capabilityGrant'],
+    writablePathPrefixes: writablePathPrefixes as unknown as Declaration['writablePathPrefixes'],
+  };
+}
+
+const STAGE_ENTRY = fixtureTool({ name: 'git_stage', capabilities: ['git.local.write'], scopes: ['write'], executionClass: 'mutating', target: { kind: 'module', target: 'git.stage' as never } });
+const COMMIT_ENTRY = fixtureTool({ name: 'git_commit', capabilities: ['git.local.write'], scopes: ['write'], executionClass: 'mutating', target: { kind: 'module', target: 'git.commit' as never } });
+
+test('a real git_stage + git_commit mutation runs end to end: journal settles, audit records the call, locks are released', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec, locks, fixture, volume }) => {
+    grantWrite(fixture, ['README.md']);
+
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+    const moduleAdapter = createModuleAdapter();
+    moduleAdapter.register('git.stage' as never, toModuleHandler(gitOperations.stage));
+    moduleAdapter.register('git.commit' as never, toModuleHandler(gitOperations.commit));
+
+    const pipeline = createDispatchPipeline({
+      registry: mutatingRegistryOf([STAGE_ENTRY, COMMIT_ENTRY]),
+      ceiling: MUTATION_CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      journal,
+      clock: systemClock,
+    });
+
+    // Materialise directly so the file to stage exists on disk before dispatch.
+    const declaration = (await declarations.get('repo-a' as never))!;
+    const holder = { operationId: 'setup' as never, declarationId: declaration.id, tool: 'setup' as never, heldSince: systemClock.now() };
+    const ensured = await cloneStore.ensure(declaration, holder, new AbortController().signal);
+    assert.equal(ensured.ok, true);
+    if (!ensured.ok) return;
+    writeFileSync(path.join(ensured.value.clone.path, 'README.md'), 'fixture\nchanged\n', 'utf8');
+    ensured.value.materialisationLock.release();
+    ensured.value.activePin.release();
+
+    const stageResult = await pipeline.dispatch({
+      toolName: 'git_stage' as never,
+      input: { paths: ['README.md'] },
+      session: sessionWith(['repo.read', 'git.local.write']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+    assert.equal(stageResult.kind, 'success');
+
+    const commitResult = await pipeline.dispatch({
+      toolName: 'git_commit' as never,
+      input: { message: 'update readme' },
+      session: sessionWith(['repo.read', 'git.local.write']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+    assert.equal(commitResult.kind, 'success');
+
+    // The journal entry for the commit settled.
+    const parked = await journal.parked();
+    assert.equal(parked.length, 0);
+    const unsettled = await journal.allUnsettled();
+    assert.equal(unsettled.length, 0, 'both mutations settled — nothing left unsettled');
+
+    // A `call` audit record exists for the commit.
+    const page = await audit.query({ declarationId: 'repo-a' as never, tool: 'git_commit' as never, actorSubject: null, form: 'call', from: null, to: null, limit: 10, cursor: null });
+    assert.equal(page.ok, true);
+    if (!page.ok) return;
+    assert.equal(page.value.records.length, 1);
+
+    // Both locks are free — a third mutation on the same repo does not queue behind anything left held.
+    assert.equal(locks.currentMutationHolder(), null);
+  });
+});
+
+test('mutation with the journal forced to fail returns infrastructure, and the working tree is byte-identical before and after — no side effect ran', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec, locks, fixture, volume }) => {
+    grantWrite(fixture, ['README.md']);
+
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+    const moduleAdapter = createModuleAdapter();
+    let handlerEntered = false;
+    moduleAdapter.register('git.stage' as never, async (ctx, input) => {
+      handlerEntered = true;
+      return toModuleHandler(gitOperations.stage)(ctx, input);
+    });
+
+    const failingJournal = {
+      async begin(): Promise<Outcome<never, JournalError>> {
+        return err(journalError({ code: 'intent-write-failed', cause: { resultKind: 'infrastructure', retryable: false, summary: 'forced failure', code: 'io-failed' } as never }, 'forced failure'));
+      },
+      async appendStep() {
+        throw new Error('unreachable — begin() already failed');
+      },
+      async markApplied() {
+        throw new Error('unreachable — begin() already failed');
+      },
+      async settle() {
+        throw new Error('unreachable — begin() already failed');
+      },
+    };
+
+    const pipeline = createDispatchPipeline({
+      registry: mutatingRegistryOf([STAGE_ENTRY]),
+      ceiling: MUTATION_CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      journal: failingJournal,
+      clock: systemClock,
+    });
+
+    const declaration = (await declarations.get('repo-a' as never))!;
+    const holder = { operationId: 'setup' as never, declarationId: declaration.id, tool: 'setup' as never, heldSince: systemClock.now() };
+    const ensured = await cloneStore.ensure(declaration, holder, new AbortController().signal);
+    assert.equal(ensured.ok, true);
+    if (!ensured.ok) return;
+    const readmePath = path.join(ensured.value.clone.path, 'README.md');
+    const before = readFileSync(readmePath, 'utf8');
+    ensured.value.materialisationLock.release();
+    ensured.value.activePin.release();
+
+    const result = await pipeline.dispatch({
+      toolName: 'git_stage' as never,
+      input: { paths: ['README.md'] },
+      session: sessionWith(['repo.read', 'git.local.write']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+
+    assert.equal(result.kind, 'infrastructure');
+    assert.equal(handlerEntered, false, 'the domain handler — the first side effect — never ran');
+    const after = readFileSync(readmePath, 'utf8');
+    assert.equal(before, after, 'the working tree is byte-identical before and after the aborted mutation');
+    assert.equal(locks.currentMutationHolder(), null, 'the mutation lock was released even on this abort path');
+  });
+});
+
+test('two concurrent mutations against the same repository never overlap — instrumented, not inferred from timing', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec, locks, fixture, volume }) => {
+    grantWrite(fixture, ['README.md']);
+
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+    const moduleAdapter = createModuleAdapter();
+    let inFlight = 0;
+    let overlapped = false;
+    moduleAdapter.register('git.stage' as never, async (ctx, input) => {
+      inFlight += 1;
+      if (inFlight > 1) overlapped = true;
+      await new Promise((r) => setTimeout(r, 20));
+      const result = await toModuleHandler(gitOperations.stage)(ctx, input);
+      inFlight -= 1;
+      return result;
+    });
+
+    const pipeline = createDispatchPipeline({
+      registry: mutatingRegistryOf([STAGE_ENTRY]),
+      ceiling: MUTATION_CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      journal,
+      clock: systemClock,
+    });
+
+    const declaration = (await declarations.get('repo-a' as never))!;
+    const holder = { operationId: 'setup' as never, declarationId: declaration.id, tool: 'setup' as never, heldSince: systemClock.now() };
+    const ensured = await cloneStore.ensure(declaration, holder, new AbortController().signal);
+    assert.equal(ensured.ok, true);
+    if (!ensured.ok) return;
+    writeFileSync(path.join(ensured.value.clone.path, 'README.md'), 'fixture\nchanged\n', 'utf8');
+    ensured.value.materialisationLock.release();
+    ensured.value.activePin.release();
+
+    const call = () =>
+      pipeline.dispatch({
+        toolName: 'git_stage' as never,
+        input: { paths: ['README.md'] },
+        session: sessionWith(['repo.read', 'git.local.write']),
+        declarationId: 'repo-a' as never,
+        scheduledJobId: null,
+        context: 'normal',
+        signal: new AbortController().signal,
+      });
+
+    const [first, second] = await Promise.all([call(), call()]);
+    assert.equal(overlapped, false, 'the two mutations never ran concurrently — the second waited on the global mutation lock');
+    assert.equal(first.kind, 'success');
+    assert.equal(second.kind, 'success');
+  });
+});
+
+test('a mutation that times out waiting for the mutation lock returns conflict naming the holding operation', async () => {
+  // Two *different* declarations, deliberately — the materialisation lock is
+  // per-declaration and a mutating call holds it for its whole duration, so
+  // two calls against the *same* declaration would queue there first and
+  // never reach the global mutation lock this test means to exercise. Two
+  // declarations share nothing but that one global mutex.
+  await withVolumeAsync(async (volume) => {
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    await store.open();
+    await store.migrate();
+    await store.close();
+
+    const exec = createExec({ volumeRoot: volume });
+    const locks = createLocks();
+    const declarationA = fixtureDeclaration('repo-a', createBareGitRemote(), ['repo.read', 'git.local.write']);
+    const declarationB = fixtureDeclaration('repo-b', createBareGitRemote(), ['repo.read', 'git.local.write']);
+    const byId = new Map([
+      [declarationA.id, { ...declarationA, writablePathPrefixes: ['README.md'] as unknown as Declaration['writablePathPrefixes'] }],
+      [declarationB.id, { ...declarationB, writablePathPrefixes: ['README.md'] as unknown as Declaration['writablePathPrefixes'] }],
+    ]);
+    const declarationsReal = createDeclarations({
+      volumeRoot: volume,
+      clock: systemClock,
+      remoteHostAllowlist: [],
+      ceiling: CAPABILITY_SET,
+      cloneAdoptionCheck: () => ({ observedRemote: async () => ({ cloneExists: false }), isSafeToAdopt: async () => ({ safe: true }) }),
+    });
+    const declarations: Declarations = { ...declarationsReal, async get(id) { return byId.get(id) ?? null; } };
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations });
+
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+    const moduleAdapter = createModuleAdapter();
+    let releaseHeld = () => {};
+    const heldGate = new Promise<void>((resolve) => {
+      releaseHeld = resolve;
+    });
+    moduleAdapter.register('git.stage' as never, async (ctx, input) => {
+      await heldGate;
+      return toModuleHandler(gitOperations.stage)(ctx, input);
+    });
+
+    const pipeline = createDispatchPipeline({
+      registry: mutatingRegistryOf([STAGE_ENTRY]),
+      ceiling: MUTATION_CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      journal,
+      clock: systemClock,
+      mutationLockAcquireMs: 50,
+    });
+
+    for (const declaration of [declarationA, declarationB]) {
+      const holder = { operationId: 'setup' as never, declarationId: declaration.id, tool: 'setup' as never, heldSince: systemClock.now() };
+      const ensured = await cloneStore.ensure(byId.get(declaration.id)!, holder, new AbortController().signal);
+      assert.equal(ensured.ok, true);
+      if (!ensured.ok) return;
+      writeFileSync(path.join(ensured.value.clone.path, 'README.md'), 'fixture\nchanged\n', 'utf8');
+      ensured.value.materialisationLock.release();
+      ensured.value.activePin.release();
+    }
+
+    const call = (declarationId: string) =>
+      pipeline.dispatch({
+        toolName: 'git_stage' as never,
+        input: { paths: ['README.md'] },
+        session: sessionWith(['repo.read', 'git.local.write']),
+        declarationId: declarationId as never,
+        scheduledJobId: null,
+        context: 'normal',
+        signal: new AbortController().signal,
+      });
+
+    const holderCall = call('repo-a');
+    await new Promise((r) => setTimeout(r, 5)); // let the first call actually acquire the mutation lock
+    const waiterCall = call('repo-b');
+
+    const waiterResult = await waiterCall;
+    assert.equal(waiterResult.kind, 'conflict');
+    assert.ok((waiterResult.findings ?? []).some((f) => f.rule === 'held-by-another-operation' && f.message.includes('git_stage')), 'names the holding operation');
+
+    releaseHeld();
+    const holderResult = await holderCall;
+    assert.equal(holderResult.kind, 'success');
+  });
+});
+
+test('the materialisation lock is released after the mutation lock, not before — release order asserted', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec, locks, fixture, volume }) => {
+    grantWrite(fixture, ['README.md']);
+
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+    const moduleAdapter = createModuleAdapter();
+    moduleAdapter.register('git.stage' as never, toModuleHandler(gitOperations.stage));
+
+    const releaseOrder: string[] = [];
+    const declaration = (await declarations.get('repo-a' as never))!;
+    const setupHolder = { operationId: 'setup' as never, declarationId: declaration.id, tool: 'setup' as never, heldSince: systemClock.now() };
+    const setupEnsured = await cloneStore.ensure(declaration, setupHolder, new AbortController().signal);
+    assert.equal(setupEnsured.ok, true);
+    if (!setupEnsured.ok) return;
+    writeFileSync(path.join(setupEnsured.value.clone.path, 'README.md'), 'fixture\nchanged\n', 'utf8');
+    setupEnsured.value.materialisationLock.release();
+    setupEnsured.value.activePin.release();
+
+    // Spy on the two lock classes' `release()` without changing their
+    // behaviour — order is recorded, not simulated.
+    const instrumentedCloneStore: Pick<CloneStore, 'ensure' | 'observeGitState'> = {
+      async ensure(...args) {
+        const result = await cloneStore.ensure(...args);
+        if (!result.ok) return result;
+        const originalRelease = result.value.materialisationLock.release.bind(result.value.materialisationLock);
+        return ok({
+          ...result.value,
+          materialisationLock: {
+            holder: result.value.materialisationLock.holder,
+            release: () => {
+              releaseOrder.push('materialisation');
+              originalRelease();
+            },
+          },
+        });
+      },
+      observeGitState: (...args) => cloneStore.observeGitState(...args),
+    };
+    const instrumentedLocks: Pick<typeof locks, 'pinActiveOperation' | 'acquireMutation'> = {
+      pinActiveOperation: (...args) => locks.pinActiveOperation(...args),
+      async acquireMutation(...args) {
+        const result = await locks.acquireMutation(...args);
+        if (!result.ok) return result;
+        const originalRelease = result.value.release.bind(result.value);
+        return ok({
+          holder: result.value.holder,
+          release: () => {
+            releaseOrder.push('mutation');
+            originalRelease();
+          },
+        });
+      },
+    };
+
+    const pipeline = createDispatchPipeline({
+      registry: mutatingRegistryOf([STAGE_ENTRY]),
+      ceiling: MUTATION_CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore: instrumentedCloneStore,
+      locks: instrumentedLocks,
+      audit,
+      journal,
+      clock: systemClock,
+    });
+
+    const result = await pipeline.dispatch({
+      toolName: 'git_stage' as never,
+      input: { paths: ['README.md'] },
+      session: sessionWith(['repo.read', 'git.local.write']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+
+    assert.equal(result.kind, 'success');
+    assert.deepEqual(releaseOrder, ['mutation', 'materialisation'], 'mutation released before materialisation — reverse acquisition order');
   });
 });

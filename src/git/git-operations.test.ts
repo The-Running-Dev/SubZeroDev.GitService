@@ -9,7 +9,8 @@ import { createExec } from '../exec/exec.ts';
 import { createLocks } from '../locks/locks.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
 import type { CallContext } from '../shared/call-context.ts';
-import type { ClonePath, DeclarationId, OperationId } from '../shared/brands.ts';
+import type { ClonePath, DeclarationId, OperationId, PathPrefix } from '../shared/brands.ts';
+import type { AuditAppendInput, AuditAppendOutcome } from '../audit/types.ts';
 import { createGitOperations } from './git-operations.ts';
 
 /**
@@ -48,12 +49,13 @@ function realClone(): { readonly clonePath: string; readonly cleanup: () => void
   git(['push', 'origin', 'main'], seedDir);
 
   git(['clone', bareDir, clonePath], dir);
-  git(['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com', 'config', 'user.name', 'fixture'], clonePath);
+  git(['config', 'user.name', 'fixture'], clonePath);
+  git(['config', 'user.email', 'fixture@example.com'], clonePath);
 
   return { clonePath, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-function contextFor(clonePath: string): CallContext {
+function contextFor(clonePath: string, writablePathPrefixes: readonly PathPrefix[] = []): CallContext {
   return {
     operationId: 'op-1' as OperationId,
     declarationId: 'repo-a' as DeclarationId,
@@ -61,11 +63,22 @@ function contextFor(clonePath: string): CallContext {
     cloneRoot: clonePath as ClonePath,
     actorRef: { kind: 'mcp', subject: 'sub' as never, clientId: null, grantId: null },
     capabilities: new Set() as never,
-    writablePathPrefixes: [],
+    writablePathPrefixes,
     context: 'normal',
     scheduledJobId: null,
     deadline: systemClock.now(),
     signal: new AbortController().signal,
+  };
+}
+
+function recordingAudit(): { readonly append: (input: AuditAppendInput) => Promise<AuditAppendOutcome>; readonly records: AuditAppendInput[] } {
+  const records: AuditAppendInput[] = [];
+  return {
+    records,
+    async append(input: AuditAppendInput): Promise<AuditAppendOutcome> {
+      records.push(input);
+      return { appended: true, sequence: records.length };
+    },
   };
 }
 
@@ -214,5 +227,134 @@ test('two reads of the same repository run concurrently — overlapping timestam
     } finally {
       cleanup();
     }
+  });
+});
+
+test('git_stage stages a well-formed path under the writable allowlist', async () => {
+  await withVolumeAsync(async (volume) => {
+    const { clonePath, cleanup } = realClone();
+    try {
+      writeFileSync(path.join(clonePath, 'README.md'), 'fixture\nmore\n', 'utf8');
+      const exec = createExec({ volumeRoot: volume });
+      const locks = createLocks();
+      const audit = recordingAudit();
+      const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+
+      const result = await gitOperations.stage(contextFor(clonePath, ['README.md' as PathPrefix]), { paths: ['README.md' as never] });
+      assert.equal(result.ok, true);
+      if (!result.ok || !result.data) return;
+      assert.deepEqual(result.data.staged, ['README.md']);
+
+      const statusResult = await gitOperations.status(contextFor(clonePath), {});
+      assert.equal(statusResult.ok, true);
+      if (!statusResult.ok || !statusResult.data) return;
+      assert.equal(statusResult.data.changedPaths[0]?.staged, true);
+      assert.equal(audit.records.length, 0, 'a successful stage writes no authorization-rejection record');
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+test('git_stage: a malformed path returns validation and writes no audit record — well-formed but outside the allowlist returns authorization and writes one', async () => {
+  await withVolumeAsync(async (volume) => {
+    const { clonePath, cleanup } = realClone();
+    try {
+      writeFileSync(path.join(clonePath, 'README.md'), 'fixture\nmore\n', 'utf8');
+      const exec = createExec({ volumeRoot: volume });
+      const locks = createLocks();
+
+      let malformedRejected = 0;
+      let allowlistRejected = 0;
+
+      // `-A`, `--all`, `.`, a `..` segment, a `;` — every malformed case
+      // `repoRelativePath`'s own rule table names — each on its own audit
+      // and count so a failure doesn't hide the other cases.
+      const malformedCases = ['-A', '--all', '.', '../x', 'a;b'];
+      for (const malformed of malformedCases) {
+        const audit = recordingAudit();
+        const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+        const result = await gitOperations.stage(contextFor(clonePath, ['/' as PathPrefix]), { paths: [malformed as never] });
+        assert.equal(result.kind, 'validation', `'${malformed}' should be malformed`);
+        assert.equal(audit.records.length, 0, `'${malformed}' is malformed input, not an authorization rejection — no audit record`);
+        malformedRejected += 1;
+      }
+      assert.equal(malformedRejected, malformedCases.length);
+
+      const audit = recordingAudit();
+      const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+      const outsideResult = await gitOperations.stage(contextFor(clonePath, ['some/other/prefix/' as PathPrefix]), { paths: ['README.md' as never] });
+      assert.equal(outsideResult.kind, 'authorization', `'README.md' is well-formed but outside the allowlist`);
+      assert.equal(audit.records.length, 1, 'a well-formed path outside the allowlist writes exactly one audit record');
+      assert.equal(audit.records[0]!.form, 'authorization-rejection');
+      allowlistRejected += 1;
+      assert.equal(allowlistRejected, 1);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+test('git_commit commits what is staged and reports the sha, branch and changed paths', async () => {
+  await withVolumeAsync(async (volume) => {
+    const { clonePath, cleanup } = realClone();
+    try {
+      writeFileSync(path.join(clonePath, 'README.md'), 'fixture\nmore\n', 'utf8');
+      const exec = createExec({ volumeRoot: volume });
+      const locks = createLocks();
+      const gitOperations = createGitOperations({ clock: systemClock, exec, locks });
+
+      const staged = await gitOperations.stage(contextFor(clonePath, ['README.md' as PathPrefix]), { paths: ['README.md' as never] });
+      assert.equal(staged.ok, true);
+
+      const result = await gitOperations.commit(contextFor(clonePath), { message: 'update README' });
+      assert.equal(result.ok, true);
+      if (!result.ok || !result.data) return;
+      assert.match(result.data.sha, /^[0-9a-f]{40}$/);
+      assert.equal(result.data.branch, 'main');
+      assert.deepEqual(result.data.changedPaths, ['README.md']);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+test('git_restore_paths restores a well-formed, allowlisted path to HEAD, discarding the change', async () => {
+  await withVolumeAsync(async (volume) => {
+    const { clonePath, cleanup } = realClone();
+    try {
+      writeFileSync(path.join(clonePath, 'README.md'), 'fixture\nchanged\n', 'utf8');
+      const exec = createExec({ volumeRoot: volume });
+      const locks = createLocks();
+      const gitOperations = createGitOperations({ clock: systemClock, exec, locks });
+
+      const result = await gitOperations.restorePaths(contextFor(clonePath, ['README.md' as PathPrefix]), { paths: ['README.md' as never] });
+      assert.equal(result.ok, true);
+      if (!result.ok || !result.data) return;
+      assert.deepEqual(result.data.restored, ['README.md']);
+
+      const statusResult = await gitOperations.status(contextFor(clonePath), {});
+      assert.equal(statusResult.ok, true);
+      if (!statusResult.ok || !statusResult.data) return;
+      assert.equal(statusResult.data.dirty, false, 'the working tree change was discarded');
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+test('GitOperations has no reset, clean, force-push, rebase or branch-delete operation — all six attempts through the typed surface fail', async () => {
+  await withVolumeAsync(async (volume) => {
+    const exec = createExec({ volumeRoot: volume });
+    const locks = createLocks();
+    const gitOperations = createGitOperations({ clock: systemClock, exec, locks }) as unknown as Record<string, unknown>;
+
+    const forbiddenOperationNames = ['reset', 'clean', 'forcePush', 'rebase', 'branchDelete', 'deleteBranch'];
+    let absent = 0;
+    for (const name of forbiddenOperationNames) {
+      assert.equal(typeof gitOperations[name], 'undefined', `GitOperations must carry no '${name}' operation`);
+      absent += 1;
+    }
+    assert.equal(absent, forbiddenOperationNames.length, `all ${forbiddenOperationNames.length} forbidden operations are confirmed absent`);
   });
 });
