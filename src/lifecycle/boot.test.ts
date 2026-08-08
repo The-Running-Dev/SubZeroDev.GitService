@@ -10,6 +10,8 @@ import { createStructuredStore } from '../store/structured-store.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
 import { NO_CONSOLE_FINGERPRINT } from '../surfaces/http-server.ts';
 import { createOperatorIdentity } from '../operator-identity/operator-identity.ts';
+import { createJournal } from '../journal/journal.ts';
+import { createNotifier, type Notifier } from '../notifier/notifier.ts';
 import type { Audit } from '../audit/audit.ts';
 import type { CapabilityName, DeploymentCeiling } from '../contract/capabilities.ts';
 import { fixtureTool } from '../contract/fixtures.ts';
@@ -61,7 +63,11 @@ const EMPTY_CEILING = new Set() as unknown as DeploymentCeiling;
 function lifecycleFor(
   volume: string,
   acquirer?: LockAcquirer,
-  options: { readonly ceiling?: DeploymentCeiling; readonly registryDeclarations?: Parameters<typeof compiler.compile>[0] } = {},
+  options: {
+    readonly ceiling?: DeploymentCeiling;
+    readonly registryDeclarations?: Parameters<typeof compiler.compile>[0];
+    readonly notifier?: Pick<Notifier, 'redriveUndelivered'>;
+  } = {},
 ) {
   const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
   const audit = createAudit({ volumeRoot: volume, clock: systemClock });
@@ -75,6 +81,7 @@ function lifecycleFor(
     consoleFingerprint: NO_CONSOLE_FINGERPRINT,
     ceiling: options.ceiling ?? EMPTY_CEILING,
     ...(acquirer ? { acquirer } : {}),
+    ...(options.notifier ? { notifier: options.notifier } : {}),
   });
   return { store, audit, lifecycle };
 }
@@ -92,6 +99,60 @@ test('boot takes the lease, applies migrations and reports both', async () => {
       assert.equal(booted.value.migrationsApplied, 1, 'migration 0001 applied');
       assert.match(booted.value.registryFingerprint, /^[0-9a-f]{64}$/);
       assert.deepEqual(booted.value.clones, [], 'step 8 derives an empty clone set with none declared');
+    } finally {
+      await lifecycle.shutdown('operator');
+    }
+  });
+});
+
+test('S11 — boot re-drives every undelivered outbox row before it returns', async () => {
+  await withVolumeAsync(async (volume) => {
+    // Seed one pending row, as if left behind by a previous process —
+    // migrated ahead of `boot()` so the outbox table exists to seed;
+    // `boot()`'s own `migrate()` call is idempotent on top.
+    const seedStore = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    await seedStore.open();
+    await seedStore.migrate();
+    await seedStore.close();
+
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin({
+      operationId: 'op-1' as never,
+      declarationId: 'repo-a' as never,
+      generation: 1 as never,
+      tool: 'git_stage' as never,
+      input: {},
+      actorRef: { kind: 'mcp', subject: 'sub' as never, clientId: null, grantId: null },
+      scheduledJobId: null,
+      context: 'normal',
+      preState: { branch: 'main' as never, headSha: 'a'.repeat(40) as never, upstreamSha: 'a'.repeat(40) as never, indexDigest: 'b'.repeat(64) as never, worktreeDigest: 'c'.repeat(64) as never },
+    });
+    await journal.settle('op-1' as never, {
+      severity: 'attention',
+      declarationId: 'repo-a' as never,
+      subject: { kind: 'operation-parked', operationId: 'op-1' as never, reason: 'left behind by the previous process' },
+      summary: 'a row left over from before the restart',
+    });
+
+    let calls = 0;
+    const seededNotifier = createNotifier({
+      volumeRoot: volume,
+      clock: systemClock,
+      webhookUrl: 'https://hooks.example.invalid/notify' as never,
+      deliverFn: async () => {
+        calls += 1;
+        return { ok: true, status: 200 };
+      },
+    });
+
+    const { lifecycle } = lifecycleFor(volume, undefined, { notifier: seededNotifier });
+    try {
+      const booted = await lifecycle.boot();
+      assert.equal(booted.ok, true);
+      assert.equal(calls, 1, 'boot re-drove the row left over from the previous process, before returning');
+
+      const failed = await seededNotifier.listFailed();
+      assert.equal(failed.length, 0, 'the redriven row delivered rather than staying failed');
     } finally {
       await lifecycle.shutdown('operator');
     }

@@ -12,6 +12,7 @@ import type { OperatorIdentity } from '../operator-identity/operator-identity.ts
 import type { ModuleTargetName } from '../shared/brands.ts';
 import type { ToolDeclaration } from '../contract/tool-declaration.ts';
 import type { RecoveryClassification } from '../recovery/types.ts';
+import type { Notifier } from '../notifier/notifier.ts';
 import { acquireLease, type InstanceLease, type LeaseGuard, type LockAcquirer } from './lease.ts';
 import { verifyRegistryArtifact } from './registry-integrity.ts';
 import { declarationsWithUnsettledEntries, recoverDeclaration as runRecoveryLadder, type RecoveryDependencies } from './recovery.ts';
@@ -121,6 +122,11 @@ export interface LifecycleDependencies {
    * silently claiming there was nothing to recover.
    */
   readonly recovery?: RecoveryDependencies;
+  /**
+   * S11. Optional so a `Lifecycle` built before the notifier existed still
+   * compiles: without it, boot simply has nothing to re-drive.
+   */
+  readonly notifier?: Pick<Notifier, 'redriveUndelivered'>;
 }
 
 const SYSTEM_ACTOR = { kind: 'recovery', subject: 'system' as Subject, clientId: null, grantId: null } as const;
@@ -297,6 +303,19 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       // repository's unfinished work, and — worse — would run resume steps
       // that touch a host before anything was ready to supervise them.
       const recoveryPending = deps.recovery ? declarationsWithUnsettledEntries(await deps.recovery.journal.allUnsettled()) : [];
+
+      // "Boot re-drives every undelivered row" (`10-design.md` § control flow
+      // #1, step 11) — the same durability reasoning as the lease takeover
+      // record above: a row left `pending` or `failed` by the previous
+      // process is exactly the notification that most needed to reach an
+      // operator, and a restart is the natural checkpoint to try it again.
+      // Awaited, unlike recovery's own lazy pass, because `redriveUndelivered`
+      // touches no git or host state and each attempt is already bounded —
+      // there is nothing here that could hold the service down the way a
+      // resume step could.
+      if (deps.notifier) {
+        await deps.notifier.redriveUndelivered();
+      }
 
       return ok({
         lease: leaseResult.value.lease,

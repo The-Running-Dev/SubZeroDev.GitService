@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { gitSha, type BranchName, type GitSha, type RemoteHost } from './shared/brands.ts';
+import { gitSha, type BranchName, type GitSha, type HttpsUrl, type RemoteHost } from './shared/brands.ts';
 import type { CapabilityName, DeploymentCeiling } from './contract/capabilities.ts';
 import { systemClock } from './clock/clock.ts';
 import { createStructuredStore } from './store/structured-store.ts';
@@ -17,6 +17,7 @@ import { createCloneStore, type CloneStore } from './clone/clone-store.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './surfaces/http-server.ts';
 import { createGitOperations } from './git/git-operations.ts';
 import { createJournal } from './journal/journal.ts';
+import { createNotifier } from './notifier/notifier.ts';
 import { createRecoveryCatalogue } from './recovery/catalogue.ts';
 import { LOCAL_MUTATION_RECOVERY_DESCRIPTORS, REMOTE_OPERATION_RECOVERY_DESCRIPTORS } from './git/recovery-descriptors.ts';
 import { createCredentialResolver } from './credentials/credentials.ts';
@@ -102,6 +103,17 @@ function resolveCeiling(): DeploymentCeiling {
         .filter((c) => c.length > 0)
     : [];
   return new Set(names as CapabilityName[]) as unknown as DeploymentCeiling;
+}
+
+/** `DeploymentConfig.notifierWebhook` — `null` until configured is the safe direction: no transport means outbox rows accumulate `pending` rather than sending anywhere unintended. */
+function resolveNotifierWebhook(): HttpsUrl | null {
+  const raw = process.env.NOTIFIER_WEBHOOK_URL;
+  if (!raw || raw.trim().length === 0) return null;
+  if (!raw.startsWith('https://')) {
+    console.error(`server: NOTIFIER_WEBHOOK_URL must be an https:// URL (got '${raw}')`);
+    process.exit(1);
+  }
+  return raw as HttpsUrl;
 }
 
 function resolveCommitSha(): GitSha {
@@ -190,6 +202,7 @@ async function main(): Promise<void> {
   // runtime image) intact here.
   const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit, declarations, credentials, credentialEnv });
   const journal = createJournal({ volumeRoot, clock: systemClock });
+  const notifier = createNotifier({ volumeRoot, clock: systemClock, webhookUrl: resolveNotifierWebhook() });
   const moduleAdapter = createModuleAdapter();
   moduleAdapter.register('git.status' as ModuleTargetName, toModuleHandler(gitOperations.status));
   moduleAdapter.register('git.log' as ModuleTargetName, toModuleHandler(gitOperations.log));
@@ -283,6 +296,7 @@ async function main(): Promise<void> {
     clock: systemClock,
     declarations,
     cloneStore,
+    notifier,
   };
 
   const lifecycle = createLifecycle({
@@ -298,6 +312,7 @@ async function main(): Promise<void> {
     registryEntries: PRODUCTION_TOOL_DECLARATIONS,
     registeredModuleTargets: moduleAdapter.registeredTargets(),
     recovery,
+    notifier,
     onTakeover: (previous, current) => {
       // The durable `lease-takeover` audit record is written by boot itself
       // (S3); this is operator-visible defense in depth, so a takeover is
@@ -394,6 +409,7 @@ async function main(): Promise<void> {
     },
     failingCredentialRefs: () => credentials.listFailing(),
     clearFailingCredential: (ref, declarationId) => credentials.clearFailing(ref, declarationId),
+    failedOutboxRows: async () => (await notifier.listFailed()).length,
     identity: operatorIdentity,
     sessionAbsoluteSeconds: SESSION_ABSOLUTE_SECONDS_DEFAULT,
     declarations,

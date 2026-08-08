@@ -31,6 +31,7 @@ interface ServerOptions {
   readonly parked?: readonly OperationJournalEntry[];
   readonly observed?: ObservedGitState | null;
   readonly resolve?: (operationId: string) => Promise<{ readonly ok: boolean; readonly summary: string }>;
+  readonly failedOutboxRows?: number;
 }
 
 async function withServer<T>(options: ServerOptions, fn: (baseUrl: string) => Promise<T>): Promise<T> {
@@ -45,6 +46,7 @@ async function withServer<T>(options: ServerOptions, fn: (baseUrl: string) => Pr
     parkedOperations: async () => options.parked ?? [],
     observeGitState: async () => options.observed ?? null,
     ...(options.resolve ? { resolveParkedOperation: async (operationId: string) => options.resolve!(operationId) } : {}),
+    ...(options.failedOutboxRows !== undefined ? { failedOutboxRows: async () => options.failedOutboxRows! } : {}),
     identity: createStubOperatorIdentity(),
     sessionAbsoluteSeconds: 43_200,
     declarations: createStubDeclarations(),
@@ -191,6 +193,14 @@ test('/health reports the placeholder fields honestly as empty/zero', async () =
     assert.deepEqual(body.failingCredentialRefs, []);
     assert.equal(body.parkedOperations, 0);
     assert.equal(body.volume.totalBytes, 0);
+  });
+});
+
+test('S11 — /health reports a real failed-outbox-row count when a notifier is wired', async () => {
+  await withServer({ failedOutboxRows: 2 }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    const body = (await response.json()) as { failedOutboxRows: number };
+    assert.equal(body.failedOutboxRows, 2);
   });
 });
 

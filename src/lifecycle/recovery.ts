@@ -8,6 +8,7 @@ import type { Declarations } from '../declarations/declarations.ts';
 import type { RecoveryCatalogue } from '../recovery/catalogue.ts';
 import type { RecoveryClassification } from '../recovery/types.ts';
 import type { Dispatch } from '../dispatch/dispatch-pipeline.ts';
+import type { Notifier } from '../notifier/notifier.ts';
 
 export interface RecoveryDependencies {
   readonly journal: Pick<Journal, 'unsettled' | 'allUnsettled' | 'classify' | 'settle' | 'park'>;
@@ -15,6 +16,14 @@ export interface RecoveryDependencies {
   readonly declarations: Pick<Declarations, 'get'>;
   readonly catalogue: Pick<RecoveryCatalogue, 'lookup'>;
   readonly clock: Clock;
+  /**
+   * S11. Optional so a `RecoveryDependencies` assembled before the notifier
+   * existed still compiles. Delivery is fired, never awaited, after a settle
+   * that actually enqueued a row — `10-design.md` § Notifier: "never blocks
+   * a caller", and this caller is recovery itself, not the operation whose
+   * terminal state is being reported.
+   */
+  readonly notifier?: Pick<Notifier, 'deliverPending'>;
   /**
    * Injected per invariant B2 — the lifecycle module receives `Dispatch`
    * rather than importing the pipeline. Only the `resume` verdict needs it,
@@ -87,18 +96,29 @@ export async function recoverDeclaration(deps: RecoveryDependencies, declaration
 
     switch (verdict.verdict) {
       case 'nothing-happened':
-      case 'completed':
+      case 'completed': {
         // Both settle. `completed` may carry a `TerminalState` the operator
-        // should hear about; S11 owns delivery, so the hook is placed here
-        // and the request is passed to `settle`, which commits the outbox row
-        // in the same transaction as the state change.
-        await deps.journal.settle(
-          entry.operationId,
+        // should hear about; the request is passed to `settle`, which
+        // commits the outbox row in the same transaction as the state
+        // change (`10-design.md` § control flow #1, step 11: "the caller's
+        // connection died with the process, so suppressing it here would
+        // recreate the failure one level up").
+        const notify =
           verdict.verdict === 'completed' && verdict.terminal
-            ? { severity: 'attention', declarationId, subject: verdict.terminal, summary: `'${entry.tool}' reached a terminal state during recovery` }
-            : null,
-        );
+            ? { severity: 'attention' as const, declarationId, subject: verdict.terminal, summary: `'${entry.tool}' reached a terminal state during recovery` }
+            : null;
+        const settled = await deps.journal.settle(entry.operationId, notify);
+        // Fired, not awaited: delivery is a separate concern from recovery
+        // finishing, and a slow or unreachable webhook must not hold up the
+        // ladder working through the rest of the unsettled entries.
+        if (settled.ok && notify && deps.notifier) {
+          void deps.notifier.deliverPending().catch(() => {
+            // `deliverPending` never throws by construction; this is belt
+            // and braces against a future implementation that does.
+          });
+        }
         break;
+      }
 
       case 'resume': {
         if (!deps.dispatch || !deps.recoverySession) {

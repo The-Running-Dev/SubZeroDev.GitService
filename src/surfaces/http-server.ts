@@ -42,12 +42,11 @@ export const NO_CONSOLE_FINGERPRINT: Sha256Hex = (() => {
 
 /**
  * `20-contract.md` § L5 surfaces. Authenticated, unlike `/healthz`.
- * `auditChain` is real as of S3 and `parkedOperations` as of S8;
- * `failedOutboxRows`, `failingCredentialRefs` and `volume` are genuinely
- * zero/empty until the modules that would populate them exist (Notifier,
- * Credentials, S17's volume accounting) — not placeholders standing in for
- * unmeasured data, but true statements that nothing has happened yet in
- * subsystems that do not run.
+ * `auditChain` is real as of S3, `failingCredentialRefs` as of S9,
+ * `parkedOperations` as of S8, and `failedOutboxRows` as of S11; `volume` is
+ * genuinely zero until S17's volume accounting exists — not a placeholder
+ * standing in for unmeasured data, but a true statement that nothing has
+ * happened yet in a subsystem that does not run.
  */
 export interface HealthReport {
   readonly ready: boolean;
@@ -112,6 +111,12 @@ export interface SurfacesDependencies
    */
   readonly failingCredentialRefs?: () => Promise<readonly CredentialFailureMark[]>;
   readonly clearFailingCredential?: (ref: CredentialRef, declarationId: DeclarationId) => Promise<void>;
+  /**
+   * The count behind `failedOutboxRows` (S11). Optional so a surfaces server
+   * assembled without a notifier still reports an honest zero rather than
+   * failing to construct — the same shape as `failingCredentialRefs` above.
+   */
+  readonly failedOutboxRows?: () => Promise<number>;
 }
 
 /** The three fields `10-design.md` requires of each row in the parked view. */
@@ -276,7 +281,7 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
       provisioningPending: await deps.provisioningPending(),
       version: { commitSha: deps.commitSha, contractFingerprint: deps.contractFingerprint, consoleFingerprint: deps.consoleFingerprint },
       auditChain,
-      failedOutboxRows: 0,
+      failedOutboxRows: deps.failedOutboxRows ? await deps.failedOutboxRows() : 0,
       failingCredentialRefs: deps.failingCredentialRefs ? await deps.failingCredentialRefs() : [],
       parkedOperations: parked.length,
       volume: NO_VOLUME_USAGE,
