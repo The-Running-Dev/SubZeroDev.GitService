@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { gitSha, type GitSha, type RemoteHost } from './shared/brands.ts';
+import { gitSha, type BranchName, type GitSha, type RemoteHost } from './shared/brands.ts';
 import type { CapabilityName, DeploymentCeiling } from './contract/capabilities.ts';
 import { systemClock } from './clock/clock.ts';
 import { createStructuredStore } from './store/structured-store.ts';
@@ -9,7 +9,9 @@ import { createAudit } from './audit/audit.ts';
 import { createLifecycle } from './lifecycle/boot.ts';
 import { createOperatorIdentity, SESSION_ABSOLUTE_SECONDS_DEFAULT } from './operator-identity/operator-identity.ts';
 import { createExec } from './exec/exec.ts';
+import type { CredentialBinding } from './exec/exec.ts';
 import { createLocks } from './locks/locks.ts';
+import type { AdmissionLimits } from './locks/types.ts';
 import { createDeclarations, type Declarations } from './declarations/declarations.ts';
 import { createCloneStore, type CloneStore } from './clone/clone-store.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './surfaces/http-server.ts';
@@ -18,7 +20,12 @@ import { createJournal } from './journal/journal.ts';
 import { createRecoveryCatalogue } from './recovery/catalogue.ts';
 import { LOCAL_MUTATION_RECOVERY_DESCRIPTORS, REMOTE_OPERATION_RECOVERY_DESCRIPTORS } from './git/recovery-descriptors.ts';
 import { createCredentialResolver } from './credentials/credentials.ts';
-import type { EnvVarName } from './shared/brands.ts';
+import { prepareDeclarationCredential } from './credentials/declaration-credential.ts';
+import { ok, err } from './shared/outcome.ts';
+import { createGitHubAdapter } from './host/github-adapter.ts';
+import { createHostOperations } from './host/host-operations.ts';
+import { PR_ENABLE_AUTO_MERGE_RECOVERY, PR_OPEN_RECOVERY } from './host/recovery-descriptors.ts';
+import type { EnvVarName, OperationId } from './shared/brands.ts';
 import { createModuleAdapter, toModuleHandler } from './module-adapter/module-adapter.ts';
 import { createDispatchPipeline } from './dispatch/dispatch-pipeline.ts';
 import { PRODUCTION_TOOL_DECLARATIONS } from './composition-root/production-declarations.ts';
@@ -54,6 +61,35 @@ function resolveRemoteHostAllowlist(): readonly RemoteHost[] {
     .split(',')
     .map((h) => h.trim().toLowerCase())
     .filter((h) => h.length > 0) as RemoteHost[];
+}
+
+/**
+ * `DeploymentConfig.admission`. The contract records these as deployment-set
+ * and fixes no default (U6), so they are read here rather than left to
+ * `createLocks`' own fallback — production running on a library default is
+ * exactly the "invented values" case, and it is invisible.
+ *
+ * Unlike the allowlist and the ceiling, empty is not the safe direction: a
+ * zero limit refuses every monitoring wait. So an unset variable takes the
+ * documented default and a malformed one is fatal, rather than quietly
+ * becoming zero.
+ */
+function resolveAdmissionLimits(): AdmissionLimits {
+  const read = (name: string, fallback: number): number => {
+    const raw = process.env[name];
+    if (raw === undefined || raw.trim().length === 0) return fallback;
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value < 1) {
+      console.error(`server: ${name} must be an integer of at least 1 (got '${raw}')`);
+      process.exit(1);
+    }
+    return value;
+  };
+  return {
+    mutationQueueDepth: read('ADMISSION_MUTATION_QUEUE_DEPTH', 32),
+    concurrentWaitsPerSession: read('ADMISSION_CONCURRENT_WAITS_PER_SESSION', 4),
+    concurrentLockFreeOperations: read('ADMISSION_CONCURRENT_LOCK_FREE_OPERATIONS', 16),
+  };
 }
 
 /** `DeploymentConfig.ceiling` — same reasoning: empty until configured, which is always valid against the contract set (Ø ⊆ anything). */
@@ -106,7 +142,7 @@ async function main(): Promise<void> {
   const credentialEnv = new Map<EnvVarName, string>();
   const exec = createExec({ volumeRoot, credentialEnv });
   const credentials = createCredentialResolver({ credentialMountRoot, volumeRoot, clock: systemClock });
-  const locks = createLocks();
+  const locks = createLocks(resolveAdmissionLimits());
   const ceiling = resolveCeiling();
   const remoteHostAllowlist = resolveRemoteHostAllowlist();
 
@@ -167,13 +203,68 @@ async function main(): Promise<void> {
   moduleAdapter.register('git.fetch' as ModuleTargetName, toModuleHandler(gitOperations.fetch));
   moduleAdapter.register('git.syncBase' as ModuleTargetName, toModuleHandler(gitOperations.syncBase));
 
+  // S10 — the host surface behind the adapter. The credential goes through
+  // the same three-step preparation the remote git operations use, so the
+  // reference's own allowed-host constraint is checked before `gh` runs.
+  // The seam between L2's credential preparation and the adapter that uses
+  // the result, keyed by `operationId`. The same shape as `credentialEnv`
+  // above: one map, handed to both sides, so the value passes between them
+  // without appearing in either signature.
+  const hostCredentialBindings = new Map<OperationId, CredentialBinding | null>();
+  const hostAdapter = createGitHubAdapter({
+    clock: systemClock,
+    exec,
+    // Reads what L2 already prepared for this call. The adapter never
+    // resolves a credential itself: preparation happens before any network
+    // contact, so a failure there is not a host failure, and `HostError` has
+    // no variant that could carry an authorization denial honestly.
+    credentialFor: (ctx) => hostCredentialBindings.get(ctx.operationId) ?? null,
+    // The declaration's base, passed explicitly to `gh pr create`. Without it
+    // the host picks its own default branch, which is the one branch the
+    // declaration never authorised.
+    baseBranchFor: async (ctx) => {
+      const config = await gitOperations.loadRepositoryConfig(ctx);
+      // `RepositoryConfig.baseBranch` is a plain `string` in the code and a
+      // `BranchName` in the contract — the drift tracked in issue #38, not
+      // this slice's to resolve. The cast is the drift, named.
+      return config.ok ? (config.value.baseBranch as BranchName) : null;
+    },
+  });
+  const hostOperations = createHostOperations({
+    clock: systemClock,
+    adapter: hostAdapter,
+    journal,
+    // Preparation lives here, one layer above the adapter, so an allowed-host
+    // denial stays `authorization` rather than becoming a retryable-looking
+    // `upstream` — the same layering the remote git operations already use.
+    prepareCredential: async (ctx) => {
+      const prepared = await prepareDeclarationCredential({ declarations, credentials, credentialEnv }, ctx);
+      return prepared.ok ? ok(prepared.value.credential) : err(prepared.error);
+    },
+    credentialBindings: hostCredentialBindings,
+    headShaFor: async (ctx) => {
+      if (ctx.cloneRoot === null) return null;
+      const head = await exec.runGit({ argv: ['rev-parse', 'HEAD'], cwd: ctx.cloneRoot, timeoutSeconds: 30, credential: null, signal: ctx.signal });
+      if (!head.ok) return null;
+      const sha = head.value.stdout.trim();
+      return sha.length > 0 ? (sha as GitSha) : null;
+    },
+  });
+  moduleAdapter.register('host.createPullRequest' as ModuleTargetName, toModuleHandler(hostOperations.createPullRequest));
+  moduleAdapter.register('host.readPullRequest' as ModuleTargetName, toModuleHandler(hostOperations.readPullRequest));
+  moduleAdapter.register('host.listPullRequests' as ModuleTargetName, toModuleHandler(hostOperations.listPullRequests));
+  moduleAdapter.register('host.readPullRequestComments' as ModuleTargetName, toModuleHandler(hostOperations.readPullRequestComments));
+  moduleAdapter.register('host.enableAutoMerge' as ModuleTargetName, toModuleHandler(hostOperations.enableAutoMerge));
+  moduleAdapter.register('host.readChecks' as ModuleTargetName, toModuleHandler(hostOperations.readChecks));
+  moduleAdapter.register('host.awaitChecks' as ModuleTargetName, toModuleHandler(hostOperations.awaitChecks));
+
   const contractCapabilitySet = new Set(PRODUCTION_TOOL_DECLARATIONS.flatMap((e) => e.capabilities)) as unknown as ContractCapabilitySet;
 
   // S8 — the recovery catalogue, populated here from L2 and read by L1. A
   // duplicate registration is a wiring defect and fatal at composition time,
   // which is the only time it can happen.
   const recoveryCatalogue = createRecoveryCatalogue();
-  for (const descriptor of [...LOCAL_MUTATION_RECOVERY_DESCRIPTORS, ...REMOTE_OPERATION_RECOVERY_DESCRIPTORS]) {
+  for (const descriptor of [...LOCAL_MUTATION_RECOVERY_DESCRIPTORS, ...REMOTE_OPERATION_RECOVERY_DESCRIPTORS, PR_OPEN_RECOVERY, PR_ENABLE_AUTO_MERGE_RECOVERY]) {
     const registered = recoveryCatalogue.register(descriptor);
     if (!registered.ok) {
       console.error(`server: ${registered.error.summary}`);

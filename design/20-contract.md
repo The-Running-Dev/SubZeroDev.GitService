@@ -1472,17 +1472,34 @@ interface ActivePin {
   release(): void;
 }
 
+interface WaitAdmission {
+  release(): void;
+}
+
 interface Locks {
   acquireMutation(holder: LockHolder, waitMs: number, signal: AbortSignal): Promise<Outcome<LockHandle, LockError>>;
   acquireMaterialisation(declarationId: DeclarationId, holder: LockHolder, waitMs: number, signal: AbortSignal): Promise<Outcome<LockHandle, LockError>>;
   pinActiveOperation(declarationId: DeclarationId): ActivePin;
   activeOperationCount(declarationId: DeclarationId): number;
   currentMutationHolder(): LockHolder | null;
+  admitLockFreeWait(sessionId: SessionId): Outcome<WaitAdmission, LockError>;
 }
 ```
 
 `pinActiveOperation` never waits and never fails. `currentMutationHolder` is what scopes
 `ReadStamp.mutationInFlight` to a declaration rather than to the mutex.
+
+**S10 adds `admitLockFreeWait`.** `LockError`'s `admission-refused` variant and
+`AdmissionLimits`' `concurrentWaitsPerSession` and `concurrentLockFreeOperations` were fixed from
+the outset with nothing that raised or read them; this is the method that does. It takes neither
+mutex — a monitoring wait holds no lock, which is the whole point of the execution class — and its
+only job is the two counters. It never awaits: admission is refused outright rather than queued,
+because a caller queueing for permission to wait is indistinguishable from the wait itself. The
+limits are supplied to `createLocks` from `DeploymentConfig.admission`, which the composition root
+reads from the deployment rather than allowing a library default to stand in silently, so the
+counters live beside
+`activeOperationCount` rather than in a second module that would have to be kept consistent with it.
+`WaitAdmission.release` is idempotent, on the same grounds as `ActivePin.release`.
 
 ### L1 — declarations
 
@@ -2143,8 +2160,125 @@ interface HostAdapter {
 
 `HostComment.body` is author-controlled text carried as data; the tool returning it is annotated
 `untrustedOutput`. There is no merge method and no rebase method on this interface, and by design
-there never will be — the host's own auto-merge is the only merge path. `CreatePullRequestInput` is
-subject to the same `## Unresolved` item as the git operations' inputs.
+there never will be — the host's own auto-merge is the only merge path.
+
+**S10 resolves U1 for the host tools**, `CreatePullRequestInput` included. Their input and output
+types, fixed here:
+
+```ts
+interface CreatePullRequestInput {
+  readonly title: string;
+  readonly body: string;
+  readonly headBranch: BranchName | null;
+  readonly draft: boolean;
+}
+
+interface PrOpenData {
+  readonly ref: PullRequestRef;
+}
+
+interface PrStatusInput {
+  readonly number: number;
+}
+
+interface PrStatusData {
+  readonly status: PullRequestStatus;
+}
+
+interface PrListInput {
+  readonly state: PullRequestState | null;
+}
+
+interface PrListData {
+  readonly pullRequests: readonly PullRequestStatus[];
+}
+
+interface PrCommentsInput {
+  readonly number: number;
+}
+
+interface PrCommentsData {
+  readonly comments: readonly HostComment[];
+}
+
+interface PrEnableAutoMergeInput {
+  readonly number: number;
+}
+
+interface PrEnableAutoMergeData {
+  readonly number: number;
+  readonly autoMergeEnabled: boolean;
+}
+
+interface ChecksStatusInput {
+  readonly ref: GitSha | null;
+}
+
+interface ChecksStatusData {
+  readonly ref: GitSha;
+  readonly checks: readonly CheckStatus[];
+}
+
+interface ChecksAwaitInput {
+  readonly ref: GitSha | null;
+  readonly timeoutSeconds: number;
+}
+
+interface ChecksAwaitData {
+  readonly ref: GitSha;
+  readonly checks: readonly CheckStatus[];
+  readonly concluded: boolean;
+  readonly waitedSeconds: number;
+}
+```
+
+`CreatePullRequestInput` carries **no base branch**. The base is the declaration's `baseBranch`, for
+the reason `git_push` takes no remote: an input-supplied base would let a caller open a pull request
+against a branch the declaration never named, which is authority the declaration is supposed to
+bound. `headBranch` defaults to the checked-out branch when null, matching `GitPushInput.branch`.
+`draft` is carried because a draft pull request is strictly less dangerous than a ready one — it
+cannot auto-merge — so omitting the field would make the *more* permissive state the only reachable
+one.
+
+`ChecksStatusInput.ref` and `ChecksAwaitInput.ref` default to the clone's current head when null.
+`ChecksAwaitData.concluded` is false when the wait returned because it hit its cap rather than
+because every check reached a conclusion; a wait that times out is a `timeout` envelope, so
+`concluded: false` is reachable only where the cap and the poll interval race, and callers read it
+rather than inferring conclusion from the check list.
+
+The seven registry entries S10 ships:
+
+| `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
+|---|---|---|---|---|---|---|
+| `pr_open` | `{ kind: 'module', target: 'host.createPullRequest' }` | `['host.pr.write']` | `['write']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 120, maxResultBytes: 65536 }` |
+| `pr_status` | `{ kind: 'module', target: 'host.readPullRequest' }` | `['host.pr.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 60, maxResultBytes: 65536 }` |
+| `pr_list` | `{ kind: 'module', target: 'host.listPullRequests' }` | `['host.pr.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 60, maxResultBytes: 65536 }` |
+| `pr_comments` | `{ kind: 'module', target: 'host.readPullRequestComments' }` | `['host.pr.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: true }` | `{ timeoutSeconds: 60, maxResultBytes: 131072 }` |
+| `pr_enable_auto_merge` | `{ kind: 'module', target: 'host.enableAutoMerge' }` | `['host.pr.write']` | `['write']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 120, maxResultBytes: 65536 }` |
+| `checks_status` | `{ kind: 'module', target: 'host.readChecks' }` | `['host.checks.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 60, maxResultBytes: 65536 }` |
+| `checks_await` | `{ kind: 'module', target: 'host.awaitChecks' }` | `['host.checks.read']` | `['read']` | `monitoring-wait` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 1800, maxResultBytes: 65536 }` |
+
+Every entry carries `capabilityScope: 'declaration'`. `pr_comments` is annotated `untrustedOutput`
+for the reason `git_log` and `git_diff` already are: `HostComment.body` is author-controlled text,
+carried as data rather than interpreted. It is the only host tool that carries the annotation — the
+other six return host-controlled structure (numbers, states, shas, check names) rather than prose,
+and annotating those would dilute what the annotation means. Its `maxResultBytes` is doubled because
+comment threads are the one host response that grows without bound, and the size limit rather than
+truncation is what bounds it.
+
+`checks_await` is the registry's first `monitoring-wait`. Its `timeoutSeconds` equals
+`monitoringWaitCapSeconds`, which is the compiler-enforced ceiling (`limit-exceeds-cap`) rather than
+a coincidence; `ChecksAwaitInput.timeoutSeconds` is clamped to it at dispatch, so a request for
+3600 s waits 1800 s rather than being refused. It declares `host.checks.read` and no mutating
+capability — invariant C7's requirement — and takes neither lock.
+
+`readDeployStatus` has **no registry entry**. Deploy monitoring and published-URL verification are
+S12's, and S10's `Out of scope` line says so; the adapter method exists because the interface fixes
+it, and is unreachable from every surface until S12 declares a tool over it.
+
+There is no registry entry over a merge or rebase either, because there is no such adapter method to
+declare one over. That absence is `10-design.md`'s auto-merge-only rule expressed in the compiled
+registry, where it is checkable, rather than as a runtime refusal.
 
 ### L2 — scheduler
 
@@ -3037,6 +3171,12 @@ ship them.
 `git_fetch`, `sync_base` — their input and output types and registry entries. See
 `### L2 — git operations` above. U1 otherwise stands: `raw`, the two composites, and
 `CreatePullRequestInput` remain open for the slices that ship them.
+
+*Narrowed further 2026-08-08:* S10 resolves U1 for the host tools — `pr_open`, `pr_status`,
+`pr_list`, `pr_comments`, `pr_enable_auto_merge`, `checks_status`, `checks_await` — their input and
+output types and registry entries, `CreatePullRequestInput` included. See `### L2 — host adapter`
+above. U1 otherwise stands: `raw` and the two composites remain open for the slices that ship them,
+and `readDeployStatus` carries no tool until S12 declares one.
 
 **U2 — The `OperatorScope` vocabulary.** The design states that an `operator-api` grant "carries
 operator scopes" and fixes the MCP scope set as `read`, `write`, `raw`, `schedule`. It does not

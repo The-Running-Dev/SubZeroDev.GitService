@@ -39,6 +39,18 @@ Append-only. Newest at the top. The rejected alternatives are the point — with
 
 ---
 
+### 2026-08-08 — `CreatePullRequestInput` carries no base branch, and `pr_open` cannot name one
+Context: S10 resolves U1 for the host tools, which requires fixing `CreatePullRequestInput`'s fields. A pull request has a base, and the obvious input carries it.
+Chosen: The base is the declaration's `RepositoryConfig.baseBranch`. The input carries `title`, `body`, `headBranch` (null meaning the checked-out branch) and `draft`, and nothing else. `draft` is carried deliberately: a draft pull request cannot auto-merge, so withholding the field would make the more permissive state the only reachable one.
+Rejected: **A `baseBranch` field** — it would let a caller open a pull request against a branch the declaration never named, which is the authority the declaration exists to bound, and the same reason `git_push` takes no remote. **A `baseBranch` field validated against an allowlist** — a second allowlist to keep consistent with `RepositoryConfig`, buying a capability nothing has asked for. **Omitting `draft`** — leaves ready-for-review as the only reachable state, and adding the field later is a schema change to a shipped tool.
+Reversibility: cheap to add a field; expensive to remove one once a consumer sends it.
+
+### 2026-08-08 — Admission limits live on `Locks`, as a method that never awaits
+Context: `LockError.admission-refused` and `AdmissionLimits`' two counters were fixed from the outset with nothing that raised or read them. S10's monitoring wait is the first caller, so S10 has to say where they live.
+Chosen: `Locks.admitLockFreeWait(sessionId)`, returning a releasable `WaitAdmission` or refusing outright. It takes neither mutex and never awaits — admission is refused, not queued. `createLocks` receives `DeploymentConfig.admission`.
+Rejected: **A separate admission module** — the per-declaration active-operation count already lives on `Locks`, and a second module holding the other two counters is two homes for one concern. **Queueing for admission** — a caller queueing for permission to wait is indistinguishable from the wait itself, and would make `concurrentWaitsPerSession` a latency knob rather than a limit. **Enforcing it in the dispatch pipeline directly** — puts process-wide counters in a component that is constructed per composition root, and makes the limit untestable without a whole pipeline.
+Reversibility: cheap — one method on an internal interface, with a single caller.
+
 ### 2026-08-08 — The credential mount's layout: file names are references, one manifest holds the host constraints
 Context: `10-design.md` fixes that a reference name is a file name in the mount and that each reference "carries its own allowed-host constraint", but not where that constraint lives. S9 has to put it somewhere.
 Chosen: `<mount>/<ref>` is the secret; `<mount>/_allowed-hosts.json` maps reference to hosts. The `_` prefix cannot collide with a reference, because `CredentialRef`'s pattern requires `[a-z0-9]` as the first character — the same device the TOTP sealing key already uses. **A reference absent from the manifest permits no host**, and a missing or malformed manifest permits nothing either.
