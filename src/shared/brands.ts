@@ -153,7 +153,13 @@ const HTTPS_CLONE_URL_PATTERN = /^https:\/\/([^/@\s]+)\/.+$/;
 // scp-style: user@host:path — the classic `git@github.com:owner/repo.git` form.
 const SCP_CLONE_URL_PATTERN = /^[\w.-]+@([a-zA-Z0-9.-]+):.+$/;
 
-function cloneUrlHost(value: string): string | null {
+/**
+ * Exported for S9's remote operations, which check a clone URL's host against
+ * the *credential reference's* own allowed-host list — the second, independent
+ * guard alongside `cloneUrl`'s deployment allowlist. Both must read the host
+ * the same way, which is why there is one function and not two.
+ */
+export function cloneUrlHost(value: string): string | null {
   const https = HTTPS_CLONE_URL_PATTERN.exec(value);
   if (https) return https[1]!.toLowerCase();
   const scp = SCP_CLONE_URL_PATTERN.exec(value);

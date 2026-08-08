@@ -1546,6 +1546,26 @@ No signature here returns a secret value. `resolveInto` writes into a `MutableEn
 consumes, and hands back a `CredentialBinding` naming the variable. Resolution happens at the
 moment of use, so a replaced file takes effect on the next operation with no restart.
 
+**The mount's layout, fixed by S9.** A reference name is a file name directly under the credential
+mount, and that file's contents — trimmed of a trailing newline — are the secret. The per-reference
+allowed-host constraint the design gives each reference lives in one manifest at the mount root:
+
+```
+<mount>/_allowed-hosts.json     { "<ref>": ["github.com", ...], ... }
+<mount>/<ref>                   the secret
+```
+
+The manifest's name begins with `_`, which `CredentialRef`'s own pattern forbids as a first
+character, so it can never collide with a reference — the same device the TOTP sealing key already
+uses. **A reference absent from the manifest permits no host**, and `allowedHosts` returns the
+empty list rather than every host: the design calls this a second guard independent of the
+deployment's `remoteHostAllowlist`, and a guard that defaults open is not one.
+
+`EnvVarName` for a resolved binding is derived from the reference, uppercased with every character
+outside `[A-Z0-9]` replaced by `_`, under a fixed `SZG_CREDENTIAL_` prefix. It is an internal
+channel name between the resolver and `Exec`, never operator-configured, so nothing depends on the
+particular spelling beyond its being stable within one call.
+
 ### L1 — structured store
 
 ```ts
@@ -1978,6 +1998,70 @@ of its own has no declared consumer yet — and none is `dropTarget`, which S17'
 for themselves. `timeoutSeconds` matches the five read tools': all three run against the local
 clone only, with no network call, and the design's per-declaration path-allowlist and two-lock
 machinery is what bounds their cost, not a longer cap.
+
+**S9 resolves U1 for the three remote operations** — `git_push`, `git_fetch`, `sync_base`. Their
+input and output types, fixed here:
+
+```ts
+interface GitPushInput {
+  readonly branch: BranchName | null;
+}
+
+interface GitPushData {
+  readonly branch: BranchName;
+  readonly headSha: GitSha;
+  readonly alreadyUpToDate: boolean;
+}
+
+interface GitFetchInput {}
+
+interface GitFetchData {
+  readonly baseBranch: BranchName;
+  readonly upstreamSha: GitSha | null;
+  readonly updatedRefs: readonly BranchName[];
+}
+
+interface SyncBaseInput {}
+
+interface SyncBaseData {
+  readonly baseBranch: BranchName;
+  readonly headSha: GitSha;
+  readonly upstreamSha: GitSha;
+  readonly fastForwarded: boolean;
+}
+```
+
+`GitPushInput.branch` defaults to the checked-out branch when null. **It carries no force option**,
+and no other field of any of the three admits one — the absence is a fixed property of the input
+schema, not a runtime refusal, which is what makes it checkable by reading the compiled registry.
+
+`sync_base` brings the *local* base branch up to `origin/<base>` and never rewrites history: it
+fast-forwards, and refuses with `precondition` when the local base carries commits the remote does
+not. `SyncBaseData.fastForwarded` is false when the branch was already current — a no-op is a
+success, not a failure. There is no reset, rebase or force path out of a divergence here; the
+operator resolves it, which is the same rule the local mutations already follow.
+
+`GitFetchData.updatedRefs` names the remote-tracking refs whose value changed, observed by
+comparing `refs/remotes/origin/*` either side of the fetch rather than by parsing transfer output.
+
+None of the three carries a `ReadStamp`, for the reason the S7 three do not: each is itself a
+mutation, not a consumer of the signal `mutationInFlight` reports.
+
+The three registry entries S9 ships:
+
+| `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
+|---|---|---|---|---|---|---|
+| `git_push` | `{ kind: 'module', target: 'git.push' }` | `['git.remote.write']` | `['write']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 300, maxResultBytes: 65536 }` |
+| `git_fetch` | `{ kind: 'module', target: 'git.fetch' }` | `['git.remote.write']` | `['write']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 300, maxResultBytes: 65536 }` |
+| `sync_base` | `{ kind: 'module', target: 'git.syncBase' }` | `['git.remote.write']` | `['write']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 300, maxResultBytes: 65536 }` |
+
+Every entry carries `capabilityScope: 'declaration'`. All three are `mutating` rather than `read`,
+`git_fetch` included: it moves remote-tracking refs, and the global mutation lock is what keeps a
+transfer from interleaving with another declaration's commit. `timeoutSeconds` is ten times the
+local tools' because these are the first operations that cross a network — the cap has to bound a
+transfer, not a local `git add`. None is `schedulable`: a scheduled bare push with no branch of its
+own has no declared consumer, and S16's held operations are where that question is actually
+answered.
 
 ### L2 — composites
 
@@ -2948,6 +3032,11 @@ ship them.
 already fixed). See `### L2 — git operations` above. U1 otherwise stands: `push`, `fetch`,
 `syncBase`, `raw`, the two composites, and `CreatePullRequestInput` remain open for the slices that
 ship them.
+
+*Narrowed further 2026-08-08:* S9 resolves U1 for the three remote operations — `git_push`,
+`git_fetch`, `sync_base` — their input and output types and registry entries. See
+`### L2 — git operations` above. U1 otherwise stands: `raw`, the two composites, and
+`CreatePullRequestInput` remain open for the slices that ship them.
 
 **U2 — The `OperatorScope` vocabulary.** The design states that an `operator-api` grant "carries
 operator scopes" and fixes the MCP scope set as `read`, `write`, `raw`, `schedule`. It does not

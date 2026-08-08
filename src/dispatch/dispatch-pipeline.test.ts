@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { systemClock } from '../clock/clock.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
@@ -21,6 +22,8 @@ import type { CompiledRegistry, ToolDeclaration } from '../contract/tool-declara
 import type { JsonSchema } from '../contract/json.ts';
 import { createModuleAdapter, toModuleHandler } from '../module-adapter/module-adapter.ts';
 import { createGitOperations } from '../git/git-operations.ts';
+import { createCredentialResolver } from '../credentials/credentials.ts';
+import type { EnvVarName } from '../shared/brands.ts';
 import { success } from '../result/envelope.ts';
 import { err, ok, type Outcome } from '../shared/outcome.ts';
 import type { Session } from '../shared/session.ts';
@@ -1632,5 +1635,153 @@ test('a pass that finds an entry already parked re-marks the clone, closing the 
 
     const afterPass = await cloneStore.describe('repo-a' as never);
     assert.equal(afterPass.ok && afterPass.value.state, 'needs-attention', 'the pass must reconcile the clone to the still-parked entry');
+  });
+});
+
+const REMOTE_CAPABILITY_SET = new Set(['repo.read', 'git.local.write', 'git.remote.write']) as unknown as DeploymentCeiling;
+
+const PUSH_ENTRY = fixtureTool({
+  name: 'git_push',
+  capabilities: ['git.remote.write'],
+  scopes: ['write'],
+  executionClass: 'mutating',
+  target: { kind: 'module', target: 'git.push' as never },
+  inputSchema: { type: 'object', properties: { branch: { type: ['string', 'null'] } }, required: ['branch'], additionalProperties: false } as unknown as JsonSchema,
+});
+
+test('S9.7 — a push holds the global mutation lock across the whole transfer, and a commit on another repository queues rather than interleaving', async () => {
+  await withVolumeAsync(async (volume) => {
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    await store.open();
+    await store.migrate();
+    await store.close();
+
+    // A real secrets mount, because `push` resolves at point of use and a
+    // declaration naming a reference that is not there never reaches a remote.
+    const mountRoot = mkdtempSync(path.join(tmpdir(), 'szg-pipeline-mount-'));
+    writeFileSync(path.join(mountRoot, 'unused'), 'fixture-secret-value', 'utf8');
+
+    const credentialEnv = new Map<EnvVarName, string>();
+    const exec = createExec({ volumeRoot: volume, credentialEnv });
+    const locks = createLocks();
+
+    const remoteA = createBareGitRemote();
+    const declarationA = fixtureDeclaration('repo-a', remoteA, ['repo.read', 'git.local.write', 'git.remote.write']);
+    const declarationB = fixtureDeclaration('repo-b', createBareGitRemote(), ['repo.read', 'git.local.write', 'git.remote.write']);
+    const byId = new Map([
+      [declarationA.id, { ...declarationA, writablePathPrefixes: ['README.md'] as unknown as Declaration['writablePathPrefixes'] }],
+      [declarationB.id, { ...declarationB, writablePathPrefixes: ['README.md'] as unknown as Declaration['writablePathPrefixes'] }],
+    ]);
+    const declarationsReal = createDeclarations({
+      volumeRoot: volume,
+      clock: systemClock,
+      remoteHostAllowlist: [],
+      ceiling: CAPABILITY_SET,
+      cloneAdoptionCheck: () => ({ observedRemote: async () => ({ cloneExists: false }), isSafeToAdopt: async () => ({ safe: true }) }),
+    });
+    const declarations: Declarations = { ...declarationsReal, async get(id) { return byId.get(id) ?? null; } };
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations });
+
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const gitOperations = createGitOperations({
+      clock: systemClock,
+      exec,
+      locks,
+      audit,
+      declarations,
+      credentials: createCredentialResolver({ credentialMountRoot: mountRoot, volumeRoot: volume, clock: systemClock }),
+      credentialEnv,
+    });
+
+    // Instrumented, not inferred from timing: `holdersDuringTransfer` records
+    // who actually held the global mutation lock at each moment the transfer
+    // was running, and `commitRanDuringPush` records whether the other
+    // repository's commit got in while it did.
+    const holdersDuringTransfer: (string | null)[] = [];
+    let pushInFlight = false;
+    let commitRanDuringPush = false;
+
+    const moduleAdapter = createModuleAdapter();
+    moduleAdapter.register('git.push' as never, async (ctx, input) => {
+      pushInFlight = true;
+      holdersDuringTransfer.push(locks.currentMutationHolder()?.declarationId ?? null);
+      const result = await toModuleHandler(gitOperations.push)(ctx, input);
+      // Sampled again after the transfer and before release, so the assertion
+      // covers the span rather than one instant at the start of it.
+      holdersDuringTransfer.push(locks.currentMutationHolder()?.declarationId ?? null);
+      pushInFlight = false;
+      return result;
+    });
+    moduleAdapter.register('git.commit' as never, async (ctx, input) => {
+      if (pushInFlight) commitRanDuringPush = true;
+      return toModuleHandler(gitOperations.commit)(ctx, input);
+    });
+
+    const pipeline = createDispatchPipeline({
+      registry: {
+        fingerprint: 'a'.repeat(64) as never,
+        compiledAt: systemClock.now(),
+        entries: [PUSH_ENTRY, COMMIT_ENTRY],
+        contractCapabilitySet: REMOTE_CAPABILITY_SET as unknown as CompiledRegistry['contractCapabilitySet'],
+      },
+      ceiling: REMOTE_CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      journal,
+      exec,
+      clock: systemClock,
+    });
+
+    // Both repositories materialised, each with a local commit waiting: one to
+    // push, one to commit.
+    for (const declaration of [declarationA, declarationB]) {
+      const holder = { operationId: 'setup' as never, declarationId: declaration.id, tool: 'setup' as never, heldSince: systemClock.now() };
+      const ensured = await cloneStore.ensure(byId.get(declaration.id)!, holder, new AbortController().signal);
+      assert.equal(ensured.ok, true);
+      if (!ensured.ok) return;
+      writeFileSync(path.join(ensured.value.clone.path, 'README.md'), `fixture\n${declaration.id}\n`, 'utf8');
+      spawnSync('git', ['add', 'README.md'], { cwd: ensured.value.clone.path, encoding: 'utf8' });
+      if (declaration.id === declarationA.id) {
+        spawnSync('git', ['-c', 'user.name=f', '-c', 'user.email=f@e.com', 'commit', '-m', 'to push'], { cwd: ensured.value.clone.path, encoding: 'utf8' });
+      }
+      ensured.value.materialisationLock.release();
+      ensured.value.activePin.release();
+    }
+
+    const push = pipeline.dispatch({
+      toolName: 'git_push' as never,
+      input: { branch: null },
+      session: sessionWith(['repo.read', 'git.local.write', 'git.remote.write']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+    const commit = pipeline.dispatch({
+      toolName: 'git_commit' as never,
+      input: { message: 'concurrent' },
+      session: sessionWith(['repo.read', 'git.local.write', 'git.remote.write']),
+      declarationId: 'repo-b' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+
+    const [pushed, committed] = await Promise.all([push, commit]);
+
+    assert.equal(pushed.kind, 'success', pushed.summary);
+    assert.equal(committed.kind, 'success', committed.summary);
+    assert.equal(commitRanDuringPush, false, 'a commit on another repository must queue behind a push, not interleave with its transfer');
+    assert.deepEqual(
+      holdersDuringTransfer,
+      ['repo-a', 'repo-a'],
+      'the pushing declaration must hold the global mutation lock at both ends of the transfer',
+    );
+
+    rmSync(mountRoot, { recursive: true, force: true });
   });
 });

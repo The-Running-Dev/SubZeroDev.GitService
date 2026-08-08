@@ -170,12 +170,53 @@ const GIT_RESTORE_PATHS_OUTPUT_SCHEMA = {
   required: ['restored'],
 } as unknown as JsonSchema;
 
+const GIT_PUSH_INPUT_SCHEMA = {
+  type: 'object',
+  properties: { branch: { type: ['string', 'null'] } },
+  required: ['branch'],
+  // `additionalProperties: false` is what makes "no force option" a property of
+  // the schema rather than of the handler: a caller cannot smuggle one in, and
+  // the absence is readable straight off the compiled registry.
+  additionalProperties: false,
+} as unknown as JsonSchema;
+
+const GIT_PUSH_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    branch: { type: 'string' },
+    headSha: { type: 'string' },
+    alreadyUpToDate: { type: 'boolean' },
+  },
+  required: ['branch', 'headSha', 'alreadyUpToDate'],
+} as unknown as JsonSchema;
+
+const GIT_FETCH_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    baseBranch: { type: 'string' },
+    upstreamSha: { type: ['string', 'null'] },
+    updatedRefs: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['baseBranch', 'upstreamSha', 'updatedRefs'],
+} as unknown as JsonSchema;
+
+const SYNC_BASE_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    baseBranch: { type: 'string' },
+    headSha: { type: 'string' },
+    upstreamSha: { type: 'string' },
+    fastForwarded: { type: 'boolean' },
+  },
+  required: ['baseBranch', 'headSha', 'upstreamSha', 'fastForwarded'],
+} as unknown as JsonSchema;
+
 /**
  * The real, deployed tool inventory. S1 through S5 shipped none (U1 was
- * wholly open); S6 resolves U1 for the five read operations and ships their
- * registry entries here — see `20-contract.md` § L2 — git operations,
- * "S6 resolves U1 for the five read operations", for the rationale behind
- * each tool's capabilities, annotations and limits.
+ * wholly open); S6 resolves U1 for the five read operations, S7 for the three
+ * local mutations and S9 for the three remote ones, each shipping their
+ * registry entries here — see `20-contract.md` § L2 — git operations for the
+ * rationale behind each tool's capabilities, annotations and limits.
  */
 export const PRODUCTION_TOOL_DECLARATIONS: readonly ToolDeclaration[] = [
   {
@@ -281,5 +322,44 @@ export const PRODUCTION_TOOL_DECLARATIONS: readonly ToolDeclaration[] = [
     annotations: { schedulable: false, dropTarget: false, untrustedOutput: false },
     limits: { timeoutSeconds: 30, maxResultBytes: 65_536 },
     target: moduleTarget('git.restorePaths'),
+  },
+  {
+    name: toolName('git_push'),
+    description: 'Pushes a branch to origin. No force option exists in this tool\'s input schema, so no caller and no authority can request one.',
+    inputSchema: GIT_PUSH_INPUT_SCHEMA,
+    outputSchema: GIT_PUSH_OUTPUT_SCHEMA,
+    scopes: ['write'],
+    capabilities: ['git.remote.write'],
+    capabilityScope: 'declaration',
+    executionClass: 'mutating',
+    annotations: { schedulable: false, dropTarget: false, untrustedOutput: false },
+    limits: { timeoutSeconds: 300, maxResultBytes: 65_536 },
+    target: moduleTarget('git.push'),
+  },
+  {
+    name: toolName('git_fetch'),
+    description: 'Fetches from origin, updating remote-tracking refs. Local branches and the working tree are untouched.',
+    inputSchema: EMPTY_INPUT_SCHEMA,
+    outputSchema: GIT_FETCH_OUTPUT_SCHEMA,
+    scopes: ['write'],
+    capabilities: ['git.remote.write'],
+    capabilityScope: 'declaration',
+    executionClass: 'mutating',
+    annotations: { schedulable: false, dropTarget: false, untrustedOutput: false },
+    limits: { timeoutSeconds: 300, maxResultBytes: 65_536 },
+    target: moduleTarget('git.fetch'),
+  },
+  {
+    name: toolName('sync_base'),
+    description: 'Brings the local base branch up to origin by fast-forward only. A base that has diverged is refused, never rewritten.',
+    inputSchema: EMPTY_INPUT_SCHEMA,
+    outputSchema: SYNC_BASE_OUTPUT_SCHEMA,
+    scopes: ['write'],
+    capabilities: ['git.remote.write'],
+    capabilityScope: 'declaration',
+    executionClass: 'mutating',
+    annotations: { schedulable: false, dropTarget: false, untrustedOutput: false },
+    limits: { timeoutSeconds: 300, maxResultBytes: 65_536 },
+    target: moduleTarget('git.syncBase'),
   },
 ];
