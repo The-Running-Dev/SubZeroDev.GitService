@@ -233,7 +233,10 @@ if ($Hook) {
             $sum.Calls
             (Format-Duration $session.Span)
             (Format-Duration $session.Active)
-            $sum.Input, $sum.CacheCreate, $sum.CacheRead, $sum.Output
+            $sum.Input
+            $sum.CacheCreate
+            $sum.CacheRead
+            $sum.Output
         ) -join "`t"
 
         # Rewrite rather than append: SessionEnd fires on clear and resume too,
