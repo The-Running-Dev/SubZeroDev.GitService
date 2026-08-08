@@ -4,6 +4,7 @@ import { sha256Hex, type GitSha, type Sha256Hex } from '../shared/brands.ts';
 import { timingSafeStringEqual } from '../shared/timing-safe.ts';
 import type { AuditChainState } from '../audit/types.ts';
 import type { CredentialFailureMark } from '../credentials/types.ts';
+import type { OperationJournalEntry } from '../journal/types.ts';
 import { NO_VOLUME_USAGE, type VolumeUsage } from '../store/volume-usage.ts';
 import { handleConsoleAuthRoute, type ConsoleAuthDependencies } from './console-auth-routes.ts';
 import { handleDeclarationRoute, type DeclarationRoutesDependencies } from './declaration-routes.ts';
@@ -38,11 +39,12 @@ export const NO_CONSOLE_FINGERPRINT: Sha256Hex = (() => {
 
 /**
  * `20-contract.md` § L5 surfaces. Authenticated, unlike `/healthz`.
- * `auditChain` is real as of S3; `failedOutboxRows`, `failingCredentialRefs`,
- * `parkedOperations` and `volume` are genuinely zero/empty until the modules
- * that would populate them exist (Notifier, Credentials, Journal, S17's
- * volume accounting) — not placeholders standing in for unmeasured data, but
- * true statements that nothing has happened yet in subsystems that do not run.
+ * `auditChain` is real as of S3 and `parkedOperations` as of S8;
+ * `failedOutboxRows`, `failingCredentialRefs` and `volume` are genuinely
+ * zero/empty until the modules that would populate them exist (Notifier,
+ * Credentials, S17's volume accounting) — not placeholders standing in for
+ * unmeasured data, but true statements that nothing has happened yet in
+ * subsystems that do not run.
  */
 export interface HealthReport {
   readonly ready: boolean;
@@ -76,6 +78,14 @@ export interface SurfacesDependencies
    * "authenticated route, 401 without a credential" without building OAuth.
    */
   readonly operatorApiToken: string;
+  /**
+   * The parked-operations view (S8). Live for the same reason
+   * `provisioningPending` is: recovery parks and a repair session unparks
+   * without a restart, so a boot-time count would be wrong within minutes.
+   * Optional so a surfaces server assembled without a journal still reports
+   * an honest zero rather than failing to construct.
+   */
+  readonly parkedOperations?: () => Promise<readonly OperationJournalEntry[]>;
 }
 
 function isAuthorized(req: IncomingMessage, token: string): boolean {
@@ -133,12 +143,38 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
     return;
   }
 
+  // The parked-operations view. `/health` carries the count; this carries the
+  // entries themselves, which is what makes the count actionable — an
+  // operator can see which repository, which tool, and why, without host
+  // access. Authenticated, like every route but `/healthz`: a parked
+  // operation names a declaration and a tool, which is operator data.
+  if (req.method === 'GET' && url.pathname === '/parked-operations') {
+    if (!isAuthorized(req, deps.operatorApiToken)) {
+      sendJson(res, 401, { error: 'unauthorized' });
+      return;
+    }
+    const parked = deps.parkedOperations ? await deps.parkedOperations() : [];
+    sendJson(res, 200, {
+      operations: parked.map((entry) => ({
+        operationId: entry.operationId,
+        declarationId: entry.declarationId,
+        generation: entry.generation,
+        tool: entry.tool,
+        reason: entry.attentionReason,
+        startedAt: entry.startedAt,
+        updatedAt: entry.updatedAt,
+      })),
+    });
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/health') {
     if (!isAuthorized(req, deps.operatorApiToken)) {
       sendJson(res, 401, { error: 'unauthorized' });
       return;
     }
     const auditChain = await deps.auditChain();
+    const parked = deps.parkedOperations ? await deps.parkedOperations() : [];
     const report: HealthReport = {
       ready: deps.ready(),
       provisioningPending: await deps.provisioningPending(),
@@ -146,7 +182,7 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
       auditChain,
       failedOutboxRows: 0,
       failingCredentialRefs: [],
-      parkedOperations: 0,
+      parkedOperations: parked.length,
       volume: NO_VOLUME_USAGE,
     };
     sendJson(res, 200, report);

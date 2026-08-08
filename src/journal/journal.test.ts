@@ -237,3 +237,31 @@ test('unsettled() is scoped to the declaration and generation pair, never crossi
     assert.equal(allUnsettled.length, 2);
   });
 });
+
+test('S8.1 — classify is pure: repeat calls return identical verdicts, and it reaches the store not at all', async () => {
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin(beginInputFor('op-9'));
+    await journal.appendStep('op-9' as never, 'git_stage');
+    const entry = (await journal.unsettled('repo-a' as never, 1 as never)).find((e) => e.operationId === ('op-9' as never))!;
+    const observed = { ...entry.preState, headSha: 'e'.repeat(40) as never, observedAt: systemClock.now() };
+
+    // A descriptor whose answer depends only on its arguments, so any
+    // difference between the two calls would be `classify`'s own.
+    const descriptor = { tool: entry.tool, expectedPostState: () => false, resume: () => ({ tool: entry.tool, input: { paths: [] } }) };
+
+    const first = journal.classify(entry, observed, descriptor);
+    const second = journal.classify(entry, observed, descriptor);
+    assert.deepEqual(first, second, 'the same three arguments must always yield the same verdict (invariant R3)');
+
+    // No I/O, demonstrated rather than asserted from the source: this journal
+    // is pointed at a volume that cannot be opened, so every method that does
+    // reach the store fails there. `classify` returning the same verdict
+    // anyway is what proves it never went.
+    const unusable = createJournal({ volumeRoot: path.join(volume, 'store.sqlite', 'not-a-directory'), clock: systemClock });
+    const begunOnUnusable = await unusable.begin(beginInputFor('op-10'));
+    assert.equal(begunOnUnusable.ok, false, 'the fixture is only meaningful if this volume genuinely cannot be written');
+
+    assert.deepEqual(unusable.classify(entry, observed, descriptor), first);
+  });
+});

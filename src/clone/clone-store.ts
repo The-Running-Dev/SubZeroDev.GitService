@@ -405,7 +405,14 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
         return current;
       }
 
-      if (current.value.state === 'ready') {
+      // `needs-attention` is materialised, not absent: the directory is on
+      // disk and readable, and a parked declaration still serves reads and a
+      // repair session (S8). It is grouped with `ready` here so `ensure` hands
+      // the existing clone back rather than falling through to the adoption
+      // branch below, which would rewrite the row as `ready` with a null
+      // `attention_reason` — silently unparking a declaration a human was
+      // asked to look at, on the next read that happened to arrive.
+      if (current.value.state === 'ready' || current.value.state === 'needs-attention') {
         // Reconcile a stale row (review finding #5): adoption bumps
         // `Declaration.generation`, and a clone materialised under a
         // previous era must not keep reporting that previous era's
@@ -414,7 +421,9 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
           const reconciled = upsertRow({
             declaration_id: declaration.id,
             generation: declaration.generation,
-            state: 'ready',
+            // The generation moved; the attention state did not. Only the era
+            // is being reconciled here.
+            state: current.value.state,
             path: current.value.path,
             size_bytes: current.value.sizeBytes,
             last_operation_at: current.value.lastOperationAt,

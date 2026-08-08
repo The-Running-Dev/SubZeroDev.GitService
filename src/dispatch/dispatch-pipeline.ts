@@ -45,7 +45,7 @@ export interface DispatchPipelineDependencies {
   readonly ceiling: DeploymentCeiling;
   readonly moduleAdapter: Pick<ModuleAdapter, 'invoke'>;
   readonly declarations: Pick<Declarations, 'get' | 'effectiveGrant' | 'effectiveWritablePrefixes'>;
-  readonly cloneStore: Pick<CloneStore, 'ensure' | 'observeGitState'>;
+  readonly cloneStore: Pick<CloneStore, 'ensure' | 'observeGitState' | 'describe'>;
   readonly locks: Pick<Locks, 'pinActiveOperation' | 'acquireMutation'>;
   readonly audit: Pick<Audit, 'append'>;
   /** Required only once a `mutating` registry entry exists (S7); every S6-only registry never reaches the branch that calls it. */
@@ -54,6 +54,14 @@ export interface DispatchPipelineDependencies {
   readonly exec?: Pick<Exec, 'scrubJson'>;
   readonly clock: Clock;
   readonly mutationLockAcquireMs?: number;
+  /**
+   * The lazy recovery pass (S8), injected rather than imported so L4 keeps
+   * no dependency on the lifecycle module. Called on a declaration's first
+   * mutating use in this process, **before** either lock is taken — a resume
+   * step it runs goes back through this same pipeline and must be able to
+   * acquire both locks in its own right.
+   */
+  readonly recoverDeclaration?: (declarationId: DeclarationId) => Promise<unknown>;
 }
 
 const PROFILE_BY_KIND: Readonly<Record<Session['kind'], ActorProfile>> = {
@@ -127,6 +135,26 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
   const { registry, ceiling, moduleAdapter, declarations, cloneStore, locks, audit, journal, clock } = deps;
   const exec: Pick<Exec, 'scrubJson'> = deps.exec ?? { scrubJson: (value) => value };
   const mutationLockAcquireMs = deps.mutationLockAcquireMs ?? MUTATION_LOCK_ACQUIRE_MS_DEFAULT;
+
+  /**
+   * Declarations whose lazy recovery pass has already run in this process.
+   * "On first use" is exactly right and no weaker than it sounds: unsettled
+   * entries exist at boot from a previous process, or are created and settled
+   * inline by this one. A restart is the only thing that adds more, and a
+   * restart empties this set with the process.
+   */
+  const recovered = new Set<DeclarationId>();
+
+  /**
+   * Declarations whose lazy pass is running right now. This is the window the
+   * contract's `recovery-pending` names — "a mutation was attempted before
+   * the lazy pass reached this declaration". The call that *triggers* the
+   * pass waits for it and then proceeds; a second mutation arriving while it
+   * is still in flight is refused rather than queued, because it would
+   * otherwise sit behind a pass that may be resuming a whole composite.
+   * Reads never consult this at all.
+   */
+  const recovering = new Set<DeclarationId>();
 
   function entryFor(toolName: RegistryToolName): ToolDeclaration | null {
     return registry.entries.find((e) => e.name === toolName) ?? null;
@@ -209,17 +237,84 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
     }
   }
 
+  /**
+   * S8's repair gate. A parked declaration refuses ordinary mutations and
+   * still serves reads; what it additionally admits is **any mutating
+   * registry entry** to a session holding `attention.resolve`, audited as
+   * repair.
+   *
+   * Deliberately a predicate on `executionClass`, not a list of tool names.
+   * `10-design.md` § the parked-operations view puts it as "the existing
+   * typed write tools ... No new mutation surface appears: these are the same
+   * operations, under the same path allowlist, that the declaration already
+   * permits when healthy" — which is a statement about a *class* of tool. An
+   * enumerated allowlist would name the three that exist today and silently
+   * withhold branch preparation from the repair session the moment S12
+   * registers it, which is the one time an operator would most need it.
+   *
+   * The tool's own declared capabilities are still checked, upstream in
+   * `dispatch`. `attention.resolve` waives the parked-state refusal; it does
+   * not substitute for `git.local.write`.
+   */
+  function admittedAsRepair(entry: ToolDeclaration, declaration: Declaration | null, session: Session): boolean {
+    if (entry.executionClass !== 'mutating') return false;
+    const grant = declarations.effectiveGrant(registry.contractCapabilitySet, ceiling, declaration, session.grant);
+    return grant.has('attention.resolve');
+  }
+
   async function dispatchMutating(request: DispatchRequest, entry: ToolDeclaration, declaration: Declaration, operationId: OperationId, actorRef: ActorRef): Promise<ToolResult<JsonValue>> {
     if (!journal) {
       return infrastructure(`mutating tool '${entry.name}' has no journal configured`);
     }
+
+    // The lazy recovery pass, ahead of **both** locks. Ahead of the mutation
+    // lock because the contract requires the resume to take that lock in its
+    // own right; ahead of the materialisation lock because a resume step
+    // re-enters this pipeline and calls `ensure` itself, and running it under
+    // a materialisation lock this call already holds would deadlock the two
+    // against each other.
+    if (deps.recoverDeclaration && !recovered.has(declaration.id)) {
+      if (recovering.has(declaration.id)) {
+        return precondition(
+          `'${declaration.id}' is recovering unsettled operations from a previous run and is not accepting mutations yet. Reads are unaffected.`,
+          [],
+        );
+      }
+      recovering.add(declaration.id);
+      try {
+        await deps.recoverDeclaration(declaration.id);
+        recovered.add(declaration.id);
+      } finally {
+        recovering.delete(declaration.id);
+      }
+    }
+
+    // Read clone state only after recovery has had its turn — recovery is
+    // exactly what moves a declaration out of `needs-attention`, and checking
+    // first would refuse a mutation the pass was about to make admissible.
+    const described = await cloneStore.describe(declaration.id);
+    const isRepair = admittedAsRepair(entry, declaration, request.session);
+    if (described.ok && described.value.state === 'needs-attention' && !isRepair) {
+      return precondition(
+        `'${declaration.id}' has a parked operation and refuses ordinary mutations: ${described.value.attentionReason ?? 'no reason recorded'}. ` +
+          `Reads are unaffected, and a session holding 'attention.resolve' can still repair the tree.`,
+        [],
+      );
+    }
+
+    // `context: 'repair'` is the audit trail's record that this mutation
+    // reached a parked declaration through the exception rather than through
+    // ordinary service. Set here rather than trusted from the caller: the
+    // caller does not decide whether it was repair, the gate does.
+    const repairing = isRepair && described.ok && described.value.state === 'needs-attention';
+    const effective: DispatchRequest = repairing ? { ...request, context: 'repair' } : request;
 
     const holder = { operationId, declarationId: declaration.id, tool: entry.name, heldSince: clock.now() };
 
     // Rule 1: materialisation is always acquired before mutation, and held
     // for the mutating call's whole duration (`10-design.md` § the lock
     // protocol, rules 1-2) — never released early the way a read releases it.
-    const ensured = await cloneStore.ensure(declaration, holder, request.signal);
+    const ensured = await cloneStore.ensure(declaration, holder, effective.signal);
     if (!ensured.ok) return moduleErrorToToolResult(ensured.error);
     const materialisationLock = ensured.value.materialisationLock;
     const activePin = ensured.value.activePin;
@@ -241,7 +336,7 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
     };
 
     try {
-      const mutationAcquired = await locks.acquireMutation(holder, mutationLockAcquireMs, request.signal);
+      const mutationAcquired = await locks.acquireMutation(holder, mutationLockAcquireMs, effective.signal);
       if (!mutationAcquired.ok) {
         // `20-contract.md` § Error semantics › Locks: every `LockError`
         // variant maps to `conflict`; `acquire-timeout` is the only one
@@ -274,10 +369,10 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
         declarationId: declaration.id,
         generation: declaration.generation,
         tool: entry.name,
-        input: exec.scrubJson(request.input),
+        input: exec.scrubJson(effective.input),
         actorRef,
-        scheduledJobId: request.scheduledJobId,
-        context: request.context,
+        scheduledJobId: effective.scheduledJobId,
+        context: effective.context,
         preState,
       });
       if (!begun.ok) {
@@ -294,8 +389,8 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
       // runs, would leave a crash between here and the handler indistinguishable
       // from one after it, which is exactly the `nothing-happened` case
       // `classify()` exists to detect.
-      const ctx = buildContext(request, entry, declaration, operationId, actorRef, cloneRoot);
-      const result = await invokeAndEnvelope(entry, ctx, request.input);
+      const ctx = buildContext(effective, entry, declaration, operationId, actorRef, cloneRoot);
+      const result = await invokeAndEnvelope(entry, ctx, effective.input);
 
       await journal.markApplied(operationId);
 
@@ -306,7 +401,7 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
         generation: declaration.generation,
         tool: entry.name,
         actorRef,
-        context: request.context,
+        context: effective.context,
         form: 'call',
         resultKind: result.kind,
         changedPaths: result.ok ? extractChangedPathsFromResultData(result.data) : [],

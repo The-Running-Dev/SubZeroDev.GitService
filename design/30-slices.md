@@ -323,8 +323,13 @@ Acceptance:
   unsettled entries is `recovery-pending`, serves reads, and refuses mutations.
 - Recovery on first use completes before the triggering call acquires the mutation lock, and the
   resume takes the lock in its own right. Asserted by acquisition order, not by timing.
-- A parked declaration admits stage, restore-paths, commit and branch to a session holding
-  `attention.resolve`, each audited with `context: 'repair'`, while ordinary traffic gets reads only.
+- A parked declaration admits **every `mutating` registry entry** to a session holding
+  `attention.resolve` — today stage, restore-paths and commit — each audited with
+  `context: 'repair'`, while ordinary traffic gets reads only. The gate is a predicate on
+  `executionClass`, not a list of tool names: `10-design.md` § the parked-operations view describes
+  it as "the existing typed write tools", which is a statement about a class, and branch
+  preparation is a composite that does not exist until S12. An enumerated allowlist would withhold
+  it from the repair session at the moment an operator most needs it.
 - Resolving a parked entry returns the clone to `ready` and the declaration to ordinary service.
 - Recovery discards nothing: a test asserts no commit, stash, untracked file or unpushed branch is
   removed on any path.

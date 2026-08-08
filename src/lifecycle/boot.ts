@@ -7,12 +7,14 @@ import type { Clone } from '../clone/types.ts';
 import type { AuditChainState } from '../audit/types.ts';
 import type { Audit } from '../audit/audit.ts';
 import type { StructuredStore } from '../store/structured-store.ts';
-import type { StoreError } from '../store/errors.ts';
+import { storeError, type StoreError } from '../store/errors.ts';
 import type { OperatorIdentity } from '../operator-identity/operator-identity.ts';
 import type { ModuleTargetName } from '../shared/brands.ts';
 import type { ToolDeclaration } from '../contract/tool-declaration.ts';
+import type { RecoveryClassification } from '../recovery/types.ts';
 import { acquireLease, type InstanceLease, type LeaseGuard, type LockAcquirer } from './lease.ts';
 import { verifyRegistryArtifact } from './registry-integrity.ts';
+import { declarationsWithUnsettledEntries, recoverDeclaration as runRecoveryLadder, type RecoveryDependencies } from './recovery.ts';
 
 export type BootError = ModuleErrorBase &
   (
@@ -76,6 +78,14 @@ export type ShutdownReason = 'signal' | 'fatal' | 'operator';
 
 export interface Lifecycle {
   boot(): Promise<Outcome<BootReport, BootError>>;
+  /**
+   * The lazy pass, called on first use and by the background sweep
+   * (`20-contract.md` § L1 — lifecycle). Deliberately **not** called by
+   * `boot`: readiness and the transports come up first, so a declaration
+   * with unsettled entries serves reads while it waits to be recovered
+   * rather than holding the whole service down.
+   */
+  recoverDeclaration(declarationId: DeclarationId): Promise<Outcome<readonly RecoveryClassification[], BootError>>;
   shutdown(reason: ShutdownReason): Promise<void>;
 }
 
@@ -104,6 +114,13 @@ export interface LifecycleDependencies {
   readonly acquirer?: LockAcquirer;
   /** Fires alongside the durable `lease-takeover` audit record — operator-visible even if the trail itself cannot be written. */
   readonly onTakeover?: (previousHolder: InstanceLease, current: InstanceLease) => void;
+  /**
+   * Recovery (S8). Optional as a group, so a `Lifecycle` built before the
+   * journal existed still compiles: without them `recoveryPending` is empty
+   * and `recoverDeclaration` reports that recovery is not wired, rather than
+   * silently claiming there was nothing to recover.
+   */
+  readonly recovery?: RecoveryDependencies;
 }
 
 const SYSTEM_ACTOR = { kind: 'recovery', subject: 'system' as Subject, clientId: null, grantId: null } as const;
@@ -272,6 +289,15 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       // report, not a source of truth (`10-design.md` § Boot and recovery).
       const clones = deps.deriveCloneStatesFromDisk ? await deps.deriveCloneStatesFromDisk() : [];
 
+      // Recovery is *listed* here, never *run* here. Boot reports which
+      // declarations hold unsettled entries so readiness and the transports
+      // can come up knowing which ones are `recovery-pending`; the ladder
+      // itself runs lazily, on first use (`recoverDeclaration`). A boot that
+      // recovered inline would hold the whole service down behind one
+      // repository's unfinished work, and — worse — would run resume steps
+      // that touch a host before anything was ready to supervise them.
+      const recoveryPending = deps.recovery ? declarationsWithUnsettledEntries(await deps.recovery.journal.allUnsettled()) : [];
+
       return ok({
         lease: leaseResult.value.lease,
         leaseSelfTestPassed: leaseResult.value.selfTestPassed,
@@ -283,8 +309,18 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         jobsResolved: NO_JOBS,
         revalidation: { jobsParked: [], entriesParked: [] },
         clones,
-        recoveryPending: [],
+        recoveryPending,
       });
+    },
+
+    async recoverDeclaration(declarationId: DeclarationId): Promise<Outcome<readonly RecoveryClassification[], BootError>> {
+      if (!deps.recovery) {
+        // A `Lifecycle` assembled without the recovery group cannot report
+        // "nothing to recover" — it does not know. Saying so is the only
+        // honest answer; the alternative reads as a clean bill of health.
+        return err(bootError({ code: 'store-failed', cause: storeError({ code: 'io-failed' }, 'no journal is wired into this lifecycle') }, 'recovery is not wired into this lifecycle'));
+      }
+      return ok(await runRecoveryLadder(deps.recovery, declarationId));
     },
 
     async shutdown(_reason: ShutdownReason): Promise<void> {

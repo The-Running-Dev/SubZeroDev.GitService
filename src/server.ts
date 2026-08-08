@@ -15,6 +15,8 @@ import { createCloneStore, type CloneStore } from './clone/clone-store.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './surfaces/http-server.ts';
 import { createGitOperations } from './git/git-operations.ts';
 import { createJournal } from './journal/journal.ts';
+import { createRecoveryCatalogue } from './recovery/catalogue.ts';
+import { LOCAL_MUTATION_RECOVERY_DESCRIPTORS } from './git/recovery-descriptors.ts';
 import { createModuleAdapter, toModuleHandler } from './module-adapter/module-adapter.ts';
 import { createDispatchPipeline } from './dispatch/dispatch-pipeline.ts';
 import { PRODUCTION_TOOL_DECLARATIONS } from './composition-root/production-declarations.ts';
@@ -156,6 +158,31 @@ async function main(): Promise<void> {
 
   const contractCapabilitySet = new Set(PRODUCTION_TOOL_DECLARATIONS.flatMap((e) => e.capabilities)) as unknown as ContractCapabilitySet;
 
+  // S8 — the recovery catalogue, populated here from L2 and read by L1. A
+  // duplicate registration is a wiring defect and fatal at composition time,
+  // which is the only time it can happen.
+  const recoveryCatalogue = createRecoveryCatalogue();
+  for (const descriptor of LOCAL_MUTATION_RECOVERY_DESCRIPTORS) {
+    const registered = recoveryCatalogue.register(descriptor);
+    if (!registered.ok) {
+      console.error(`server: ${registered.error.summary}`);
+      process.exit(1);
+      return;
+    }
+  }
+
+  // `dispatch` is not wired into recovery here: no descriptor registered
+  // above returns a resume step, so no resume can be reached. The seam is in
+  // `RecoveryDependencies` and S12's composites fill it when they bring
+  // descriptors that do resume.
+  const recovery = {
+    journal,
+    catalogue: recoveryCatalogue,
+    clock: systemClock,
+    declarations,
+    cloneStore,
+  };
+
   const lifecycle = createLifecycle({
     volumeRoot,
     buildDir,
@@ -168,6 +195,7 @@ async function main(): Promise<void> {
     deriveCloneStatesFromDisk: () => cloneStore.deriveAllStatesFromDisk(),
     registryEntries: PRODUCTION_TOOL_DECLARATIONS,
     registeredModuleTargets: moduleAdapter.registeredTargets(),
+    recovery,
     onTakeover: (previous, current) => {
       // The durable `lease-takeover` audit record is written by boot itself
       // (S3); this is operator-visible defense in depth, so a takeover is
@@ -210,6 +238,7 @@ async function main(): Promise<void> {
     journal,
     exec,
     clock: systemClock,
+    recoverDeclaration: (declarationId) => lifecycle.recoverDeclaration(declarationId),
   });
 
   const server = createSurfacesServer({
@@ -223,6 +252,7 @@ async function main(): Promise<void> {
     provisioningPending: () => operatorIdentity.provisioningState().then((state) => state === 'pending'),
     auditChain: () => audit.chainState(),
     operatorApiToken,
+    parkedOperations: () => journal.parked(),
     identity: operatorIdentity,
     sessionAbsoluteSeconds: SESSION_ABSOLUTE_SECONDS_DEFAULT,
     declarations,

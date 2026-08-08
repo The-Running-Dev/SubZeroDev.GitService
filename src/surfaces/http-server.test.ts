@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
+import type { OperationJournalEntry } from '../journal/types.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './http-server.ts';
 import type { GitSha, Sha256Hex } from '../shared/brands.ts';
 import type { AuditChainState } from '../audit/types.ts';
@@ -26,6 +27,7 @@ interface ServerOptions {
   readonly ready?: boolean;
   readonly provisioningPending?: boolean;
   readonly auditChain?: AuditChainState;
+  readonly parked?: readonly OperationJournalEntry[];
 }
 
 async function withServer<T>(options: ServerOptions, fn: (baseUrl: string) => Promise<T>): Promise<T> {
@@ -37,6 +39,7 @@ async function withServer<T>(options: ServerOptions, fn: (baseUrl: string) => Pr
     provisioningPending: async () => options.provisioningPending ?? false,
     auditChain: async () => options.auditChain ?? HEALTHY_CHAIN,
     operatorApiToken: TOKEN,
+    parkedOperations: async () => options.parked ?? [],
     identity: createStubOperatorIdentity(),
     sessionAbsoluteSeconds: 43_200,
     declarations: createStubDeclarations(),
@@ -183,5 +186,52 @@ test('/health reports the placeholder fields honestly as empty/zero', async () =
     assert.deepEqual(body.failingCredentialRefs, []);
     assert.equal(body.parkedOperations, 0);
     assert.equal(body.volume.totalBytes, 0);
+  });
+});
+
+const PARKED_ENTRY = {
+  operationId: 'op-parked' as never,
+  declarationId: 'repo-a' as never,
+  generation: 1 as never,
+  tool: 'git_commit' as never,
+  input: {},
+  actorRef: { kind: 'operator' as const, subject: 'operator' as never, clientId: null, grantId: null },
+  scheduledJobId: null,
+  context: 'normal' as const,
+  preState: { branch: null, headSha: null, upstreamSha: null, indexDigest: 'b'.repeat(64) as never, worktreeDigest: 'c'.repeat(64) as never },
+  steps: [],
+  state: 'attention' as const,
+  attentionReason: 'post-state does not match and no resume step is registered',
+  startedAt: '2026-08-08T00:00:00.000Z' as never,
+  updatedAt: '2026-08-08T00:00:01.000Z' as never,
+};
+
+test('S8.9 — /parked-operations answers 401 without a credential', async () => {
+  await withServer({ parked: [PARKED_ENTRY] }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/parked-operations`);
+    assert.equal(response.status, 401);
+  });
+});
+
+test('S8.9 — /parked-operations names the repository, the tool and the reason, so the exit does not need host access', async () => {
+  await withServer({ parked: [PARKED_ENTRY] }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/parked-operations`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { operations: readonly Record<string, unknown>[] };
+    assert.equal(body.operations.length, 1);
+    assert.equal(body.operations[0]!.declarationId, 'repo-a');
+    assert.equal(body.operations[0]!.tool, 'git_commit');
+    assert.equal(body.operations[0]!.reason, 'post-state does not match and no resume step is registered');
+    // The entry's input is deliberately absent: it is scrubbed before it is
+    // journalled, but this view has no reason to carry it at all.
+    assert.equal('input' in body.operations[0]!, false);
+  });
+});
+
+test('S8 — /health counts parked operations for real, rather than reporting a constant zero', async () => {
+  await withServer({ parked: [PARKED_ENTRY, { ...PARKED_ENTRY, operationId: 'op-parked-2' as never }] }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    const body = (await response.json()) as { parkedOperations: number };
+    assert.equal(body.parkedOperations, 2);
   });
 });
