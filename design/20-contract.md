@@ -842,7 +842,7 @@ interface NotificationRequest {
   readonly summary: string;
 }
 
-type OutboxRowStatus = 'pending' | 'delivered' | 'failed';
+type OutboxRowStatus = 'pending' | 'in-flight' | 'delivered' | 'failed';
 
 interface OutboxRow {
   readonly id: OutboxRowId;
@@ -867,6 +867,29 @@ interface DeliveryReport {
 
 Every `TerminalState` is `attention` severity; `MaintenanceSummary` is `info`, one per pass rather
 than one per clone.
+
+**`in-flight` is a claim, not a report of progress.** A delivery pass is `SELECT` → send → write back,
+and the send is the slow part, so a row stays `pending` on disk for the whole webhook round trip. Two
+passes overlapping in that window both select it and both send it. `Notifier` already serialises its
+own passes in-process, which closes that window — but only while exactly one process owns the volume.
+That is the instance lease's guarantee (S2), and it is the *only* thing standing between a
+misconfiguration and an operator paged twice for the same merge conflict. A pass therefore also moves
+each row `pending` → `in-flight` with a compare-and-set before sending, and sends only the rows whose
+set it won. Losing the set means another pass owns the row; the loser skips it silently and counts
+nothing, because the winner will count it.
+
+The two mechanisms answer different questions and both are kept deliberately. In-process serialisation
+stops a redundant pass from starting at all, which is the ordinary case and costs nothing; the claim
+is what makes correctness independent of the lease holding, which is the case nobody notices until it
+has already happened. **The claim is the correctness boundary; serialisation is an optimisation in
+front of it.**
+
+The claim is durable, so a process that dies mid-send leaves the row `in-flight` rather than `pending`,
+and nothing can distinguish that from a live claim by inspection. `redriveUndelivered` therefore sweeps
+`in-flight` back to `pending` before it selects — boot is the one moment at which no pass of this
+instance can be running, which is what makes the sweep safe there and unsafe anywhere else. The sweep
+itself is the one part that still rests on the lease: a second live instance would sweep rows the first
+is still sending.
 
 **`DeliveryReport.errors` is where three of the four `NotifierError` variants become reachable.**
 `deliverPending` and `redriveUndelivered` return a report rather than an `Outcome`, because one row
@@ -1348,7 +1371,7 @@ CREATE TABLE notification_outbox (
   severity        TEXT    NOT NULL CHECK (severity IN ('attention','info')),
   declaration_id  TEXT,
   payload         TEXT    NOT NULL,
-  status          TEXT    NOT NULL CHECK (status IN ('pending','delivered','failed')),
+  status          TEXT    NOT NULL CHECK (status IN ('pending','in-flight','delivered','failed')),
   attempts        INTEGER NOT NULL,
   last_attempt_at TEXT,
   last_error      TEXT,

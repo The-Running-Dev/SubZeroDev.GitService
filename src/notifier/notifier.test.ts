@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { systemClock } from '../clock/clock.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
@@ -503,6 +503,86 @@ test('S11.4 — a delivery whose status write-back fails is counted as still pen
   });
 });
 
+test('clearFailed reports a write that did not land rather than returning ok', async () => {
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin(beginInputFor('op-1'));
+    await journal.settle('op-1' as never, TERMINAL_NOTIFICATIONS[0]!);
+
+    const notifier = createNotifier({
+      volumeRoot: volume,
+      clock: systemClock,
+      webhookUrl: 'https://hooks.example.invalid/notify' as never,
+      maxAttempts: 1,
+      deliverFn: async () => ({ ok: false, status: 500 }),
+    });
+    await notifier.deliverPending();
+    const failed = await notifier.listFailed();
+    assert.equal(failed.length, 1);
+
+    // The volume goes read-only between the lookup and the write — SQLite can
+    // still read the row, but cannot create the journal file it needs to
+    // change it. `clearFailed` is the only way back for a `failed` row now
+    // that `redriveUndelivered` is `pending`-only, so reporting success on a
+    // write that did not land strands the row until someone tries again.
+    chmodSync(volume, 0o555);
+    try {
+      const cleared = await notifier.clearFailed(failed[0]!.id, ACTOR);
+      assert.equal(cleared.ok, false, 'a write that could not land is not success');
+      if (cleared.ok) return;
+      assert.match(cleared.error.summary, /could not be cleared/);
+    } finally {
+      chmodSync(volume, 0o755);
+    }
+
+    assert.equal(readOutboxRows(volume)[0]!.status, 'failed', 'and the row really is still failed');
+  });
+});
+
+test('the retry bound counts this pass, not the attempts a row already carries', async () => {
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin(beginInputFor('op-1'));
+    await journal.settle('op-1' as never, TERMINAL_NOTIFICATIONS[0]!);
+
+    // Written directly, because no path in the module produces this state
+    // today: `redriveUndelivered` selects `pending` alone, `clearFailed` zeroes
+    // the count on the way back, and `tryDeliver` never returns un-exhausted
+    // without having delivered. That is three independent facts holding the
+    // old `attempts = row.attempts` seeding upright — and any one of them
+    // changing would have turned the bound into a budget already spent,
+    // giving the row a single try with no backoff. The bound must not depend
+    // on them, so this pins it directly.
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    db.prepare(`UPDATE notification_outbox SET attempts = 4`).run();
+    db.close();
+
+    let sends = 0;
+    const sleeps: number[] = [];
+    const report = await createNotifier({
+      volumeRoot: volume,
+      clock: systemClock,
+      webhookUrl: 'https://hooks.example.invalid/notify' as never,
+      maxAttempts: 3,
+      deliverFn: async () => {
+        sends += 1;
+        return sends <= 2 ? { ok: false, status: 503 } : { ok: true, status: 200 };
+      },
+      sleepFn: async (ms) => {
+        sleeps.push(ms);
+      },
+    }).deliverPending();
+
+    assert.deepEqual(counts(report), { delivered: 1, failed: 0, stillPending: 0 });
+    assert.equal(sends, 3, 'a full budget of tries, not one shot against an already-spent count');
+    assert.deepEqual(sleeps, [2000, 4000], 'and backoff from the start of this ladder');
+
+    const rows = readOutboxRows(volume);
+    assert.equal(rows[0]!.status, 'delivered');
+    assert.equal(rows[0]!.attempts, 7, 'the persisted count stays a running total: 4 carried in, 3 this pass');
+  });
+});
+
 const MAINTENANCE_NOTIFICATION: NotificationRequest = {
   severity: 'info',
   declarationId: null,
@@ -580,5 +660,70 @@ test('enqueue survives the caller having already written in the same transaction
 
     const rows = readOutboxRows(volume);
     assert.equal(rows.length, 2, 'both the caller write and the enqueued row committed together');
+  });
+});
+
+test('a row claimed by a process that died is swept back to pending by the next redrive', async () => {
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin(beginInputFor('op-1'));
+    await journal.settle('op-1' as never, TERMINAL_NOTIFICATIONS[0]!);
+
+    // Exactly what a kill -9 mid-send leaves behind: a claim with nobody
+    // holding it. Nothing can tell it from a live claim by inspection, which
+    // is why the sweep lives at boot — the one moment no pass can be running.
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    db.prepare(`UPDATE notification_outbox SET status = 'in-flight'`).run();
+    db.close();
+
+    const report = await createNotifier({
+      volumeRoot: volume,
+      clock: systemClock,
+      webhookUrl: 'https://hooks.example.invalid/notify' as never,
+      deliverFn: async () => ({ ok: true, status: 200 }),
+    }).redriveUndelivered();
+
+    assert.deepEqual(counts(report), { delivered: 1, failed: 0, stillPending: 0 }, 'an abandoned claim must not strand the row forever');
+    assert.equal(readOutboxRows(volume)[0]!.status, 'delivered');
+  });
+});
+
+test('two independent notifiers over the same volume send each row exactly once', async () => {
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin(beginInputFor('op-1'));
+    await journal.settle('op-1' as never, TERMINAL_NOTIFICATIONS[0]!);
+    await journal.begin(beginInputFor('op-2'));
+    await journal.settle('op-2' as never, TERMINAL_NOTIFICATIONS[1]!);
+
+    // Two `createNotifier` instances are two independent serialisation chains
+    // — the same thing two processes sharing a volume would be, which is the
+    // case in-process serialisation cannot see and the instance lease is meant
+    // to prevent. The interleaving matters: A selects both rows and claims the
+    // first, and while A is awaiting that webhook, B selects and claims the
+    // second. When A comes back for the second row, its claim must lose.
+    //
+    // Without the claim both instances select both rows and send all four.
+    const sent: string[] = [];
+    const deliverFn = async (_url: string, body: string) => {
+      sent.push((JSON.parse(body) as { subject: { kind: string } }).subject.kind);
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      return { ok: true, status: 200 };
+    };
+    const notifierA = createNotifier({ volumeRoot: volume, clock: systemClock, webhookUrl: 'https://hooks.example.invalid/notify' as never, deliverFn });
+    const notifierB = createNotifier({ volumeRoot: volume, clock: systemClock, webhookUrl: 'https://hooks.example.invalid/notify' as never, deliverFn });
+
+    const passA = notifierA.deliverPending();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const passB = notifierB.deliverPending();
+    const [reportA, reportB] = await Promise.all([passA, passB]);
+
+    assert.equal(sent.length, 2, `each row sent exactly once across both instances — got ${JSON.stringify(sent)}`);
+    assert.deepEqual([...sent].sort(), ['merge-conflict', 'required-check-failed']);
+    assert.equal(reportA.delivered + reportB.delivered, 2, 'and each delivery is counted once, by whichever pass made it');
+
+    const rows = readOutboxRows(volume);
+    assert.equal(rows.length, 2);
+    assert.equal(rows.every((r) => r.status === 'delivered'), true);
   });
 });
