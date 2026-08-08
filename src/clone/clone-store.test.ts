@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { systemClock } from '../clock/clock.ts';
@@ -467,5 +468,96 @@ test('computeBlockers fails closed: a failed git status check refuses removal ra
     assert.equal(removed.ok, false, 'a git command that cannot be verified must refuse, not silently allow removal');
     if (!removed.ok) assert.equal(removed.error.code, 'not-safe-to-remove');
     assert.equal(existsSync(ensured.value.clone.path), true, 'nothing was removed while safety could not be established');
+  });
+});
+
+function gitIn(args: readonly string[], cwd: string): { readonly status: number | null; readonly stdout: string; readonly stderr: string } {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
+test('20-contract.md § Clone, U8 — observeGitState succeeds against a deliberately unmerged index, which git write-tree would refuse', async () => {
+  await withMigratedVolume(async (volume) => {
+    const remote = createBareGitRemote();
+    const declaration = fixtureDeclaration('repo-unmerged', remote);
+    const exec = createExec({ volumeRoot: volume });
+    const locks = createLocks();
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations: declarationsStubFor(declaration) });
+
+    const ensured = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(ensured.ok, true);
+    if (!ensured.ok) return;
+    const clonePath = ensured.value.clone.path;
+    ensured.value.materialisationLock.release();
+
+    // Produce a real, unmerged index: two branches touching the same line,
+    // merged into each other.
+    gitIn(['config', 'user.name', 'fixture'], clonePath);
+    gitIn(['config', 'user.email', 'fixture@example.com'], clonePath);
+    gitIn(['checkout', '-b', 'branch-a'], clonePath);
+    writeFileSync(path.join(clonePath, 'README.md'), 'branch-a\n', 'utf8');
+    gitIn(['commit', '-am', 'branch-a change'], clonePath);
+    gitIn(['checkout', 'main'], clonePath);
+    gitIn(['checkout', '-b', 'branch-b'], clonePath);
+    writeFileSync(path.join(clonePath, 'README.md'), 'branch-b\n', 'utf8');
+    gitIn(['commit', '-am', 'branch-b change'], clonePath);
+    const merge = gitIn(['merge', 'branch-a'], clonePath);
+    assert.notEqual(merge.status, 0, 'the merge must actually conflict for this test to mean anything');
+
+    // `git write-tree` refuses outright on an unmerged index — the exact
+    // failure `indexDigest`'s algorithm (`git ls-files --stage`) must not
+    // reproduce, since pre-state capture has to succeed on a tree in
+    // exactly this state.
+    const writeTree = gitIn(['write-tree'], clonePath);
+    assert.notEqual(writeTree.status, 0, 'git write-tree must fail here, confirming the index really is unmerged');
+
+    const lsFilesStage = gitIn(['ls-files', '--stage'], clonePath);
+    assert.match(lsFilesStage.stdout, /\s[123]\t/, 'a real stage 1/2/3 entry is present in the index');
+
+    const observed = await cloneStore.observeGitState(declaration.id);
+    assert.equal(observed.ok, true, 'pre-state capture succeeds against the unmerged index that write-tree refuses');
+    if (!observed.ok) return;
+    assert.match(observed.value.indexDigest, /^[0-9a-f]{64}$/);
+    assert.match(observed.value.worktreeDigest, /^[0-9a-f]{64}$/);
+  });
+});
+
+test('a preState captured before a change goes stale: a fresh observeGitState() after the change reports different digests', async () => {
+  await withMigratedVolume(async (volume) => {
+    const remote = createBareGitRemote();
+    const declaration = fixtureDeclaration('repo-stale-prestate', remote);
+    const exec = createExec({ volumeRoot: volume });
+    const locks = createLocks();
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations: declarationsStubFor(declaration) });
+
+    const ensured = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(ensured.ok, true);
+    if (!ensured.ok) return;
+    const clonePath = ensured.value.clone.path;
+    ensured.value.materialisationLock.release();
+
+    // The dirty-tree starting point a mutating operation's pre-state would
+    // capture — one path already changed and staged, mirroring the case a
+    // boolean "clean" flag cannot represent.
+    writeFileSync(path.join(clonePath, 'README.md'), 'first change\n', 'utf8');
+    gitIn(['add', 'README.md'], clonePath);
+    const capturedBeforeKill = await cloneStore.observeGitState(declaration.id);
+    assert.equal(capturedBeforeKill.ok, true);
+    if (!capturedBeforeKill.ok) return;
+
+    // Simulate the operation being killed mid-way: a further change lands
+    // that the captured `preState` above never saw and can never reflect,
+    // because nothing ever wrote it back.
+    writeFileSync(path.join(clonePath, 'README.md'), 'second change, after the kill\n', 'utf8');
+    gitIn(['add', 'README.md'], clonePath);
+    const observedAfterKill = await cloneStore.observeGitState(declaration.id);
+    assert.equal(observedAfterKill.ok, true);
+    if (!observedAfterKill.ok) return;
+
+    assert.notEqual(
+      capturedBeforeKill.value.indexDigest,
+      observedAfterKill.value.indexDigest,
+      'the captured pre-state and the freshly observed state disagree — a boolean clean flag could not represent this',
+    );
   });
 });
