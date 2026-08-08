@@ -3,8 +3,13 @@ import type { JsonValue } from '../contract/json.ts';
 import type { NotificationSeverity } from '../journal/types.ts';
 import type { NotifierError } from './errors.ts';
 
-/** `20-contract.md` § Notification. */
-export type OutboxRowStatus = 'pending' | 'delivered' | 'failed';
+/**
+ * `20-contract.md` § Notification. `in-flight` is a claim a delivery pass takes
+ * before it sends, not a report of progress: three drivers (boot, the
+ * composition root's timer, recovery) can each start a pass, and without it two
+ * of them select the same `pending` row and both send it.
+ */
+export type OutboxRowStatus = 'pending' | 'in-flight' | 'delivered' | 'failed';
 
 export interface OutboxRow {
   readonly id: OutboxRowId;

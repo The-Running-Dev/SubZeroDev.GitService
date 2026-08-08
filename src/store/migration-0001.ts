@@ -191,7 +191,7 @@ CREATE TABLE notification_outbox (
   severity        TEXT    NOT NULL CHECK (severity IN ('attention','info')),
   declaration_id  TEXT,
   payload         TEXT    NOT NULL,
-  status          TEXT    NOT NULL CHECK (status IN ('pending','delivered','failed')),
+  status          TEXT    NOT NULL CHECK (status IN ('pending','in-flight','delivered','failed')),
   attempts        INTEGER NOT NULL,
   last_attempt_at TEXT,
   last_error      TEXT,
