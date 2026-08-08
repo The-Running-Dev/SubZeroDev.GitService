@@ -15,6 +15,8 @@ import { createCloneStore, type CloneStore } from './clone/clone-store.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './surfaces/http-server.ts';
 import { createGitOperations } from './git/git-operations.ts';
 import { createJournal } from './journal/journal.ts';
+import { createRecoveryCatalogue } from './recovery/catalogue.ts';
+import { LOCAL_MUTATION_RECOVERY_DESCRIPTORS } from './git/recovery-descriptors.ts';
 import { createModuleAdapter, toModuleHandler } from './module-adapter/module-adapter.ts';
 import { createDispatchPipeline } from './dispatch/dispatch-pipeline.ts';
 import { PRODUCTION_TOOL_DECLARATIONS } from './composition-root/production-declarations.ts';
@@ -156,6 +158,31 @@ async function main(): Promise<void> {
 
   const contractCapabilitySet = new Set(PRODUCTION_TOOL_DECLARATIONS.flatMap((e) => e.capabilities)) as unknown as ContractCapabilitySet;
 
+  // S8 — the recovery catalogue, populated here from L2 and read by L1. A
+  // duplicate registration is a wiring defect and fatal at composition time,
+  // which is the only time it can happen.
+  const recoveryCatalogue = createRecoveryCatalogue();
+  for (const descriptor of LOCAL_MUTATION_RECOVERY_DESCRIPTORS) {
+    const registered = recoveryCatalogue.register(descriptor);
+    if (!registered.ok) {
+      console.error(`server: ${registered.error.summary}`);
+      process.exit(1);
+      return;
+    }
+  }
+
+  // `dispatch` is not wired into recovery here: no descriptor registered
+  // above returns a resume step, so no resume can be reached. The seam is in
+  // `RecoveryDependencies` and S12's composites fill it when they bring
+  // descriptors that do resume.
+  const recovery = {
+    journal,
+    catalogue: recoveryCatalogue,
+    clock: systemClock,
+    declarations,
+    cloneStore,
+  };
+
   const lifecycle = createLifecycle({
     volumeRoot,
     buildDir,
@@ -168,6 +195,7 @@ async function main(): Promise<void> {
     deriveCloneStatesFromDisk: () => cloneStore.deriveAllStatesFromDisk(),
     registryEntries: PRODUCTION_TOOL_DECLARATIONS,
     registeredModuleTargets: moduleAdapter.registeredTargets(),
+    recovery,
     onTakeover: (previous, current) => {
       // The durable `lease-takeover` audit record is written by boot itself
       // (S3); this is operator-visible defense in depth, so a takeover is
@@ -210,6 +238,7 @@ async function main(): Promise<void> {
     journal,
     exec,
     clock: systemClock,
+    recoverDeclaration: (declarationId) => lifecycle.recoverDeclaration(declarationId),
   });
 
   const server = createSurfacesServer({
@@ -223,6 +252,44 @@ async function main(): Promise<void> {
     provisioningPending: () => operatorIdentity.provisioningState().then((state) => state === 'pending'),
     auditChain: () => audit.chainState(),
     operatorApiToken,
+    declarationsAwaitingRecovery: async () => new Set((await journal.allUnsettled()).map((entry) => entry.declarationId as string)),
+    parkedOperations: () => journal.parked(),
+    observeGitState: async (declarationId) => {
+      const observed = await cloneStore.observeGitState(declarationId);
+      return observed.ok ? observed.value : null;
+    },
+    // The parked view's way out. Settling the entry and clearing the clone's
+    // mark are two writes to two stores and cannot be atomic; the entry is
+    // settled first, because a settled entry with a still-marked clone is
+    // repairable from this same route, whereas a cleared clone with a parked
+    // entry would readmit ordinary traffic to a tree still under question.
+    resolveParkedOperation: async (operationId, actor) => {
+      // The entry is located before anything is written: settling an
+      // operation that is not parked would be a state change nobody asked
+      // for, and `settle` alone cannot tell the difference.
+      const parkedBefore = await journal.parked();
+      const entry = parkedBefore.find((candidate) => candidate.operationId === operationId);
+      if (!entry) return { ok: false, summary: `no parked operation '${operationId}'` };
+
+      const settled = await journal.settle(operationId, null);
+      if (!settled.ok) return { ok: false, summary: settled.error.summary };
+
+      // The clone is unparked only when this was the declaration's *last*
+      // parked entry. Two entries can park the same repository, and clearing
+      // on the first would readmit ordinary traffic while the second is still
+      // outstanding.
+      const othersStillParked = parkedBefore.some(
+        (candidate) => candidate.declarationId === entry.declarationId && candidate.operationId !== operationId,
+      );
+      if (othersStillParked) {
+        return { ok: true, summary: `operation ${operationId} settled; '${entry.declarationId}' stays parked on its remaining entries` };
+      }
+
+      const cleared = await cloneStore.clearAttention(entry.declarationId, actor);
+      return cleared.ok
+        ? { ok: true, summary: `operation ${operationId} settled and '${entry.declarationId}' returned to ready` }
+        : { ok: false, summary: cleared.error.summary };
+    },
     identity: operatorIdentity,
     sessionAbsoluteSeconds: SESSION_ABSOLUTE_SECONDS_DEFAULT,
     declarations,

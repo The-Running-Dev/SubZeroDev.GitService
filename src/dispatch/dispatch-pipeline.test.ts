@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { systemClock } from '../clock/clock.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
@@ -23,6 +24,8 @@ import { createGitOperations } from '../git/git-operations.ts';
 import { success } from '../result/envelope.ts';
 import { err, ok, type Outcome } from '../shared/outcome.ts';
 import type { Session } from '../shared/session.ts';
+import { createRecoveryCatalogue } from '../recovery/catalogue.ts';
+import { recoverDeclaration } from '../lifecycle/recovery.ts';
 import { createDispatchPipeline } from './dispatch-pipeline.ts';
 
 const CAPABILITY_SET = new Set(['repo.read']) as unknown as DeploymentCeiling;
@@ -867,7 +870,7 @@ test('the materialisation lock is released after the mutation lock, not before �
 
     // Spy on the two lock classes' `release()` without changing their
     // behaviour — order is recorded, not simulated.
-    const instrumentedCloneStore: Pick<CloneStore, 'ensure' | 'observeGitState'> = {
+    const instrumentedCloneStore: Pick<CloneStore, 'ensure' | 'observeGitState' | 'describe'> = {
       async ensure(...args) {
         const result = await cloneStore.ensure(...args);
         if (!result.ok) return result;
@@ -884,6 +887,7 @@ test('the materialisation lock is released after the mutation lock, not before �
         });
       },
       observeGitState: (...args) => cloneStore.observeGitState(...args),
+      describe: (...args) => cloneStore.describe(...args),
     };
     const instrumentedLocks: Pick<typeof locks, 'pinActiveOperation' | 'acquireMutation'> = {
       pinActiveOperation: (...args) => locks.pinActiveOperation(...args),
@@ -925,5 +929,708 @@ test('the materialisation lock is released after the mutation lock, not before �
 
     assert.equal(result.kind, 'success');
     assert.deepEqual(releaseOrder, ['mutation', 'materialisation'], 'mutation released before materialisation — reverse acquisition order');
+  });
+});
+
+/**
+ * S8's recovery and repair gates. `REPAIR_CAPABILITY_SET` adds the
+ * instance-scoped `attention.resolve` to the mutation set — instance-scoped,
+ * so it passes `effectiveGrant` on the contract/ceiling/session intersection
+ * alone and is never gated by the declaration's own grant.
+ */
+const REPAIR_CAPABILITY_SET = new Set(['repo.read', 'git.local.write', 'attention.resolve']) as unknown as DeploymentCeiling;
+
+function repairRegistryOf(entries: readonly ToolDeclaration[]): CompiledRegistry {
+  return {
+    fingerprint: 'a'.repeat(64) as never,
+    compiledAt: systemClock.now(),
+    entries,
+    contractCapabilitySet: REPAIR_CAPABILITY_SET as unknown as CompiledRegistry['contractCapabilitySet'],
+  };
+}
+
+/** Invariant A7 keeps `attention.resolve` out of every non-operator profile, so a repair session is an operator session. */
+function operatorSessionWith(grant: readonly string[]): Session {
+  return {
+    id: 'sess-repair' as never,
+    kind: 'operator',
+    actorRef: { kind: 'operator', subject: 'operator' as never, clientId: null, grantId: null },
+    repositoryBinding: null,
+    grant: new Set(grant) as unknown as Session['grant'],
+    writablePathPrefixes: [],
+    frozenAtEpoch: 0 as never,
+  };
+}
+
+const REPAIR_ACTOR = { kind: 'operator' as const, subject: 'operator' as never, clientId: null, grantId: null };
+
+async function materialise(cloneStore: CloneStore, declarations: Declarations): Promise<string> {
+  const declaration = (await declarations.get('repo-a' as never))!;
+  const holder = { operationId: 'setup' as never, declarationId: declaration.id, tool: 'setup' as never, heldSince: systemClock.now() };
+  const ensured = await cloneStore.ensure(declaration, holder, new AbortController().signal);
+  assert.equal(ensured.ok, true);
+  if (!ensured.ok) throw new Error('fixture could not materialise');
+  ensured.value.materialisationLock.release();
+  ensured.value.activePin.release();
+  return ensured.value.clone.path;
+}
+
+test('S8.6 — a parked declaration still serves reads and refuses ordinary mutations', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec, locks, fixture, volume }) => {
+    grantWrite(fixture, ['README.md']);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+    const moduleAdapter = createModuleAdapter();
+    moduleAdapter.register('git.stage' as never, toModuleHandler(gitOperations.stage));
+    // The read used to prove 'reads are unaffected' is a stub, deliberately:
+    // this test is about the gate, and a real git.status would make it also a
+    // test of git.status. Its target is the fixture tool's default — its name.
+    moduleAdapter.register('repo_status' as never, async () => success('read served', {}, { operationId: null, declarationId: null, generation: null, durationMs: 0 }));
+
+    const clonePath = await materialise(cloneStore, declarations);
+    writeFileSync(path.join(clonePath, 'README.md'), 'fixture\nchanged\n', 'utf8');
+    await cloneStore.markAttention('repo-a' as never, 'an earlier operation was parked');
+
+    const pipeline = createDispatchPipeline({
+      registry: mutatingRegistryOf([STAGE_ENTRY, fixtureTool({ name: 'repo_status', capabilities: ['repo.read'] })]),
+      ceiling: MUTATION_CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      journal,
+      clock: systemClock,
+    });
+
+    const mutation = await pipeline.dispatch({
+      toolName: 'git_stage' as never,
+      input: { paths: ['README.md'] },
+      session: sessionWith(['repo.read', 'git.local.write']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+    assert.equal(mutation.kind, 'precondition');
+    assert.match(mutation.summary, /parked operation/);
+    assert.match(mutation.summary, /an earlier operation was parked/, 'the refusal must name why, not merely that');
+
+    const read = await pipeline.dispatch({
+      toolName: 'repo_status' as never,
+      input: {},
+      session: sessionWith(['repo.read']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+    assert.equal(read.kind, 'success', 'reads are unaffected by a parked declaration');
+
+    // And the clone is still parked afterwards — serving a read must not
+    // quietly unpark it.
+    const described = await cloneStore.describe('repo-a' as never);
+    assert.equal(described.ok && described.value.state, 'needs-attention');
+  });
+});
+
+test('S8.8 — a session holding attention.resolve reaches the same mutating tool on a parked declaration, audited as repair', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec, locks, fixture, volume }) => {
+    grantWrite(fixture, ['README.md']);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+    const moduleAdapter = createModuleAdapter();
+    moduleAdapter.register('git.stage' as never, toModuleHandler(gitOperations.stage));
+
+    const clonePath = await materialise(cloneStore, declarations);
+    writeFileSync(path.join(clonePath, 'README.md'), 'fixture\nchanged\n', 'utf8');
+    await cloneStore.markAttention('repo-a' as never, 'parked for repair');
+
+    const pipeline = createDispatchPipeline({
+      registry: repairRegistryOf([STAGE_ENTRY]),
+      ceiling: REPAIR_CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      journal,
+      clock: systemClock,
+    });
+
+    const repair = await pipeline.dispatch({
+      toolName: 'git_stage' as never,
+      input: { paths: ['README.md'] },
+      // `attention.resolve` waives the parked-state refusal; it does not
+      // substitute for the tool's own `git.local.write`, which is still here.
+      session: operatorSessionWith(['repo.read', 'git.local.write', 'attention.resolve']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+    assert.equal(repair.kind, 'success');
+
+    const page = await audit.query({ declarationId: 'repo-a' as never, tool: 'git_stage' as never, actorSubject: null, form: 'call', from: null, to: null, limit: 10, cursor: null });
+    assert.equal(page.ok, true);
+    if (!page.ok) return;
+    assert.equal(page.value.records.length, 1);
+    assert.equal(page.value.records[0]!.context, 'repair', 'the caller asked for normal; the gate records what it actually was');
+  });
+});
+
+test('S8.8 — the repair gate is a predicate on executionClass, not a list of tool names', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec, locks, fixture, volume }) => {
+    grantWrite(fixture, ['README.md']);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+    const moduleAdapter = createModuleAdapter();
+    moduleAdapter.register('git.stage' as never, toModuleHandler(gitOperations.stage));
+    // A mutating tool this slice has never heard of, standing in for the one
+    // S12 will register. If the gate enumerated today's three tool names,
+    // this would be refused — and branch preparation would be withheld from
+    // the repair session at exactly the moment it is most needed.
+    const futureTool = fixtureTool({
+      name: 'prepare_publish_branch',
+      capabilities: ['git.local.write'],
+      scopes: ['write'],
+      executionClass: 'mutating',
+      target: { kind: 'module', target: 'git.stage' as never },
+    });
+
+    const clonePath = await materialise(cloneStore, declarations);
+    writeFileSync(path.join(clonePath, 'README.md'), 'fixture\nchanged\n', 'utf8');
+    await cloneStore.markAttention('repo-a' as never, 'parked');
+
+    const pipeline = createDispatchPipeline({
+      registry: repairRegistryOf([futureTool]),
+      ceiling: REPAIR_CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      journal,
+      clock: systemClock,
+    });
+
+    const result = await pipeline.dispatch({
+      toolName: 'prepare_publish_branch' as never,
+      input: { paths: ['README.md'] },
+      session: operatorSessionWith(['repo.read', 'git.local.write', 'attention.resolve']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+    assert.equal(result.kind, 'success', 'a mutating tool registered after S8 must be admitted by the same gate');
+  });
+});
+
+test('S8.7 — the lazy recovery pass finishes before the triggering mutation acquires either lock', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec, locks, fixture, volume }) => {
+    grantWrite(fixture, ['README.md']);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+    const moduleAdapter = createModuleAdapter();
+    moduleAdapter.register('git.stage' as never, toModuleHandler(gitOperations.stage));
+
+    const clonePath = await materialise(cloneStore, declarations);
+    writeFileSync(path.join(clonePath, 'README.md'), 'fixture\nchanged\n', 'utf8');
+
+    const order: string[] = [];
+    const instrumentedLocks: Pick<typeof locks, 'pinActiveOperation' | 'acquireMutation'> = {
+      pinActiveOperation: (...args) => locks.pinActiveOperation(...args),
+      async acquireMutation(...args) {
+        order.push('mutation-lock');
+        return locks.acquireMutation(...args);
+      },
+    };
+    const instrumentedCloneStore: Pick<CloneStore, 'ensure' | 'observeGitState' | 'describe'> = {
+      async ensure(...args) {
+        order.push('materialisation-lock');
+        return cloneStore.ensure(...args);
+      },
+      observeGitState: (...args) => cloneStore.observeGitState(...args),
+      describe: (...args) => cloneStore.describe(...args),
+    };
+
+    const pipeline = createDispatchPipeline({
+      registry: mutatingRegistryOf([STAGE_ENTRY]),
+      ceiling: MUTATION_CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore: instrumentedCloneStore,
+      locks: instrumentedLocks,
+      audit,
+      journal,
+      clock: systemClock,
+      recoverDeclaration: async () => {
+        order.push('recovery-start');
+        await new Promise((resolve) => setImmediate(resolve));
+        order.push('recovery-end');
+      },
+    });
+
+    const result = await pipeline.dispatch({
+      toolName: 'git_stage' as never,
+      input: { paths: ['README.md'] },
+      session: sessionWith(['repo.read', 'git.local.write']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+    assert.equal(result.kind, 'success');
+
+    // Acquisition order, not timing. Recovery is wholly finished before
+    // either lock is taken — including the materialisation lock, because a
+    // resume step re-enters this pipeline and takes it for itself.
+    assert.deepEqual(order, ['recovery-start', 'recovery-end', 'materialisation-lock', 'mutation-lock']);
+  });
+});
+
+test('S8.6 — a mutation arriving while the lazy pass is still running is refused as recovery-pending, and the pass runs once', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec, locks, fixture, volume }) => {
+    grantWrite(fixture, ['README.md']);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+    const moduleAdapter = createModuleAdapter();
+    moduleAdapter.register('git.stage' as never, toModuleHandler(gitOperations.stage));
+    // The read used to prove 'reads are unaffected' is a stub, deliberately:
+    // this test is about the gate, and a real git.status would make it also a
+    // test of git.status. Its target is the fixture tool's default — its name.
+    moduleAdapter.register('repo_status' as never, async () => success('read served', {}, { operationId: null, declarationId: null, generation: null, durationMs: 0 }));
+
+    const clonePath = await materialise(cloneStore, declarations);
+    writeFileSync(path.join(clonePath, 'README.md'), 'fixture\nchanged\n', 'utf8');
+
+    let passes = 0;
+    let releasePass: (() => void) | null = null;
+    const pipeline = createDispatchPipeline({
+      registry: mutatingRegistryOf([STAGE_ENTRY, fixtureTool({ name: 'repo_status', capabilities: ['repo.read'] })]),
+      ceiling: MUTATION_CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      journal,
+      clock: systemClock,
+      recoverDeclaration: async () => {
+        passes += 1;
+        await new Promise<void>((resolve) => {
+          releasePass = resolve;
+        });
+      },
+    });
+
+    const mutate = () =>
+      pipeline.dispatch({
+        toolName: 'git_stage' as never,
+        input: { paths: ['README.md'] },
+        session: sessionWith(['repo.read', 'git.local.write']),
+        declarationId: 'repo-a' as never,
+        scheduledJobId: null,
+        context: 'normal',
+        signal: new AbortController().signal,
+      });
+
+    const first = mutate();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Arrives mid-pass.
+    const second = await mutate();
+    assert.equal(second.kind, 'precondition');
+    assert.match(second.summary, /recovering unsettled operations/);
+
+    // A read during the same window is untouched.
+    const read = await pipeline.dispatch({
+      toolName: 'repo_status' as never,
+      input: {},
+      session: sessionWith(['repo.read']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+    assert.equal(read.kind, 'success');
+
+    releasePass!();
+    assert.equal((await first).kind, 'success');
+
+    // A third mutation, after the pass has completed, does not re-run it.
+    assert.equal((await mutate()).kind, 'success');
+    assert.equal(passes, 1, 'the lazy pass runs once per declaration per process — "on first use"');
+  });
+});
+
+test('S8.9 — resolving a parked entry returns the clone to ready and the declaration to ordinary service', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec, locks, fixture, volume }) => {
+    grantWrite(fixture, ['README.md']);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+    const moduleAdapter = createModuleAdapter();
+    moduleAdapter.register('git.stage' as never, toModuleHandler(gitOperations.stage));
+
+    const clonePath = await materialise(cloneStore, declarations);
+    writeFileSync(path.join(clonePath, 'README.md'), 'fixture\nchanged\n', 'utf8');
+
+    const pipeline = createDispatchPipeline({
+      registry: mutatingRegistryOf([STAGE_ENTRY]),
+      ceiling: MUTATION_CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      journal,
+      clock: systemClock,
+    });
+
+    const mutate = () =>
+      pipeline.dispatch({
+        toolName: 'git_stage' as never,
+        input: { paths: ['README.md'] },
+        session: sessionWith(['repo.read', 'git.local.write']),
+        declarationId: 'repo-a' as never,
+        scheduledJobId: null,
+        context: 'normal',
+        signal: new AbortController().signal,
+      });
+
+    // A parked entry, and the clone marked to match — the state the ladder leaves behind.
+    await journal.begin({
+      operationId: 'op-parked' as never,
+      declarationId: 'repo-a' as never,
+      generation: 1 as never,
+      tool: 'git_stage' as never,
+      input: {},
+      actorRef: REPAIR_ACTOR,
+      scheduledJobId: null,
+      context: 'normal',
+      preState: { branch: null, headSha: null, upstreamSha: null, indexDigest: 'b'.repeat(64) as never, worktreeDigest: 'c'.repeat(64) as never },
+    });
+    await journal.park('op-parked' as never, 'needs a human');
+    await cloneStore.markAttention('repo-a' as never, 'needs a human');
+
+    assert.equal((await mutate()).kind, 'precondition', 'parked: ordinary mutations refused');
+
+    // The resolution itself: settle the entry, clear the clone's mark.
+    const settled = await journal.settle('op-parked' as never, null);
+    assert.equal(settled.ok, true);
+    const cleared = await cloneStore.clearAttention('repo-a' as never, REPAIR_ACTOR);
+    assert.equal(cleared.ok, true);
+
+    const described = await cloneStore.describe('repo-a' as never);
+    assert.equal(described.ok && described.value.state, 'ready');
+    assert.equal(described.ok && described.value.attentionReason, null);
+    assert.equal((await journal.parked()).length, 0);
+
+    assert.equal((await mutate()).kind, 'success', 'ordinary service resumes');
+  });
+});
+
+test('S8.10 — recovery discards nothing: a real clone keeps every commit, stash, untracked file and unpushed branch across every verdict', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec, locks, fixture, volume }) => {
+    grantWrite(fixture, ['README.md']);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+    const moduleAdapter = createModuleAdapter();
+    moduleAdapter.register('git.stage' as never, toModuleHandler(gitOperations.stage));
+
+    // The real clone the ladder will observe — not a synthetic
+    // `ObservedGitState`. Everything below happens in this directory, and it
+    // is this directory that is compared before and after.
+    const clonePath = await materialise(cloneStore, declarations);
+    const git = (...args: string[]): string => {
+      const result = spawnSync('git', ['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com', ...args], { cwd: clonePath, encoding: 'utf8' });
+      if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${result.stderr}`);
+      return result.stdout;
+    };
+
+    // One of each thing the criterion names, all of them unreachable from the
+    // remote, so nothing but this service could restore them if it lost them.
+    git('checkout', '-b', 'unpushed-work');
+    writeFileSync(path.join(clonePath, 'feature.txt'), 'work in progress\n', 'utf8');
+    git('add', 'feature.txt');
+    git('commit', '-m', 'unpushed');
+    git('checkout', 'main');
+    writeFileSync(path.join(clonePath, 'README.md'), 'fixture, stashed\n', 'utf8');
+    git('stash', 'push', '-m', 'operator work in progress');
+    writeFileSync(path.join(clonePath, 'scratch.txt'), 'untracked\n', 'utf8');
+    writeFileSync(path.join(clonePath, 'README.md'), 'fixture, edited\n', 'utf8');
+
+    // The four things the criterion names, and nothing else: a legitimate
+    // resume may stage a path, which moves `git status` without *removing*
+    // anything. Widening this to a whole-tree snapshot would make the test
+    // fail on correct behaviour, which is a different bug.
+    const survivors = (): string =>
+      [git('log', '--all', '--format=%H %s'), git('stash', 'list'), git('branch', '--list'), String(existsSync(path.join(clonePath, 'scratch.txt')))].join('\n--\n');
+
+    const before = survivors();
+    assert.match(before, /unpushed/, 'the fixture must actually hold an unpushed commit');
+    assert.match(before, /operator work in progress/, 'the fixture must actually hold a stash');
+    assert.match(before, /unpushed-work/, 'the fixture must actually hold the branch');
+    assert.match(before, /true$/, 'the fixture must actually hold an untracked file');
+
+    const pipeline = createDispatchPipeline({
+      registry: mutatingRegistryOf([STAGE_ENTRY]),
+      ceiling: MUTATION_CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      journal,
+      clock: systemClock,
+    });
+
+    // The pre-state a `nothing-happened` verdict needs is the tree as it
+    // actually stands, read through the real clone store.
+    const observedNow = await cloneStore.observeGitState('repo-a' as never);
+    assert.equal(observedNow.ok, true);
+    if (!observedNow.ok) return;
+    const livePreState = {
+      branch: observedNow.value.branch,
+      headSha: observedNow.value.headSha,
+      upstreamSha: observedNow.value.upstreamSha,
+      indexDigest: observedNow.value.indexDigest,
+      worktreeDigest: observedNow.value.worktreeDigest,
+    };
+    const stalePreState = { ...livePreState, headSha: 'f'.repeat(40) as never };
+
+    const entryFor = (operationId: string, tool: string, preState: typeof livePreState) => ({
+      operationId: operationId as never,
+      declarationId: 'repo-a' as never,
+      generation: 1 as never,
+      tool: tool as never,
+      input: { paths: ['README.md'] },
+      actorRef: { kind: 'operator' as const, subject: 'operator' as never, clientId: null, grantId: null },
+      scheduledJobId: null,
+      context: 'normal' as const,
+      preState,
+    });
+
+    // Every verdict, over this one real tree.
+    await journal.begin(entryFor('live-nothing', 'git_stage', livePreState));
+    await journal.begin(entryFor('live-park', 'no_descriptor_tool', stalePreState));
+    await journal.begin(entryFor('live-completed', 'git_commit', stalePreState));
+    await journal.begin(entryFor('live-resume', 'git_stage', stalePreState));
+
+    const catalogue = createRecoveryCatalogue();
+    catalogue.register({ tool: 'git_commit' as never, expectedPostState: () => true, resume: null });
+    catalogue.register({
+      tool: 'git_stage' as never,
+      expectedPostState: (entry) => entry.operationId !== ('live-resume' as never),
+      resume: () => ({ tool: 'git_stage' as never, input: { paths: ['README.md'] } }),
+    });
+
+    const verdicts = await recoverDeclaration(
+      {
+        journal,
+        catalogue,
+        clock: systemClock,
+        declarations,
+        cloneStore,
+        // The real pipeline, so the resume genuinely re-enters dispatch,
+        // takes both locks and runs a real git subprocess.
+        dispatch: pipeline.dispatch,
+        recoverySession: sessionWith(['repo.read', 'git.local.write']),
+      },
+      'repo-a' as never,
+    );
+
+    // The ladder must actually have done all four things — a test that
+    // silently classified nothing would also report an unchanged tree.
+    assert.deepEqual(
+      verdicts.map((v) => v.verdict),
+      ['nothing-happened', 'park', 'completed', 'resume'],
+    );
+    assert.equal(survivors(), before, 'recovery removed a commit, a stash, an untracked file or a branch');
+  });
+});
+
+test('a resume dispatched from inside the lazy pass is not refused by the pass it is part of', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec, locks, fixture, volume }) => {
+    grantWrite(fixture, ['README.md']);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+    const moduleAdapter = createModuleAdapter();
+    moduleAdapter.register('git.stage' as never, toModuleHandler(gitOperations.stage));
+
+    const clonePath = await materialise(cloneStore, declarations);
+    writeFileSync(path.join(clonePath, 'README.md'), 'fixture\nchanged\n', 'utf8');
+
+    const catalogue = createRecoveryCatalogue();
+    catalogue.register({
+      tool: 'git_stage' as never,
+      expectedPostState: () => false,
+      resume: () => ({ tool: 'git_stage' as never, input: { paths: ['README.md'] } }),
+    });
+
+    // The real cycle: the pipeline runs the ladder on first mutating use, and
+    // the ladder dispatches its resume back through that same pipeline. A
+    // stubbed dispatch cannot show this — the resume has to actually re-enter.
+    let pipeline!: ReturnType<typeof createDispatchPipeline>;
+    pipeline = createDispatchPipeline({
+      registry: mutatingRegistryOf([STAGE_ENTRY]),
+      ceiling: MUTATION_CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      journal,
+      clock: systemClock,
+      recoverDeclaration: (declarationId) =>
+        recoverDeclaration(
+          {
+            journal,
+            catalogue,
+            clock: systemClock,
+            declarations,
+            cloneStore,
+            dispatch: (request) => pipeline.dispatch(request),
+            recoverySession: sessionWith(['repo.read', 'git.local.write']),
+          },
+          declarationId,
+        ),
+    });
+
+    // An unsettled entry from a previous run whose tree has moved, so the
+    // ladder reaches `resume` rather than `nothing-happened`.
+    await journal.begin({
+      operationId: 'op-resume' as never,
+      declarationId: 'repo-a' as never,
+      generation: 1 as never,
+      tool: 'git_stage' as never,
+      input: { paths: ['README.md'] },
+      actorRef: { kind: 'operator' as const, subject: 'operator' as never, clientId: null, grantId: null },
+      scheduledJobId: null,
+      context: 'normal',
+      preState: { branch: null, headSha: 'f'.repeat(40) as never, upstreamSha: null, indexDigest: 'b'.repeat(64) as never, worktreeDigest: 'c'.repeat(64) as never },
+    });
+
+    const triggering = await pipeline.dispatch({
+      toolName: 'git_stage' as never,
+      input: { paths: ['README.md'] },
+      session: sessionWith(['repo.read', 'git.local.write']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+    assert.equal(triggering.kind, 'success');
+
+    // The resume succeeded, so the entry settled. If the resume had been
+    // refused as `recovery-pending` by the very pass that issued it, the
+    // ladder would have read that as a failed resume and parked it instead.
+    assert.equal((await journal.parked()).length, 0, 'the resumed entry must not be parked');
+    assert.equal((await journal.allUnsettled()).length, 0, 'both the resumed entry and the triggering call settled');
+
+    const repairAudit = await audit.query({ declarationId: 'repo-a' as never, tool: 'git_stage' as never, actorSubject: null, form: 'call', from: null, to: null, limit: 10, cursor: null });
+    assert.equal(repairAudit.ok, true);
+    if (!repairAudit.ok) return;
+    const contexts = repairAudit.value.records.map((r) => r.context).sort();
+    assert.deepEqual(contexts, ['normal', 'recovery'], 'the resume is audited as recovery, not relabelled as repair');
+  });
+});
+
+test('S8.8 — the repair gate is scoped to local writes: a mutating remote tool is not admitted to a parked declaration', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec, locks, fixture, volume }) => {
+    grantWrite(fixture, ['README.md']);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+    const moduleAdapter = createModuleAdapter();
+    moduleAdapter.register('git.stage' as never, toModuleHandler(gitOperations.stage));
+
+    // Stands in for S9's `git_push`: mutating, but a remote write. A parked
+    // declaration admits repair, not new reach — `10-design.md` scopes the
+    // repair tools to the typed *local* writes under the path allowlist.
+    const remoteTool = fixtureTool({
+      name: 'git_push',
+      capabilities: ['git.remote.write'],
+      scopes: ['write'],
+      executionClass: 'mutating',
+      target: { kind: 'module', target: 'git.stage' as never },
+    });
+
+    const clonePath = await materialise(cloneStore, declarations);
+    writeFileSync(path.join(clonePath, 'README.md'), 'fixture\nchanged\n', 'utf8');
+    await cloneStore.markAttention('repo-a' as never, 'parked');
+
+    fixture.current = { ...fixture.current!, capabilityGrant: new Set(['repo.read', 'git.local.write', 'git.remote.write']) as never };
+
+    const pipeline = createDispatchPipeline({
+      registry: {
+        fingerprint: 'a'.repeat(64) as never,
+        compiledAt: systemClock.now(),
+        entries: [remoteTool],
+        contractCapabilitySet: new Set(['repo.read', 'git.local.write', 'git.remote.write', 'attention.resolve']) as never,
+      },
+      ceiling: new Set(['repo.read', 'git.local.write', 'git.remote.write', 'attention.resolve']) as unknown as DeploymentCeiling,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      journal,
+      clock: systemClock,
+    });
+
+    const result = await pipeline.dispatch({
+      toolName: 'git_push' as never,
+      input: { paths: ['README.md'] },
+      session: operatorSessionWith(['repo.read', 'git.remote.write', 'attention.resolve']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+    assert.equal(result.kind, 'precondition', 'attention.resolve must not buy a remote write on a parked declaration');
+    assert.match(result.summary, /parked operation/);
+  });
+});
+
+test('a pass that finds an entry already parked re-marks the clone, closing the crash window between the two writes', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, volume }) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await materialise(cloneStore, declarations);
+
+    // Exactly the state a kill between `journal.park` and `markAttention`
+    // leaves: the entry is parked, the clone still reads ready.
+    await journal.begin({
+      operationId: 'op-half-parked' as never,
+      declarationId: 'repo-a' as never,
+      generation: 1 as never,
+      tool: 'git_stage' as never,
+      input: {},
+      actorRef: { kind: 'operator' as const, subject: 'operator' as never, clientId: null, grantId: null },
+      scheduledJobId: null,
+      context: 'normal',
+      preState: { branch: null, headSha: null, upstreamSha: null, indexDigest: 'b'.repeat(64) as never, worktreeDigest: 'c'.repeat(64) as never },
+    });
+    await journal.park('op-half-parked' as never, 'parked before the clone was marked');
+
+    const beforePass = await cloneStore.describe('repo-a' as never);
+    assert.equal(beforePass.ok && beforePass.value.state, 'ready', 'the fixture must reproduce the inconsistency it claims to');
+
+    await recoverDeclaration(
+      { journal, catalogue: createRecoveryCatalogue(), clock: systemClock, declarations, cloneStore },
+      'repo-a' as never,
+    );
+
+    const afterPass = await cloneStore.describe('repo-a' as never);
+    assert.equal(afterPass.ok && afterPass.value.state, 'needs-attention', 'the pass must reconcile the clone to the still-parked entry');
   });
 });

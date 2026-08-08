@@ -7,12 +7,35 @@ import type { DeclarationError } from '../declarations/errors.ts';
 import type { AmendInput, DeclareInput } from '../declarations/types.ts';
 import type { CloneStore } from '../clone/clone-store.ts';
 import type { CloneStoreError } from '../clone/errors.ts';
+import type { Clone } from '../clone/types.ts';
 import type { OperatorSession } from '../operator-identity/operator-identity.ts';
 import { csrfOk, requireSession, type ConsoleAuthDependencies } from './console-auth-routes.ts';
 
 export interface DeclarationRoutesDependencies extends ConsoleAuthDependencies {
   readonly declarations: Declarations;
   readonly cloneStore: CloneStore;
+  /**
+   * Declarations holding at least one unsettled journal entry (S8).
+   *
+   * `recovery-pending` is derived rather than stored — no `CloneStore` method
+   * writes it (`design/90-decisions.md`, 2026-08-08) — so it has to be
+   * overlaid here, on the way out. Without this the state would exist in the
+   * contract's `CloneState` union and in `BootReport` and be observable
+   * nowhere, which is the same as not existing.
+   */
+  readonly declarationsAwaitingRecovery?: () => Promise<ReadonlySet<string>>;
+}
+
+/**
+ * The clone as an operator should see it: `recovery-pending` outranks the
+ * stored state, because a clone that reads `ready` while an unsettled entry
+ * is outstanding is telling the operator the repository is available for
+ * work the dispatch pipeline will in fact refuse.
+ */
+function withRecoveryOverlay(clone: Clone | null, awaiting: ReadonlySet<string>): Clone | null {
+  if (!clone || !awaiting.has(clone.declarationId)) return clone;
+  if (clone.state === 'needs-attention') return clone;
+  return { ...clone, state: 'recovery-pending' };
 }
 
 /** Every mutating route here is a cookie route, so it gets invariant E7 in full — session first (401), then origin + double-submit token (403), same order and shapes `console-auth-routes.ts` uses. */
@@ -198,13 +221,14 @@ export async function handleDeclarationRoute(
 
   if (req.method === 'GET' && segments.length === 1) {
     const declarations = await deps.declarations.list({ state: null, hasContentDrop: null });
+    const awaiting = deps.declarationsAwaitingRecovery ? await deps.declarationsAwaitingRecovery() : new Set<string>();
     const withClones = await Promise.all(
       declarations.map(async (d) => ({ declaration: d, clone: await deps.cloneStore.describe(d.id) })),
     );
     sendJson(
       res,
       200,
-      withClones.map(({ declaration, clone }) => ({ declaration, clone: clone.ok ? clone.value : null })),
+      withClones.map(({ declaration, clone }) => ({ declaration, clone: withRecoveryOverlay(clone.ok ? clone.value : null, awaiting) })),
     );
     return true;
   }
@@ -245,7 +269,8 @@ export async function handleDeclarationRoute(
       return true;
     }
     const clone = await deps.cloneStore.describe(id);
-    sendJson(res, 200, { declaration, clone: clone.ok ? clone.value : null });
+    const awaiting = deps.declarationsAwaitingRecovery ? await deps.declarationsAwaitingRecovery() : new Set<string>();
+    sendJson(res, 200, { declaration, clone: withRecoveryOverlay(clone.ok ? clone.value : null, awaiting) });
     return true;
   }
 
