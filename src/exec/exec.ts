@@ -211,6 +211,13 @@ export function createExec(options: ExecOptions): Exec {
         // authentication rejection and marking a reference that never resolved.
         env.SZG_CREDENTIAL_VAR = request.credential.variableName;
         if (configuresGitCredentialHelper) argv = [...credentialConfigArgs(), ...request.argv];
+        // `gh` has no credential-helper protocol; it reads a token from
+        // `GH_TOKEN` in its own environment. Same channel as git's helper and
+        // the same guarantee: the value exists only in the child's
+        // environment, and nothing about it reaches `argv` (invariant S5).
+        // Set only in the `gh` child, so a git child never gains a second
+        // variable holding the same secret.
+        if (!configuresGitCredentialHelper) env.GH_TOKEN = value;
       }
     }
 

@@ -22,6 +22,8 @@ import type { ActorProfile } from '../declarations/types.ts';
 import type { ModuleErrorBase } from '../shared/result-kind.ts';
 
 const MUTATION_LOCK_ACQUIRE_MS_DEFAULT = 30_000;
+/** `20-contract.md` § Deployment configuration fixes this default at 1800 s. */
+const MONITORING_WAIT_CAP_SECONDS_DEFAULT = 1800;
 
 export interface DispatchRequest {
   readonly toolName: RegistryToolName;
@@ -46,7 +48,7 @@ export interface DispatchPipelineDependencies {
   readonly moduleAdapter: Pick<ModuleAdapter, 'invoke'>;
   readonly declarations: Pick<Declarations, 'get' | 'effectiveGrant' | 'effectiveWritablePrefixes'>;
   readonly cloneStore: Pick<CloneStore, 'ensure' | 'observeGitState' | 'describe'>;
-  readonly locks: Pick<Locks, 'pinActiveOperation' | 'acquireMutation'>;
+  readonly locks: Pick<Locks, 'pinActiveOperation' | 'acquireMutation'> & Partial<Pick<Locks, 'admitLockFreeWait'>>;
   readonly audit: Pick<Audit, 'append'>;
   /** Required only once a `mutating` registry entry exists (S7); every S6-only registry never reaches the branch that calls it. */
   readonly journal?: Pick<Journal, 'begin' | 'markApplied' | 'settle'>;
@@ -54,6 +56,12 @@ export interface DispatchPipelineDependencies {
   readonly exec?: Pick<Exec, 'scrubJson'>;
   readonly clock: Clock;
   readonly mutationLockAcquireMs?: number;
+  /**
+   * `DeploymentConfig.timeouts.monitoringWaitCapSeconds`. Every monitoring
+   * wait's effective timeout is at most this, regardless of what was
+   * requested (invariant C6).
+   */
+  readonly monitoringWaitCapSeconds?: number;
   /**
    * The lazy recovery pass (S8), injected rather than imported so L4 keeps
    * no dependency on the lifecycle module. Called on a declaration's first
@@ -128,13 +136,15 @@ function extractChangedPathsFromResultData(data: unknown): readonly RepoRelative
  * the global mutation lock, pre-state captured under it, the journal's
  * intent record written before the first side effect, and both locks
  * released in reverse acquisition order once the call and its journal/audit
- * bookkeeping are done (invariant C2). Monitoring-wait entries still have no
- * registry entry (S10) and are refused with `infrastructure`.
+ * bookkeeping are done (invariant C2). S10 adds the third path: a monitoring
+ * wait, which holds neither lock, is admitted against the two lock-free
+ * counters, and has its requested timeout clamped to the cap.
  */
 export function createDispatchPipeline(deps: DispatchPipelineDependencies): DispatchPipeline {
   const { registry, ceiling, moduleAdapter, declarations, cloneStore, locks, audit, journal, clock } = deps;
   const exec: Pick<Exec, 'scrubJson'> = deps.exec ?? { scrubJson: (value) => value };
   const mutationLockAcquireMs = deps.mutationLockAcquireMs ?? MUTATION_LOCK_ACQUIRE_MS_DEFAULT;
+  const monitoringWaitCapSeconds = deps.monitoringWaitCapSeconds ?? MONITORING_WAIT_CAP_SECONDS_DEFAULT;
 
   /**
    * Declarations whose lazy recovery pass has already run in this process.
@@ -234,6 +244,70 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
       return await invokeAndEnvelope(entry, ctx, request.input);
     } finally {
       if (releasePin) releasePin();
+    }
+  }
+
+  /**
+   * Invariant C6: every monitoring wait's effective timeout is at most
+   * `monitoringWaitCapSeconds`, **regardless of what was requested**. A
+   * request for 3600 s waits 1800 s rather than being refused — the cap is a
+   * ceiling on how long the service will hold a wait open, not a validation
+   * rule the caller failed.
+   *
+   * Applied generically, on the field name rather than on a known input type,
+   * because L4 may not import L2 (invariant B1) and so cannot know
+   * `ChecksAwaitInput`. The registry entry's own `timeoutSeconds` is the other
+   * half of the same limit, enforced by the compiler (`limit-exceeds-cap`), so
+   * the effective cap is the lower of the two.
+   */
+  function clampMonitoringWaitInput(entry: ToolDeclaration, input: JsonValue): JsonValue {
+    const cap = Math.min(entry.limits.timeoutSeconds, monitoringWaitCapSeconds);
+    if (input === null || typeof input !== 'object' || Array.isArray(input)) return input;
+    const requested = (input as Record<string, JsonValue>).timeoutSeconds;
+    if (typeof requested !== 'number' || requested <= cap) return input;
+    return { ...(input as Record<string, JsonValue>), timeoutSeconds: cap };
+  }
+
+  /**
+   * A monitoring wait takes **neither lock**. It materialises the clone the
+   * same way a read does and releases the materialisation lock the moment the
+   * clone is ready (invariant C3), so a thirty-minute wait on one repository
+   * delays no mutation on another and blocks nothing on its own.
+   *
+   * What bounds it instead is admission: the two counters on `Locks`, which
+   * refuse outright rather than queueing. Both refusals surface as `conflict`,
+   * the same envelope every `LockError` maps to.
+   */
+  async function dispatchMonitoringWait(request: DispatchRequest, entry: ToolDeclaration, declaration: Declaration | null, operationId: OperationId, actorRef: ActorRef): Promise<ToolResult<JsonValue>> {
+    if (!locks.admitLockFreeWait) {
+      return infrastructure(`monitoring-wait tool '${entry.name}' has no admission control configured`);
+    }
+    const admitted = locks.admitLockFreeWait(request.session.id);
+    if (!admitted.ok) {
+      return conflict(admitted.error.summary, null);
+    }
+
+    let cloneRoot: CallContext['cloneRoot'] = null;
+    let releasePin: (() => void) | null = null;
+
+    try {
+      if (declaration !== null) {
+        const holder = { operationId, declarationId: declaration.id, tool: entry.name, heldSince: clock.now() };
+        const ensured = await cloneStore.ensure(declaration, holder, request.signal);
+        if (!ensured.ok) return moduleErrorToToolResult(ensured.error);
+        // Released before the wait begins, not after it ends. Holding it for
+        // the wait's duration is exactly the thing this execution class
+        // exists not to do.
+        ensured.value.materialisationLock.release();
+        cloneRoot = ensured.value.clone.path;
+        releasePin = () => ensured.value.activePin.release();
+      }
+
+      const ctx = buildContext(request, entry, declaration, operationId, actorRef, cloneRoot);
+      return await invokeAndEnvelope(entry, ctx, clampMonitoringWaitInput(entry, request.input));
+    } finally {
+      if (releasePin) releasePin();
+      admitted.value.release();
     }
   }
 
@@ -474,12 +548,6 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
         return authorization(`session lacks capabilit(y/ies) for '${entry.name}'`, missing);
       }
 
-      if (entry.executionClass === 'monitoring-wait') {
-        // No monitoring-wait registry entry exists yet (S10) — unreachable
-        // from the current registry, documented rather than silently misrouted.
-        return infrastructure(`execution class '${entry.executionClass}' is not dispatched until its owning slice builds it`);
-      }
-
       const inputFindings = validateAgainstSchema(entry.inputSchema, request.input);
       if (inputFindings.length > 0) {
         return validation(`input for '${entry.name}' does not satisfy its schema`, inputFindings);
@@ -490,6 +558,10 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
 
       if (entry.executionClass === 'read') {
         return dispatchRead(request, entry, declaration, operationId, actorRef);
+      }
+
+      if (entry.executionClass === 'monitoring-wait') {
+        return dispatchMonitoringWait(request, entry, declaration, operationId, actorRef);
       }
 
       // `entry.capabilityScope === 'declaration'` was already checked above

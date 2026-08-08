@@ -18,6 +18,12 @@ import { createJournal } from './journal/journal.ts';
 import { createRecoveryCatalogue } from './recovery/catalogue.ts';
 import { LOCAL_MUTATION_RECOVERY_DESCRIPTORS, REMOTE_OPERATION_RECOVERY_DESCRIPTORS } from './git/recovery-descriptors.ts';
 import { createCredentialResolver } from './credentials/credentials.ts';
+import { prepareDeclarationCredential } from './credentials/declaration-credential.ts';
+import { ok, err } from './shared/outcome.ts';
+import { createGitHubAdapter } from './host/github-adapter.ts';
+import { createHostOperations } from './host/host-operations.ts';
+import { hostError } from './host/errors.ts';
+import { PR_ENABLE_AUTO_MERGE_RECOVERY, PR_OPEN_RECOVERY } from './host/recovery-descriptors.ts';
 import type { EnvVarName } from './shared/brands.ts';
 import { createModuleAdapter, toModuleHandler } from './module-adapter/module-adapter.ts';
 import { createDispatchPipeline } from './dispatch/dispatch-pipeline.ts';
@@ -167,13 +173,45 @@ async function main(): Promise<void> {
   moduleAdapter.register('git.fetch' as ModuleTargetName, toModuleHandler(gitOperations.fetch));
   moduleAdapter.register('git.syncBase' as ModuleTargetName, toModuleHandler(gitOperations.syncBase));
 
+  // S10 — the host surface behind the adapter. The credential goes through
+  // the same three-step preparation the remote git operations use, so the
+  // reference's own allowed-host constraint is checked before `gh` runs.
+  const hostAdapter = createGitHubAdapter({
+    clock: systemClock,
+    exec,
+    credentialFor: async (ctx) => {
+      const prepared = await prepareDeclarationCredential({ declarations, credentials, credentialEnv }, ctx);
+      if (!prepared.ok) return err(hostError({ code: 'unreachable' }, prepared.error.summary));
+      return ok(prepared.value.credential);
+    },
+  });
+  const hostOperations = createHostOperations({
+    clock: systemClock,
+    adapter: hostAdapter,
+    journal,
+    headShaFor: async (ctx) => {
+      if (ctx.cloneRoot === null) return null;
+      const head = await exec.runGit({ argv: ['rev-parse', 'HEAD'], cwd: ctx.cloneRoot, timeoutSeconds: 30, credential: null, signal: ctx.signal });
+      if (!head.ok) return null;
+      const sha = head.value.stdout.trim();
+      return sha.length > 0 ? (sha as GitSha) : null;
+    },
+  });
+  moduleAdapter.register('host.createPullRequest' as ModuleTargetName, toModuleHandler(hostOperations.createPullRequest));
+  moduleAdapter.register('host.readPullRequest' as ModuleTargetName, toModuleHandler(hostOperations.readPullRequest));
+  moduleAdapter.register('host.listPullRequests' as ModuleTargetName, toModuleHandler(hostOperations.listPullRequests));
+  moduleAdapter.register('host.readPullRequestComments' as ModuleTargetName, toModuleHandler(hostOperations.readPullRequestComments));
+  moduleAdapter.register('host.enableAutoMerge' as ModuleTargetName, toModuleHandler(hostOperations.enableAutoMerge));
+  moduleAdapter.register('host.readChecks' as ModuleTargetName, toModuleHandler(hostOperations.readChecks));
+  moduleAdapter.register('host.awaitChecks' as ModuleTargetName, toModuleHandler(hostOperations.awaitChecks));
+
   const contractCapabilitySet = new Set(PRODUCTION_TOOL_DECLARATIONS.flatMap((e) => e.capabilities)) as unknown as ContractCapabilitySet;
 
   // S8 — the recovery catalogue, populated here from L2 and read by L1. A
   // duplicate registration is a wiring defect and fatal at composition time,
   // which is the only time it can happen.
   const recoveryCatalogue = createRecoveryCatalogue();
-  for (const descriptor of [...LOCAL_MUTATION_RECOVERY_DESCRIPTORS, ...REMOTE_OPERATION_RECOVERY_DESCRIPTORS]) {
+  for (const descriptor of [...LOCAL_MUTATION_RECOVERY_DESCRIPTORS, ...REMOTE_OPERATION_RECOVERY_DESCRIPTORS, PR_OPEN_RECOVERY, PR_ENABLE_AUTO_MERGE_RECOVERY]) {
     const registered = recoveryCatalogue.register(descriptor);
     if (!registered.ok) {
       console.error(`server: ${registered.error.summary}`);

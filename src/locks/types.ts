@@ -15,3 +15,15 @@ export interface LockHandle {
 export interface ActivePin {
   release(): void;
 }
+
+/** Held for a monitoring wait's duration. `release` is idempotent, on the same grounds as `ActivePin.release`. */
+export interface WaitAdmission {
+  release(): void;
+}
+
+/** `DeploymentConfig.admission`. `mutationQueueDepth` is not S10's; the two wait counters are. */
+export interface AdmissionLimits {
+  readonly mutationQueueDepth: number;
+  readonly concurrentWaitsPerSession: number;
+  readonly concurrentLockFreeOperations: number;
+}

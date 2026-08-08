@@ -1,7 +1,7 @@
 import { ok, err, type Outcome } from '../shared/outcome.ts';
-import type { DeclarationId } from '../shared/brands.ts';
+import type { DeclarationId, SessionId } from '../shared/brands.ts';
 import { lockError, type LockError } from './errors.ts';
-import type { ActivePin, LockHandle, LockHolder } from './types.ts';
+import type { ActivePin, AdmissionLimits, LockHandle, LockHolder, WaitAdmission } from './types.ts';
 
 export interface Locks {
   acquireMutation(holder: LockHolder, waitMs: number, signal: AbortSignal): Promise<Outcome<LockHandle, LockError>>;
@@ -9,7 +9,26 @@ export interface Locks {
   pinActiveOperation(declarationId: DeclarationId): ActivePin;
   activeOperationCount(declarationId: DeclarationId): number;
   currentMutationHolder(): LockHolder | null;
+  /**
+   * Admission for a monitoring wait (S10). Takes **neither mutex** — a
+   * monitoring wait holds no lock, which is the whole point of the execution
+   * class — and never awaits: admission is refused outright rather than
+   * queued, because a caller queueing for permission to wait is
+   * indistinguishable from the wait itself.
+   */
+  admitLockFreeWait(sessionId: SessionId): Outcome<WaitAdmission, LockError>;
 }
+
+/**
+ * Code defaults, not contract values: `20-contract.md` records both counters
+ * as deployment-set and declines to fix them (U6). These bound a forgotten
+ * configuration to something finite rather than standing in for a decision.
+ */
+const ADMISSION_DEFAULTS: AdmissionLimits = {
+  mutationQueueDepth: 32,
+  concurrentWaitsPerSession: 4,
+  concurrentLockFreeOperations: 16,
+};
 
 interface Waiter {
   readonly holder: LockHolder;
@@ -86,10 +105,12 @@ function createMutex() {
   return { acquire, currentHolder: (): LockHolder | null => current };
 }
 
-export function createLocks(): Locks {
+export function createLocks(admission: AdmissionLimits = ADMISSION_DEFAULTS): Locks {
   const mutationMutex = createMutex();
   const materialisationMutexes = new Map<DeclarationId, ReturnType<typeof createMutex>>();
   const activeOperationCounts = new Map<DeclarationId, number>();
+  const waitsPerSession = new Map<SessionId, number>();
+  let lockFreeInFlight = 0;
 
   function materialisationMutexFor(declarationId: DeclarationId): ReturnType<typeof createMutex> {
     const existing = materialisationMutexes.get(declarationId);
@@ -128,6 +149,45 @@ export function createLocks(): Locks {
 
     currentMutationHolder(): LockHolder | null {
       return mutationMutex.currentHolder();
+    },
+
+    admitLockFreeWait(sessionId): Outcome<WaitAdmission, LockError> {
+      // Process-wide first. The two limits protect different things — one
+      // stops a single session monopolising the waits, the other stops the
+      // process as a whole — and the refusal names which one fired so an
+      // operator can tell "you are doing too much" from "the service is".
+      if (lockFreeInFlight >= admission.concurrentLockFreeOperations) {
+        return err(
+          lockError(
+            { code: 'admission-refused', limit: 'process-lock-free' },
+            `this instance already has ${lockFreeInFlight} lock-free operations in flight, its limit`,
+          ),
+        );
+      }
+      const forSession = waitsPerSession.get(sessionId) ?? 0;
+      if (forSession >= admission.concurrentWaitsPerSession) {
+        return err(
+          lockError(
+            { code: 'admission-refused', limit: 'per-session-waits' },
+            `this session already has ${forSession} monitoring waits in flight, its limit`,
+          ),
+        );
+      }
+
+      lockFreeInFlight += 1;
+      waitsPerSession.set(sessionId, forSession + 1);
+
+      let released = false;
+      return ok({
+        release(): void {
+          if (released) return;
+          released = true;
+          lockFreeInFlight = Math.max(0, lockFreeInFlight - 1);
+          const next = (waitsPerSession.get(sessionId) ?? 1) - 1;
+          if (next <= 0) waitsPerSession.delete(sessionId);
+          else waitsPerSession.set(sessionId, next);
+        },
+      });
     },
   };
 }

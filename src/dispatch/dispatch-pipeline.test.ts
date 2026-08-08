@@ -1785,3 +1785,272 @@ test('S9.7 — a push holds the global mutation lock across the whole transfer, 
     rmSync(mountRoot, { recursive: true, force: true });
   });
 });
+
+// --- S10: the monitoring-wait path ---
+
+/** A `monitoring-wait` registry entry, the class the pipeline refused outright before this slice. */
+function waitingTool(name: string, timeoutSeconds = 1800): ToolDeclaration {
+  return fixtureTool({
+    name,
+    capabilities: ['repo.read'],
+    executionClass: 'monitoring-wait',
+    scopes: ['read'],
+    limits: { timeoutSeconds, maxResultBytes: 1_000_000 },
+  });
+}
+
+test('S10.5: a monitoring wait holds neither lock while it runs', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, locks }) => {
+    const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
+    const moduleAdapter = createModuleAdapter();
+
+    let mutationHolderDuringWait: unknown = 'not observed';
+    const waitGate: { fn: (() => void) | null } = { fn: null };
+    let signalStarted: (() => void) | null = null;
+    const waitStarted = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    moduleAdapter.register('checks_await' as never, async (ctx) => {
+      mutationHolderDuringWait = locks.currentMutationHolder();
+      signalStarted?.();
+      await new Promise<void>((done) => {
+        waitGate.fn = done;
+      });
+      return success('waited', {}, { operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation, durationMs: 0 });
+    });
+
+    const pipeline = createDispatchPipeline({
+      registry: registryOf([waitingTool('checks_await')]),
+      ceiling: CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      clock: systemClock,
+    });
+
+    const inFlight = pipeline.dispatch({
+      toolName: 'checks_await' as never,
+      input: {},
+      session: sessionWith(['repo.read']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+
+    await waitStarted;
+
+    // The global mutation lock: never taken at all.
+    assert.equal(mutationHolderDuringWait, null);
+    assert.equal(locks.currentMutationHolder(), null, 'a wait in flight must leave the global mutation lock free');
+
+    // This declaration's materialisation lock: released before the wait began,
+    // so it is immediately re-acquirable while the wait is still running.
+    const holder = { operationId: 'other-op' as never, declarationId: 'repo-a' as never, tool: 'git_commit' as never, heldSince: systemClock.now() };
+    const acquired = await locks.acquireMaterialisation('repo-a' as never, holder, 250, new AbortController().signal);
+    assert.equal(acquired.ok, true, "the wait must not still hold its declaration's materialisation lock");
+    if (acquired.ok) acquired.value.release();
+
+    // And a mutation on a different repository is not delayed by it.
+    const otherHolder = { operationId: 'op-b' as never, declarationId: 'repo-b' as never, tool: 'git_commit' as never, heldSince: systemClock.now() };
+    const mutation = await locks.acquireMutation(otherHolder, 250, new AbortController().signal);
+    assert.equal(mutation.ok, true, 'a wait on one repository must not delay a mutation on another');
+    if (mutation.ok) mutation.value.release();
+
+    waitGate.fn?.();
+    const result = await inFlight;
+    assert.equal(result.ok, true);
+  });
+});
+
+test('S10.6: a wait requesting 3600s is clamped to 1800s rather than refused', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, locks }) => {
+    const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
+    const moduleAdapter = createModuleAdapter();
+    let seen: unknown = null;
+    moduleAdapter.register('checks_await' as never, async (ctx, input) => {
+      seen = input;
+      return success('waited', {}, { operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation, durationMs: 0 });
+    });
+
+    const pipeline = createDispatchPipeline({
+      registry: registryOf([waitingTool('checks_await')]),
+      ceiling: CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      clock: systemClock,
+      monitoringWaitCapSeconds: 1800,
+    });
+
+    const result = await pipeline.dispatch({
+      toolName: 'checks_await' as never,
+      input: { ref: null, timeoutSeconds: 3600 },
+      session: sessionWith(['repo.read']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+
+    assert.equal(result.ok, true, 'a request above the cap waits the cap; it is not a validation failure');
+    assert.deepEqual(seen, { ref: null, timeoutSeconds: 1800 });
+  });
+});
+
+test('S10.6: a wait requesting less than the cap is left exactly as asked', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, locks }) => {
+    const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
+    const moduleAdapter = createModuleAdapter();
+    let seen: unknown = null;
+    moduleAdapter.register('checks_await' as never, async (ctx, input) => {
+      seen = input;
+      return success('waited', {}, { operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation, durationMs: 0 });
+    });
+
+    const pipeline = createDispatchPipeline({
+      registry: registryOf([waitingTool('checks_await')]),
+      ceiling: CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      clock: systemClock,
+    });
+
+    await pipeline.dispatch({
+      toolName: 'checks_await' as never,
+      input: { ref: null, timeoutSeconds: 120 },
+      session: sessionWith(['repo.read']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+
+    assert.deepEqual(seen, { ref: null, timeoutSeconds: 120 });
+  });
+});
+
+test('S10.7: exceeding concurrentWaitsPerSession returns conflict', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore }) => {
+    const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
+    const locks = createLocks({ mutationQueueDepth: 32, concurrentWaitsPerSession: 1, concurrentLockFreeOperations: 16 });
+    const moduleAdapter = createModuleAdapter();
+
+    const gate: { fn: (() => void) | null } = { fn: null };
+    let signalStarted: (() => void) | null = null;
+    let started = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    moduleAdapter.register('checks_await' as never, async (ctx) => {
+      signalStarted?.();
+      await new Promise<void>((done) => {
+        gate.fn = done;
+      });
+      return success('waited', {}, { operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation, durationMs: 0 });
+    });
+
+    const pipeline = createDispatchPipeline({
+      registry: registryOf([waitingTool('checks_await')]),
+      ceiling: CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      clock: systemClock,
+    });
+
+    const request = {
+      toolName: 'checks_await' as never,
+      input: {},
+      session: sessionWith(['repo.read']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal' as const,
+      signal: new AbortController().signal,
+    };
+
+    const first = pipeline.dispatch(request);
+    await started;
+
+    const second = await pipeline.dispatch(request);
+    assert.equal(second.ok, false);
+    assert.equal(second.kind, 'conflict');
+    assert.match(second.summary, /monitoring waits in flight/);
+
+    gate.fn?.();
+    assert.equal((await first).ok, true);
+
+    // The admission is released with the wait, so the next one is admitted
+    // rather than being permanently refused by a leaked counter.
+    started = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    const third = pipeline.dispatch(request);
+    await started;
+    gate.fn?.();
+    assert.equal((await third).ok, true);
+  });
+});
+
+test('S10.7: exceeding concurrentLockFreeOperations returns conflict, naming the process limit', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore }) => {
+    const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
+    const locks = createLocks({ mutationQueueDepth: 32, concurrentWaitsPerSession: 8, concurrentLockFreeOperations: 1 });
+    const moduleAdapter = createModuleAdapter();
+
+    const gate: { fn: (() => void) | null } = { fn: null };
+    let signalStarted: (() => void) | null = null;
+    const started = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    moduleAdapter.register('checks_await' as never, async (ctx) => {
+      signalStarted?.();
+      await new Promise<void>((done) => {
+        gate.fn = done;
+      });
+      return success('waited', {}, { operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation, durationMs: 0 });
+    });
+
+    const pipeline = createDispatchPipeline({
+      registry: registryOf([waitingTool('checks_await')]),
+      ceiling: CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      clock: systemClock,
+    });
+
+    const base = {
+      toolName: 'checks_await' as never,
+      input: {},
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal' as const,
+      signal: new AbortController().signal,
+    };
+
+    const first = pipeline.dispatch({ ...base, session: sessionWith(['repo.read']) });
+    await started;
+
+    // A different session entirely, so the per-session limit cannot be what fires.
+    const otherSession = { ...sessionWith(['repo.read']), id: 'sess-2' as never };
+    const second = await pipeline.dispatch({ ...base, session: otherSession });
+
+    assert.equal(second.ok, false);
+    assert.equal(second.kind, 'conflict');
+    assert.match(second.summary, /lock-free operations in flight/);
+
+    gate.fn?.();
+    assert.equal((await first).ok, true);
+  });
+});

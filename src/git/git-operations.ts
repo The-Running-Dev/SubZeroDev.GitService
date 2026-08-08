@@ -1,7 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
-  cloneUrlHost,
   isoUtcTimestamp,
   repoRelativePath,
   type BranchName,
@@ -21,6 +20,7 @@ import type { Locks } from '../locks/locks.ts';
 import type { Audit } from '../audit/audit.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import type { CredentialResolver } from '../credentials/credentials.ts';
+import { prepareDeclarationCredential } from '../credentials/declaration-credential.ts';
 import { success, validation, authorization, infrastructure, precondition, upstream, type ToolResult, type ReadStamp, type Diagnostics } from '../result/envelope.ts';
 import type { ModuleErrorBase } from '../shared/result-kind.ts';
 import { REPOSITORY_CONFIG_DEFAULTS, type RepositoryConfig } from '../declarations/types.ts';
@@ -271,46 +271,16 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
   }
 
   /**
-   * Everything a remote operation needs before it may touch a network, in the
-   * order the design fixes:
-   *
-   * 1. the declaration, because the credential reference and the clone URL are
-   *    its fields and not the call context's;
-   * 2. the reference's **own** allowed-host constraint against that clone
-   *    URL's host — the second guard, independent of the deployment's
-   *    remote-host allowlist, so neither alone carries the property;
-   * 3. resolution, at the moment of use, into the shared `MutableEnv`.
-   *
-   * A declaration with no `credentialRef` reaches a public remote with no
-   * credential at all, which is a legitimate configuration (a public mirror,
-   * or a local path in a test) and not a refusal.
+   * The three-step preparation every remote operation performs before it may
+   * touch a network lives in `prepareDeclarationCredential` — S10's host
+   * adapter needs the identical sequence, and the reference's own allowed-host
+   * check is not a rule that may exist in two places. This wrapper only maps
+   * its `ModuleErrorBase` into this module's envelope.
    */
   async function prepareRemote(ctx: CallContext): Promise<Outcome<{ readonly credential: CredentialBinding | null; readonly ref: CredentialRef | null }, ToolResult<never>>> {
-    if (!deps.declarations || !deps.credentials || !deps.credentialEnv) {
-      return err(infrastructure('this instance has no credential resolver configured, and will not reach a remote without one'));
-    }
-    if (ctx.declarationId === null) {
-      return err(infrastructure('no declaration in context for a remote operation'));
-    }
-    const declaration = await deps.declarations.get(ctx.declarationId);
-    if (declaration === null) {
-      return err(precondition(`declaration '${ctx.declarationId}' no longer exists`, []));
-    }
-    const ref = declaration.credentialRef;
-    if (ref === null) return ok({ credential: null, ref: null });
-
-    const host = cloneUrlHost(declaration.cloneUrl as string);
-    if (host !== null) {
-      const allowed = await deps.credentials.allowedHosts(ref);
-      if (!allowed.ok) return err(moduleErrorToToolResult(allowed.error));
-      if (!allowed.value.some((permitted) => (permitted as string).toLowerCase() === host)) {
-        return err(authorization(`credential reference '${ref}' is not permitted to reach '${host}'`, []));
-      }
-    }
-
-    const resolved = await deps.credentials.resolveInto(ref, ctx.declarationId, deps.credentialEnv);
-    if (!resolved.ok) return err(moduleErrorToToolResult(resolved.error));
-    return ok({ credential: resolved.value, ref });
+    const prepared = await prepareDeclarationCredential(deps, ctx);
+    if (!prepared.ok) return err(moduleErrorToToolResult(prepared.error));
+    return ok(prepared.value);
   }
 
   /** Records the rejection against this declaration only — never reference-wide. See `credential_failure_mark`'s composite key. */
