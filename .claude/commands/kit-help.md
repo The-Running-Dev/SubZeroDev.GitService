@@ -54,17 +54,21 @@ Three of these stop rather than proceed, and that is the cheapest failure availa
 
 One slice, one branch, one session. Do not start slice N+1 because you noticed something in slice N — that goes in `90-decisions.md` under `## Open`, and `/track` turns it into an issue.
 
-1. **Branch.** `/pr` refuses to open from the default branch.
-2. **`/slice S3`**, or bare **`/slice`** for the lowest-numbered slice that is neither closed nor fully ticked and whose dependencies are done. Criteria stated by id, failing tests first, implemented against the contract, ending with the ids it believes are met.
-3. **You tick the boxes.** Deliberately not the agent's to do — "S3.1 met" and a ticked box are different claims by different parties.
-4. **`/verify`** — same session. Discovers the gates from CI and reports three lists; the one that matters is *did not run*. It fixes nothing.
-5. **Commit, then push.** Named paths only, and push before announcing anything.
-6. **`/pr`** — same session, because the description must carry `/verify`'s did-not-run list **verbatim**.
-7. **`/resolve`** — same session, once review lands. Fixed order: fix → push → confirm checks on the **new** head → only then resolve.
-8. **Merge** — the user's, unless this repository's instruction file explicitly delegates it.
-9. **`/track`** — **new session**, after the merge.
+1. **`/slice S3`**, or bare **`/slice`** for the lowest-numbered slice that is neither closed nor fully ticked and whose dependencies are done. Branches, states criteria by id, writes failing tests first, implements against the contract, commits, pushes, opens the PR — **never as a draft** — ticks the `Done when` boxes it confirms, and ends by reporting the ids it believes are met.
+2. **`/pr`** — same session, and the whole of the rest of the branch's life. Three phases in order: writes the real description onto the PR `/slice` opened; runs the gates and puts their three lists — the one that matters is *did not run* — into the `Verified` section **verbatim**, fixing nothing; then works the review threads automatically, fix → push → confirm checks on the **new** head → only then resolve. Resolving is delegated, no ask required (`AGENTS.md`, *Git and delivery*).
+3. **Merge** — the user's, unless this repository's instruction file explicitly delegates it.
+4. **`/track`** — **new session**, after the merge. Closes the issue if every box is ticked.
+5. **`/done`** — any time after the merge. Switches back to the default branch, deletes the now-merged local slice branch (and any other local branch already merged), and prunes remote-tracking refs for branches gone from `origin`. Optional housekeeping, not a pipeline step — nothing downstream depends on it.
+
+`/verify` and `/resolve` are phases 2 and 3 of `/pr` and own their own procedure; both stay callable on their own when you want the gates run against a tree, or threads worked on a PR `/pr` did not open.
+
+**`/kit-sync`** — any time, in a repository the kit is already installed in. Updates the shared `~/.agent-kit` checkout and re-runs `INSTALL.md`'s reconciliation against this repository, so upgrading the kit itself never depends on someone having it checked out at a path you happen to know.
 
 Then back to 1 for the next slice.
+
+### Outside the slice loop — a defect with no slice
+
+**`/fix`** — reproduces a defect first, then gets to a bug issue (given a number, or filing one from `.github/ISSUE_TEMPLATE/bug.md` after reproducing on the description path), branches, fixes, opens the PR, and hands off to the same `/pr`, same session throughout. Use it instead of `/slice` when the work has no slice id and no contract signature to implement against.
 
 ### When the slices run out
 
@@ -82,5 +86,6 @@ For something short-lived, the honest minimum is `00-brief.md` with real non-goa
 ## Answering
 
 - **Name the next command, its tier from `AGENTS.md`, and whether it needs a fresh session.** That is the whole answer most of the time.
+- **Where it needs a fresh session, say so as the banner defined in `AGENTS.md`, *Session boundaries*** — set off visibly, not folded into the same sentence as the orientation line. This is the one command whose entire job is telling the user what's next, so it is the last place that banner should be easy to miss.
 - **Do not run the next command.** This orients; it does not act. Ending a session may be the next step, and a command that starts work cannot tell the user to start a new session for it.
 - **Do not invent a step, a stage, or a tier.** If something here does not cover the situation, say so — an invented step in a help command is the one that gets followed.

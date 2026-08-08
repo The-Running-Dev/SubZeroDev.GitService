@@ -4,9 +4,13 @@ description: Discover this repository's gates, run them, and report honestly wha
 
 Run the checks this repository actually has, and report the result without softening it.
 
+**`/pr` runs this as its gate phase**, against the branch and worktree its pull request points at, and writes the report below into that PR's `Verified` section **verbatim** — the same three lists, not a summary. This file owns the procedure; `/pr` owns only where the sequence sits. Invoked on its own, it does the same discovery and the same three lists against whatever tree is checked out, and writes to no pull request.
+
 **The point of this command is the second half of its report — what did *not* run.** Silence is not success, and a gate that could not run is the most likely place a false "everything passes" comes from.
 
 ## Discover, do not assume
+
+**Check the cache first.** `tools/Test-GatesCache.ps1 -RepoRoot <repo>` hashes the files this discovery reads (every workflow's content, `package.json`'s content, and whether the known build-script paths exist) and compares it to `.claude/gates.json`. `Fresh` means none of those inputs have changed since the last discovery — skip straight to **Run** with the gates it returns. `Stale` or `Missing` means discover as below, then call `tools/Test-GatesCache.ps1 -Write -GatesJson '<the gates you found, as [{"name","command"}]>'` before running them, so the next `/verify` on this tree does not re-derive the same answer. The cache only remembers gates; it never decides what they are — that judgement stays here.
 
 **CI is the authoritative list.** Read `.github/workflows/*.yml` first: whatever the required checks invoke is the set worth running locally. A gate that exists but CI never runs is optional; a gate CI runs that you skipped is a hole in your report.
 

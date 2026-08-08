@@ -5,27 +5,54 @@ argument-hint: [pr number]
 
 Work the review comments on pull request **$1** — the current branch's PR if no number is given.
 
-**Resolving a thread is an external write, and it is not covered by the issue carve-out** (`AGENTS.md`, *Tracking work* — that covers opening issues, not commenting on or resolving anyone else's thread). Read this repository's own instruction file first: some delegate resolution after a validated fix so a thread cannot block auto-merge, some forbid replying or resolving without authorization. **Follow what it says. Where it is silent, ask before resolving anything.**
+**`/pr` runs this as its final phase**, once review has landed on the pull request it took to merge-ready. This file owns the procedure — the query, the classes, the order of operations; `/pr` owns only where the sequence sits. Invoked on its own, it does exactly the same thing against any pull request named.
+
+**Resolving a thread is an external write, but this repository delegates it** (`AGENTS.md`, *Git and delivery*): once a thread is classified `Defect` and the fix satisfying it is pushed, resolve it without asking first. This delegation covers execution only — classification itself still runs on the merit of the claim, and `Ambiguous` threads are still brought individually. This delegation is unavailable in a repository this account does not own; there, ask before resolving anything, per that same section.
 
 ## Find every thread
 
 `gh pr view --json reviewRequests,latestReviews` **does not show conversation threads.** An automated reviewer can leave threads that block merge and appear nowhere in that listing — this has cost real time, and it is why the query is written out here:
 
 ```bash
-gh api graphql -f query='
-{ repository(owner:"OWNER", name:"REPO") {
+gh api graphql --paginate -f query='
+query($endCursor: String) {
+  repository(owner:"OWNER", name:"REPO") {
     pullRequest(number:N) {
-      reviewThreads(first:100) { nodes {
-        id isResolved isOutdated path line
-        comments(first:10) { nodes { author { login } body } }
-      } } } } }'
+      reviewThreads(first:100, after:$endCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id isResolved isOutdated path line
+          comments(first:10) { pageInfo { hasNextPage endCursor } nodes { author { login } body } }
+        }
+      }
+    }
+  }
+}'
 ```
+
+`--paginate` walks `reviewThreads`' own `pageInfo` to exhaustion — a PR with more than 100 threads is not silently truncated. Each thread's nested `comments` connection paginates separately and `--paginate` does not reach it: if a thread's `comments.pageInfo.hasNextPage` comes back `true`, its first 10 comments are not the whole conversation, and it needs its own follow-up query, looped on that thread's `comments.pageInfo.endCursor` until `hasNextPage` is `false`, before it can be classified:
+
+```bash
+gh api graphql -f query='
+query($threadId: ID!, $commentsCursor: String) {
+  node(id: $threadId) {
+    ... on PullRequestReviewThread {
+      comments(first:100, after:$commentsCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { author { login } body }
+      }
+    }
+  }
+}' -f threadId="PRRT_…"
+```
+
+**Classifying from a partial fetch — a truncated thread list or a truncated comment list — is exactly the failure this pagination exists to prevent.**
 
 Count unresolved threads before you start and say the number. If `required_review_thread_resolution` is on, that count *is* the merge blocker.
 
-## Classify every comment, then act
+## Classify every thread
 
-Produce one scannable table — every thread, one row. **Volume from a bot is not authority**; classify on the merit of the claim, not on who filed it or how confidently it is worded.
+Produce one scannable table — every thread, one row, its `PRRT_…` node id included. **Volume from a bot is not authority**; classify on the merit of the claim, not on who filed it or how confidently it is worded. **Finish classifying every thread before acting on any of them** — the batch below asks once, over the full table, and a partial classification would mean asking again once the rest comes in.
 
 | Class | Meaning | Action |
 |---|---|---|
@@ -42,24 +69,24 @@ Act on the four clear classes without further prompting. **Bring only the ambigu
 This sequence is the safeguard. Do not reorder it.
 
 1. **Fix** the defects. Nothing else — no adjacent tidying, no refactors.
-2. **Push.** A fix that is not pushed does not exist as far as the reviewer or CI is concerned.
-3. **Confirm the checks are green on the new head SHA.** Not the old one.
-4. **Only then resolve**, and only the threads a validated fix actually satisfies.
+2. **Push.** A fix that is not pushed does not exist as far as the reviewer or CI is concerned. No ask required — this repository delegates it (`AGENTS.md`, *Git and delivery*).
+3. **Confirm the checks are green on the new head SHA — not the old one — by calling `pwsh -File tools/Wait-PullRequestCheck.ps1 -PullRequest $1 -HeadSha <pushed SHA>`.** Resolution proceeds only when its `WaitResult.State` is `Passed`. Any other state — `Failed`, or `NotEvaluated` for any reason including `HeadMoved` or `NoChecksConfigured` — means stop and report; do not resolve anything.
+4. **Re-query the threads** (§ Find every thread, fully paginated again) before resolving anything. **Only then resolve** every `Defect`-class thread the pushed fix addresses. A thread that appears in this re-query but was not part of that classification — including a fresh bot review posted while the wait was running — needs its own classification pass first, not an immediate resolve.
 
 **Never resolve a thread you did not address.** Resolving is how a blocking finding becomes invisible — it is the one action here that cannot be noticed afterwards. Leave anything ambiguous, contested, or merely replied-to **open**, and say so in your report.
 
-Where the repository requires authorization to resolve: fix and push, then report which threads are now satisfied, and stop.
+In a repository this account does not own, the delegation above is unavailable: fix and push, then ask before resolving anything, per `AGENTS.md`, *Git and delivery*.
 
 ## Report
 
 - Threads found, and how many were unresolved at the start
 - The classification table
 - What was fixed, and the pushed SHA
-- Checks on that SHA — including any that **did not run**, per `/verify`
+- The `WaitResult` for that SHA — including anything in `.NotRun`, per `/verify`
 - Threads resolved, and threads deliberately left open with the reason
 - Issues filed for out-of-scope findings, with numbers
 
-**Then ask.** Anything left open is unresolved work, and *a reconciliation ends in a decision, not a report* (`AGENTS.md`, *Working with me*). If every thread was clear-cut and nothing remains, say so and stop — do not manufacture a question.
+**Then ask, but only about what's still open.** Anything left `Ambiguous` is unresolved work, and *a reconciliation ends in a decision, not a report* (`AGENTS.md`, *Working with me*). If every thread was clear-cut and resolved, say so and stop — do not manufacture a question.
 
 ## Never
 
@@ -67,3 +94,4 @@ Where the repository requires authorization to resolve: fix and push, then repor
 - Resolve a thread on someone else's PR without being asked.
 - Merge. That is `/pr`'s territory and this repository's convention, not this command's.
 - Treat an outdated thread as resolved. `isOutdated` means the line moved, not that the point was answered.
+- Resolve a thread that was not classified `Defect` and addressed by the pushed fix, even if it looks like a clear win. It needs its own classification pass.

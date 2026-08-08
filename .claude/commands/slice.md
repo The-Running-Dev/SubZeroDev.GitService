@@ -11,7 +11,7 @@ Implement one slice from `design/30-slices.md`. The slice is **$1**, where that 
 
 **With no id, the next slice is the lowest-numbered one that is not done and whose dependencies are done.** Selection is the whole of the difference — everything after it is identical.
 
-A slice is **done** when its issue is closed, or when every box under `Done when` is ticked. Ticking is the user's confirmation that a criterion is genuinely met (`AGENTS.md`, *Tracking work*), which makes the tracker the only evidence of doneness this kit recognises. **Do not infer it from the working tree, the commit log, or code that appears to already exist** — that is equally what an abandoned attempt looks like.
+A slice is **done** when its issue is closed, or when every box under `Done when` is ticked. `/slice` ticks a box itself, in the same run it reports the matching criterion met by id (`AGENTS.md`, *Tracking work*), which makes the tracker the only evidence of doneness this kit recognises. **Do not infer it from the working tree, the commit log, or code that appears to already exist** — that is equally what an abandoned attempt looks like.
 
 ```powershell
 gh issue list --state all --limit 200 --json number,title,state,body
@@ -36,13 +36,15 @@ Before writing code, read `design/20-contract.md` for every signature you will t
 
 Sequence:
 
-1. State the slice's acceptance criteria back as a checklist, **by id** — `S3.1`, `S3.2`. One line each. Nothing else.
-2. Write the tests that check those criteria. They must fail for the right reason before you write the implementation.
-3. Implement against the contract signatures exactly. No signature drift, no added parameters, no widened return types.
-4. Run the tests. Run the full suite, not just the new tests.
-5. Report **by criterion id**: which are met, which are not and why, and anything you had to decide that the contract did not determine.
-
-**You do not tick the issue's checkboxes.** Ticking is the user's confirmation that a criterion is genuinely met, and it is deliberately not yours to give — a report saying "S3.1 met" and a ticked box are different claims by different parties. End by listing the ids you believe are met, in one line, so ticking them is mechanical.
+1. **Branch.** `git status --short` must be clean and on the default branch before you touch anything; uncommitted work that is not this slice's is not yours to stash or discard (`AGENTS.md`, *Safe start*) — stop and say so instead. Create and check out `slice/S<n>` from the default branch's latest. **Refuse to implement on the default branch** — `/pr` refuses to open a PR from it, and the branch is one command away.
+2. State the slice's acceptance criteria back as a checklist, **by id** — `S3.1`, `S3.2`. One line each. Nothing else.
+3. Write the tests that check those criteria. They must fail for the right reason before you write the implementation.
+4. Implement against the contract signatures exactly. No signature drift, no added parameters, no widened return types.
+5. Run the tests. Run the full suite, not just the new tests.
+6. **Commit, then push.** Stage by named path — never `git add -A`, `git add .`, or a bare directory (`AGENTS.md`, *Git and delivery*).
+7. **Open the pull request. Never as a draft.** Carved out of the authorization rule the same as pushing the branch (`AGENTS.md`, *Git and delivery*). Title it from the slice name; the body can be minimal, since `/pr` writes the real description in this same session and runs the gates and the review threads after it. Check for an existing open PR on this branch first and do not open a second one.
+8. **Tick the `Done when` boxes** on the matching issue for every id this run confirms met. Carved out the same way (`AGENTS.md`, *Tracking work*) — the report in step 9 and the tick are the same claim now, not two.
+9. Report **by criterion id**: which are met, which are not and why, anything you had to decide that the contract did not determine, and the branch name and PR URL.
 
 Stop conditions — halt and report rather than proceeding:
 
