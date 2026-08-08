@@ -54,6 +54,16 @@ const BUDGET_WINDOW_SECONDS = 3600;
 /** Backoff between 5xx retries. Jittered so a fleet of waits does not resynchronise on the same second. */
 const RETRY_BASE_MS = 500;
 
+/**
+ * Well above what `pr_list`'s 65536-byte result limit admits (~200 entries at
+ * the fields requested). Overshooting produces a loud `infrastructure`
+ * refusal; gh's own default of 30 would truncate silently.
+ */
+const LIST_LIMIT = 300;
+
+/** GitHub's REST maximum. Fewer pages to walk, and the same answer. */
+const API_PAGE_SIZE = 100;
+
 type CallKind = 'read' | 'mutation';
 
 export interface GitHubAdapterDependencies {
@@ -65,6 +75,14 @@ export interface GitHubAdapterDependencies {
    * — a public repository read is a legitimate configuration.
    */
   readonly credentialFor?: (ctx: CallContext) => Promise<Outcome<CredentialBinding | null, HostError>>;
+  /**
+   * The declaration's `RepositoryConfig.baseBranch`. **Required for
+   * `createPullRequest`**: without it, `gh pr create` falls back to the host's
+   * own default branch, which is precisely the branch the declaration never
+   * authorised. Omitting `--base` is not a neutral default — it is the wrong
+   * base chosen silently.
+   */
+  readonly baseBranchFor?: (ctx: CallContext) => Promise<BranchName | null>;
   /** Injectable so tests do not spend real seconds on backoff. */
   readonly sleep?: (ms: number) => Promise<void>;
   readonly requestBudget?: number;
@@ -215,6 +233,16 @@ export function createGitHubAdapter(deps: GitHubAdapterDependencies): HostAdapte
     state.remaining = Math.max(0, state.remaining - 1);
   }
 
+  /** Seconds until the window resets when the budget is spent, or null when there is budget left. */
+  function budgetExhausted(credential: CredentialBinding | null): number | null {
+    if (credential === null) return null;
+    const state = budgetFor(credential.ref);
+    if (state.remaining > 0) return null;
+    const nowMs = Date.parse(deps.clock.now());
+    const resetsAtMs = state.resetsAt !== null ? Date.parse(state.resetsAt) : state.windowStartedMs + BUDGET_WINDOW_SECONDS * 1000;
+    return Math.max(1, Math.ceil((resetsAtMs - nowMs) / 1000));
+  }
+
   function exhaustBudget(credential: CredentialBinding | null, retryAfterSeconds: number): void {
     if (credential === null) return;
     const state = budgetFor(credential.ref);
@@ -251,6 +279,21 @@ export function createGitHubAdapter(deps: GitHubAdapterDependencies): HostAdapte
     let attempts = 0;
 
     for (;;) {
+      // The contract's `rate-limited` row reads "the per-credential budget
+      // tripped, **or** the host said so" — so an exhausted budget raises the
+      // same error the host would, before the request is made rather than
+      // after it is refused. A budget that is counted but never consulted
+      // bounds nothing.
+      const exhausted = budgetExhausted(credential.value);
+      if (exhausted !== null) {
+        return err(
+          hostError(
+            { code: 'rate-limited', retryAfterSeconds: exhausted },
+            `the per-credential request budget for this window is exhausted; retry after ${exhausted}s`,
+          ),
+        );
+      }
+
       attempts += 1;
       chargeBudget(credential.value);
 
@@ -336,11 +379,26 @@ export function createGitHubAdapter(deps: GitHubAdapterDependencies): HostAdapte
     kind: 'github',
 
     async createPullRequest(ctx, input): Promise<Outcome<PullRequestRef, HostError>> {
-      const argv = ['pr', 'create', '--title', input.title, '--body', input.body];
+      // The base is the declaration's, and it is passed **explicitly**.
+      // `CreatePullRequestInput` carries no base so that no caller can name
+      // one; that guarantee is only worth anything if the declaration's base
+      // is then actually applied. Leaving `--base` off would hand the choice
+      // to the host's default branch instead, which is a branch the
+      // declaration never authorised — the same failure the input's omission
+      // was meant to prevent, arriving through the other door.
+      const base = deps.baseBranchFor ? await deps.baseBranchFor(ctx) : null;
+      if (base === null) {
+        return err(
+          hostError(
+            { code: 'not-found', resource: 'base branch' },
+            "this declaration's base branch could not be resolved, and a pull request will not be opened against the host's default instead",
+          ),
+        );
+      }
+
+      const argv = ['pr', 'create', '--title', input.title, '--body', input.body, '--base', base as string];
       if (input.headBranch !== null) argv.push('--head', input.headBranch as string);
       if (input.draft) argv.push('--draft');
-      // No `--base`: the base is the declaration's, applied by the caller
-      // configuring the clone, never a caller-supplied value.
 
       const created = await gh(ctx, 'mutation', argv);
       if (!created.ok) return err(created.error);
@@ -360,8 +418,15 @@ export function createGitHubAdapter(deps: GitHubAdapterDependencies): HostAdapte
     readPullRequest,
 
     async listPullRequests(ctx, state): Promise<Outcome<readonly PullRequestStatus[], HostError>> {
-      const argv = ['pr', 'list', '--json', PR_VIEW_FIELDS];
-      if (state !== null) argv.push('--state', state);
+      // `--state` is always passed. `gh pr list` defaults to open-only, so
+      // omitting it for the null case would turn "no state filter" into
+      // "open pull requests", silently dropping every closed and merged one.
+      //
+      // `--limit` is well above what `maxResultBytes` admits, deliberately:
+      // gh's own default of 30 truncates silently, whereas overshooting the
+      // size limit fails loudly as `infrastructure`. A wrong answer nobody
+      // can detect is worse than a refusal.
+      const argv = ['pr', 'list', '--json', PR_VIEW_FIELDS, '--limit', String(LIST_LIMIT), '--state', state ?? 'all'];
       const result = await gh(ctx, 'read', argv);
       if (!result.ok) return err(result.error);
       const parsed = parseJson(result.value.stdout);
@@ -422,17 +487,37 @@ export function createGitHubAdapter(deps: GitHubAdapterDependencies): HostAdapte
       return err(result.error);
     },
 
+    /**
+     * Every page, not just the first. GitHub returns 30 check runs by
+     * default, and a partial list is worse here than an error: `checks_await`
+     * decides it is finished when nothing is pending, so an omitted pending
+     * check would report a commit as concluded while it is still building.
+     */
     async readChecks(ctx, ref): Promise<Outcome<readonly CheckStatus[], HostError>> {
-      const result = await gh(ctx, 'read', ['api', `repos/{owner}/{repo}/commits/${ref as string}/check-runs`]);
+      const result = await gh(ctx, 'read', [
+        'api',
+        '--paginate',
+        '--slurp',
+        `repos/{owner}/{repo}/commits/${ref as string}/check-runs?per_page=${API_PAGE_SIZE}`,
+      ]);
       if (!result.ok) return err(result.error);
-      const record = asRecord(parseJson(result.value.stdout));
-      const raw = record?.check_runs;
-      if (!Array.isArray(raw)) return ok([]);
+
+      // `--slurp` wraps the pages in an array. Accept a bare object too, so a
+      // gh build without `--slurp` degrades to the first page rather than to
+      // an empty list that would read as "no checks at all".
+      const parsed = parseJson(result.value.stdout);
+      const pages = Array.isArray(parsed) ? parsed : [parsed];
+
       const checks: CheckStatus[] = [];
-      for (const item of raw) {
-        const entry = asRecord(item);
-        const check = entry === null ? null : checkStatusFrom(entry);
-        if (check !== null) checks.push(check);
+      for (const page of pages) {
+        const record = asRecord(page);
+        const raw = record?.check_runs;
+        if (!Array.isArray(raw)) continue;
+        for (const item of raw) {
+          const entry = asRecord(item);
+          const check = entry === null ? null : checkStatusFrom(entry);
+          if (check !== null) checks.push(check);
+        }
       }
       return ok(checks);
     },

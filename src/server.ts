@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { gitSha, type GitSha, type RemoteHost } from './shared/brands.ts';
+import { gitSha, type BranchName, type GitSha, type RemoteHost } from './shared/brands.ts';
 import type { CapabilityName, DeploymentCeiling } from './contract/capabilities.ts';
 import { systemClock } from './clock/clock.ts';
 import { createStructuredStore } from './store/structured-store.ts';
@@ -10,6 +10,7 @@ import { createLifecycle } from './lifecycle/boot.ts';
 import { createOperatorIdentity, SESSION_ABSOLUTE_SECONDS_DEFAULT } from './operator-identity/operator-identity.ts';
 import { createExec } from './exec/exec.ts';
 import { createLocks } from './locks/locks.ts';
+import type { AdmissionLimits } from './locks/types.ts';
 import { createDeclarations, type Declarations } from './declarations/declarations.ts';
 import { createCloneStore, type CloneStore } from './clone/clone-store.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './surfaces/http-server.ts';
@@ -62,6 +63,35 @@ function resolveRemoteHostAllowlist(): readonly RemoteHost[] {
     .filter((h) => h.length > 0) as RemoteHost[];
 }
 
+/**
+ * `DeploymentConfig.admission`. The contract records these as deployment-set
+ * and fixes no default (U6), so they are read here rather than left to
+ * `createLocks`' own fallback — production running on a library default is
+ * exactly the "invented values" case, and it is invisible.
+ *
+ * Unlike the allowlist and the ceiling, empty is not the safe direction: a
+ * zero limit refuses every monitoring wait. So an unset variable takes the
+ * documented default and a malformed one is fatal, rather than quietly
+ * becoming zero.
+ */
+function resolveAdmissionLimits(): AdmissionLimits {
+  const read = (name: string, fallback: number): number => {
+    const raw = process.env[name];
+    if (raw === undefined || raw.trim().length === 0) return fallback;
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value < 1) {
+      console.error(`server: ${name} must be an integer of at least 1 (got '${raw}')`);
+      process.exit(1);
+    }
+    return value;
+  };
+  return {
+    mutationQueueDepth: read('ADMISSION_MUTATION_QUEUE_DEPTH', 32),
+    concurrentWaitsPerSession: read('ADMISSION_CONCURRENT_WAITS_PER_SESSION', 4),
+    concurrentLockFreeOperations: read('ADMISSION_CONCURRENT_LOCK_FREE_OPERATIONS', 16),
+  };
+}
+
 /** `DeploymentConfig.ceiling` — same reasoning: empty until configured, which is always valid against the contract set (Ø ⊆ anything). */
 function resolveCeiling(): DeploymentCeiling {
   const raw = process.env.DEPLOYMENT_CEILING;
@@ -112,7 +142,7 @@ async function main(): Promise<void> {
   const credentialEnv = new Map<EnvVarName, string>();
   const exec = createExec({ volumeRoot, credentialEnv });
   const credentials = createCredentialResolver({ credentialMountRoot, volumeRoot, clock: systemClock });
-  const locks = createLocks();
+  const locks = createLocks(resolveAdmissionLimits());
   const ceiling = resolveCeiling();
   const remoteHostAllowlist = resolveRemoteHostAllowlist();
 
@@ -183,6 +213,16 @@ async function main(): Promise<void> {
       const prepared = await prepareDeclarationCredential({ declarations, credentials, credentialEnv }, ctx);
       if (!prepared.ok) return err(hostError({ code: 'unreachable' }, prepared.error.summary));
       return ok(prepared.value.credential);
+    },
+    // The declaration's base, passed explicitly to `gh pr create`. Without it
+    // the host picks its own default branch, which is the one branch the
+    // declaration never authorised.
+    baseBranchFor: async (ctx) => {
+      const config = await gitOperations.loadRepositoryConfig(ctx);
+      // `RepositoryConfig.baseBranch` is a plain `string` in the code and a
+      // `BranchName` in the contract — the drift tracked in issue #38, not
+      // this slice's to resolve. The cast is the drift, named.
+      return config.ok ? (config.value.baseBranch as BranchName) : null;
     },
   });
   const hostOperations = createHostOperations({

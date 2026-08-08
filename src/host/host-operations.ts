@@ -223,9 +223,23 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
           // A rate limit backs off and keeps waiting rather than failing the
           // wait — the contract's own note that "monitoring waits back off
           // with jitter". Everything else is terminal for the wait.
-          if (checks.error.code === 'rate-limited' && Date.parse(clock.now()) < deadlineMs) {
-            await sleep(checks.error.retryAfterSeconds * 1000 + Math.floor(Math.random() * 1000));
-            continue;
+          //
+          // The backoff is clamped to what is left of the deadline. A
+          // retry-after of an hour against a wait with a second left would
+          // otherwise sleep for the hour and only then notice the cap, which
+          // is the bounded-wait guarantee broken by the one path that looks
+          // like it is honouring it.
+          if (checks.error.code === 'rate-limited') {
+            const remainingMs = deadlineMs - Date.parse(clock.now());
+            const backoffMs = checks.error.retryAfterSeconds * 1000 + Math.floor(Math.random() * 1000);
+            if (remainingMs > 0 && backoffMs < remainingMs) {
+              await sleep(backoffMs);
+              continue;
+            }
+            return timeoutResult(
+              `checks at ${ref} were still rate-limited when the ${input.timeoutSeconds}s wait ran out`,
+              input.timeoutSeconds,
+            );
           }
           return hostErrorToToolResult(checks.error);
         }

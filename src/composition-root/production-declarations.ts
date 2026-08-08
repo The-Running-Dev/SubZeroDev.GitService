@@ -269,9 +269,15 @@ const PR_STATUS_OUTPUT_SCHEMA = {
   required: ['status'],
 } as unknown as JsonSchema;
 
+/**
+ * `state` is the `PullRequestState` union, encoded as an `enum` rather than a
+ * bare string. Without it an unrecognised value reaches `gh` and comes back as
+ * an upstream failure, which tells the caller the host is unwell when the
+ * input was simply wrong.
+ */
 const PR_LIST_INPUT_SCHEMA = {
   type: 'object',
-  properties: { state: { type: ['string', 'null'] } },
+  properties: { state: { type: ['string', 'null'], enum: ['open', 'merged', 'closed', null] } },
   required: ['state'],
   additionalProperties: false,
 } as unknown as JsonSchema;

@@ -8,6 +8,7 @@ import type { ExecRequest, ExecResult } from '../exec/exec.ts';
 import type { ExecError } from '../exec/errors.ts';
 import { execError } from '../exec/errors.ts';
 import { PRODUCTION_TOOL_DECLARATIONS } from '../composition-root/production-declarations.ts';
+import { validateAgainstSchema } from '../contract/json-schema.ts';
 import { createGitHubAdapter } from './github-adapter.ts';
 import { createHostOperations } from './host-operations.ts';
 import { PR_ENABLE_AUTO_MERGE_RECOVERY, PR_OPEN_RECOVERY } from './recovery-descriptors.ts';
@@ -82,7 +83,7 @@ function recordingJournal() {
 }
 
 function operations(gh: ReturnType<typeof stubGh>, overrides: { readonly journal?: ReturnType<typeof recordingJournal>['journal']; readonly sleep?: (ms: number) => Promise<void> } = {}) {
-  const adapter = createGitHubAdapter({ clock: systemClock, exec: gh.exec, sleep: async () => {} });
+  const adapter = createGitHubAdapter({ clock: systemClock, exec: gh.exec, sleep: async () => {}, baseBranchFor: async () => 'main' as never });
   return createHostOperations({
     clock: systemClock,
     adapter,
@@ -113,7 +114,7 @@ test('S10.1: pr_open writes its journal step before the gh call', async () => {
       return gh.exec.runGh(request);
     },
   };
-  const adapter = createGitHubAdapter({ clock: systemClock, exec: watched, sleep: async () => {} });
+  const adapter = createGitHubAdapter({ clock: systemClock, exec: watched, sleep: async () => {}, baseBranchFor: async () => 'main' as never });
   const ops = createHostOperations({ clock: systemClock, adapter, journal, headShaFor: async () => HEAD, sleep: async () => {} });
 
   const result = await ops.createPullRequest(context(), { title: 't', body: 'b', headBranch: null, draft: false });
@@ -136,7 +137,7 @@ test('S10.1: enable_auto_merge writes its journal step before the gh call', asyn
 
 test('S10.1: a host mutation refuses before the network call when its step cannot be written', async () => {
   const gh = stubGh([{ when: () => true, reply: () => stdout('https://github.com/acme/repo/pull/7\n') }]);
-  const adapter = createGitHubAdapter({ clock: systemClock, exec: gh.exec, sleep: async () => {} });
+  const adapter = createGitHubAdapter({ clock: systemClock, exec: gh.exec, sleep: async () => {}, baseBranchFor: async () => 'main' as never });
   const ops = createHostOperations({
     clock: systemClock,
     adapter,
@@ -383,7 +384,7 @@ test('pr_open has no base branch in its input schema, so no caller can name one'
   assert.equal(schema.additionalProperties, false, 'without this, a base could arrive as an extra property');
 });
 
-test('pr_open sends no --base to gh, whatever it is handed', async () => {
+test('pr_open passes draft and head through, and takes its base from the declaration rather than the input', async () => {
   const gh = stubGh([
     { when: (a) => a[1] === 'create', reply: () => stdout('https://github.com/acme/repo/pull/7\n') },
     { when: (a) => a[1] === 'view', reply: () => stdout(PR_JSON) },
@@ -393,7 +394,148 @@ test('pr_open sends no --base to gh, whatever it is handed', async () => {
   await ops.createPullRequest(context(), { title: 't', body: 'b', headBranch: 'slice/S10' as never, draft: true });
 
   const create = gh.calls.find((argv) => argv[1] === 'create') ?? [];
-  assert.equal(create.includes('--base'), false);
   assert.equal(create.includes('--draft'), true);
-  assert.equal(create.includes('--head'), true);
+  assert.equal(create[create.indexOf('--head') + 1], 'slice/S10');
+  // The base is present and comes from the declaration, not from the input —
+  // which carries no base at all. Both halves matter: the input cannot name
+  // one, and the declaration's is applied.
+  assert.equal(create[create.indexOf('--base') + 1], 'main');
+});
+
+// --- Review findings on PR #46, each with the test that would have caught it ---
+
+test('review: pr_open passes the declaration base explicitly, and refuses rather than letting the host pick', async () => {
+  const gh = stubGh([
+    { when: (a) => a[1] === 'create', reply: () => stdout('https://github.com/acme/repo/pull/7\n') },
+    { when: (a) => a[1] === 'view', reply: () => stdout(PR_JSON) },
+  ]);
+  const adapter = createGitHubAdapter({ clock: systemClock, exec: gh.exec, sleep: async () => {}, baseBranchFor: async () => 'release/9' as never });
+  const ops = createHostOperations({ clock: systemClock, adapter, journal: recordingJournal().journal, headShaFor: async () => HEAD, sleep: async () => {} });
+
+  await ops.createPullRequest(context(), { title: 't', body: 'b', headBranch: null, draft: false });
+
+  const create = gh.calls.find((argv) => argv[1] === 'create') ?? [];
+  assert.equal(create.includes('--base'), true, 'omitting --base hands the choice to the host default branch');
+  assert.equal(create[create.indexOf('--base') + 1], 'release/9');
+});
+
+test('review: pr_open refuses when the base cannot be resolved, rather than opening against the default', async () => {
+  const gh = stubGh([{ when: () => true, reply: () => stdout('https://github.com/acme/repo/pull/7\n') }]);
+  const adapter = createGitHubAdapter({ clock: systemClock, exec: gh.exec, sleep: async () => {}, baseBranchFor: async () => null });
+  const ops = createHostOperations({ clock: systemClock, adapter, journal: recordingJournal().journal, headShaFor: async () => HEAD, sleep: async () => {} });
+
+  const result = await ops.createPullRequest(context(), { title: 't', body: 'b', headBranch: null, draft: false });
+
+  assert.equal(result.ok, false);
+  assert.equal(gh.calls.length, 0, 'nothing may reach the host without a base');
+});
+
+test('review: pr_list with a null state asks for every state, not just open', async () => {
+  const gh = stubGh([{ when: () => true, reply: () => stdout('[]') }]);
+  const ops = operations(gh);
+
+  await ops.listPullRequests(context(), { state: null });
+
+  const argv = gh.calls[0] ?? [];
+  assert.equal(argv[argv.indexOf('--state') + 1], 'all', "gh defaults to open-only, so 'no filter' has to be said out loud");
+  assert.equal(argv.includes('--limit'), true, "gh's default of 30 truncates silently");
+});
+
+test('review: pr_list passes the requested state through unchanged', async () => {
+  const gh = stubGh([{ when: () => true, reply: () => stdout('[]') }]);
+  const ops = operations(gh);
+
+  await ops.listPullRequests(context(), { state: 'merged' });
+
+  const argv = gh.calls[0] ?? [];
+  assert.equal(argv[argv.indexOf('--state') + 1], 'merged');
+});
+
+test("review: pr_list's input schema rejects a state outside the union", () => {
+  const entry = PRODUCTION_TOOL_DECLARATIONS.find((e) => (e.name as string) === 'pr_list');
+  assert.ok(entry);
+
+  assert.equal(validateAgainstSchema(entry.inputSchema, { state: 'draft' } as never).length > 0, true, 'an unknown state must fail validation, not reach gh');
+  for (const accepted of ['open', 'merged', 'closed', null]) {
+    assert.deepEqual(validateAgainstSchema(entry.inputSchema, { state: accepted } as never), []);
+  }
+});
+
+test('review: readChecks reads every page, so a pending check on page two is not lost', async () => {
+  // Two pages, `--slurp`-style. The pending run is on the second — exactly the
+  // one a first-page-only read would drop, reporting the commit as concluded.
+  const pages = JSON.stringify([
+    { check_runs: [{ name: 'lint', status: 'completed', conclusion: 'success', details_url: null }] },
+    { check_runs: [{ name: 'build', status: 'in_progress', conclusion: null, details_url: null }] },
+  ]);
+  const gh = stubGh([{ when: () => true, reply: () => stdout(pages) }]);
+  const ops = operations(gh);
+
+  const result = await ops.readChecks(context(), { ref: HEAD });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.data?.checks.map((c) => `${c.name}:${c.conclusion}`), ['lint:success', 'build:pending']);
+  assert.equal((gh.calls[0] ?? []).includes('--paginate'), true);
+});
+
+test('review: readChecks still reads a single un-slurped page', async () => {
+  const gh = stubGh([
+    { when: () => true, reply: () => stdout(JSON.stringify({ check_runs: [{ name: 'lint', status: 'completed', conclusion: 'success', details_url: null }] })) },
+  ]);
+  const ops = operations(gh);
+
+  const result = await ops.readChecks(context(), { ref: HEAD });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.data?.checks.length, 1);
+});
+
+test('review: an exhausted per-credential budget raises rate-limited before the request is made', async () => {
+  const gh = stubGh([{ when: () => true, reply: () => stdout(PR_JSON) }]);
+  const adapter = createGitHubAdapter({
+    clock: systemClock,
+    exec: gh.exec,
+    sleep: async () => {},
+    requestBudget: 2,
+    credentialFor: async () => ok({ ref: 'token' as never, declarationId: DECLARATION, variableName: 'V' as never }),
+  });
+  const ops = createHostOperations({ clock: systemClock, adapter, journal: recordingJournal().journal, headShaFor: async () => HEAD, sleep: async () => {} });
+
+  assert.equal((await ops.readPullRequest(context(), { number: 7 })).ok, true);
+  assert.equal((await ops.readPullRequest(context(), { number: 7 })).ok, true);
+  assert.equal(adapter.remainingBudget('token' as never).remaining, 0);
+
+  const third = await ops.readPullRequest(context(), { number: 7 });
+  assert.equal(third.ok, false);
+  assert.equal(third.kind, 'upstream');
+  assert.match(third.summary, /budget for this window is exhausted/);
+  assert.equal(gh.calls.length, 2, 'a budget that is counted but never consulted bounds nothing');
+});
+
+test('review: a wait clamps its rate-limit backoff to the remaining deadline', async () => {
+  // An hour of retry-after against a wait with nothing left. Sleeping it would
+  // honour the host and break the cap.
+  const gh = stubGh([{ when: () => true, reply: () => ghFailure('gh: API rate limit exceeded (HTTP 403)\nretry-after: 3600') }]);
+  const slept: number[] = [];
+  const adapter = createGitHubAdapter({ clock: systemClock, exec: gh.exec, sleep: async () => {} });
+  const ops = createHostOperations({
+    clock: systemClock,
+    adapter,
+    journal: recordingJournal().journal,
+    headShaFor: async () => HEAD,
+    pollIntervalSeconds: 0,
+    sleep: async (ms) => {
+      slept.push(ms);
+    },
+  });
+
+  const result = await ops.awaitChecks(context(), { ref: null, timeoutSeconds: 1 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.kind, 'timeout');
+  assert.equal(
+    slept.some((ms) => ms > 5_000),
+    false,
+    'no sleep may outlast the wait it belongs to',
+  );
 });

@@ -1495,7 +1495,9 @@ the outset with nothing that raised or read them; this is the method that does. 
 mutex — a monitoring wait holds no lock, which is the whole point of the execution class — and its
 only job is the two counters. It never awaits: admission is refused outright rather than queued,
 because a caller queueing for permission to wait is indistinguishable from the wait itself. The
-limits are supplied to `createLocks` from `DeploymentConfig.admission`, so the counters live beside
+limits are supplied to `createLocks` from `DeploymentConfig.admission`, which the composition root
+reads from the deployment rather than allowing a library default to stand in silently, so the
+counters live beside
 `activeOperationCount` rather than in a second module that would have to be kept consistent with it.
 `WaitAdmission.release` is idempotent, on the same grounds as `ActivePin.release`.
 
