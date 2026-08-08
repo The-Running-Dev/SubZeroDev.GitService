@@ -245,12 +245,23 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
    *
    * Deliberately a predicate on `executionClass`, not a list of tool names.
    * `10-design.md` § the parked-operations view puts it as "the existing
-   * typed write tools ... No new mutation surface appears: these are the same
-   * operations, under the same path allowlist, that the declaration already
-   * permits when healthy" — which is a statement about a *class* of tool. An
-   * enumerated allowlist would name the three that exist today and silently
-   * withhold branch preparation from the repair session the moment S12
-   * registers it, which is the one time an operator would most need it.
+   * typed write tools — stage, restore-paths, commit, branch ... No new
+   * mutation surface appears: these are the same operations, **under the same
+   * path allowlist**, that the declaration already permits when healthy."
+   *
+   * Two halves, and both matter:
+   *
+   * - **A class, not a list.** An enumerated allowlist would name the three
+   *   tools that exist today and silently withhold branch preparation from
+   *   the repair session the moment S12 registers it — the one time an
+   *   operator would most need it.
+   * - **Local writes only.** `executionClass: 'mutating'` alone is too wide:
+   *   `git_push` (S9) is a mutating entry too, and admitting a push to a
+   *   parked declaration is new authority the design never granted. The
+   *   design's own capability table (`10-design.md` § capabilities) maps
+   *   `git.local.write` to exactly "branch preparation, stage, commit,
+   *   restore-paths" — the four the repair session names. Requiring that
+   *   capability *is* the design's list, expressed as a predicate.
    *
    * The tool's own declared capabilities are still checked, upstream in
    * `dispatch`. `attention.resolve` waives the parked-state refusal; it does
@@ -258,6 +269,7 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
    */
   function admittedAsRepair(entry: ToolDeclaration, declaration: Declaration | null, session: Session): boolean {
     if (entry.executionClass !== 'mutating') return false;
+    if (!entry.capabilities.includes('git.local.write')) return false;
     const grant = declarations.effectiveGrant(registry.contractCapabilitySet, ceiling, declaration, session.grant);
     return grant.has('attention.resolve');
   }
@@ -273,7 +285,17 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
     // re-enters this pipeline and calls `ensure` itself, and running it under
     // a materialisation lock this call already holds would deadlock the two
     // against each other.
-    if (deps.recoverDeclaration && !recovered.has(declaration.id)) {
+    // `context: 'recovery'` is the ladder's own resume step re-entering this
+    // pipeline from inside the pass. It must not consult the lazy pass at
+    // all: the declaration is in `recovering` precisely because the call
+    // above it is the pass, so the guard below would refuse the resume, the
+    // ladder would read that refusal as a failed resume, and every real
+    // resume would park. The recursion is the reason this exemption exists,
+    // not a loophole in it — a resume still takes both locks in its own
+    // right, which is the property the contract actually requires.
+    const isRecoveryResume = request.context === 'recovery';
+
+    if (deps.recoverDeclaration && !isRecoveryResume && !recovered.has(declaration.id)) {
       if (recovering.has(declaration.id)) {
         return precondition(
           `'${declaration.id}' is recovering unsettled operations from a previous run and is not accepting mutations yet. Reads are unaffected.`,
@@ -293,7 +315,11 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
     // exactly what moves a declaration out of `needs-attention`, and checking
     // first would refuse a mutation the pass was about to make admissible.
     const described = await cloneStore.describe(declaration.id);
-    const isRepair = admittedAsRepair(entry, declaration, request.session);
+    // A resume is exempt for the same reason it skips the pass above: it *is*
+    // the recovery of this declaration. An earlier entry parking the clone
+    // must not stop the ladder from resuming a later one — that would make
+    // one parked entry permanently block every other entry's recovery.
+    const isRepair = isRecoveryResume || admittedAsRepair(entry, declaration, request.session);
     if (described.ok && described.value.state === 'needs-attention' && !isRepair) {
       return precondition(
         `'${declaration.id}' has a parked operation and refuses ordinary mutations: ${described.value.attentionReason ?? 'no reason recorded'}. ` +
@@ -306,7 +332,10 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
     // reached a parked declaration through the exception rather than through
     // ordinary service. Set here rather than trusted from the caller: the
     // caller does not decide whether it was repair, the gate does.
-    const repairing = isRepair && described.ok && described.value.state === 'needs-attention';
+    // A resume keeps `context: 'recovery'` — it reached a parked declaration
+    // as recovery, not as an operator repairing one, and the audit trail must
+    // not relabel it.
+    const repairing = isRepair && !isRecoveryResume && described.ok && described.value.state === 'needs-attention';
     const effective: DispatchRequest = repairing ? { ...request, context: 'repair' } : request;
 
     const holder = { operationId, declarationId: declaration.id, tool: entry.name, heldSince: clock.now() };

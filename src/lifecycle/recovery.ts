@@ -52,7 +52,20 @@ export async function recoverDeclaration(deps: RecoveryDependencies, declaration
     // it would let a pass that happens to observe a matching tree quietly
     // settle something a human was asked to look at.
     if (entry.state === 'attention') {
-      verdicts.push({ verdict: 'park', reason: entry.attentionReason ?? 'already parked' });
+      const reason = entry.attentionReason ?? 'already parked';
+      // Re-mark the clone rather than only reporting the verdict. `park()`
+      // writes the journal first and the clone second, so a process killed
+      // between those two writes restarts with an `attention` entry and a
+      // `ready` clone — and the dispatch gate reads the clone, so ordinary
+      // mutations would be admitted against a tree a human was asked to look
+      // at. `markAttention` is idempotent, so reasserting it costs nothing on
+      // the ordinary path and closes that window on the one that matters.
+      const marked = await deps.cloneStore.markAttention(declarationId, reason);
+      verdicts.push(
+        marked.ok
+          ? { verdict: 'park', reason }
+          : { verdict: 'park', reason: `${reason} (the clone could not be re-marked: ${marked.error.summary})` },
+      );
       continue;
     }
 
@@ -130,6 +143,13 @@ async function park(deps: RecoveryDependencies, entry: OperationJournalEntry, de
   // clone state, and an entry parked without the clone following it would
   // leave the declaration accepting ordinary mutations on a tree nobody has
   // accounted for.
+  //
+  // These two writes are not atomic and cannot be — they are different
+  // stores. A crash between them is recovered on the next pass, which
+  // re-marks the clone from the still-parked entry (see the `attention`
+  // branch above). The journal is written first deliberately: an entry
+  // parked with an unmarked clone is repairable, whereas a marked clone with
+  // no parked entry would be a declaration nothing can ever unpark.
   await deps.cloneStore.markAttention(declarationId, reason);
 }
 

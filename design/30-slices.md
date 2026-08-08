@@ -323,13 +323,16 @@ Acceptance:
   unsettled entries is `recovery-pending`, serves reads, and refuses mutations.
 - Recovery on first use completes before the triggering call acquires the mutation lock, and the
   resume takes the lock in its own right. Asserted by acquisition order, not by timing.
-- A parked declaration admits **every `mutating` registry entry** to a session holding
-  `attention.resolve` — today stage, restore-paths and commit — each audited with
-  `context: 'repair'`, while ordinary traffic gets reads only. The gate is a predicate on
-  `executionClass`, not a list of tool names: `10-design.md` § the parked-operations view describes
-  it as "the existing typed write tools", which is a statement about a class, and branch
-  preparation is a composite that does not exist until S12. An enumerated allowlist would withhold
-  it from the repair session at the moment an operator most needs it.
+- A parked declaration admits **every `mutating` registry entry carrying `git.local.write`** to a
+  session holding `attention.resolve` — today stage, restore-paths and commit — each audited with
+  `context: 'repair'`, while ordinary traffic gets reads only. The gate is a predicate, not a list
+  of tool names, because branch preparation is a composite that does not exist until S12 and an
+  enumerated allowlist would withhold it from the repair session at the moment an operator most
+  needs it. It is scoped to `git.local.write` rather than to `mutating` alone because
+  `10-design.md` § capabilities maps that capability to exactly the four tools the repair session
+  names — "branch preparation, stage, commit, restore-paths" — so the predicate reproduces the
+  design's list rather than widening it. `git_push` is a mutating entry too, and a parked
+  declaration must not admit one.
 - Resolving a parked entry returns the clone to `ready` and the declaration to ordinary service.
 - Recovery discards nothing: a test asserts no commit, stash, untracked file or unpushed branch is
   removed on any path.

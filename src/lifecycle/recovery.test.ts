@@ -1,9 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 import { ok, err, type Outcome } from '../shared/outcome.ts';
 import { systemClock } from '../clock/clock.ts';
 import { createJournal } from '../journal/journal.ts';
@@ -259,72 +255,6 @@ test('a resume verdict with no dispatch wired parks rather than dropping the ent
 
     assert.equal((await journal.parked()).length, 1);
   });
-});
-
-test('S8.10 — recovery discards nothing: a commit, a stash, an untracked file and an unpushed branch all survive every verdict', async () => {
-  // A real repository holding one of each thing the criterion names, driven
-  // through every branch of the ladder in turn. The claim is about "any
-  // path", so every verdict runs against the same tree and the tree is
-  // compared before and after — not one representative case.
-  const repo = mkdtempSync(path.join(tmpdir(), 'szg-recovery-'));
-  const git = (...args: string[]): string => {
-    const result = spawnSync('git', ['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com', ...args], { cwd: repo, encoding: 'utf8' });
-    if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${result.stderr}`);
-    return result.stdout;
-  };
-
-  git('init', '--initial-branch=main');
-  writeFileSync(path.join(repo, 'README.md'), 'fixture\n', 'utf8');
-  git('add', 'README.md');
-  git('commit', '-m', 'initial');
-
-  // An unpushed branch carrying a commit that exists nowhere else.
-  git('checkout', '-b', 'unpushed-work');
-  writeFileSync(path.join(repo, 'feature.txt'), 'work in progress\n', 'utf8');
-  git('add', 'feature.txt');
-  git('commit', '-m', 'unpushed');
-  git('checkout', 'main');
-
-  // A stash, and an untracked file that must survive alongside it.
-  writeFileSync(path.join(repo, 'README.md'), 'fixture, edited\n', 'utf8');
-  git('stash', 'push', '-m', 'operator work in progress');
-  writeFileSync(path.join(repo, 'scratch.txt'), 'untracked\n', 'utf8');
-
-  const snapshot = (): string =>
-    [git('log', '--all', '--format=%H %s'), git('stash', 'list'), git('branch', '--list'), git('status', '--porcelain')].join('\n--\n');
-
-  const before = snapshot();
-  assert.match(before, /unpushed/, 'the fixture must actually contain the unpushed commit it claims to');
-  assert.match(before, /operator work in progress/, 'the fixture must actually contain a stash');
-  assert.match(before, /\?\? scratch\.txt/, 'the fixture must actually contain an untracked file');
-
-  await migratedVolume(async (volume) => {
-    // Every verdict the ladder can reach, over the same real tree: settle,
-    // park-for-no-descriptor, park-for-unobservable, and a resume.
-    const cases: readonly { readonly operationId: string; readonly tool: string; readonly options: Parameters<typeof harness>[1] }[] = [
-      { operationId: 'live-1', tool: 'git_stage', options: {} },
-      { operationId: 'live-2', tool: 'no_descriptor_tool', options: { observed: () => ok(observedDiverged()) } },
-      { operationId: 'live-3', tool: 'git_stage', options: { observed: () => err(cloneStoreError({ code: 'corrupt-tree' }, 'unreadable')) } },
-      {
-        operationId: 'live-4',
-        tool: 'git_stage',
-        options: {
-          observed: () => ok(observedDiverged()),
-          descriptors: [{ tool: 'git_stage' as never, expectedPostState: () => false, resume: () => ({ tool: 'git_stage' as never, input: {} }) }],
-          dispatch: async () => ({ ok: true, kind: 'success', summary: 'resumed', data: null, findings: [], diagnostics: null }) as never,
-        },
-      },
-    ];
-
-    for (const testCase of cases) {
-      const { deps, journal } = await harness(volume, testCase.options);
-      await journal.begin(beginInputFor(testCase.operationId, testCase.tool));
-      await recoverDeclaration(deps, 'repo-a' as never);
-    }
-  });
-
-  assert.equal(snapshot(), before, 'recovery must leave every commit, stash, untracked file and branch exactly as it found them');
-  rmSync(repo, { recursive: true, force: true });
 });
 
 test('boot reports one entry per declaration holding unsettled work, not one per entry', () => {

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
+import type { ObservedGitState } from '../clone/types.ts';
 import type { OperationJournalEntry } from '../journal/types.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './http-server.ts';
 import type { GitSha, Sha256Hex } from '../shared/brands.ts';
@@ -28,6 +29,8 @@ interface ServerOptions {
   readonly provisioningPending?: boolean;
   readonly auditChain?: AuditChainState;
   readonly parked?: readonly OperationJournalEntry[];
+  readonly observed?: ObservedGitState | null;
+  readonly resolve?: (operationId: string) => Promise<{ readonly ok: boolean; readonly summary: string }>;
 }
 
 async function withServer<T>(options: ServerOptions, fn: (baseUrl: string) => Promise<T>): Promise<T> {
@@ -40,6 +43,8 @@ async function withServer<T>(options: ServerOptions, fn: (baseUrl: string) => Pr
     auditChain: async () => options.auditChain ?? HEALTHY_CHAIN,
     operatorApiToken: TOKEN,
     parkedOperations: async () => options.parked ?? [],
+    observeGitState: async () => options.observed ?? null,
+    ...(options.resolve ? { resolveParkedOperation: async (operationId: string) => options.resolve!(operationId) } : {}),
     identity: createStubOperatorIdentity(),
     sessionAbsoluteSeconds: 43_200,
     declarations: createStubDeclarations(),
@@ -234,4 +239,92 @@ test('S8 — /health counts parked operations for real, rather than reporting a 
     const body = (await response.json()) as { parkedOperations: number };
     assert.equal(body.parkedOperations, 2);
   });
+});
+
+test('S8.9 — the parked view carries preState, the observed current state and the diff between them', async () => {
+  // `10-design.md` § operator-only views, item 6 names all three. Without the
+  // diff an operator is comparing two 64-character digests by eye, which is
+  // how a repair gets done against the wrong repository.
+  const observed = {
+    branch: 'main' as never,
+    headSha: 'd'.repeat(40) as never,
+    upstreamSha: null,
+    indexDigest: 'b'.repeat(64) as never,
+    worktreeDigest: 'e'.repeat(64) as never,
+    observedAt: '2026-08-08T00:00:05.000Z' as never,
+  };
+  await withServer({ parked: [PARKED_ENTRY], observed }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/parked-operations`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    const body = (await response.json()) as { operations: readonly Record<string, any>[] };
+    const row = body.operations[0]!;
+
+    assert.equal(row.preState.indexDigest, 'b'.repeat(64));
+    assert.equal(row.observed.headSha, 'd'.repeat(40));
+    // branch, headSha and worktreeDigest all moved against this entry's
+    // pre-state; indexDigest did not, so it is absent from the diff. The
+    // point of the assertion is that unchanged fields stay out of it — a
+    // diff listing all five would be no better than the two raw states.
+    assert.deepEqual(
+      row.diff.map((d: { field: string }) => d.field).sort(),
+      ['branch', 'headSha', 'worktreeDigest'],
+    );
+    assert.equal(
+      row.diff.some((d: { field: string }) => d.field === 'indexDigest'),
+      false,
+      'an unchanged field must not appear in the diff',
+    );
+  });
+});
+
+test('the parked view renders an unobservable tree rather than failing — the case a parked entry most often sits on', async () => {
+  await withServer({ parked: [PARKED_ENTRY], observed: null }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/parked-operations`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { operations: readonly Record<string, unknown>[] };
+    assert.equal(body.operations[0]!.observed, null);
+    assert.equal(body.operations[0]!.diff, null);
+  });
+});
+
+test('S8.9 — resolving a parked operation needs a credential, and reports what it did', async () => {
+  const resolved: string[] = [];
+  await withServer(
+    {
+      parked: [PARKED_ENTRY],
+      resolve: async (operationId) => {
+        resolved.push(operationId);
+        return { ok: true, summary: `operation ${operationId} settled and 'repo-a' returned to ready` };
+      },
+    },
+    async (baseUrl) => {
+      const unauthenticated = await fetch(`${baseUrl}/parked-operations/op-parked/resolve`, { method: 'POST' });
+      assert.equal(unauthenticated.status, 401);
+      assert.deepEqual(resolved, [], 'an unauthenticated call must not reach the resolution at all');
+
+      const response = await fetch(`${baseUrl}/parked-operations/op-parked/resolve`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      assert.equal(response.status, 200);
+      const body = (await response.json()) as { resolved: boolean; summary: string };
+      assert.equal(body.resolved, true);
+      assert.match(body.summary, /returned to ready/);
+      assert.deepEqual(resolved, ['op-parked']);
+    },
+  );
+});
+
+test('resolving an operation that is not parked answers 409 rather than reporting success', async () => {
+  await withServer(
+    { parked: [], resolve: async (operationId) => ({ ok: false, summary: `no parked operation '${operationId}'` }) },
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/parked-operations/op-missing/resolve`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      assert.equal(response.status, 409);
+      const body = (await response.json()) as { summary: string };
+      assert.match(body.summary, /no parked operation/);
+    },
+  );
 });

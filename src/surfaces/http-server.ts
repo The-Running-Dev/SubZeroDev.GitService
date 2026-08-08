@@ -4,6 +4,9 @@ import { sha256Hex, type GitSha, type Sha256Hex } from '../shared/brands.ts';
 import { timingSafeStringEqual } from '../shared/timing-safe.ts';
 import type { AuditChainState } from '../audit/types.ts';
 import type { CredentialFailureMark } from '../credentials/types.ts';
+import type { DeclarationId, OperationId } from '../shared/brands.ts';
+import type { ActorRef } from '../shared/actor.ts';
+import type { ObservedGitState, PreState } from '../clone/types.ts';
 import type { OperationJournalEntry } from '../journal/types.ts';
 import { NO_VOLUME_USAGE, type VolumeUsage } from '../store/volume-usage.ts';
 import { handleConsoleAuthRoute, type ConsoleAuthDependencies } from './console-auth-routes.ts';
@@ -59,7 +62,7 @@ export interface HealthReport {
 
 export interface SurfacesDependencies
   extends ConsoleAuthDependencies,
-    Pick<DeclarationRoutesDependencies, 'declarations' | 'cloneStore'>,
+    Pick<DeclarationRoutesDependencies, 'declarations' | 'cloneStore' | 'declarationsAwaitingRecovery'>,
     Pick<ToolRoutesDependencies, 'dispatchPipeline' | 'contractCapabilitySet'> {
   readonly commitSha: GitSha;
   readonly contractFingerprint: Sha256Hex;
@@ -86,7 +89,49 @@ export interface SurfacesDependencies
    * an honest zero rather than failing to construct.
    */
   readonly parkedOperations?: () => Promise<readonly OperationJournalEntry[]>;
+  /**
+   * The observed current state of a declaration's clone, for the parked view's
+   * `preState` / observed / diff comparison (`10-design.md` § operator-only
+   * views, item 6). `null` when it cannot be observed — a corrupt or absent
+   * tree is exactly the case a parked entry is most likely to be sitting on,
+   * and the view has to render it rather than fail.
+   */
+  readonly observeGitState?: (declarationId: DeclarationId) => Promise<ObservedGitState | null>;
+  /**
+   * The parked view's way out (`10-design.md` § operator-only views, item 7).
+   * Settles the entry and returns the clone to `ready`; the alternative
+   * resolution, keeping it parked, is simply not calling this.
+   */
+  readonly resolveParkedOperation?: (operationId: OperationId, actor: ActorRef) => Promise<{ readonly ok: boolean; readonly summary: string }>;
 }
+
+/** The three fields `10-design.md` requires of each row in the parked view. */
+function stateComparison(preState: PreState, observed: ObservedGitState | null): Record<string, unknown> {
+  const fields = ['branch', 'headSha', 'upstreamSha', 'indexDigest', 'worktreeDigest'] as const;
+  return {
+    preState,
+    observed,
+    // The diff is computed here rather than left to the reader: "which of the
+    // five fields moved" is the whole question an operator is asking, and
+    // making them compare two digest strings by eye is how a repair gets done
+    // against the wrong repository.
+    diff:
+      observed === null
+        ? null
+        : fields
+            .filter((field) => preState[field] !== observed[field])
+            .map((field) => ({ field, before: preState[field], after: observed[field] })),
+  };
+}
+
+/**
+ * The bearer token is a shared secret standing in for the Authorization
+ * module (S13), so there is no real subject behind it yet. Named explicitly
+ * rather than left implicit: when S13 lands, this is the line that has to
+ * become the authenticated operator's own `ActorRef`, and `clearAttention`
+ * already takes the actor so the audit trail is ready for it.
+ */
+const RESOLVER_ACTOR: ActorRef = { kind: 'operator', subject: 'operator-api' as ActorRef['subject'], clientId: null, grantId: null };
 
 function isAuthorized(req: IncomingMessage, token: string): boolean {
   const header = req.headers.authorization;
@@ -154,8 +199,10 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
       return;
     }
     const parked = deps.parkedOperations ? await deps.parkedOperations() : [];
-    sendJson(res, 200, {
-      operations: parked.map((entry) => ({
+    const operations = [];
+    for (const entry of parked) {
+      const observed = deps.observeGitState ? await deps.observeGitState(entry.declarationId) : null;
+      operations.push({
         operationId: entry.operationId,
         declarationId: entry.declarationId,
         generation: entry.generation,
@@ -163,8 +210,27 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
         reason: entry.attentionReason,
         startedAt: entry.startedAt,
         updatedAt: entry.updatedAt,
-      })),
-    });
+        ...stateComparison(entry.preState, observed),
+      });
+    }
+    sendJson(res, 200, { operations });
+    return;
+  }
+
+  // The way out. A parked entry's other resolution — keeping it parked — is
+  // not calling this, so there is deliberately no route for it.
+  const resolveMatch = /^\/parked-operations\/([^/]+)\/resolve$/.exec(url.pathname);
+  if (req.method === 'POST' && resolveMatch) {
+    if (!isAuthorized(req, deps.operatorApiToken)) {
+      sendJson(res, 401, { error: 'unauthorized' });
+      return;
+    }
+    if (!deps.resolveParkedOperation) {
+      sendJson(res, 503, { error: 'unavailable', summary: 'no journal is wired into this server' });
+      return;
+    }
+    const resolved = await deps.resolveParkedOperation(resolveMatch[1] as OperationId, RESOLVER_ACTOR);
+    sendJson(res, resolved.ok ? 200 : 409, resolved.ok ? { resolved: true, summary: resolved.summary } : { error: 'not-resolved', summary: resolved.summary });
     return;
   }
 

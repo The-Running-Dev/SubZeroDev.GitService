@@ -252,7 +252,44 @@ async function main(): Promise<void> {
     provisioningPending: () => operatorIdentity.provisioningState().then((state) => state === 'pending'),
     auditChain: () => audit.chainState(),
     operatorApiToken,
+    declarationsAwaitingRecovery: async () => new Set((await journal.allUnsettled()).map((entry) => entry.declarationId as string)),
     parkedOperations: () => journal.parked(),
+    observeGitState: async (declarationId) => {
+      const observed = await cloneStore.observeGitState(declarationId);
+      return observed.ok ? observed.value : null;
+    },
+    // The parked view's way out. Settling the entry and clearing the clone's
+    // mark are two writes to two stores and cannot be atomic; the entry is
+    // settled first, because a settled entry with a still-marked clone is
+    // repairable from this same route, whereas a cleared clone with a parked
+    // entry would readmit ordinary traffic to a tree still under question.
+    resolveParkedOperation: async (operationId, actor) => {
+      // The entry is located before anything is written: settling an
+      // operation that is not parked would be a state change nobody asked
+      // for, and `settle` alone cannot tell the difference.
+      const parkedBefore = await journal.parked();
+      const entry = parkedBefore.find((candidate) => candidate.operationId === operationId);
+      if (!entry) return { ok: false, summary: `no parked operation '${operationId}'` };
+
+      const settled = await journal.settle(operationId, null);
+      if (!settled.ok) return { ok: false, summary: settled.error.summary };
+
+      // The clone is unparked only when this was the declaration's *last*
+      // parked entry. Two entries can park the same repository, and clearing
+      // on the first would readmit ordinary traffic while the second is still
+      // outstanding.
+      const othersStillParked = parkedBefore.some(
+        (candidate) => candidate.declarationId === entry.declarationId && candidate.operationId !== operationId,
+      );
+      if (othersStillParked) {
+        return { ok: true, summary: `operation ${operationId} settled; '${entry.declarationId}' stays parked on its remaining entries` };
+      }
+
+      const cleared = await cloneStore.clearAttention(entry.declarationId, actor);
+      return cleared.ok
+        ? { ok: true, summary: `operation ${operationId} settled and '${entry.declarationId}' returned to ready` }
+        : { ok: false, summary: cleared.error.summary };
+    },
     identity: operatorIdentity,
     sessionAbsoluteSeconds: SESSION_ABSOLUTE_SECONDS_DEFAULT,
     declarations,
