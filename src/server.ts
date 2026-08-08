@@ -16,7 +16,9 @@ import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './surfaces/http-se
 import { createGitOperations } from './git/git-operations.ts';
 import { createJournal } from './journal/journal.ts';
 import { createRecoveryCatalogue } from './recovery/catalogue.ts';
-import { LOCAL_MUTATION_RECOVERY_DESCRIPTORS } from './git/recovery-descriptors.ts';
+import { LOCAL_MUTATION_RECOVERY_DESCRIPTORS, REMOTE_OPERATION_RECOVERY_DESCRIPTORS } from './git/recovery-descriptors.ts';
+import { createCredentialResolver } from './credentials/credentials.ts';
+import type { EnvVarName } from './shared/brands.ts';
 import { createModuleAdapter, toModuleHandler } from './module-adapter/module-adapter.ts';
 import { createDispatchPipeline } from './dispatch/dispatch-pipeline.ts';
 import { PRODUCTION_TOOL_DECLARATIONS } from './composition-root/production-declarations.ts';
@@ -97,7 +99,13 @@ async function main(): Promise<void> {
   const store = createStructuredStore({ volumeRoot, clock: systemClock });
   const audit = createAudit({ volumeRoot, clock: systemClock });
   const operatorIdentity = createOperatorIdentity({ volumeRoot, credentialMountRoot, clock: systemClock, audit });
-  const exec = createExec({ volumeRoot });
+  // The one `MutableEnv` the resolver writes a secret into and `Exec` reads it
+  // back out of, by variable name. Sharing the map here is what keeps the
+  // value out of every signature in between (`20-contract.md` § L1 —
+  // credentials).
+  const credentialEnv = new Map<EnvVarName, string>();
+  const exec = createExec({ volumeRoot, credentialEnv });
+  const credentials = createCredentialResolver({ credentialMountRoot, volumeRoot, clock: systemClock });
   const locks = createLocks();
   const ceiling = resolveCeiling();
   const remoteHostAllowlist = resolveRemoteHostAllowlist();
@@ -144,7 +152,7 @@ async function main(): Promise<void> {
   // pipeline. `PRODUCTION_TOOL_DECLARATIONS` is plain data (no compiler
   // call), which is what keeps invariant B8 (the compiler absent from the
   // runtime image) intact here.
-  const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+  const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit, declarations, credentials, credentialEnv });
   const journal = createJournal({ volumeRoot, clock: systemClock });
   const moduleAdapter = createModuleAdapter();
   moduleAdapter.register('git.status' as ModuleTargetName, toModuleHandler(gitOperations.status));
@@ -155,6 +163,9 @@ async function main(): Promise<void> {
   moduleAdapter.register('git.stage' as ModuleTargetName, toModuleHandler(gitOperations.stage));
   moduleAdapter.register('git.commit' as ModuleTargetName, toModuleHandler(gitOperations.commit));
   moduleAdapter.register('git.restorePaths' as ModuleTargetName, toModuleHandler(gitOperations.restorePaths));
+  moduleAdapter.register('git.push' as ModuleTargetName, toModuleHandler(gitOperations.push));
+  moduleAdapter.register('git.fetch' as ModuleTargetName, toModuleHandler(gitOperations.fetch));
+  moduleAdapter.register('git.syncBase' as ModuleTargetName, toModuleHandler(gitOperations.syncBase));
 
   const contractCapabilitySet = new Set(PRODUCTION_TOOL_DECLARATIONS.flatMap((e) => e.capabilities)) as unknown as ContractCapabilitySet;
 
@@ -162,7 +173,7 @@ async function main(): Promise<void> {
   // duplicate registration is a wiring defect and fatal at composition time,
   // which is the only time it can happen.
   const recoveryCatalogue = createRecoveryCatalogue();
-  for (const descriptor of LOCAL_MUTATION_RECOVERY_DESCRIPTORS) {
+  for (const descriptor of [...LOCAL_MUTATION_RECOVERY_DESCRIPTORS, ...REMOTE_OPERATION_RECOVERY_DESCRIPTORS]) {
     const registered = recoveryCatalogue.register(descriptor);
     if (!registered.ok) {
       console.error(`server: ${registered.error.summary}`);
@@ -290,6 +301,8 @@ async function main(): Promise<void> {
         ? { ok: true, summary: `operation ${operationId} settled and '${entry.declarationId}' returned to ready` }
         : { ok: false, summary: cleared.error.summary };
     },
+    failingCredentialRefs: () => credentials.listFailing(),
+    clearFailingCredential: (ref, declarationId) => credentials.clearFailing(ref, declarationId),
     identity: operatorIdentity,
     sessionAbsoluteSeconds: SESSION_ABSOLUTE_SECONDS_DEFAULT,
     declarations,

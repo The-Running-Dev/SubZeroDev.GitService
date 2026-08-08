@@ -1,14 +1,28 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { isoUtcTimestamp, repoRelativePath, type BranchName, type ClonePath, type CloneUrl, type GitSha, type IsoUtcTimestamp, type RepoRelativePath } from '../shared/brands.ts';
+import {
+  cloneUrlHost,
+  isoUtcTimestamp,
+  repoRelativePath,
+  type BranchName,
+  type ClonePath,
+  type CloneUrl,
+  type CredentialRef,
+  type GitSha,
+  type IsoUtcTimestamp,
+  type RepoRelativePath,
+} from '../shared/brands.ts';
 import { isJsonObject, type JsonValue } from '../contract/json.ts';
 import { ok, err, type Outcome } from '../shared/outcome.ts';
 import type { CallContext, DomainOperation } from '../shared/call-context.ts';
 import type { Clock } from '../clock/clock.ts';
-import type { Exec } from '../exec/exec.ts';
+import type { CredentialBinding, Exec, MutableEnv } from '../exec/exec.ts';
 import type { Locks } from '../locks/locks.ts';
 import type { Audit } from '../audit/audit.ts';
-import { success, validation, authorization, infrastructure, precondition, type ToolResult, type ReadStamp, type Diagnostics } from '../result/envelope.ts';
+import type { Declarations } from '../declarations/declarations.ts';
+import type { CredentialResolver } from '../credentials/credentials.ts';
+import { success, validation, authorization, infrastructure, precondition, upstream, type ToolResult, type ReadStamp, type Diagnostics } from '../result/envelope.ts';
+import type { ModuleErrorBase } from '../shared/result-kind.ts';
 import { REPOSITORY_CONFIG_DEFAULTS, type RepositoryConfig } from '../declarations/types.ts';
 import { gitOperationsError, type GitOperationsError } from './errors.ts';
 import type {
@@ -19,9 +33,13 @@ import type {
   GitCommitInput,
   GitDiffData,
   GitDiffInput,
+  GitFetchData,
+  GitFetchInput,
   GitLogData,
   GitLogEntry,
   GitLogInput,
+  GitPushData,
+  GitPushInput,
   GitStageData,
   GitStageInput,
   PathRejection,
@@ -33,9 +51,13 @@ import type {
   RestorePathsData,
   RestorePathsInput,
   StaleBranchSummary,
+  SyncBaseData,
+  SyncBaseInput,
 } from './types.ts';
 
 const GIT_COMMAND_TIMEOUT_SECONDS = 30;
+/** Matches the three remote tools' registry `timeoutSeconds` — these cross a network, the local ones do not. */
+const GIT_REMOTE_COMMAND_TIMEOUT_SECONDS = 300;
 const DEFAULT_LOG_LIMIT = 200;
 const STALE_BRANCH_DAYS = 30;
 const FIELD_SEP = '\x1f';
@@ -55,6 +77,21 @@ export interface GitOperationsDependencies {
   readonly locks: Pick<Locks, 'currentMutationHolder'>;
   /** Optional so every pre-S7 call site (read-only, never rejects a path) keeps compiling unchanged; a caller of `stage`/`restorePaths` that omits it simply gets no audit trail for a rejected path. */
   readonly audit?: Pick<Audit, 'append'>;
+  /**
+   * S9's three remote operations only. `CallContext` carries no credential
+   * reference and no clone URL — both are `Declaration` fields — so reaching a
+   * remote needs the record itself. Optional for the same reason `audit` is:
+   * every local operation runs without it, and a remote one that has no
+   * resolver refuses rather than reaching a remote unauthenticated.
+   */
+  readonly declarations?: Pick<Declarations, 'get'>;
+  readonly credentials?: CredentialResolver;
+  /**
+   * The same `MutableEnv` the `Exec` above was built with. `resolveInto`
+   * writes the secret here and `Exec` reads it back by variable name; nothing
+   * in between ever holds the value.
+   */
+  readonly credentialEnv?: MutableEnv;
 }
 
 export interface GitOperations {
@@ -66,6 +103,9 @@ export interface GitOperations {
   readonly stage: DomainOperation<GitStageInput, GitStageData>;
   readonly commit: DomainOperation<GitCommitInput, GitCommitData>;
   readonly restorePaths: DomainOperation<RestorePathsInput, RestorePathsData>;
+  readonly push: DomainOperation<GitPushInput, GitPushData>;
+  readonly fetch: DomainOperation<GitFetchInput, GitFetchData>;
+  readonly syncBase: DomainOperation<SyncBaseInput, SyncBaseData>;
   loadRepositoryConfig(ctx: CallContext): Promise<Outcome<RepositoryConfig, GitOperationsError>>;
   validateWritePath(ctx: CallContext, rawPath: string): Outcome<RepoRelativePath, PathRejection>;
 }
@@ -95,6 +135,22 @@ function diagnosticsFor(ctx: CallContext, startedAtMs: number, clock: Clock): Di
 function toToolResultError(error: GitOperationsError): ToolResult<never> {
   if (error.resultKind === 'precondition') return precondition(error.summary, 'findings' in error ? error.findings : []);
   return infrastructure(error.summary);
+}
+
+/** Maps any `ModuleErrorBase`-shaped error into the envelope by its own `resultKind` — the four `CredentialError` variants each carry theirs. */
+function moduleErrorToToolResult(error: ModuleErrorBase): ToolResult<never> {
+  switch (error.resultKind) {
+    case 'validation':
+      return validation(error.summary, []);
+    case 'precondition':
+      return precondition(error.summary, []);
+    case 'authorization':
+      return authorization(error.summary, []);
+    case 'upstream':
+      return upstream(error.summary, null);
+    default:
+      return infrastructure(error.summary);
+  }
 }
 
 function gitToIso(raw: string): IsoUtcTimestamp | null {
@@ -187,6 +243,92 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
 
   async function git(cwd: ClonePath, args: readonly string[], signal: AbortSignal) {
     return exec.runGit({ argv: args, cwd, timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS, credential: null, signal });
+  }
+
+  /**
+   * A remote git call, carrying the resolved credential by variable name.
+   * Separate from `git` above only in the timeout and the binding — the
+   * secret itself never passes through here, and `Exec` is what puts it into
+   * the child's environment.
+   */
+  async function remoteGit(cwd: ClonePath, args: readonly string[], signal: AbortSignal, credential: CredentialBinding | null) {
+    return exec.runGit({ argv: args, cwd, timeoutSeconds: GIT_REMOTE_COMMAND_TIMEOUT_SECONDS, credential, signal });
+  }
+
+  /**
+   * Git says "Authentication failed" (or a 401/403 through its transport) for a
+   * credential the remote refused, and something else entirely for a host it
+   * could not reach. The distinction decides whether a reference gets marked
+   * failing, so it is made on the text git actually emits rather than on the
+   * exit code, which is 128 for both.
+   */
+  function looksLikeAuthRejection(stderr: string): boolean {
+    return /authentication failed|invalid username or password|403 forbidden|401 unauthorized|permission to .* denied|could not read Username/i.test(stderr);
+  }
+
+  function execStderr(error: { readonly code: string; readonly summary: string }): string {
+    return 'stderr' in error && typeof (error as { stderr?: unknown }).stderr === 'string' ? (error as { stderr: string }).stderr : error.summary;
+  }
+
+  /**
+   * Everything a remote operation needs before it may touch a network, in the
+   * order the design fixes:
+   *
+   * 1. the declaration, because the credential reference and the clone URL are
+   *    its fields and not the call context's;
+   * 2. the reference's **own** allowed-host constraint against that clone
+   *    URL's host — the second guard, independent of the deployment's
+   *    remote-host allowlist, so neither alone carries the property;
+   * 3. resolution, at the moment of use, into the shared `MutableEnv`.
+   *
+   * A declaration with no `credentialRef` reaches a public remote with no
+   * credential at all, which is a legitimate configuration (a public mirror,
+   * or a local path in a test) and not a refusal.
+   */
+  async function prepareRemote(ctx: CallContext): Promise<Outcome<{ readonly credential: CredentialBinding | null; readonly ref: CredentialRef | null }, ToolResult<never>>> {
+    if (!deps.declarations || !deps.credentials || !deps.credentialEnv) {
+      return err(infrastructure('this instance has no credential resolver configured, and will not reach a remote without one'));
+    }
+    if (ctx.declarationId === null) {
+      return err(infrastructure('no declaration in context for a remote operation'));
+    }
+    const declaration = await deps.declarations.get(ctx.declarationId);
+    if (declaration === null) {
+      return err(precondition(`declaration '${ctx.declarationId}' no longer exists`, []));
+    }
+    const ref = declaration.credentialRef;
+    if (ref === null) return ok({ credential: null, ref: null });
+
+    const host = cloneUrlHost(declaration.cloneUrl as string);
+    if (host !== null) {
+      const allowed = await deps.credentials.allowedHosts(ref);
+      if (!allowed.ok) return err(moduleErrorToToolResult(allowed.error));
+      if (!allowed.value.some((permitted) => (permitted as string).toLowerCase() === host)) {
+        return err(authorization(`credential reference '${ref}' is not permitted to reach '${host}'`, []));
+      }
+    }
+
+    const resolved = await deps.credentials.resolveInto(ref, ctx.declarationId, deps.credentialEnv);
+    if (!resolved.ok) return err(moduleErrorToToolResult(resolved.error));
+    return ok({ credential: resolved.value, ref });
+  }
+
+  /** Records the rejection against this declaration only — never reference-wide. See `credential_failure_mark`'s composite key. */
+  async function markRejected(ctx: CallContext, ref: CredentialRef | null, stderr: string): Promise<void> {
+    if (ref === null || !deps.credentials || ctx.declarationId === null) return;
+    await deps.credentials.markFailing(ref, ctx.declarationId, `the remote refused this credential: ${stderr.trim().slice(0, 200)}`);
+  }
+
+  /** `refs/remotes/origin/*` and their values, which is what a fetch is observed to have changed. */
+  async function remoteTrackingRefs(cwd: ClonePath, signal: AbortSignal): Promise<ReadonlyMap<string, string>> {
+    const result = await git(cwd, ['for-each-ref', '--format=%(refname:short) %(objectname)', 'refs/remotes/origin/'], signal);
+    const refs = new Map<string, string>();
+    if (!result.ok) return refs;
+    for (const line of result.value.stdout.split('\n')) {
+      const [name, sha] = line.trim().split(' ');
+      if (name && sha) refs.set(name, sha);
+    }
+    return refs;
   }
 
   async function currentBranch(cwd: ClonePath, signal: AbortSignal): Promise<BranchName | null> {
@@ -496,6 +638,162 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
 
       const data: RestorePathsData = { restored: validated.value };
       return success(`restored ${validated.value.length} path(s)`, data, diagnosticsFor(ctx, startedAtMs, clock));
+    },
+
+    async push(ctx, input: GitPushInput): Promise<ToolResult<GitPushData>> {
+      const startedAtMs = Date.now();
+      if (ctx.cloneRoot === null) return infrastructure('no clone materialised for this operation');
+      const cwd = ctx.cloneRoot;
+      const signal = ctx.signal;
+
+      const branch = input.branch ?? (await currentBranch(cwd, signal));
+      if (branch === null) {
+        return precondition('nothing to push: the clone is on a detached HEAD and no branch was named', [
+          { path: 'branch', rule: 'resolvable', message: 'detached HEAD and no branch given' },
+        ]);
+      }
+
+      // `show-ref --verify`, not `rev-parse`. `rev-parse` resolves any
+      // revision expression — a tag, a raw sha, `main~1` — so an input that is
+      // not a local branch would pass and then fail inside the push as a
+      // misleading upstream error. Prefixing `refs/heads/` is not enough on
+      // its own either: `rev-parse --verify refs/heads/main~1` still applies
+      // the `~1`. `show-ref --verify` requires an exact ref and honours no
+      // revision syntax at all, so what is checked here is precisely the ref
+      // the refspec below pushes.
+      const headResult = await git(cwd, ['show-ref', '--verify', `refs/heads/${branch}`], signal);
+      if (!headResult.ok) {
+        return precondition(`'${branch}' is not a local branch in this clone`, [{ path: 'branch', rule: 'must-be-local-branch', message: branch }]);
+      }
+      const headSha = (headResult.value.stdout.trim().split(/\s+/)[0] ?? '') as GitSha;
+
+      const prepared = await prepareRemote(ctx);
+      if (!prepared.ok) return prepared.error;
+
+      // `--porcelain` so "everything up to date" is a parseable line rather
+      // than prose, and no `--force` — there is none in `GitPushInput` and
+      // none here.
+      const pushResult = await remoteGit(cwd, ['push', '--porcelain', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], signal, prepared.value.credential);
+      if (!pushResult.ok) {
+        const stderr = execStderr(pushResult.error);
+        if (looksLikeAuthRejection(stderr)) {
+          await markRejected(ctx, prepared.value.ref, stderr);
+          return upstream(`the remote refused the credential for '${ctx.declarationId}'; the reference is marked failing for this declaration only`, null);
+        }
+        return upstream(`push of '${branch}' failed: ${pushResult.error.summary}`, null);
+      }
+
+      // `--porcelain` prefixes each ref line with a status character: `=` for
+      // a ref that was already up to date, `*` for a new one, a space for a
+      // fast-forward. Reading the character beats matching git's prose, which
+      // is localisable and has changed between versions.
+      const data: GitPushData = {
+        branch,
+        headSha,
+        alreadyUpToDate: pushResult.value.stdout.split('\n').some((line) => line.startsWith('=\t')),
+      };
+      return success(`pushed '${branch}'`, data, diagnosticsFor(ctx, startedAtMs, clock));
+    },
+
+    async fetch(ctx, _input: GitFetchInput): Promise<ToolResult<GitFetchData>> {
+      const startedAtMs = Date.now();
+      const configResult = await loadRepositoryConfig(ctx);
+      if (!configResult.ok) return toToolResultError(configResult.error);
+      const cwd = ctx.cloneRoot as ClonePath;
+      const signal = ctx.signal;
+      const baseBranch = configResult.value.baseBranch as BranchName;
+
+      const before = await remoteTrackingRefs(cwd, signal);
+
+      const prepared = await prepareRemote(ctx);
+      if (!prepared.ok) return prepared.error;
+
+      const fetchResult = await remoteGit(cwd, ['fetch', 'origin'], signal, prepared.value.credential);
+      if (!fetchResult.ok) {
+        const stderr = execStderr(fetchResult.error);
+        if (looksLikeAuthRejection(stderr)) {
+          await markRejected(ctx, prepared.value.ref, stderr);
+          return upstream(`the remote refused the credential for '${ctx.declarationId}'; the reference is marked failing for this declaration only`, null);
+        }
+        // Git applies a fetch's ref updates only once the transfer completes,
+        // so a transfer that fails part-way leaves every remote-tracking ref
+        // where it was. Nothing is undone here because nothing was done.
+        return upstream(`fetch failed: ${fetchResult.error.summary}`, null);
+      }
+
+      const after = await remoteTrackingRefs(cwd, signal);
+      const updatedRefs = [...after.entries()].filter(([name, sha]) => before.get(name) !== sha).map(([name]) => name as BranchName);
+      const upstreamSha = after.get(`origin/${baseBranch}`) ?? null;
+
+      const data: GitFetchData = { baseBranch, upstreamSha: upstreamSha as GitSha | null, updatedRefs };
+      return success(`fetched origin; ${updatedRefs.length} ref(s) updated`, data, diagnosticsFor(ctx, startedAtMs, clock));
+    },
+
+    async syncBase(ctx, _input: SyncBaseInput): Promise<ToolResult<SyncBaseData>> {
+      const startedAtMs = Date.now();
+      const configResult = await loadRepositoryConfig(ctx);
+      if (!configResult.ok) return toToolResultError(configResult.error);
+      const cwd = ctx.cloneRoot as ClonePath;
+      const signal = ctx.signal;
+      const baseBranch = configResult.value.baseBranch as BranchName;
+
+      const prepared = await prepareRemote(ctx);
+      if (!prepared.ok) return prepared.error;
+
+      const fetchResult = await remoteGit(cwd, ['fetch', 'origin', baseBranch], signal, prepared.value.credential);
+      if (!fetchResult.ok) {
+        const stderr = execStderr(fetchResult.error);
+        if (looksLikeAuthRejection(stderr)) {
+          await markRejected(ctx, prepared.value.ref, stderr);
+          return upstream(`the remote refused the credential for '${ctx.declarationId}'; the reference is marked failing for this declaration only`, null);
+        }
+        return upstream(`could not fetch '${baseBranch}': ${fetchResult.error.summary}`, null);
+      }
+
+      const upstreamResult = await git(cwd, ['rev-parse', 'FETCH_HEAD'], signal);
+      if (!upstreamResult.ok) {
+        return upstream(`fetched '${baseBranch}' but could not read what was fetched: ${upstreamResult.error.summary}`, null);
+      }
+      const upstreamSha = upstreamResult.value.stdout.trim() as GitSha;
+
+      const localResult = await git(cwd, ['rev-parse', '--verify', `refs/heads/${baseBranch}`], signal);
+      const localSha = localResult.ok ? (localResult.value.stdout.trim() as GitSha) : null;
+
+      if (localSha === upstreamSha) {
+        const data: SyncBaseData = { baseBranch, headSha: upstreamSha, upstreamSha, fastForwarded: false };
+        return success(`'${baseBranch}' is already current`, data, diagnosticsFor(ctx, startedAtMs, clock));
+      }
+
+      // Refuse rather than rewrite. A local base carrying commits the remote
+      // does not is the incident the protected-base rule came out of, and
+      // there is no reset, rebase or force path out of it on this interface —
+      // the operator resolves it.
+      if (localSha !== null) {
+        const ancestry = await git(cwd, ['merge-base', '--is-ancestor', localSha, upstreamSha], signal);
+        if (!ancestry.ok) {
+          return precondition(
+            `'${baseBranch}' has diverged from origin and will not be rewritten: local ${localSha} is not an ancestor of ${upstreamSha}`,
+            [{ path: 'baseBranch', rule: 'fast-forwardable', message: baseBranch }],
+          );
+        }
+      }
+
+      const current = await currentBranch(cwd, signal);
+      const advance =
+        current === baseBranch
+          ? // The checked-out branch cannot be moved by a ref update; a
+            // fast-forward-only merge is the same movement, refusing in the
+            // same case.
+            await git(cwd, ['merge', '--ff-only', 'FETCH_HEAD'], signal)
+          : await git(cwd, ['update-ref', `refs/heads/${baseBranch}`, upstreamSha], signal);
+      if (!advance.ok) {
+        return precondition(`could not fast-forward '${baseBranch}': ${advance.error.summary}`, [
+          { path: 'baseBranch', rule: 'fast-forwardable', message: baseBranch },
+        ]);
+      }
+
+      const data: SyncBaseData = { baseBranch, headSha: upstreamSha, upstreamSha, fastForwarded: true };
+      return success(`fast-forwarded '${baseBranch}' to ${upstreamSha}`, data, diagnosticsFor(ctx, startedAtMs, clock));
     },
 
     loadRepositoryConfig,

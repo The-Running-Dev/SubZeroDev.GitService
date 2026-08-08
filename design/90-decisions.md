@@ -39,6 +39,37 @@ Append-only. Newest at the top. The rejected alternatives are the point — with
 
 ---
 
+### 2026-08-08 — The credential mount's layout: file names are references, one manifest holds the host constraints
+Context: `10-design.md` fixes that a reference name is a file name in the mount and that each reference "carries its own allowed-host constraint", but not where that constraint lives. S9 has to put it somewhere.
+Chosen: `<mount>/<ref>` is the secret; `<mount>/_allowed-hosts.json` maps reference to hosts. The `_` prefix cannot collide with a reference, because `CredentialRef`'s pattern requires `[a-z0-9]` as the first character — the same device the TOTP sealing key already uses. **A reference absent from the manifest permits no host**, and a missing or malformed manifest permits nothing either.
+Rejected: **A sidecar file per reference (`<ref>.hosts`)** — `CredentialRef` admits dots, so a reference legitimately named `token.hosts` would collide with another reference's sidecar, and the collision is silent. **A directory per reference** — contradicts the design's "file names are reference names" directly. **Defaulting an absent entry to every host** — `90-decisions.md` 2026-08-03 calls this the *second, independent* guard against credential redirection, and a guard that defaults open leaves the property resting on the deployment allowlist alone, which is the single point the two-guard design exists to avoid.
+Reversibility: cheap for the file name; expensive for the fail-closed default once deployments exist, because relaxing it is invisible and tightening it breaks every mount that never wrote a manifest.
+
+### 2026-08-08 — Exec's credential channel is a written shell helper reading an indirected variable
+Context: `10-design.md` says git cannot authenticate from a bare environment variable and that Exec supplies the credential channel as configuration ahead of every caller argument. It does not say how, and every mechanism has a different exposure.
+Chosen: a `credential-helper.sh` written once into the neutral home at construction, configured as `-c credential.helper= -c credential.helper=!'<path>'`. The script holds no secret and no variable name: it reads the *name* from `SZG_CREDENTIAL_VAR` and dereferences it inside the child, so the value exists only in the child's environment and in the pipe git reads the answer from.
+Rejected: **An inline `!`-command through `-c`** — the value would carry shell quoting on the command line, and the one thing that must never be quoted into a command line is anything near the secret. **`git-credential-store` with a credentials file** — writes the secret to disk on the data volume, which invariant S5 and the design's "no secret in the structured store" both push against, and it outlives the process. **`http.extraHeader` with a Basic credential** — puts the secret directly into `argv`, which is exactly what invariant S5 forbids.
+Reversibility: cheap — one function in `exec.ts` and one written file.
+
+### 2026-08-08 — A failing credential's mark clears on the secret file's mtime, not on a stored digest
+Context: "The mark clears when the resolver observes a changed secret." `credential_failure_mark` has four columns and the contract fixes them, so there is nowhere to persist a digest of the secret that was rejected, and `reason` is operator-facing prose.
+Chosen: compare the secret file's modification time against `marked_at`. A file written after the mark was taken is a changed secret; the mark is deleted and the operation proceeds.
+Rejected: **An in-process digest map** — lost on restart, and the safe fallback for an unknown digest is "assume changed", which makes every restart clear every mark. **Widening the table with a digest column** — a contract amendment to a schema whose four columns the contract fixes deliberately, for a signal the filesystem already carries. **Requiring the operator to clear it by hand always** — the design explicitly names rotation as the self-clearing path, and says so as one of the three reasons this resolver ships.
+Consequence: rewriting the file with identical bytes also clears the mark. That buys exactly one retry, which re-marks immediately if the credential is still wrong, so the failure is re-detected rather than masked.
+Reversibility: cheap.
+
+### 2026-08-08 — `sync_base` refuses a diverged base rather than rewriting it
+Context: S9 ships base-sync, and the local base branch can carry commits the remote does not. The contract has no reset, rebase or force path anywhere on `GitOperations`.
+Chosen: fast-forward only. A local base that is not an ancestor of the fetched upstream returns `precondition` naming both shas, and nothing in the tree is touched. When the base is not checked out the ref is advanced directly; when it is, a `--ff-only` merge does the same movement and refuses in the same case.
+Rejected: **`reset --hard` to the upstream** — discards committed work, which invariant R7 forbids and which is the incident the protected-base rule came out of. **Rebasing the local commits** — rewrites history the operator may already have pushed elsewhere, and there is no rebase tool on this interface by design. **Reporting success with `fastForwarded: false`** — makes a refusal indistinguishable from a no-op, and the caller acts on the difference.
+Reversibility: cheap.
+
+### 2026-08-08 — `Exec` reports its spawned argument vector through an observation-only seam
+Context: Invariant S5's process-argument-vector half was untestable. Every byte a child writes back passes through `scrub`, which redacts each resolved secret — so a secret leaked into `argv` is scrubbed out of the very output a test would read it from, and the test passes while `ps` on the host shows the token. This was found by breaking the implementation deliberately and watching the test still pass.
+Chosen: `ExecOptions.onSpawn`, called with the executable and vector immediately before the child becomes a process. Observation only, not part of `Exec`'s contract signature — the same kind of seam `credentialEnv` and `StructuredStoreOptions.migrations` already are.
+Rejected: **Asserting on the child's own output** — structurally impossible for the reason above. **Reading the command line from the OS while the child runs** — Windows and Linux need different mechanisms and both race the child's lifetime, in a repository whose tests run on both. **A shim executable that dumps its arguments** — Exec prepends its own configuration ahead of the caller's vector, so the shim would have to parse git's own flags to find them, and Node cannot spawn a `.cmd` shim on Windows without a shell.
+Reversibility: cheap.
+
 ### 2026-08-08 — The repair gate is a predicate on `executionClass`, not a list of tool names
 Context: S8's acceptance criterion named "stage, restore-paths, commit and branch" as what a parked declaration admits to a session holding `attention.resolve`. Branch creation is not a `GitOperations` primitive — it is `Composites.prepareBranch`, delivered by S12, four slices after S8. The criterion named a tool that cannot exist when the slice implementing it runs.
 Chosen: the gate admits any registry entry that is `executionClass: 'mutating'` **and carries `git.local.write`**, to a session whose effective grant holds `attention.resolve`, audited with `context: 'repair'`. Today that is three tools; `prepareBranch` joins automatically when S12 registers it, with no change here. `design/30-slices.md`'s S8 criterion was reworded to match, in the same commit.

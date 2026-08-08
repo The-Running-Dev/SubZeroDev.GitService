@@ -4,7 +4,7 @@ import { sha256Hex, type GitSha, type Sha256Hex } from '../shared/brands.ts';
 import { timingSafeStringEqual } from '../shared/timing-safe.ts';
 import type { AuditChainState } from '../audit/types.ts';
 import type { CredentialFailureMark } from '../credentials/types.ts';
-import type { DeclarationId, OperationId } from '../shared/brands.ts';
+import type { CredentialRef, DeclarationId, OperationId } from '../shared/brands.ts';
 import type { ActorRef } from '../shared/actor.ts';
 import type { ObservedGitState, PreState } from '../clone/types.ts';
 import type { OperationJournalEntry } from '../journal/types.ts';
@@ -103,6 +103,15 @@ export interface SurfacesDependencies
    * resolution, keeping it parked, is simply not calling this.
    */
   readonly resolveParkedOperation?: (operationId: OperationId, actor: ActorRef) => Promise<{ readonly ok: boolean; readonly summary: string }>;
+  /**
+   * Failing credential references, and the by-hand way to clear one (S9). The
+   * design gives a mark two ways out — the resolver observing a changed
+   * secret, and the operator clearing it from the health view — and this is
+   * the second. Optional so a surfaces server assembled without a resolver
+   * still reports an honest empty list.
+   */
+  readonly failingCredentialRefs?: () => Promise<readonly CredentialFailureMark[]>;
+  readonly clearFailingCredential?: (ref: CredentialRef, declarationId: DeclarationId) => Promise<void>;
 }
 
 /** The three fields `10-design.md` requires of each row in the parked view. */
@@ -217,6 +226,27 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
     return;
   }
 
+  // A failing credential's second way out. The first — replacing the secret in
+  // the mount — needs no route at all, which is the point of resolving at
+  // point of use; this is the one for a mark left by a fault that has since
+  // been fixed somewhere other than the file.
+  const clearCredentialMatch = /^\/failing-credentials\/([^/]+)\/([^/]+)\/clear$/.exec(url.pathname);
+  if (req.method === 'POST' && clearCredentialMatch) {
+    if (!isAuthorized(req, deps.operatorApiToken)) {
+      sendJson(res, 401, { error: 'unauthorized' });
+      return;
+    }
+    if (!deps.clearFailingCredential) {
+      sendJson(res, 503, { error: 'unavailable', summary: 'no credential resolver is wired into this server' });
+      return;
+    }
+    const ref = decodeURIComponent(clearCredentialMatch[1]!) as CredentialRef;
+    const declarationId = decodeURIComponent(clearCredentialMatch[2]!) as DeclarationId;
+    await deps.clearFailingCredential(ref, declarationId);
+    sendJson(res, 200, { cleared: true, ref, declarationId });
+    return;
+  }
+
   // The way out. A parked entry's other resolution — keeping it parked — is
   // not calling this, so there is deliberately no route for it.
   const resolveMatch = /^\/parked-operations\/([^/]+)\/resolve$/.exec(url.pathname);
@@ -247,7 +277,7 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
       version: { commitSha: deps.commitSha, contractFingerprint: deps.contractFingerprint, consoleFingerprint: deps.consoleFingerprint },
       auditChain,
       failedOutboxRows: 0,
-      failingCredentialRefs: [],
+      failingCredentialRefs: deps.failingCredentialRefs ? await deps.failingCredentialRefs() : [],
       parkedOperations: parked.length,
       volume: NO_VOLUME_USAGE,
     };

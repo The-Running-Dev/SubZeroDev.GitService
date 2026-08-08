@@ -117,6 +117,36 @@ export interface RestorePathsData {
   readonly restored: readonly RepoRelativePath[];
 }
 
+/** `20-contract.md` § L2 — git operations, S9's resolution of U1 for the three remote operations. */
+
+export interface GitPushInput {
+  /** Null pushes the checked-out branch. There is no force option, here or anywhere in this input. */
+  readonly branch: BranchName | null;
+}
+
+export interface GitPushData {
+  readonly branch: BranchName;
+  readonly headSha: GitSha;
+  readonly alreadyUpToDate: boolean;
+}
+
+export interface GitFetchInput {}
+
+export interface GitFetchData {
+  readonly baseBranch: BranchName;
+  readonly upstreamSha: GitSha | null;
+  readonly updatedRefs: readonly BranchName[];
+}
+
+export interface SyncBaseInput {}
+
+export interface SyncBaseData {
+  readonly baseBranch: BranchName;
+  readonly headSha: GitSha;
+  readonly upstreamSha: GitSha;
+  readonly fastForwarded: boolean;
+}
+
 /** `20-contract.md` § L2 — git operations, `validateWritePath`'s three-way refusal. */
 export type PathRejection =
   | { readonly kind: 'malformed'; readonly rule: string }
