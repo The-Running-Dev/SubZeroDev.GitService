@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { ok, err, type Outcome } from '../shared/outcome.ts';
-import { sha256Hex, type BranchName, type ClonePath, type CloneUrl, type DeclarationId, type GitSha, type IsoUtcTimestamp } from '../shared/brands.ts';
+import { sha256Hex, type BranchName, type ClonePath, type CloneUrl, type DeclarationId, type GitSha, type IsoUtcTimestamp, type Sha256Hex } from '../shared/brands.ts';
+import { canonicalize } from '../shared/canonical-json.ts';
 import type { ActorRef } from '../shared/actor.ts';
 import type { Clock } from '../clock/clock.ts';
 import type { Exec } from '../exec/exec.ts';
@@ -224,34 +225,101 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
     return result.ok ? (result.value.stdout.trim() as CloneUrl) : null;
   }
 
-  /** `PreState`/`ObservedGitState`'s digest inputs are U8, gated to S7 (`20-contract.md` § Unresolved) — this is a working implementation, not the canonical answer S7 will fix in the contract. */
+  /**
+   * `Declaration.identity` (`git_user_name`/`git_user_email`) has nowhere
+   * else to land: a mutating tool commits with no author identity of its
+   * own, and the neutral exec environment (`exec.ts`'s `neutralGitEnv`)
+   * deliberately carries no global `user.name`/`user.email` for a real
+   * commit to inherit. Configuring it on every path that returns a *newly*
+   * `ready` clone — a fresh clone or an adoption — is what makes `git_commit`
+   * (S7) able to run at all; both command outcomes are checked, so a failed
+   * write reports `store-failed` rather than silently marking the clone
+   * ready with no identity configured. **Not** run on the already-`ready`
+   * fast path (unchanged generation, no adoption): that path is also the
+   * one every read call takes, so re-running two `git config` calls on it
+   * would tax every read for a write-only concern. A clone materialised
+   * before this fix shipped, or whose declaration's identity changed after
+   * materialisation, is not re-configured until its clone is next adopted or
+   * re-cloned — a known, narrower gap than "every `ensure()` call", recorded
+   * rather than silently left unstated.
+   */
+  async function configureIdentity(clonePath: string, declaration: Declaration, signal: AbortSignal): Promise<Outcome<void, CloneStoreError>> {
+    const nameResult = await exec.runGit({ argv: ['config', 'user.name', declaration.identity.gitUserName], cwd: clonePath as ClonePath, timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS, credential: null, signal });
+    if (!nameResult.ok) {
+      return err(cloneStoreError({ code: 'store-failed', cause: storeError({ code: 'io-failed' }, nameResult.error.summary) }, `could not configure user.name for '${declaration.id}': ${nameResult.error.summary}`));
+    }
+    const emailResult = await exec.runGit({ argv: ['config', 'user.email', declaration.identity.gitUserEmail], cwd: clonePath as ClonePath, timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS, credential: null, signal });
+    if (!emailResult.ok) {
+      return err(cloneStoreError({ code: 'store-failed', cause: storeError({ code: 'io-failed' }, emailResult.error.summary) }, `could not configure user.email for '${declaration.id}': ${emailResult.error.summary}`));
+    }
+    return ok(undefined);
+  }
+
+  /**
+   * `20-contract.md` § Clone, U8's resolution (fixed by S7): `indexDigest`
+   * covers `git ls-files --stage`'s entries (path, mode, blob id, stage
+   * number) in that command's own order; `worktreeDigest` covers `git status
+   * --porcelain=v1`'s lines (path, working-tree status column) in that
+   * command's order. Neither command writes to the object database — in
+   * particular this is never `git write-tree`, which a deliberately unmerged
+   * index would fail. `canonicalize` is the same deep key-sorted JSON the
+   * audit trail's record hash uses (U9); array order is preserved by it, so
+   * the ordering above is the contract, not an implementation detail.
+   */
+  async function computePreStateDigests(clonePath: string, signal: AbortSignal): Promise<{ readonly indexDigest: Sha256Hex; readonly worktreeDigest: Sha256Hex } | null> {
+    const lsFilesResult = await exec.runGit({ argv: ['ls-files', '--stage'], cwd: clonePath as ClonePath, timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS, credential: null, signal });
+    const statusResult = await exec.runGit({ argv: ['status', '--porcelain=v1'], cwd: clonePath as ClonePath, timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS, credential: null, signal });
+    if (!lsFilesResult.ok || !statusResult.ok) return null;
+
+    // `git ls-files --stage` lines: `<mode> <blob> <stage>\t<path>`.
+    const indexEntries = lsFilesResult.value.stdout
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map((line) => {
+        const tabIndex = line.indexOf('\t');
+        const meta = (tabIndex === -1 ? line : line.slice(0, tabIndex)).trim().split(/\s+/);
+        const entryPath = tabIndex === -1 ? '' : line.slice(tabIndex + 1);
+        return { path: entryPath, mode: meta[0] ?? '', blobId: meta[1] ?? '', stage: Number(meta[2] ?? '0') };
+      });
+
+    // `git status --porcelain=v1` lines: `XY <path>` (renames carry ` -> `,
+    // irrelevant here since only the path and the worktree column matter).
+    const worktreeEntries = statusResult.value.stdout
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map((line) => {
+        const indexStatus = line[0] ?? ' ';
+        const worktreeStatus = line[1] ?? ' ';
+        const entryPath = line.slice(3);
+        const status = indexStatus === '?' && worktreeStatus === '?' ? '?' : worktreeStatus;
+        return { path: entryPath, workingTreeStatus: status };
+      })
+      .filter((entry) => entry.workingTreeStatus !== ' ');
+
+    const indexDigestResult = sha256Hex(createHash('sha256').update(canonicalize(indexEntries), 'utf8').digest('hex'));
+    const worktreeDigestResult = sha256Hex(createHash('sha256').update(canonicalize(worktreeEntries), 'utf8').digest('hex'));
+    if (!indexDigestResult.ok || !worktreeDigestResult.ok) return null;
+    return { indexDigest: indexDigestResult.value, worktreeDigest: worktreeDigestResult.value };
+  }
+
   async function observeInternal(declarationId: DeclarationId, clonePath: string, signal: AbortSignal): Promise<ObservedGitState | null> {
     const branchResult = await exec.runGit({ argv: ['rev-parse', '--abbrev-ref', 'HEAD'], cwd: clonePath as ClonePath, timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS, credential: null, signal });
     const headResult = await exec.runGit({ argv: ['rev-parse', 'HEAD'], cwd: clonePath as ClonePath, timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS, credential: null, signal });
     const upstreamResult = await exec.runGit({ argv: ['rev-parse', '@{u}'], cwd: clonePath as ClonePath, timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS, credential: null, signal });
-    const statusResult = await exec.runGit({ argv: ['status', '--porcelain=v1'], cwd: clonePath as ClonePath, timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS, credential: null, signal });
 
     const branch = branchResult.ok && branchResult.value.stdout.trim() !== 'HEAD' ? (branchResult.value.stdout.trim() as BranchName) : null;
     const headSha = headResult.ok ? (headResult.value.stdout.trim() as GitSha) : null;
     const upstreamSha = upstreamResult.ok ? (upstreamResult.value.stdout.trim() as GitSha) : null;
 
-    const indexPath = path.join(clonePath, '.git', 'index');
-    let indexBytes: Buffer;
-    try {
-      indexBytes = existsSync(indexPath) ? readFileSync(indexPath) : Buffer.alloc(0);
-    } catch {
-      return null;
-    }
-    const indexDigestResult = sha256Hex(createHash('sha256').update(indexBytes).digest('hex'));
-    const worktreeDigestResult = sha256Hex(createHash('sha256').update(statusResult.ok ? statusResult.value.stdout : '').digest('hex'));
-    if (!indexDigestResult.ok || !worktreeDigestResult.ok) return null;
+    const digests = await computePreStateDigests(clonePath, signal);
+    if (!digests) return null;
 
     return {
       branch,
       headSha,
       upstreamSha,
-      indexDigest: indexDigestResult.value,
-      worktreeDigest: worktreeDigestResult.value,
+      indexDigest: digests.indexDigest,
+      worktreeDigest: digests.worktreeDigest,
       observedAt: clock.now(),
     };
   }
@@ -389,6 +457,11 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
           materialisationLock.release();
           return err(cloneStoreError({ code: 'remote-mismatch', declared: declarationRecord.cloneUrl, observed }, `the existing clone's remote does not match the declared one`));
         }
+        const identitySet = await configureIdentity(clonePath, declaration, signal);
+        if (!identitySet.ok) {
+          materialisationLock.release();
+          return identitySet;
+        }
         const bytes = directoryBytes(clonePath);
         const now = clock.now();
         const written = upsertRow({ declaration_id: declaration.id, generation: declarationRecord.generation, state: 'ready', path: clonePath, size_bytes: bytes, last_operation_at: now, observed_remote: observed, attention_reason: null });
@@ -429,6 +502,14 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
           return err(cloneStoreError({ code: 'clone-timeout', limitSeconds: cloneSeconds }, `clone of '${declaration.id}' exceeded its ${cloneSeconds}s cap`));
         }
         return err(cloneStoreError({ code: 'clone-failed', cause: cloneResult.error }, `clone of '${declaration.id}' failed: ${cloneResult.error.summary}`));
+      }
+
+      const identitySet = await configureIdentity(clonePath, declaration, signal);
+      if (!identitySet.ok) {
+        removePartial(clonePath);
+        upsertRow({ declaration_id: declaration.id, generation: declarationRecord.generation, state: 'absent', path: clonePath, size_bytes: 0, last_operation_at: null, observed_remote: null, attention_reason: null });
+        materialisationLock.release();
+        return identitySet;
       }
 
       const bytes = directoryBytes(clonePath);

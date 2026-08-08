@@ -134,6 +134,42 @@ const GIT_DIFF_OUTPUT_SCHEMA = {
   required: ['diff', 'checkClean', 'checkOutput', 'readStamp'],
 } as unknown as JsonSchema;
 
+const PATHS_INPUT_SCHEMA = {
+  type: 'object',
+  properties: { paths: { type: 'array', items: { type: 'string' } } },
+  required: ['paths'],
+  additionalProperties: false,
+} as unknown as JsonSchema;
+
+const GIT_STAGE_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: { staged: { type: 'array', items: { type: 'string' } } },
+  required: ['staged'],
+} as unknown as JsonSchema;
+
+const GIT_COMMIT_INPUT_SCHEMA = {
+  type: 'object',
+  properties: { message: { type: 'string' } },
+  required: ['message'],
+  additionalProperties: false,
+} as unknown as JsonSchema;
+
+const GIT_COMMIT_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    sha: { type: 'string' },
+    branch: { type: 'string' },
+    changedPaths: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['sha', 'branch', 'changedPaths'],
+} as unknown as JsonSchema;
+
+const GIT_RESTORE_PATHS_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: { restored: { type: 'array', items: { type: 'string' } } },
+  required: ['restored'],
+} as unknown as JsonSchema;
+
 /**
  * The real, deployed tool inventory. S1 through S5 shipped none (U1 was
  * wholly open); S6 resolves U1 for the five read operations and ships their
@@ -206,5 +242,44 @@ export const PRODUCTION_TOOL_DECLARATIONS: readonly ToolDeclaration[] = [
     annotations: { schedulable: false, dropTarget: false, untrustedOutput: true },
     limits: { timeoutSeconds: 30, maxResultBytes: 4_194_304 },
     target: moduleTarget('git.diff'),
+  },
+  {
+    name: toolName('git_stage'),
+    description: 'Stages the given repository-relative paths, each checked against the declaration\'s writable path prefixes before anything is staged.',
+    inputSchema: PATHS_INPUT_SCHEMA,
+    outputSchema: GIT_STAGE_OUTPUT_SCHEMA,
+    scopes: ['write'],
+    capabilities: ['git.local.write'],
+    capabilityScope: 'declaration',
+    executionClass: 'mutating',
+    annotations: { schedulable: false, dropTarget: false, untrustedOutput: false },
+    limits: { timeoutSeconds: 30, maxResultBytes: 65_536 },
+    target: moduleTarget('git.stage'),
+  },
+  {
+    name: toolName('git_commit'),
+    description: 'Commits whatever is currently staged, with the given message.',
+    inputSchema: GIT_COMMIT_INPUT_SCHEMA,
+    outputSchema: GIT_COMMIT_OUTPUT_SCHEMA,
+    scopes: ['write'],
+    capabilities: ['git.local.write'],
+    capabilityScope: 'declaration',
+    executionClass: 'mutating',
+    annotations: { schedulable: false, dropTarget: false, untrustedOutput: false },
+    limits: { timeoutSeconds: 30, maxResultBytes: 65_536 },
+    target: moduleTarget('git.commit'),
+  },
+  {
+    name: toolName('git_restore_paths'),
+    description: 'Restores the given repository-relative paths to HEAD, discarding both staged and working-tree changes for those paths only. Each path is checked against the writable path prefixes before anything is restored.',
+    inputSchema: PATHS_INPUT_SCHEMA,
+    outputSchema: GIT_RESTORE_PATHS_OUTPUT_SCHEMA,
+    scopes: ['write'],
+    capabilities: ['git.local.write'],
+    capabilityScope: 'declaration',
+    executionClass: 'mutating',
+    annotations: { schedulable: false, dropTarget: false, untrustedOutput: false },
+    limits: { timeoutSeconds: 30, maxResultBytes: 65_536 },
+    target: moduleTarget('git.restorePaths'),
   },
 ];

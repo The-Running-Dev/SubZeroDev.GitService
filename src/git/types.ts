@@ -1,4 +1,4 @@
-import type { BranchName, GitSha, IsoUtcTimestamp, RepoRelativePath } from '../shared/brands.ts';
+import type { BranchName, GitSha, IsoUtcTimestamp, PathPrefix, RepoRelativePath } from '../shared/brands.ts';
 import type { CloneUrl } from '../shared/brands.ts';
 import type { ReadStamp } from '../result/envelope.ts';
 
@@ -88,3 +88,37 @@ export interface GitDiffData {
   readonly checkOutput: string;
   readonly readStamp: ReadStamp;
 }
+
+/** `20-contract.md` § L2 — git operations, S7's resolution of U1 for the three local mutating operations. */
+
+export interface GitStageInput {
+  readonly paths: readonly RepoRelativePath[];
+}
+
+export interface GitStageData {
+  readonly staged: readonly RepoRelativePath[];
+}
+
+export interface GitCommitInput {
+  readonly message: string;
+}
+
+export interface GitCommitData {
+  readonly sha: GitSha;
+  readonly branch: BranchName;
+  readonly changedPaths: readonly RepoRelativePath[];
+}
+
+export interface RestorePathsInput {
+  readonly paths: readonly RepoRelativePath[];
+}
+
+export interface RestorePathsData {
+  readonly restored: readonly RepoRelativePath[];
+}
+
+/** `20-contract.md` § L2 — git operations, `validateWritePath`'s three-way refusal. */
+export type PathRejection =
+  | { readonly kind: 'malformed'; readonly rule: string }
+  | { readonly kind: 'outside-allowlist'; readonly prefixes: readonly PathPrefix[] }
+  | { readonly kind: 'stripped-by-profile'; readonly prefix: PathPrefix };

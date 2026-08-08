@@ -44,7 +44,11 @@ export function conflict(summary: string, holder: LockHolder | null): ToolResult
 }
 
 function holderFinding(holder: LockHolder): Finding {
-  return { path: 'lock', rule: 'held-by-another-operation', message: `held by ${holder.tool} on ${holder.declarationId} since ${holder.heldSince}` };
+  return {
+    path: 'lock',
+    rule: 'held-by-another-operation',
+    message: `held by operation ${holder.operationId} (${holder.tool}) on ${holder.declarationId} since ${holder.heldSince}`,
+  };
 }
 
 export function authorization(summary: string, missing: readonly CapabilityName[]): ToolResult<never> {

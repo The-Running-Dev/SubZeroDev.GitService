@@ -298,7 +298,29 @@ interface PreState {
 interface ObservedGitState extends PreState {
   readonly observedAt: IsoUtcTimestamp;
 }
+```
 
+**U8's resolution, 2026-08-08.** `indexDigest` and `worktreeDigest` are each `SHA256_hex(canonical(entries))`,
+reusing the same deep key-sorted-JSON canonicalisation U9 fixed for the audit record hash
+(`shared/canonical-json.ts`), over an array of plain objects rather than the design's own prose —
+array order is content under that canonicalisation, so the ordering below is part of the contract,
+not an implementation detail:
+
+- `indexDigest` covers one entry per index record, in the order `git ls-files --stage` emits them
+  (lexicographic by path — deterministic across platforms because git defines it, not the OS),
+  each `{ path, mode, blobId, stage }` read straight off that command's output. Never `git
+  write-tree`: that command can fail on a deliberately unmerged index (a real state a mutating tool
+  must still be able to capture pre-state for), and it writes a tree object to the object database,
+  which pre-state capture may never do.
+- `worktreeDigest` covers one entry per line of `git status --porcelain=v1`, in the order that
+  command emits them, each `{ path, workingTreeStatus }` where `workingTreeStatus` is the
+  porcelain line's second column (`M`, `D`, …) for a tracked path or `?` for an untracked one — "
+  tracked paths differing from the index plus the untracked set", read directly off the column the
+  design already names rather than re-derived by a second command.
+
+Both commands read the index and the working tree; neither writes to the object database.
+
+```ts
 type SafeToEvictVerdict =
   | { readonly safe: true }
   | { readonly safe: false; readonly blockers: readonly EvictionBlocker[] };
@@ -1913,6 +1935,50 @@ branch names and counts, and stay `false`. None is `schedulable` — a periodic 
 declared consumer yet, and the annotation is easy to flip on a future tool that wants one.
 `timeoutSeconds` is short because all five run against the local clone only, with no network call.
 
+**S7 resolves U1 for the three local mutating operations** — `git_stage`, `git_commit`,
+`git_restore_paths`. `GitStageInput`, `RestorePathsInput` and `GitCommitInput` are already fixed
+above; their output types, fixed here:
+
+```ts
+interface GitStageData {
+  readonly staged: readonly RepoRelativePath[];
+}
+
+interface GitCommitData {
+  readonly sha: GitSha;
+  readonly branch: BranchName;
+  readonly changedPaths: readonly RepoRelativePath[];
+}
+
+interface RestorePathsData {
+  readonly restored: readonly RepoRelativePath[];
+}
+```
+
+None of the three carries a `ReadStamp` — that field exists so a caller can tell whether what it
+read was stable under a concurrent mutation, and a mutating call is itself the thing every read's
+`mutationInFlight` would be reporting on, not a consumer of the same signal.
+
+Every path in `GitStageInput.paths` and `RestorePathsInput.paths` is checked with
+`validateWritePath` before any side effect: `malformed` maps to `validation`, `outside-allowlist`
+and `stripped-by-profile` both map to `authorization` and write an audit record naming the rejected
+path. `git_commit` takes no path and needs no such check; it commits whatever is already staged.
+
+The three registry entries S7 ships:
+
+| `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
+|---|---|---|---|---|---|---|
+| `git_stage` | `{ kind: 'module', target: 'git.stage' }` | `['git.local.write']` | `['write']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 65536 }` |
+| `git_commit` | `{ kind: 'module', target: 'git.commit' }` | `['git.local.write']` | `['write']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 65536 }` |
+| `git_restore_paths` | `{ kind: 'module', target: 'git.restorePaths' }` | `['git.local.write']` | `['write']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 65536 }` |
+
+Every entry carries `capabilityScope: 'declaration'`, the same as every S6 entry. None is
+`schedulable` — a scheduled job naming a bare local mutation with no commit message or path input
+of its own has no declared consumer yet — and none is `dropTarget`, which S17's watcher tools claim
+for themselves. `timeoutSeconds` matches the five read tools': all three run against the local
+clone only, with no network call, and the design's per-declaration path-allowlist and two-lock
+machinery is what bounds their cost, not a longer cap.
+
 ### L2 — composites
 
 ```ts
@@ -2877,6 +2943,12 @@ entries. See `### L2 — git operations` above. U1 otherwise stands: the seven m
 the two composites, and the host adapter's `CreatePullRequestInput` remain open for the slices that
 ship them.
 
+*Narrowed further 2026-08-08:* S7 resolves U1 for the three local mutating operations — `git_stage`,
+`git_commit`, `git_restore_paths` — their output types and registry entries (their input types were
+already fixed). See `### L2 — git operations` above. U1 otherwise stands: `push`, `fetch`,
+`syncBase`, `raw`, the two composites, and `CreatePullRequestInput` remain open for the slices that
+ship them.
+
 **U2 — The `OperatorScope` vocabulary.** The design states that an `operator-api` grant "carries
 operator scopes" and fixes the MCP scope set as `read`, `write`, `raw`, `schedule`. It does not
 name the operator scopes, nor say whether they are the same four, a superset, or disjoint.
@@ -2914,12 +2986,10 @@ over the element type because the design fixes what a view receives and what it 
 the UI framework binding, the package's exported build entry, or how the asset manifest is hashed
 into the console fingerprint.
 
-**U8 — The pre-state digest algorithms.** The design fixes what `indexDigest` and `worktreeDigest`
-cover — index entries by path, mode, blob id and stage number; tracked paths differing from the
-index plus the untracked set — and that neither may write to the object database. It does not fix
-the canonical serialisation the hash is taken over. Two implementations that disagree make every
-recovery classification wrong across an upgrade, so this is a contract fact rather than an
-implementation detail.
+~~**U8 — The pre-state digest algorithms.**~~ — **resolved 2026-08-08.** `SHA256_hex(canonical(...))`
+over an ordered array of index entries and porcelain-status lines respectively, neither derived via
+a command that writes to the object database. See `### Clone`, immediately after `ObservedGitState`,
+for the exact fields and ordering. This unblocks S7.
 
 ~~**U9 — The audit record's canonical serialisation.**~~ — **resolved 2026-08-03.** Deep key-sorted
 JSON over the full flattened `AuditRecord` excluding only `hash` itself, reusing the compiler's
