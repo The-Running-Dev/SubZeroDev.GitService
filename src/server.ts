@@ -13,6 +13,13 @@ import { createLocks } from './locks/locks.ts';
 import { createDeclarations, type Declarations } from './declarations/declarations.ts';
 import { createCloneStore, type CloneStore } from './clone/clone-store.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './surfaces/http-server.ts';
+import { createGitOperations } from './git/git-operations.ts';
+import { createModuleAdapter, toModuleHandler } from './module-adapter/module-adapter.ts';
+import { createDispatchPipeline } from './dispatch/dispatch-pipeline.ts';
+import { PRODUCTION_TOOL_DECLARATIONS } from './composition-root/production-declarations.ts';
+import type { ModuleTargetName } from './shared/brands.ts';
+import type { ContractCapabilitySet } from './contract/capabilities.ts';
+import type { CompiledRegistry } from './contract/tool-declaration.ts';
 
 /**
  * The composition root. It never imports the compiler (invariant B8, enforced
@@ -129,6 +136,20 @@ async function main(): Promise<void> {
   const cloneStore = createCloneStore({ volumeRoot, clock: systemClock, exec, locks, declarations });
   cloneStoreRef = cloneStore;
 
+  // The five S6 read tools: git operations dispatched through a module
+  // adapter and the dispatch pipeline. `PRODUCTION_TOOL_DECLARATIONS` is
+  // plain data (no compiler call), which is what keeps invariant B8 (the
+  // compiler absent from the runtime image) intact here.
+  const gitOperations = createGitOperations({ clock: systemClock, exec, locks });
+  const moduleAdapter = createModuleAdapter();
+  moduleAdapter.register('git.status' as ModuleTargetName, toModuleHandler(gitOperations.status));
+  moduleAdapter.register('git.log' as ModuleTargetName, toModuleHandler(gitOperations.log));
+  moduleAdapter.register('git.branches' as ModuleTargetName, toModuleHandler(gitOperations.branches));
+  moduleAdapter.register('git.health' as ModuleTargetName, toModuleHandler(gitOperations.health));
+  moduleAdapter.register('git.diff' as ModuleTargetName, toModuleHandler(gitOperations.diff));
+
+  const contractCapabilitySet = new Set(PRODUCTION_TOOL_DECLARATIONS.flatMap((e) => e.capabilities)) as unknown as ContractCapabilitySet;
+
   const lifecycle = createLifecycle({
     volumeRoot,
     buildDir,
@@ -139,6 +160,8 @@ async function main(): Promise<void> {
     consoleFingerprint: NO_CONSOLE_FINGERPRINT,
     ceiling,
     deriveCloneStatesFromDisk: () => cloneStore.deriveAllStatesFromDisk(),
+    registryEntries: PRODUCTION_TOOL_DECLARATIONS,
+    registeredModuleTargets: moduleAdapter.registeredTargets(),
     onTakeover: (previous, current) => {
       // The durable `lease-takeover` audit record is written by boot itself
       // (S3); this is operator-visible defense in depth, so a takeover is
@@ -164,6 +187,23 @@ async function main(): Promise<void> {
   }
   ready = true;
 
+  const registry: CompiledRegistry = {
+    fingerprint: booted.value.registryFingerprint,
+    compiledAt: systemClock.now(),
+    entries: PRODUCTION_TOOL_DECLARATIONS,
+    contractCapabilitySet,
+  };
+  const dispatchPipeline = createDispatchPipeline({
+    registry,
+    ceiling,
+    moduleAdapter,
+    declarations,
+    cloneStore,
+    locks,
+    audit,
+    clock: systemClock,
+  });
+
   const server = createSurfacesServer({
     commitSha,
     contractFingerprint: booted.value.registryFingerprint,
@@ -179,6 +219,8 @@ async function main(): Promise<void> {
     sessionAbsoluteSeconds: SESSION_ABSOLUTE_SECONDS_DEFAULT,
     declarations,
     cloneStore,
+    dispatchPipeline,
+    contractCapabilitySet,
   });
 
   const shutdown = (signal: NodeJS.Signals): void => {

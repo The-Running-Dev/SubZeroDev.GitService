@@ -1804,6 +1804,115 @@ write matching `remote.*`. There is no force flag anywhere in `GitPushInput`, an
 reset, clean, rebase or branch-delete operation on this interface. The remaining fields of all
 twelve are **not determined** — see `## Unresolved`.
 
+**S6 resolves U1 for the five read operations.** Their input and output types, fixed here:
+
+```ts
+interface RepoStatusInput {}
+
+interface RepoStatusEntry {
+  readonly path: RepoRelativePath;
+  readonly staged: boolean;
+}
+
+interface RepoStatusData {
+  readonly branch: BranchName;
+  readonly baseBranch: BranchName;
+  readonly dirty: boolean;
+  readonly parkedOffBase: boolean;
+  readonly ahead: number;
+  readonly behind: number;
+  readonly changedPaths: readonly RepoStatusEntry[];
+  readonly observedRemote: CloneUrl | null;
+  readonly readStamp: ReadStamp;
+}
+
+interface GitLogEntry {
+  readonly sha: GitSha;
+  readonly authorName: string;
+  readonly authorEmail: string;
+  readonly authorDate: IsoUtcTimestamp;
+  readonly subject: string;
+}
+
+interface GitLogData {
+  readonly ref: BranchName;
+  readonly commits: readonly GitLogEntry[];
+  readonly readStamp: ReadStamp;
+}
+
+interface BranchesInput {}
+
+interface BranchSummary {
+  readonly name: BranchName;
+  readonly current: boolean;
+  readonly ahead: number;
+  readonly behind: number;
+  readonly lastCommitAt: IsoUtcTimestamp | null;
+}
+
+interface BranchesData {
+  readonly baseBranch: BranchName;
+  readonly branches: readonly BranchSummary[];
+  readonly readStamp: ReadStamp;
+}
+
+interface RepoHealthInput {}
+
+interface StaleBranchSummary {
+  readonly count: number;
+  readonly names: readonly BranchName[];
+}
+
+interface RepoHealthData {
+  readonly branch: BranchName;
+  readonly baseBranch: BranchName;
+  readonly dirty: boolean;
+  readonly parkedOffBase: boolean;
+  readonly ahead: number;
+  readonly behind: number;
+  readonly commitsLast7Days: number;
+  readonly daysSinceLastCommit: number | null;
+  readonly staleBranches: StaleBranchSummary;
+  readonly readStamp: ReadStamp;
+}
+
+interface GitDiffInput {
+  readonly staged: boolean;
+  readonly paths: readonly RepoRelativePath[] | null;
+}
+
+interface GitDiffData {
+  readonly diff: string;
+  readonly checkClean: boolean;
+  readonly checkOutput: string;
+  readonly readStamp: ReadStamp;
+}
+```
+
+`RepoHealthData` carries no GitHub-derived field — no PR count, deploy status or check pass rate.
+`GitOperations` (L2) depends on L1 only; folding host data into this tool would give it a dependency
+the module table does not grant it. A combined local-plus-host view, if wanted, is a composite, not
+this tool.
+
+The five registry entries S6 ships, naming the tools by the brief's own convention (`git_commit`,
+`repo_declare`):
+
+| `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
+|---|---|---|---|---|---|---|
+| `repo_status` | `{ kind: 'module', target: 'git.status' }` | `['repo.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 65536 }` |
+| `git_log` | `{ kind: 'module', target: 'git.log' }` | `['repo.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 1048576 }` |
+| `git_branches` | `{ kind: 'module', target: 'git.branches' }` | `['repo.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 262144 }` |
+| `repo_health` | `{ kind: 'module', target: 'git.health' }` | `['repo.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 65536 }` |
+| `git_diff` | `{ kind: 'module', target: 'git.diff' }` | `['repo.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 4194304 }` |
+
+Every entry has `capabilityScope: 'declaration'`. `git_log` and `git_diff` carry
+`untrustedOutput: true`: commit subjects and diff bodies are written by repository contributors,
+not the operator, which is exactly the "author-controlled text as data" case the annotation exists
+for elsewhere on `HostComment.body`. `repo_status`, `git_branches` and `repo_health` carry only
+branch names and counts, and stay `false`. None is `schedulable` — a periodic read has no
+declared consumer yet, and the annotation is easy to flip on a future tool that wants one.
+`timeoutSeconds` is short because all five run against the local clone only, with no network call.
+
 ### L2 — composites
 
 ```ts
@@ -2761,6 +2870,12 @@ operation-descriptive names, no `blog_` prefix on a base tool, a clean break at 
 `### L2 — git operations`, `### L2 — composites` and `CreatePullRequestInput` carry only the fields
 the design and brief determine, and are lower bounds rather than complete declarations.
 **This blocks any slice that compiles a contract.**
+
+*Narrowed 2026-08-08:* S6 resolves U1 for the five read operations — `repo_status`, `git_log`,
+`git_branches`, `repo_health`, `git_diff` — their input and output types, and their registry
+entries. See `### L2 — git operations` above. U1 otherwise stands: the seven mutating operations,
+the two composites, and the host adapter's `CreatePullRequestInput` remain open for the slices that
+ship them.
 
 **U2 — The `OperatorScope` vocabulary.** The design states that an `operator-api` grant "carries
 operator scopes" and fixes the MCP scope set as `read`, `write`, `raw`, `schedule`. It does not

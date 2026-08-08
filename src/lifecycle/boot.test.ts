@@ -372,3 +372,63 @@ test('S5 — boot succeeds when the ceiling is a subset of the registry contract
     }
   });
 });
+
+test('S6 — boot exits with executor-missing when a registry entry has no registered executor', async () => {
+  await withVolumeAsync(async (volume) => {
+    const registryDeclarations = [fixtureTool({ name: 'fixture_read', capabilities: ['repo.read'], target: { kind: 'module', target: 'fixture.unregistered' as never } })];
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const lifecycle = createLifecycle({
+      volumeRoot: volume,
+      buildDir: writeBuildDir(volume, registryDeclarations),
+      clock: systemClock,
+      store,
+      audit,
+      operatorIdentity: operatorIdentityFor(volume, audit),
+      consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+      ceiling: new Set(['repo.read']) as unknown as DeploymentCeiling,
+      registryEntries: registryDeclarations,
+      registeredModuleTargets: new Set(), // nothing registered — the fixture's target has no executor
+    });
+
+    const booted = await lifecycle.boot();
+    assert.equal(booted.ok, false, 'a registry entry with no registered executor is fatal');
+    if (booted.ok) return;
+    assert.equal(booted.error.code, 'executor-missing');
+    if (booted.error.code !== 'executor-missing') return;
+    assert.deepEqual(booted.error.tools, ['fixture_read']);
+
+    // The lease must not be left held by a boot that refused to complete.
+    const { lifecycle: retry } = lifecycleFor(volume);
+    const second = await retry.boot();
+    assert.equal(second.ok, true, 'the volume is free again after a failed boot');
+    await retry.shutdown('operator');
+  });
+});
+
+test('S6 — boot succeeds when every registry entry has a registered executor', async () => {
+  await withVolumeAsync(async (volume) => {
+    const registryDeclarations = [fixtureTool({ name: 'fixture_read', capabilities: ['repo.read'], target: { kind: 'module', target: 'fixture.registered' as never } })];
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const lifecycle = createLifecycle({
+      volumeRoot: volume,
+      buildDir: writeBuildDir(volume, registryDeclarations),
+      clock: systemClock,
+      store,
+      audit,
+      operatorIdentity: operatorIdentityFor(volume, audit),
+      consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+      ceiling: new Set(['repo.read']) as unknown as DeploymentCeiling,
+      registryEntries: registryDeclarations,
+      registeredModuleTargets: new Set(['fixture.registered' as never]),
+    });
+
+    try {
+      const booted = await lifecycle.boot();
+      assert.equal(booted.ok, true, 'every entry has an executor');
+    } finally {
+      await lifecycle.shutdown('operator');
+    }
+  });
+});
