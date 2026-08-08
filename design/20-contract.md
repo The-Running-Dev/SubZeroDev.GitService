@@ -1586,8 +1586,11 @@ particular spelling beyond its being stable within one call.
 ### L1 — structured store
 
 ```ts
+type SqlParameter = string | number | bigint | null | Uint8Array;
+
 interface StoreTransaction {
   readonly id: string;
+  run(sql: string, ...parameters: readonly SqlParameter[]): void;
 }
 
 interface BackupStamp {
@@ -1613,6 +1616,18 @@ interface StructuredStore {
 
 `incrementalVacuum` returns the bytes actually returned to the filesystem, which is what the
 maintenance pass reports rather than the rows it deleted.
+
+**`StoreTransaction` carries `run`, and that is what makes every `tx`-taking member honest.** Four
+members take one — `Notifier.enqueue`, `Declarations.bumpGrantEpoch`, `Scheduler.cancelForDeclaration`
+and `Authorization.revokeGrantsForResource` — and each promises its write commits with the caller's.
+An opaque `{ id }` token cannot deliver that: a participant holding only an identifier has no way to
+reach the open transaction, so it opens its own connection instead and the write lands outside. It
+then either survives the caller's rollback, or is refused as busy and lost silently, since three of
+the four return no error channel. Participants therefore write through `run`.
+
+It exposes no `BEGIN`, `COMMIT` or `ROLLBACK` **by design**: the module that opened the transaction
+is the only one permitted to end it. A participant that could commit its caller's transaction is a
+worse defect than the one this replaces.
 
 ### L1 — clone store
 
