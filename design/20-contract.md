@@ -861,11 +861,24 @@ interface DeliveryReport {
   readonly delivered: number;
   readonly failed: number;
   readonly stillPending: number;
+  readonly errors: readonly NotifierError[];
 }
 ```
 
 Every `TerminalState` is `attention` severity; `MaintenanceSummary` is `info`, one per pass rather
 than one per clone.
+
+**`DeliveryReport.errors` is where three of the four `NotifierError` variants become reachable.**
+`deliverPending` and `redriveUndelivered` return a report rather than an `Outcome`, because one row
+failing must not fail the pass — the other rows still have to be attempted. Without `errors` that
+leaves `no-transport-configured`, `delivery-failed` and `retries-exhausted` with nowhere to surface,
+and a variant nothing can construct constrains nothing. It carries them **as data, not as a thrown
+failure**, which preserves the rule that delivery never blocks the operation it describes: a caller
+that ignores `errors` behaves exactly as before.
+
+Reporting, not raising, is also what the error table already asks for. `delivery-failed` says the
+caller does "nothing"; `retries-exhausted` says "mark the row `failed` and surface it, never drop
+it". Both are descriptions of a pass that continues, which is what a report is.
 
 ### Volume, retention and maintenance
 
