@@ -191,21 +191,33 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
   }
 
   return {
-    enqueue(request: NotificationRequest, _tx: StoreTransaction): void {
-      // `_tx` is the opaque `StoreTransaction` the contract requires this
-      // signature to accept. Every module in this codebase that touches
-      // `store.sqlite` opens its own connection rather than sharing the
-      // structured store's (`journal.ts`, `credentials.ts`, `audit.ts`), so
-      // there is no ambient transaction to join here either — this call is
-      // its own atomic insert, exactly as `Journal.settle`'s own outbox
-      // write already is.
-      const now = clock.now();
-      withDb(volumeRoot, (db) => {
-        db.prepare(
-          `INSERT INTO notification_outbox (id, severity, declaration_id, payload, status, attempts, last_attempt_at, last_error, created_at, delivered_at)
-           VALUES (?, ?, ?, ?, 'pending', 0, NULL, NULL, ?, NULL)`,
-        ).run(randomUUID(), request.severity, request.declarationId, JSON.stringify({ subject: request.subject, summary: request.summary }), now);
-      });
+    /**
+     * Writes through `tx`, never around it. The row and whatever the caller
+     * is committing land together or not at all — which is the entire reason
+     * the contract puts a transaction in this signature.
+     *
+     * Opening a connection here instead would break in both directions, and
+     * both were demonstrated before this was written: a row enqueued inside a
+     * transaction that later rolled back **survived** it, and a row enqueued
+     * after the caller's transaction had already written was refused as busy
+     * and **lost silently** — this member returns `void`, so there is no
+     * channel through which a caller could ever learn it. That is exactly the
+     * failure the same-transaction rule exists to prevent.
+     *
+     * Synchronous, per the contract: an `await` between the caller's other
+     * writes and this one would be a window in which the transaction is open
+     * and this row is not yet in it.
+     */
+    enqueue(request: NotificationRequest, tx: StoreTransaction): void {
+      tx.run(
+        `INSERT INTO notification_outbox (id, severity, declaration_id, payload, status, attempts, last_attempt_at, last_error, created_at, delivered_at)
+         VALUES (?, ?, ?, ?, 'pending', 0, NULL, NULL, ?, NULL)`,
+        randomUUID(),
+        request.severity,
+        request.declarationId,
+        JSON.stringify({ subject: request.subject, summary: request.summary }),
+        clock.now(),
+      );
     },
 
     async deliverPending(): Promise<DeliveryReport> {

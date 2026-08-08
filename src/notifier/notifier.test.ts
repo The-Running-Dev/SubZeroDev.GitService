@@ -179,34 +179,44 @@ test('with no webhook configured, rows accumulate pending and nothing throws', a
   });
 });
 
-test('a hanging notifier endpoint does not delay deliverPending forever, and the operation it describes already returned before this ran', async () => {
+test('S11.6 — a notifier endpoint that hangs does not delay the operation that enqueued the notification', async () => {
   await migratedVolume(async (volume) => {
     const journal = createJournal({ volumeRoot: volume, clock: systemClock });
-    const started = Date.now();
-    await journal.begin(beginInputFor('op-1'));
-    const settled = await journal.settle('op-1' as never, TERMINAL_NOTIFICATIONS[0]!);
-    const settleDurationMs = Date.now() - started;
 
-    // The operation that enqueued the notification (`begin` + `settle`) has
-    // already completed — delivery is a separate call, made afterwards, and
-    // this asserts the enqueue path itself never touches the network.
-    assert.equal(settled.ok, true);
-    assert.ok(settleDurationMs < 1000, 'settle returned without waiting on any delivery attempt');
+    // The endpoint hangs for this long. `durationMs` proper is a field on a
+    // `ToolResult`'s `Diagnostics`, which the journal does not produce — so
+    // the operation's own measured elapsed time stands in for it, which is
+    // the quantity the criterion is actually comparing against the delay.
+    const ENDPOINT_DELAY_MS = 750;
 
-    let delayMs = 0;
     const notifier = createNotifier({
       volumeRoot: volume,
       clock: systemClock,
       webhookUrl: 'https://hooks.example.invalid/notify' as never,
       maxAttempts: 1,
       deliverFn: async () => {
-        delayMs = 50;
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        await new Promise((resolve) => setTimeout(resolve, ENDPOINT_DELAY_MS));
         return { ok: true, status: 200 };
       },
     });
-    await notifier.deliverPending();
-    assert.equal(delayMs, 50, 'delivery ran, on its own time, well after the operation had already returned');
+
+    // Delivery is in flight and hanging while the operation runs — the whole
+    // point is that an operation enqueuing a notification is not behind it.
+    const deliveryInFlight = notifier.deliverPending();
+
+    const startedAt = Date.now();
+    await journal.begin(beginInputFor('op-1'));
+    const settled = await journal.settle('op-1' as never, TERMINAL_NOTIFICATIONS[0]!);
+    const operationDurationMs = Date.now() - startedAt;
+
+    assert.equal(settled.ok, true);
+    // The comparison the criterion names, made directly.
+    assert.ok(
+      operationDurationMs < ENDPOINT_DELAY_MS,
+      `the operation took ${operationDurationMs}ms, which must be well under the endpoint's ${ENDPOINT_DELAY_MS}ms hang`,
+    );
+
+    await deliveryInFlight;
   });
 });
 
@@ -277,15 +287,82 @@ test('clearFailed resets a failed row to pending without deleting it, and refuse
   });
 });
 
-test('enqueue writes a pending row directly, independent of Journal.settle', async () => {
-  await migratedVolume(async (volume) => {
+const MAINTENANCE_NOTIFICATION: NotificationRequest = {
+  severity: 'info',
+  declarationId: null,
+  subject: { kind: 'maintenance-pass', releasedBytes: 0, evictedDeclarations: [], prunedByModule: [] },
+  summary: 'nothing to report',
+};
+
+/** An open, migrated store — `migratedVolume` closes its own, and these tests need one live to hold a transaction. */
+async function withOpenStore<T>(fn: (volume: string, store: ReturnType<typeof createStructuredStore>) => Promise<T>): Promise<T> {
+  return withVolumeAsync(async (volume) => {
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    await store.open();
+    await store.migrate();
+    try {
+      return await fn(volume, store);
+    } finally {
+      await store.close();
+    }
+  });
+}
+
+test('enqueue writes inside the caller transaction: a committed one leaves the row', async () => {
+  await withOpenStore(async (volume, store) => {
     const notifier = createNotifier({ volumeRoot: volume, clock: systemClock, webhookUrl: null });
-    notifier.enqueue(
-      { severity: 'info', declarationId: null, subject: { kind: 'maintenance-pass', releasedBytes: 0, evictedDeclarations: [], prunedByModule: [] }, summary: 'nothing to report' },
-      { id: 'tx-1' },
-    );
+
+    const result = await store.transaction(async (tx) => {
+      notifier.enqueue(MAINTENANCE_NOTIFICATION, tx);
+      return 'done';
+    });
+    assert.equal(result.ok, true);
+
     const rows = readOutboxRows(volume);
     assert.equal(rows.length, 1);
     assert.equal(rows[0]!.status, 'pending');
+  });
+});
+
+test('enqueue writes inside the caller transaction: a rolled-back one leaves NO row', async () => {
+  await withOpenStore(async (volume, store) => {
+    const notifier = createNotifier({ volumeRoot: volume, clock: systemClock, webhookUrl: null });
+
+    // The regression test for the defect this member shipped with. Opening a
+    // private connection here instead of writing through `tx` made the row
+    // survive this rollback — a notification for something that never
+    // happened, which no later pass can tell from a real one.
+    const result = await store.transaction(async (tx) => {
+      notifier.enqueue(MAINTENANCE_NOTIFICATION, tx);
+      throw new Error('the caller failed after enqueuing');
+    });
+    assert.equal(result.ok, false, 'the transaction faulted, as the test intends');
+
+    const rows = readOutboxRows(volume);
+    assert.equal(rows.length, 0, 'the row rolled back with the caller — it must not outlive the work it describes');
+  });
+});
+
+test('enqueue survives the caller having already written in the same transaction', async () => {
+  await withOpenStore(async (volume, store) => {
+    const notifier = createNotifier({ volumeRoot: volume, clock: systemClock, webhookUrl: null });
+
+    // The realistic settle ordering, and the direction that used to lose the
+    // row outright: a private connection hit SQLITE_BUSY against the write
+    // lock the caller already held, and `enqueue` returns `void`, so the
+    // failure was swallowed with no channel to report it.
+    const result = await store.transaction(async (tx) => {
+      tx.run(
+        `INSERT INTO notification_outbox (id, severity, declaration_id, payload, status, attempts, last_attempt_at, last_error, created_at, delivered_at)
+         VALUES ('caller-row', 'attention', NULL, '{}', 'pending', 0, NULL, NULL, ?, NULL)`,
+        systemClock.now(),
+      );
+      notifier.enqueue(MAINTENANCE_NOTIFICATION, tx);
+      return 'done';
+    });
+    assert.equal(result.ok, true);
+
+    const rows = readOutboxRows(volume);
+    assert.equal(rows.length, 2, 'both the caller write and the enqueued row committed together');
   });
 });

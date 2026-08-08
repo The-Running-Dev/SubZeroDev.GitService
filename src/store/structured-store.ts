@@ -9,8 +9,24 @@ import type { RetentionReport } from '../shared/retention.ts';
 import { storeError, type BackupStamp, type StoreError } from './errors.ts';
 import { MIGRATION_0001_SQL } from './migration-0001.ts';
 
+/** What `node:sqlite` accepts as a bound parameter. */
+export type SqlParameter = string | number | bigint | null | Uint8Array;
+
+/**
+ * `20-contract.md` § L1 — structured store. `run` is what makes every
+ * `tx`-taking member honest: a participant holding only an identifier has no
+ * way to reach the open transaction, so it would open its own connection and
+ * the write would land outside — surviving the caller's rollback, or being
+ * refused as busy and lost silently.
+ *
+ * No `BEGIN`, `COMMIT` or `ROLLBACK` is exposed, deliberately. The module that
+ * opened the transaction is the only one permitted to end it; a participant
+ * able to commit its caller's transaction would be a worse defect than the one
+ * this replaces.
+ */
 export interface StoreTransaction {
   readonly id: string;
+  run(sql: string, ...parameters: readonly SqlParameter[]): void;
 }
 
 export type StoreTableName =
@@ -258,7 +274,15 @@ export function createStructuredStore(options: StructuredStoreOptions): Structur
 
     async transaction<T>(work: (tx: StoreTransaction) => Promise<T>): Promise<Outcome<T, StoreError>> {
       const database = requireDb();
-      const tx: StoreTransaction = { id: createHash('sha256').update(String(clock.monotonicMs())).digest('hex').slice(0, 16) };
+      // The transaction closes over *this* connection, which is the whole
+      // point: a participant writing through `tx.run` writes inside the
+      // `BEGIN` below rather than racing it from a second connection.
+      const tx: StoreTransaction = {
+        id: createHash('sha256').update(String(clock.monotonicMs())).digest('hex').slice(0, 16),
+        run(sql: string, ...parameters: readonly SqlParameter[]): void {
+          database.prepare(sql).run(...parameters);
+        },
+      };
       try {
         database.exec('BEGIN;');
         const value = await work(tx);
