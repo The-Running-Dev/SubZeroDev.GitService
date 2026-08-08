@@ -1,0 +1,21 @@
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pwsh",
+            "args": [
+              "-NoProfile",
+              "-File",
+              "${CLAUDE_PROJECT_DIR}/tools/Measure-Session.ps1",
+              "-Hook"
+            ],
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
