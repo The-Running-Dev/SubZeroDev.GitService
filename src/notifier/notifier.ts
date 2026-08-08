@@ -235,6 +235,24 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
     }
   }
 
+  /**
+   * Move one row `from` → `in-flight`, and report whether this pass won it.
+   * The `WHERE status = ?` is the whole mechanism: two passes that both
+   * selected the row race here instead of at the webhook, and SQLite decides.
+   *
+   * `serialised` already keeps two passes of *this* process apart, so on the
+   * ordinary path this always wins. It earns its keep when that assumption
+   * does not hold — a second process against the same volume — which is
+   * exactly the case in-process serialisation cannot see.
+   */
+  function claim(row: OutboxRowDb, from: OutboxRowStatus): DbOutcome<boolean> {
+    const claimed = withDb(volumeRoot, (db) =>
+      db.prepare(`UPDATE notification_outbox SET status = 'in-flight' WHERE id = ? AND status = ?`).run(row.id, from),
+    );
+    if (!claimed.ok) return claimed;
+    return { ok: true, value: Number(claimed.value.changes) === 1 };
+  }
+
   /** Shared by `deliverPending` and `redriveUndelivered`: attempt every row in `statuses`, write back the outcome, and tally the report. */
   async function deliverRows(statuses: readonly OutboxRowStatus[]): Promise<DeliveryReport> {
     if (webhookUrl === null) {
@@ -275,6 +293,22 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
     const errors: NotifierError[] = [];
 
     for (const row of selected.value) {
+      // Claimed before it is sent, never after. Losing the claim is not an
+      // error — another pass owns the row and will count it, so this one skips
+      // it rather than double-counting a delivery it did not make.
+      const won = claim(row, row.status as OutboxRowStatus);
+      if (!won.ok) {
+        stillPending += 1;
+        errors.push(
+          notifierError(
+            { code: 'delivery-failed', status: null, attempts: row.attempts },
+            `outbox row '${row.id}' could not be claimed for delivery, so it was not attempted: ${won.reason}`,
+          ),
+        );
+        continue;
+      }
+      if (!won.value) continue;
+
       const outcome = await tryDeliver(row);
       const now = clock.now();
       errors.push(...outcome.errors);
@@ -302,17 +336,26 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
           });
 
       // The bookkeeping write is checked, not assumed. A delivery that
-      // succeeded but could not be recorded leaves the row `pending` on disk,
-      // so the next pass sends it again — counting it `delivered` here would
-      // make the report claim a state the volume does not agree with, and
-      // hide the duplicate an operator is about to receive. The row is
-      // counted as what it actually still is.
+      // succeeded but could not be recorded leaves the row short of
+      // `delivered` on disk, so a later pass sends it again — counting it
+      // `delivered` here would make the report claim a state the volume does
+      // not agree with, and hide the duplicate an operator is about to
+      // receive. The row is counted as what it actually still is.
       if (!written.ok) {
+        // The claim outlives the failed write, so release it rather than
+        // leaving the row parked `in-flight` until the next restart's sweep.
+        // Best effort by definition: if the volume is gone this fails too, and
+        // then the sweep is what recovers it.
+        const released = withDb(volumeRoot, (db) => {
+          db.prepare(`UPDATE notification_outbox SET status = 'pending' WHERE id = ? AND status = 'in-flight'`).run(row.id);
+        });
         stillPending += 1;
         errors.push(
           notifierError(
             { code: 'delivery-failed', status: null, attempts: outcome.attempts },
-            `outbox row '${row.id}' reached '${nextStatus}' but the status could not be written back, so it stays pending and will be attempted again: ${written.reason}`,
+            released.ok
+              ? `outbox row '${row.id}' reached '${nextStatus}' but the status could not be written back, so it stays pending and will be attempted again: ${written.reason}`
+              : `outbox row '${row.id}' reached '${nextStatus}' but the status could not be written back and the claim could not be released, so it stays in-flight until the next restart sweeps it: ${written.reason}`,
           ),
         );
         continue;
@@ -376,8 +419,27 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
      * conflicts long since resolved, timeouts for operations already settled.
      * `clearFailed` is the sanctioned way back for a row an operator judges
      * still worth sending, one at a time and by a human's decision.
+     *
+     * Sweeps `in-flight` back to `pending` first. A process killed mid-send
+     * leaves its claim behind, and nothing can tell that claim from a live one
+     * by inspection — boot is the single moment at which no pass of this
+     * instance can be running, which is what makes the sweep safe here and
+     * unsafe anywhere else. This is the one part of the claim mechanism that
+     * still rests on the instance lease (S2): a second live instance would
+     * sweep rows the first is still sending.
      */
     async redriveUndelivered(): Promise<DeliveryReport> {
+      const swept = withDb(volumeRoot, (db) => {
+        db.prepare(`UPDATE notification_outbox SET status = 'pending' WHERE status = 'in-flight'`).run();
+      });
+      if (!swept.ok) {
+        return {
+          delivered: 0,
+          failed: 0,
+          stillPending: 0,
+          errors: [notifierError({ code: 'delivery-failed', status: null, attempts: 0 }, `claims left by a previous process could not be swept, so no row was attempted: ${swept.reason}`)],
+        };
+      }
       return serialised(() => deliverRows(['pending']));
     },
 

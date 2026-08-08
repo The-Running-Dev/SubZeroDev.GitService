@@ -662,3 +662,68 @@ test('enqueue survives the caller having already written in the same transaction
     assert.equal(rows.length, 2, 'both the caller write and the enqueued row committed together');
   });
 });
+
+test('a row claimed by a process that died is swept back to pending by the next redrive', async () => {
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin(beginInputFor('op-1'));
+    await journal.settle('op-1' as never, TERMINAL_NOTIFICATIONS[0]!);
+
+    // Exactly what a kill -9 mid-send leaves behind: a claim with nobody
+    // holding it. Nothing can tell it from a live claim by inspection, which
+    // is why the sweep lives at boot — the one moment no pass can be running.
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    db.prepare(`UPDATE notification_outbox SET status = 'in-flight'`).run();
+    db.close();
+
+    const report = await createNotifier({
+      volumeRoot: volume,
+      clock: systemClock,
+      webhookUrl: 'https://hooks.example.invalid/notify' as never,
+      deliverFn: async () => ({ ok: true, status: 200 }),
+    }).redriveUndelivered();
+
+    assert.deepEqual(counts(report), { delivered: 1, failed: 0, stillPending: 0 }, 'an abandoned claim must not strand the row forever');
+    assert.equal(readOutboxRows(volume)[0]!.status, 'delivered');
+  });
+});
+
+test('two independent notifiers over the same volume send each row exactly once', async () => {
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin(beginInputFor('op-1'));
+    await journal.settle('op-1' as never, TERMINAL_NOTIFICATIONS[0]!);
+    await journal.begin(beginInputFor('op-2'));
+    await journal.settle('op-2' as never, TERMINAL_NOTIFICATIONS[1]!);
+
+    // Two `createNotifier` instances are two independent serialisation chains
+    // — the same thing two processes sharing a volume would be, which is the
+    // case in-process serialisation cannot see and the instance lease is meant
+    // to prevent. The interleaving matters: A selects both rows and claims the
+    // first, and while A is awaiting that webhook, B selects and claims the
+    // second. When A comes back for the second row, its claim must lose.
+    //
+    // Without the claim both instances select both rows and send all four.
+    const sent: string[] = [];
+    const deliverFn = async (_url: string, body: string) => {
+      sent.push((JSON.parse(body) as { subject: { kind: string } }).subject.kind);
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      return { ok: true, status: 200 };
+    };
+    const notifierA = createNotifier({ volumeRoot: volume, clock: systemClock, webhookUrl: 'https://hooks.example.invalid/notify' as never, deliverFn });
+    const notifierB = createNotifier({ volumeRoot: volume, clock: systemClock, webhookUrl: 'https://hooks.example.invalid/notify' as never, deliverFn });
+
+    const passA = notifierA.deliverPending();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const passB = notifierB.deliverPending();
+    const [reportA, reportB] = await Promise.all([passA, passB]);
+
+    assert.equal(sent.length, 2, `each row sent exactly once across both instances — got ${JSON.stringify(sent)}`);
+    assert.deepEqual([...sent].sort(), ['merge-conflict', 'required-check-failed']);
+    assert.equal(reportA.delivered + reportB.delivered, 2, 'and each delivery is counted once, by whichever pass made it');
+
+    const rows = readOutboxRows(volume);
+    assert.equal(rows.length, 2);
+    assert.equal(rows.every((r) => r.status === 'delivered'), true);
+  });
+});
