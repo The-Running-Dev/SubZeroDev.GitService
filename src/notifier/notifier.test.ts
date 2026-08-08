@@ -1,12 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { systemClock } from '../clock/clock.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
 import { createJournal } from '../journal/journal.ts';
 import type { JournalBeginInput, NotificationRequest } from '../journal/types.ts';
+import type { DeliveryReport } from './types.ts';
 import { createNotifier } from './notifier.ts';
 
 const ACTOR = { kind: 'mcp' as const, subject: 'sub' as never, clientId: null, grantId: null };
@@ -39,6 +41,11 @@ async function migratedVolume<T>(fn: (volume: string) => Promise<T>): Promise<T>
     await store.close();
     return fn(volume);
   });
+}
+
+/** The three counts alone. `errors` is asserted separately by the tests that care what went wrong. */
+function counts(report: DeliveryReport): { delivered: number; failed: number; stillPending: number } {
+  return { delivered: report.delivered, failed: report.failed, stillPending: report.stillPending };
 }
 
 function readOutboxRows(volume: string): { status: string; attempts: number; delivered_at: string | null }[] {
@@ -114,7 +121,7 @@ test('deliverPending delivers a pending row on the first successful attempt', as
     });
 
     const report = await notifier.deliverPending();
-    assert.deepEqual(report, { delivered: 1, failed: 0, stillPending: 0 });
+    assert.deepEqual(counts(report), { delivered: 1, failed: 0, stillPending: 0 });
     assert.equal(calls, 1);
 
     const rows = readOutboxRows(volume);
@@ -148,7 +155,7 @@ test('delivery failure retries with backoff, bounded, then marks the row failed 
     });
 
     const report = await notifier.deliverPending();
-    assert.deepEqual(report, { delivered: 0, failed: 1, stillPending: 0 });
+    assert.deepEqual(counts(report), { delivered: 0, failed: 1, stillPending: 0 });
     assert.equal(calls, 3, 'bounded to maxAttempts tries');
     assert.equal(sleeps.length, 2, 'a backoff sleep between each retry, not after the last');
 
@@ -171,7 +178,7 @@ test('with no webhook configured, rows accumulate pending and nothing throws', a
 
     const notifier = createNotifier({ volumeRoot: volume, clock: systemClock, webhookUrl: null });
     const report = await notifier.deliverPending();
-    assert.deepEqual(report, { delivered: 0, failed: 0, stillPending: 1 });
+    assert.deepEqual(counts(report), { delivered: 0, failed: 0, stillPending: 1 });
 
     const rows = readOutboxRows(volume);
     assert.equal(rows.length, 1);
@@ -237,7 +244,7 @@ test('redriveUndelivered re-attempts pending and failed rows alike, the boot pat
       deliverFn: async () => ({ ok: false, status: 503 }),
     });
     const firstPass = await failing.deliverPending();
-    assert.deepEqual(firstPass, { delivered: 0, failed: 2, stillPending: 0 });
+    assert.deepEqual(counts(firstPass), { delivered: 0, failed: 2, stillPending: 0 });
 
     // Simulate a restart: a fresh notifier instance, now with a healthy transport.
     const recovered = createNotifier({
@@ -247,7 +254,7 @@ test('redriveUndelivered re-attempts pending and failed rows alike, the boot pat
       deliverFn: async () => ({ ok: true, status: 200 }),
     });
     const redriven = await recovered.redriveUndelivered();
-    assert.deepEqual(redriven, { delivered: 2, failed: 0, stillPending: 0 });
+    assert.deepEqual(counts(redriven), { delivered: 2, failed: 0, stillPending: 0 });
 
     const rows = readOutboxRows(volume);
     assert.equal(rows.every((r) => r.status === 'delivered'), true);
@@ -284,6 +291,114 @@ test('clearFailed resets a failed row to pending without deleting it, and refuse
     assert.equal(secondClear.ok, false);
     if (secondClear.ok) return;
     assert.equal(secondClear.error.code, 'row-not-found');
+  });
+});
+
+test('S11.4 — all four NotifierError variants are constructible, and each is produced by a real path; counts stated', async () => {
+  const produced = new Set<string>();
+
+  // 1. no-transport-configured — a pass with no webhook set.
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin(beginInputFor('op-1'));
+    await journal.settle('op-1' as never, TERMINAL_NOTIFICATIONS[0]!);
+    const report = await createNotifier({ volumeRoot: volume, clock: systemClock, webhookUrl: null }).deliverPending();
+    for (const error of report.errors) produced.add(error.code);
+    assert.equal(report.errors.length, 1);
+    assert.equal(report.errors[0]!.code, 'no-transport-configured');
+  });
+
+  // 2. delivery-failed — a non-2xx that has retries left, so the row stays pending.
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin(beginInputFor('op-1'));
+    await journal.settle('op-1' as never, TERMINAL_NOTIFICATIONS[0]!);
+    const report = await createNotifier({
+      volumeRoot: volume,
+      clock: systemClock,
+      webhookUrl: 'https://hooks.example.invalid/notify' as never,
+      maxAttempts: 5,
+      deliverFn: async () => ({ ok: false, status: 500 }),
+      sleepFn: async () => {},
+    }).deliverPending();
+    for (const error of report.errors) produced.add(error.code);
+    // The bound is reached inside this single call, so the terminal error is
+    // `retries-exhausted`; `delivery-failed` is what it reports as the cause.
+    assert.ok(report.errors.some((e) => e.code === 'retries-exhausted'));
+  });
+
+  // 3. delivery-failed WITHOUT retries-exhausted — a transport error on the
+  //    first of three attempts, succeeding on the second. The row is
+  //    delivered, so nothing is exhausted, and the only thing reported is the
+  //    failure that happened on the way. This is the case that proves the
+  //    variant is reachable on its own rather than only as a companion to
+  //    exhaustion.
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin(beginInputFor('op-1'));
+    await journal.settle('op-1' as never, TERMINAL_NOTIFICATIONS[0]!);
+    let attempt = 0;
+    const notifier = createNotifier({
+      volumeRoot: volume,
+      clock: systemClock,
+      webhookUrl: 'https://hooks.example.invalid/notify' as never,
+      maxAttempts: 3,
+      deliverFn: async () => {
+        attempt += 1;
+        if (attempt === 1) throw new Error('ECONNREFUSED');
+        return { ok: true, status: 200 };
+      },
+      sleepFn: async () => {},
+    });
+    const report = await notifier.deliverPending();
+    for (const error of report.errors) produced.add(error.code);
+
+    assert.equal(report.delivered, 1, 'the row was delivered on the retry');
+    assert.equal(report.errors.length, 1, 'and the one failure on the way is still reported');
+    assert.equal(report.errors[0]!.code, 'delivery-failed');
+    assert.ok(
+      !report.errors.some((e) => e.code === 'retries-exhausted'),
+      'nothing was exhausted, so delivery-failed is reachable independently',
+    );
+    assert.match(report.errors[0]!.summary, /ECONNREFUSED/);
+  });
+
+  // 4. row-not-found — clearing a row that is not failed.
+  await migratedVolume(async (volume) => {
+    const notifier = createNotifier({ volumeRoot: volume, clock: systemClock, webhookUrl: null });
+    const cleared = await notifier.clearFailed('no-such-row' as never, ACTOR);
+    assert.equal(cleared.ok, false);
+    if (cleared.ok) return;
+    produced.add(cleared.error.code);
+  });
+
+  const expected = ['no-transport-configured', 'delivery-failed', 'retries-exhausted', 'row-not-found'];
+  assert.deepEqual([...produced].sort(), [...expected].sort(), `all ${expected.length} NotifierError variants must be reachable — produced ${produced.size}`);
+});
+
+test('S11.4 — a delivery whose status write-back fails is counted as still pending, not as delivered', async () => {
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin(beginInputFor('op-1'));
+    await journal.settle('op-1' as never, TERMINAL_NOTIFICATIONS[0]!);
+
+    const notifier = createNotifier({
+      volumeRoot: volume,
+      clock: systemClock,
+      webhookUrl: 'https://hooks.example.invalid/notify' as never,
+      deliverFn: async () => ({ ok: true, status: 200 }),
+    });
+
+    // The webhook accepts, then the volume goes away before the status can be
+    // written back. The row is still `pending` on disk, so the next pass will
+    // send it again — and a report claiming `delivered: 1` would hide the
+    // duplicate the operator is about to receive.
+    rmSync(path.join(volume, 'store.sqlite'), { force: true });
+    mkdirSync(path.join(volume, 'store.sqlite'), { recursive: true });
+
+    const report = await notifier.deliverPending();
+    assert.equal(report.delivered, 0, 'a delivery that could not be recorded is not reported as delivered');
+    assert.ok(report.errors.length > 0, 'and the reason is surfaced rather than swallowed');
   });
 });
 

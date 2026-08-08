@@ -41,6 +41,18 @@ function backoffMs(attempts: number): number {
   return Math.min(1000 * 2 ** attempts, BACKOFF_CAP_MS);
 }
 
+/**
+ * One row's delivery outcome. `errors` carries **every** failure encountered,
+ * not just the terminal one: a row that failed twice and succeeded on the
+ * third attempt still tells an operator their webhook is flaky, and reporting
+ * only the final state would throw that away.
+ */
+interface DeliveryAttempt {
+  readonly delivered: boolean;
+  readonly attempts: number;
+  readonly errors: readonly NotifierError[];
+}
+
 async function realDeliver(url: string, body: string): Promise<{ readonly ok: boolean; readonly status: number }> {
   const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
   return { ok: res.ok, status: res.status };
@@ -120,25 +132,43 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
    * something that only emerges from being invoked repeatedly by a
    * scheduler this slice does not build (S16).
    */
-  async function tryDeliver(row: OutboxRowDb): Promise<{ readonly delivered: boolean; readonly attempts: number; readonly lastError: string | null }> {
+  async function tryDeliver(row: OutboxRowDb): Promise<DeliveryAttempt> {
     let attempts = row.attempts;
-    let lastError: string | null = null;
+    const errors: NotifierError[] = [];
+
     for (;;) {
       if (webhookUrl === null) {
-        return { delivered: false, attempts, lastError: 'no webhook is configured' };
+        // Not a delivery failure — there is nothing to deliver *to*. The
+        // contract's own table says the row stays `pending` and is surfaced,
+        // which is why this returns rather than counting an attempt.
+        errors.push(notifierError({ code: 'no-transport-configured' }, 'no notifier webhook is configured, so the row stays pending'));
+        return { delivered: false, attempts, errors };
       }
+
       attempts += 1;
       try {
         const result = await deliverFn(webhookUrl as unknown as string, row.payload);
         if (result.ok) {
-          return { delivered: true, attempts, lastError: null };
+          // Delivered — but any earlier failures still travel with it.
+          return { delivered: true, attempts, errors };
         }
-        lastError = `webhook responded ${result.status}`;
+        errors.push(notifierError({ code: 'delivery-failed', status: result.status, attempts }, `the webhook responded ${result.status} on attempt ${attempts}`));
       } catch (cause) {
-        lastError = cause instanceof Error ? cause.message : String(cause);
+        const message = cause instanceof Error ? cause.message : String(cause);
+        errors.push(notifierError({ code: 'delivery-failed', status: null, attempts }, `the webhook could not be reached on attempt ${attempts}: ${message}`));
       }
+
       if (attempts >= maxAttempts) {
-        return { delivered: false, attempts, lastError };
+        // The bound is reached, so the row is about to become `failed`. That
+        // is a different statement from the last attempt's failure, and the
+        // contract gives it its own variant: never dropped, always surfaced.
+        errors.push(
+          notifierError(
+            { code: 'retries-exhausted', rowId: row.id as OutboxRowId },
+            `delivery of outbox row '${row.id}' was abandoned after ${attempts} attempt(s); the row is marked failed and kept`,
+          ),
+        );
+        return { delivered: false, attempts, errors };
       }
       await sleepFn(backoffMs(attempts));
     }
@@ -151,43 +181,69 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
       return db.prepare(`SELECT * FROM notification_outbox WHERE status IN (${placeholders}) ORDER BY created_at ASC`).all(...statuses) as unknown as OutboxRowDb[];
     });
     if (!selected.ok) {
-      return { delivered: 0, failed: 0, stillPending: 0 };
+      return {
+        delivered: 0,
+        failed: 0,
+        stillPending: 0,
+        errors: [notifierError({ code: 'delivery-failed', status: null, attempts: 0 }, `the outbox could not be read, so no row was attempted: ${selected.reason}`)],
+      };
     }
 
     let delivered = 0;
     let failed = 0;
     let stillPending = 0;
+    const errors: NotifierError[] = [];
 
     for (const row of selected.value) {
       const outcome = await tryDeliver(row);
       const now = clock.now();
-      if (outcome.delivered) {
-        delivered += 1;
-        withDb(volumeRoot, (db) => {
-          db.prepare(`UPDATE notification_outbox SET status = 'delivered', attempts = ?, last_attempt_at = ?, last_error = NULL, delivered_at = ? WHERE id = ?`).run(
-            outcome.attempts,
-            now,
-            now,
-            row.id,
-          );
-        });
+      errors.push(...outcome.errors);
+      const lastError = outcome.errors.at(-1) ?? null;
+
+      const nextStatus: OutboxRowStatus = outcome.delivered ? 'delivered' : outcome.attempts >= maxAttempts ? 'failed' : 'pending';
+
+      const written = outcome.delivered
+        ? withDb(volumeRoot, (db) => {
+            db.prepare(`UPDATE notification_outbox SET status = 'delivered', attempts = ?, last_attempt_at = ?, last_error = NULL, delivered_at = ? WHERE id = ?`).run(
+              outcome.attempts,
+              now,
+              now,
+              row.id,
+            );
+          })
+        : withDb(volumeRoot, (db) => {
+            db.prepare(`UPDATE notification_outbox SET status = ?, attempts = ?, last_attempt_at = ?, last_error = ? WHERE id = ?`).run(
+              nextStatus,
+              outcome.attempts,
+              now,
+              lastError?.summary ?? null,
+              row.id,
+            );
+          });
+
+      // The bookkeeping write is checked, not assumed. A delivery that
+      // succeeded but could not be recorded leaves the row `pending` on disk,
+      // so the next pass sends it again — counting it `delivered` here would
+      // make the report claim a state the volume does not agree with, and
+      // hide the duplicate an operator is about to receive. The row is
+      // counted as what it actually still is.
+      if (!written.ok) {
+        stillPending += 1;
+        errors.push(
+          notifierError(
+            { code: 'delivery-failed', status: null, attempts: outcome.attempts },
+            `outbox row '${row.id}' reached '${nextStatus}' but the status could not be written back, so it stays pending and will be attempted again: ${written.reason}`,
+          ),
+        );
         continue;
       }
-      const nextStatus: OutboxRowStatus = outcome.attempts >= maxAttempts ? 'failed' : 'pending';
-      if (nextStatus === 'failed') failed += 1;
+
+      if (outcome.delivered) delivered += 1;
+      else if (nextStatus === 'failed') failed += 1;
       else stillPending += 1;
-      withDb(volumeRoot, (db) => {
-        db.prepare(`UPDATE notification_outbox SET status = ?, attempts = ?, last_attempt_at = ?, last_error = ? WHERE id = ?`).run(
-          nextStatus,
-          outcome.attempts,
-          now,
-          outcome.lastError,
-          row.id,
-        );
-      });
     }
 
-    return { delivered, failed, stillPending };
+    return { delivered, failed, stillPending, errors };
   }
 
   return {

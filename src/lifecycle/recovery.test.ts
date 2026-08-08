@@ -124,7 +124,7 @@ test('S11.7 — recovery settling a terminal state the caller never saw fires th
       notifier: {
         deliverPending: async () => {
           deliverCalls += 1;
-          return { delivered: 0, failed: 0, stillPending: 1 };
+          return { delivered: 0, failed: 0, stillPending: 1, errors: [] };
         },
       },
     });

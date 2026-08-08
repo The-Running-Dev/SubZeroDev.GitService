@@ -116,6 +116,29 @@ function resolveNotifierWebhook(): HttpsUrl | null {
   return raw as HttpsUrl;
 }
 
+/**
+ * How often the composition root drives `deliverPending`.
+ *
+ * **The contract fixes no value for this.** `RetentionWindows` and
+ * `TimeoutBudget` name every operational number the design settled, and a
+ * notifier delivery cadence is not among them — so this is a deployment-set
+ * value with a documented fallback, read the same way the admission limits
+ * are, rather than a constant invented in a module and invisible in
+ * production. 30 s is chosen to be well under any human's idea of "promptly"
+ * while leaving a hanging endpoint's bounded retry room to finish between
+ * passes; it is not a number the design blessed.
+ */
+function resolveNotifierIntervalSeconds(): number {
+  const raw = process.env.NOTIFIER_INTERVAL_SECONDS;
+  if (raw === undefined || raw.trim().length === 0) return 30;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    console.error(`server: NOTIFIER_INTERVAL_SECONDS must be an integer of at least 1 (got '${raw}')`);
+    process.exit(1);
+  }
+  return value;
+}
+
 function resolveCommitSha(): GitSha {
   const fromEnv = process.env.GIT_COMMIT_SHA;
   const raw = fromEnv ?? execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim();
@@ -418,8 +441,39 @@ async function main(): Promise<void> {
     contractCapabilitySet,
   });
 
+  // What actually drives delivery. Boot re-drives once, and recovery fires a
+  // pass after settling a terminal state — but a notification enqueued during
+  // ordinary operation had nothing to send it until the next restart, which
+  // makes "unwatched" mean "unnoticed" for exactly as long as the process
+  // stays up. This is the composition root's job rather than a member on
+  // `Notifier`: the contract's interface has no start/stop, and a module that
+  // owns its own timer cannot be driven deterministically by a test.
+  let deliveryInFlight = false;
+  const deliveryTimer = setInterval(() => {
+    // Never overlap passes. A pass slower than the interval would otherwise
+    // have a second one selecting the same `pending` rows and sending them
+    // again — the duplicate the outbox exists to avoid.
+    if (deliveryInFlight) return;
+    deliveryInFlight = true;
+    void notifier
+      .deliverPending()
+      .then((report) => {
+        for (const error of report.errors) console.warn(`server: notifier delivery — ${error.summary}`);
+      })
+      .catch(() => {
+        // `deliverPending` reports rather than throwing; this is belt and
+        // braces so a future implementation cannot kill the timer.
+      })
+      .finally(() => {
+        deliveryInFlight = false;
+      });
+  }, resolveNotifierIntervalSeconds() * 1000);
+  // Unreferenced, so a pending timer never keeps the process alive on its own.
+  deliveryTimer.unref();
+
   const shutdown = (signal: NodeJS.Signals): void => {
     ready = false;
+    clearInterval(deliveryTimer);
     server.close(() => {
       void lifecycle.shutdown('signal').then(() => process.exit(0));
     });
