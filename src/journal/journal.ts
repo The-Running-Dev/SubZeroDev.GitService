@@ -67,9 +67,13 @@ interface JournalStepRow {
 }
 
 function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): Outcome<T, JournalError> {
-  mkdirSync(volumeRoot, { recursive: true });
   let db: DatabaseSync;
   try {
+    // `mkdirSync` belongs inside this guard, not before it: a missing or
+    // unwritable volume parent throws here too, and this call runs after
+    // the mutating pipeline has already acquired both locks — it must
+    // return the promised `Outcome` error, not reject and leak them.
+    mkdirSync(volumeRoot, { recursive: true });
     db = new DatabaseSync(path.join(volumeRoot, 'store.sqlite'));
     db.exec('PRAGMA foreign_keys = ON;');
   } catch (cause) {
@@ -209,8 +213,13 @@ export function createJournal(deps: JournalDependencies): Journal {
       return withDb(volumeRoot, (db) => {
         const existing = loadEntry(db, operationId);
         if (!existing) throw journalError({ code: 'entry-not-found', operationId }, `no journal entry '${operationId}'`);
-        if (existing.state === 'settled') {
-          throw journalError({ code: 'invalid-transition', from: existing.state, to: 'applied' }, `cannot move a settled entry to 'applied'`);
+        // `20-contract.md` § Error semantics › Journal: `invalid-transition`
+        // is raised for `settled` to anything, **or `attention` to
+        // `applied`** — a parked entry moving back to `applied` on its own
+        // would silently clear the state a human or a repair session put it
+        // in, without going through `clearAttention`/resolution at all.
+        if (existing.state === 'settled' || existing.state === 'attention') {
+          throw journalError({ code: 'invalid-transition', from: existing.state, to: 'applied' }, `cannot move a '${existing.state}' entry to 'applied'`);
         }
         db.prepare(`UPDATE journal_entry SET state = 'applied', updated_at = ? WHERE operation_id = ?`).run(now, operationId);
       });
@@ -271,9 +280,21 @@ export function createJournal(deps: JournalDependencies): Journal {
      * rule itself, which the contract fixes independently of who calls it.
      */
     classify(entry: OperationJournalEntry, observed: ObservedGitState, descriptor: RecoveryDescriptor | null): RecoveryClassification {
-      if (entry.steps.length === 0) {
-        // No step ever reached `applied`: the intent was written and nothing
-        // after it ran, regardless of how the observed state compares.
+      // `nothing-happened` needs *both* halves: no step ever reached
+      // `applied` (composites/remote effects), **and** the freshly observed
+      // state still matches what `preState` captured. A local mutation with
+      // no steps of its own (S7 records none — see the dispatch pipeline's
+      // own note) can still have run its side effect and crashed before
+      // `markApplied`; steps-length alone would misclassify that as nothing
+      // happened and lose the recovery candidate silently.
+      const stateUnchanged =
+        entry.preState.branch === observed.branch &&
+        entry.preState.headSha === observed.headSha &&
+        entry.preState.upstreamSha === observed.upstreamSha &&
+        entry.preState.indexDigest === observed.indexDigest &&
+        entry.preState.worktreeDigest === observed.worktreeDigest;
+
+      if (entry.steps.length === 0 && stateUnchanged) {
         return { verdict: 'nothing-happened' };
       }
       if (!descriptor) {

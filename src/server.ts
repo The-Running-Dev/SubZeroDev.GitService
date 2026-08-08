@@ -208,6 +208,7 @@ async function main(): Promise<void> {
     locks,
     audit,
     journal,
+    exec,
     clock: systemClock,
   });
 

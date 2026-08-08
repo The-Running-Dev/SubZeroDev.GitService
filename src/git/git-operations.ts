@@ -132,11 +132,23 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
    * it stays in `PathRejection` for whatever surface has both lists to
    * compare.
    */
+  /**
+   * A `PathPrefix` ending in `/` is a directory — matched by `startsWith`.
+   * One that does not is a single named file (`PathPrefix`'s own doc
+   * comment: "a `RepoRelativePath` ending in `/`, or a `RepoRelativePath`
+   * naming one file") — matched by exact equality only, so a declared
+   * `README.md` cannot also authorize `README.md.bak` the way a bare
+   * `startsWith` would.
+   */
+  function pathMatchesPrefix(candidate: string, prefix: string): boolean {
+    return prefix.endsWith('/') ? candidate.startsWith(prefix) : candidate === prefix;
+  }
+
   function validateWritePath(ctx: CallContext, rawPath: string): Outcome<RepoRelativePath, PathRejection> {
     const parsed = repoRelativePath(rawPath);
     if (!parsed.ok) return err({ kind: 'malformed', rule: parsed.error.rule });
     const candidate = parsed.value;
-    const allowed = ctx.writablePathPrefixes.some((prefix) => candidate === (prefix as unknown as string) || candidate.startsWith(prefix as unknown as string));
+    const allowed = ctx.writablePathPrefixes.some((prefix) => pathMatchesPrefix(candidate, prefix as unknown as string));
     if (!allowed) return err({ kind: 'outside-allowlist', prefixes: ctx.writablePathPrefixes });
     return ok(candidate);
   }
@@ -441,14 +453,29 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
         return precondition('commit failed — is anything staged?', [{ path: 'message', rule: 'stagedChangesExist', message: commitResult.error.summary }]);
       }
 
+      // The commit itself already happened — a real side effect the caller
+      // must be told about, one way or another. A failure to describe it
+      // (a cancelled signal, a killed subprocess) must not be reported as
+      // `success` with a fabricated empty sha and a synthetic `HEAD` branch,
+      // since that would satisfy this tool's permissive output schema while
+      // handing the caller data none of it actually observed.
       const shaResult = await git(cwd, ['rev-parse', 'HEAD'], signal);
+      if (!shaResult.ok) {
+        return infrastructure(`committed, but could not read the resulting sha: ${shaResult.error.summary}`);
+      }
       const branch = await currentBranch(cwd, signal);
+      if (branch === null) {
+        return infrastructure(`committed ${shaResult.value.stdout.trim()}, but could not determine the current branch`);
+      }
       const changedResult = await git(cwd, ['diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'], signal);
+      if (!changedResult.ok) {
+        return infrastructure(`committed ${shaResult.value.stdout.trim()}, but could not read its changed paths: ${changedResult.error.summary}`);
+      }
 
       const data: GitCommitData = {
-        sha: (shaResult.ok ? shaResult.value.stdout.trim() : '') as GitSha,
-        branch: branch ?? ('HEAD' as BranchName),
-        changedPaths: changedResult.ok ? (changedResult.value.stdout.split('\n').filter((l) => l.length > 0) as RepoRelativePath[]) : [],
+        sha: shaResult.value.stdout.trim() as GitSha,
+        branch,
+        changedPaths: changedResult.value.stdout.split('\n').filter((l) => l.length > 0) as RepoRelativePath[],
       };
       return success(`committed ${data.sha}`, data, diagnosticsFor(ctx, startedAtMs, clock));
     },

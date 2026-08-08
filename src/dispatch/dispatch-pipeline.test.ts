@@ -666,6 +666,86 @@ test('two concurrent mutations against the same repository never overlap — ins
   });
 });
 
+test('two concurrent mutations against *different* repositories never overlap either — the global mutation lock, not the per-declaration materialisation lock, is what serialises them', async () => {
+  await withVolumeAsync(async (volume) => {
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    await store.open();
+    await store.migrate();
+    await store.close();
+
+    const exec = createExec({ volumeRoot: volume });
+    const locks = createLocks();
+    const declarationA = fixtureDeclaration('repo-a', createBareGitRemote(), ['repo.read', 'git.local.write']);
+    const declarationB = fixtureDeclaration('repo-b', createBareGitRemote(), ['repo.read', 'git.local.write']);
+    const byId = new Map([
+      [declarationA.id, { ...declarationA, writablePathPrefixes: ['README.md'] as unknown as Declaration['writablePathPrefixes'] }],
+      [declarationB.id, { ...declarationB, writablePathPrefixes: ['README.md'] as unknown as Declaration['writablePathPrefixes'] }],
+    ]);
+    const declarationsReal = createDeclarations({
+      volumeRoot: volume,
+      clock: systemClock,
+      remoteHostAllowlist: [],
+      ceiling: CAPABILITY_SET,
+      cloneAdoptionCheck: () => ({ observedRemote: async () => ({ cloneExists: false }), isSafeToAdopt: async () => ({ safe: true }) }),
+    });
+    const declarations: Declarations = { ...declarationsReal, async get(id) { return byId.get(id) ?? null; } };
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations });
+
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+    const moduleAdapter = createModuleAdapter();
+    let inFlight = 0;
+    let overlapped = false;
+    moduleAdapter.register('git.stage' as never, async (ctx, input) => {
+      inFlight += 1;
+      if (inFlight > 1) overlapped = true;
+      await new Promise((r) => setTimeout(r, 20));
+      const result = await toModuleHandler(gitOperations.stage)(ctx, input);
+      inFlight -= 1;
+      return result;
+    });
+
+    const pipeline = createDispatchPipeline({
+      registry: mutatingRegistryOf([STAGE_ENTRY]),
+      ceiling: MUTATION_CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      journal,
+      clock: systemClock,
+    });
+
+    for (const declaration of [declarationA, declarationB]) {
+      const holder = { operationId: 'setup' as never, declarationId: declaration.id, tool: 'setup' as never, heldSince: systemClock.now() };
+      const ensured = await cloneStore.ensure(byId.get(declaration.id)!, holder, new AbortController().signal);
+      assert.equal(ensured.ok, true);
+      if (!ensured.ok) return;
+      writeFileSync(path.join(ensured.value.clone.path, 'README.md'), 'fixture\nchanged\n', 'utf8');
+      ensured.value.materialisationLock.release();
+      ensured.value.activePin.release();
+    }
+
+    const call = (declarationId: string) =>
+      pipeline.dispatch({
+        toolName: 'git_stage' as never,
+        input: { paths: ['README.md'] },
+        session: sessionWith(['repo.read', 'git.local.write']),
+        declarationId: declarationId as never,
+        scheduledJobId: null,
+        context: 'normal',
+        signal: new AbortController().signal,
+      });
+
+    const [first, second] = await Promise.all([call('repo-a'), call('repo-b')]);
+    assert.equal(overlapped, false, 'two different repositories still never mutate concurrently — the global mutation lock, not a per-declaration one, serialises them');
+    assert.equal(first.kind, 'success');
+    assert.equal(second.kind, 'success');
+  });
+});
+
 test('a mutation that times out waiting for the mutation lock returns conflict naming the holding operation', async () => {
   // Two *different* declarations, deliberately — the materialisation lock is
   // per-declaration and a mutating call holds it for its whole duration, so
@@ -704,7 +784,15 @@ test('a mutation that times out waiting for the mutation lock returns conflict n
     const heldGate = new Promise<void>((resolve) => {
       releaseHeld = resolve;
     });
+    let signalHandlerEntered = () => {};
+    const handlerEntered = new Promise<void>((resolve) => {
+      signalHandlerEntered = resolve;
+    });
     moduleAdapter.register('git.stage' as never, async (ctx, input) => {
+      // Signals that this call already holds the global mutation lock — the
+      // handler only runs once `dispatchMutating` has acquired it — rather
+      // than a fixed sleep guessing how long acquisition takes.
+      signalHandlerEntered();
       await heldGate;
       return toModuleHandler(gitOperations.stage)(ctx, input);
     });
@@ -744,7 +832,7 @@ test('a mutation that times out waiting for the mutation lock returns conflict n
       });
 
     const holderCall = call('repo-a');
-    await new Promise((r) => setTimeout(r, 5)); // let the first call actually acquire the mutation lock
+    await handlerEntered; // the holder is inside its handler, so it already holds the mutation lock
     const waiterCall = call('repo-b');
 
     const waiterResult = await waiterCall;

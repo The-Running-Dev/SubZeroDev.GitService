@@ -471,9 +471,28 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
       return result as unknown as EffectiveGrant;
     },
 
+    /**
+     * Excludes a declared prefix on *either* direction of overlap with a
+     * stripped one — not just "declared starts with stripped" (a declared
+     * `.github/workflows/release.yml` under stripped `.github/workflows/`),
+     * but also "stripped starts with declared" (a declared `.github/`
+     * reaching over stripped `.github/workflows/`). The latter previously
+     * survived unfiltered: `.github/`.startsWith('.github/workflows/')` is
+     * false, so it passed through and authorized exactly the unattended
+     * write invariant A4 exists to stop. `PathPrefix` has no "prefix minus
+     * an excluded sub-path" shape, so a broader declared prefix that
+     * reaches into stripped territory is dropped whole (fail closed) rather
+     * than partially carved — the same trade the design already makes by
+     * stripping whole prefixes rather than narrowing them.
+     */
     effectiveWritablePrefixes(declaration: Declaration, profile: ActorProfile): readonly PathPrefix[] {
       if (profile.strippedPathPrefixes.length === 0) return declaration.writablePathPrefixes;
-      return declaration.writablePathPrefixes.filter((prefix) => !profile.strippedPathPrefixes.some((stripped) => (prefix as unknown as string).startsWith(stripped as unknown as string)));
+      return declaration.writablePathPrefixes.filter(
+        (prefix) =>
+          !profile.strippedPathPrefixes.some(
+            (stripped) => (prefix as unknown as string).startsWith(stripped as unknown as string) || (stripped as unknown as string).startsWith(prefix as unknown as string),
+          ),
+      );
     },
 
     /**

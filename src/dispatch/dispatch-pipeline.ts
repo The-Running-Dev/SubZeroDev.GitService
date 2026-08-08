@@ -10,6 +10,7 @@ import type { CloneStore } from '../clone/clone-store.ts';
 import type { PreState } from '../clone/types.ts';
 import type { Locks } from '../locks/locks.ts';
 import type { Audit } from '../audit/audit.ts';
+import type { Exec } from '../exec/exec.ts';
 import type { Journal } from '../journal/journal.ts';
 import type { CapabilityName, ContractCapabilitySet, DeploymentCeiling } from '../contract/capabilities.ts';
 import type { CompiledRegistry, ToolDeclaration } from '../contract/tool-declaration.ts';
@@ -48,7 +49,9 @@ export interface DispatchPipelineDependencies {
   readonly locks: Pick<Locks, 'pinActiveOperation' | 'acquireMutation'>;
   readonly audit: Pick<Audit, 'append'>;
   /** Required only once a `mutating` registry entry exists (S7); every S6-only registry never reaches the branch that calls it. */
-  readonly journal?: Pick<Journal, 'begin' | 'appendStep' | 'markApplied' | 'settle'>;
+  readonly journal?: Pick<Journal, 'begin' | 'markApplied' | 'settle'>;
+  /** `scrubJson` only — `JournalBeginInput.input` must be scrubbed before it is persisted (`20-contract.md` § Operation journal). Optional so every pre-S7 read-only call site keeps compiling; the mutating path is the only one that ever reaches it. */
+  readonly exec?: Pick<Exec, 'scrubJson'>;
   readonly clock: Clock;
   readonly mutationLockAcquireMs?: number;
 }
@@ -90,11 +93,22 @@ function byteLength(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value) ?? '', 'utf8');
 }
 
-function extractPathsFromInput(input: JsonValue): readonly RepoRelativePath[] {
-  if (input === null || typeof input !== 'object' || Array.isArray(input)) return [];
-  const paths = (input as { readonly paths?: unknown }).paths;
-  if (!Array.isArray(paths)) return [];
-  return paths.filter((p): p is string => typeof p === 'string') as RepoRelativePath[];
+/**
+ * The audit trail's `changedPaths` describes what actually changed, not what
+ * was requested — a rejected or partially-applied stage/restore must not
+ * report its input paths as changed, and `git_commit` (no `paths` input at
+ * all) must report the paths its own output names. Every S7 mutating tool's
+ * `*Data` carries one of these three field names for exactly this reason;
+ * checked in that order because a single result only ever carries one.
+ */
+function extractChangedPathsFromResultData(data: unknown): readonly RepoRelativePath[] {
+  if (data === null || typeof data !== 'object') return [];
+  const record = data as Record<string, unknown>;
+  for (const field of ['staged', 'restored', 'changedPaths'] as const) {
+    const value = record[field];
+    if (Array.isArray(value)) return value.filter((p): p is string => typeof p === 'string') as RepoRelativePath[];
+  }
+  return [];
 }
 
 /**
@@ -111,6 +125,7 @@ function extractPathsFromInput(input: JsonValue): readonly RepoRelativePath[] {
  */
 export function createDispatchPipeline(deps: DispatchPipelineDependencies): DispatchPipeline {
   const { registry, ceiling, moduleAdapter, declarations, cloneStore, locks, audit, journal, clock } = deps;
+  const exec: Pick<Exec, 'scrubJson'> = deps.exec ?? { scrubJson: (value) => value };
   const mutationLockAcquireMs = deps.mutationLockAcquireMs ?? MUTATION_LOCK_ACQUIRE_MS_DEFAULT;
 
   function entryFor(toolName: RegistryToolName): ToolDeclaration | null {
@@ -225,79 +240,90 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
       activePin.release();
     };
 
-    const mutationAcquired = await locks.acquireMutation(holder, mutationLockAcquireMs, request.signal);
-    if (!mutationAcquired.ok) {
+    try {
+      const mutationAcquired = await locks.acquireMutation(holder, mutationLockAcquireMs, request.signal);
+      if (!mutationAcquired.ok) {
+        // `20-contract.md` § Error semantics › Locks: every `LockError`
+        // variant maps to `conflict`; `acquire-timeout` is the only one
+        // naming a holder.
+        const holderOfLock = 'holder' in mutationAcquired.error ? mutationAcquired.error.holder : null;
+        return conflict(mutationAcquired.error.summary, holderOfLock);
+      }
+      mutationLock = mutationAcquired.value;
+
+      // Pre-state is captured under the mutation lock, before the intent record.
+      const observed = await cloneStore.observeGitState(declaration.id);
+      if (!observed.ok) {
+        // `20-contract.md` § Error semantics › Journal: `prestate-capture-failed`
+        // aborts before acting — `infrastructure`, no side effects.
+        return infrastructure(`could not capture pre-state for '${declaration.id}': ${observed.error.summary}`);
+      }
+      const preState: PreState = {
+        branch: observed.value.branch,
+        headSha: observed.value.headSha,
+        upstreamSha: observed.value.upstreamSha,
+        indexDigest: observed.value.indexDigest,
+        worktreeDigest: observed.value.worktreeDigest,
+      };
+
+      // `input` is scrubbed by `Exec.scrubJson` before it reaches the
+      // journal (`20-contract.md` § Operation journal) — a commit message
+      // or path carrying a credential-bearing URL must not persist verbatim.
+      const begun = await journal.begin({
+        operationId,
+        declarationId: declaration.id,
+        generation: declaration.generation,
+        tool: entry.name,
+        input: exec.scrubJson(request.input),
+        actorRef,
+        scheduledJobId: request.scheduledJobId,
+        context: request.context,
+        preState,
+      });
+      if (!begun.ok) {
+        // `intent-write-failed` aborts before acting, same as above — the
+        // first side effect never runs, so the tree is untouched.
+        return infrastructure(`could not write the journal intent record: ${begun.error.summary}`);
+      }
+
+      // No `appendStep` here: a step marks a call whose effect local
+      // pre-state cannot observe (a composite's sub-step, a push, a PR —
+      // `10-design.md` § control flow #1, step 9). A single local mutation's
+      // effect *is* observable in local pre-state, via `preState` itself —
+      // recording a step unconditionally, before the domain handler even
+      // runs, would leave a crash between here and the handler indistinguishable
+      // from one after it, which is exactly the `nothing-happened` case
+      // `classify()` exists to detect.
+      const ctx = buildContext(request, entry, declaration, operationId, actorRef, cloneRoot);
+      const result = await invokeAndEnvelope(entry, ctx, request.input);
+
+      await journal.markApplied(operationId);
+
+      await audit.append({
+        at: clock.now(),
+        operationId,
+        declarationId: declaration.id,
+        generation: declaration.generation,
+        tool: entry.name,
+        actorRef,
+        context: request.context,
+        form: 'call',
+        resultKind: result.kind,
+        changedPaths: result.ok ? extractChangedPathsFromResultData(result.data) : [],
+      });
+
+      await journal.settle(operationId, null);
+
+      return result;
+    } finally {
+      // Idempotent and safe at every exit — the normal-completion path
+      // above, a `return` on any error branch, or an unexpected rejection
+      // from `acquireMutation`, `observeGitState`, `journal.begin`,
+      // `moduleAdapter.invoke`, `journal.markApplied`, `audit.append` or
+      // `journal.settle`. Without this `finally`, a thrown error at any of
+      // those points would leak the global mutation lock forever.
       release();
-      // `20-contract.md` § Error semantics › Locks: every `LockError` variant
-      // maps to `conflict`; `acquire-timeout` is the only one naming a holder.
-      const holderOfLock = 'holder' in mutationAcquired.error ? mutationAcquired.error.holder : null;
-      return conflict(mutationAcquired.error.summary, holderOfLock);
     }
-    mutationLock = mutationAcquired.value;
-
-    // Pre-state is captured under the mutation lock, before the intent record.
-    const observed = await cloneStore.observeGitState(declaration.id);
-    if (!observed.ok) {
-      release();
-      // `20-contract.md` § Error semantics › Journal: `prestate-capture-failed`
-      // aborts before acting — `infrastructure`, no side effects.
-      return infrastructure(`could not capture pre-state for '${declaration.id}': ${observed.error.summary}`);
-    }
-    const preState: PreState = {
-      branch: observed.value.branch,
-      headSha: observed.value.headSha,
-      upstreamSha: observed.value.upstreamSha,
-      indexDigest: observed.value.indexDigest,
-      worktreeDigest: observed.value.worktreeDigest,
-    };
-
-    const begun = await journal.begin({
-      operationId,
-      declarationId: declaration.id,
-      generation: declaration.generation,
-      tool: entry.name,
-      input: request.input,
-      actorRef,
-      scheduledJobId: request.scheduledJobId,
-      context: request.context,
-      preState,
-    });
-    if (!begun.ok) {
-      release();
-      // `intent-write-failed` aborts before acting, same as above — the
-      // first side effect never runs, so the tree is untouched.
-      return infrastructure(`could not write the journal intent record: ${begun.error.summary}`);
-    }
-
-    const stepped = await journal.appendStep(operationId, entry.name);
-    if (!stepped.ok) {
-      release();
-      return infrastructure(`could not append the journal step: ${stepped.error.summary}`);
-    }
-
-    const ctx = buildContext(request, entry, declaration, operationId, actorRef, cloneRoot);
-    const result = await invokeAndEnvelope(entry, ctx, request.input);
-
-    await journal.markApplied(operationId);
-
-    await audit.append({
-      at: clock.now(),
-      operationId,
-      declarationId: declaration.id,
-      generation: declaration.generation,
-      tool: entry.name,
-      actorRef,
-      context: request.context,
-      form: 'call',
-      resultKind: result.kind,
-      changedPaths: extractPathsFromInput(request.input),
-    });
-
-    release();
-
-    await journal.settle(operationId, null);
-
-    return result;
   }
 
   return {
