@@ -653,11 +653,19 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
         ]);
       }
 
-      const headResult = await git(cwd, ['rev-parse', branch], signal);
+      // `show-ref --verify`, not `rev-parse`. `rev-parse` resolves any
+      // revision expression — a tag, a raw sha, `main~1` — so an input that is
+      // not a local branch would pass and then fail inside the push as a
+      // misleading upstream error. Prefixing `refs/heads/` is not enough on
+      // its own either: `rev-parse --verify refs/heads/main~1` still applies
+      // the `~1`. `show-ref --verify` requires an exact ref and honours no
+      // revision syntax at all, so what is checked here is precisely the ref
+      // the refspec below pushes.
+      const headResult = await git(cwd, ['show-ref', '--verify', `refs/heads/${branch}`], signal);
       if (!headResult.ok) {
-        return precondition(`'${branch}' does not exist in this clone`, [{ path: 'branch', rule: 'must-exist', message: branch }]);
+        return precondition(`'${branch}' is not a local branch in this clone`, [{ path: 'branch', rule: 'must-be-local-branch', message: branch }]);
       }
-      const headSha = headResult.value.stdout.trim() as GitSha;
+      const headSha = (headResult.value.stdout.trim().split(/\s+/)[0] ?? '') as GitSha;
 
       const prepared = await prepareRemote(ctx);
       if (!prepared.ok) return prepared.error;

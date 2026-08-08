@@ -463,6 +463,47 @@ test('sync_base fast-forwards a base branch the remote has moved ahead of, and r
   });
 });
 
+test('push refuses a branch input that is a revision expression rather than a local branch, before reaching a remote', async () => {
+  await withVolumeAsync(async (volumeRoot) => {
+    await migratedVolume(volumeRoot);
+    const clone = realClone();
+    const mount = secretsMount(SECRET, null);
+    try {
+      const credentialEnv = new Map<EnvVarName, string>();
+      const exec = createExec({ volumeRoot, credentialEnv });
+      const declaration = fixtureDeclaration(DECLARATION, clone.bareDir);
+      const operations = createGitOperations({
+        clock: systemClock,
+        exec,
+        locks: createLocks(),
+        declarations: { get: async () => declaration },
+        credentials: createCredentialResolver({ credentialMountRoot: mount.root, volumeRoot, clock: systemClock }),
+        credentialEnv,
+      });
+
+      writeFileSync(path.join(clone.clonePath, 'SECOND.md'), 'second\n', 'utf8');
+      git(['add', 'SECOND.md'], clone.clonePath);
+      git(['commit', '-m', 'second'], clone.clonePath);
+      git(['tag', 'v1'], clone.clonePath);
+
+      // Each of these resolves under a bare `git rev-parse` and is not a local
+      // branch, so pushing `refs/heads/<it>` would fail as an upstream error
+      // that named the wrong cause.
+      for (const branch of ['main~1', 'v1', gitOut(['rev-parse', 'HEAD'], clone.clonePath).trim()]) {
+        const result = await operations.push(contextFor(clone.clonePath), { branch: branch as never });
+        assert.equal(result.kind, 'precondition', `'${branch}' must be refused as an input, not as a failed push`);
+        assert.match(result.summary, /not a local branch/);
+      }
+
+      // The remote was never touched by any of them.
+      assert.equal(gitOut(['tag', '--list'], clone.bareDir).trim(), '');
+    } finally {
+      mount.cleanup();
+      clone.cleanup();
+    }
+  });
+});
+
 test('a credential reference not permitted to reach the remote refuses with authorization, before any network call', async () => {
   await withVolumeAsync(async (volumeRoot) => {
     await migratedVolume(volumeRoot);

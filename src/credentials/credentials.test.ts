@@ -15,10 +15,25 @@ const REPO_A = 'repo-a' as DeclarationId;
 const REPO_B = 'repo-b' as DeclarationId;
 const SECRET = 'ghp-fixture-secret-value';
 
+/**
+ * Every file is stamped five seconds into the past.
+ *
+ * A mark clears when the secret file is newer than `marked_at`, and both sides
+ * are milliseconds — so a fixture that writes the file and marks it in the
+ * same tick is asserting a coincidence rather than a property, and fails
+ * whenever the machine is loaded enough to reorder them. Back-dating gives
+ * every test an unambiguous "this secret predates the mark" baseline; the one
+ * test that needs the opposite stamps its own file forward explicitly.
+ */
 function mount(files: Readonly<Record<string, string>>): { readonly root: string; readonly cleanup: () => void } {
   const root = mkdtempSync(path.join(tmpdir(), 'szg-creds-'));
   mkdirSync(root, { recursive: true });
-  for (const [name, contents] of Object.entries(files)) writeFileSync(path.join(root, name), contents, 'utf8');
+  const earlier = new Date(Date.now() - 5_000);
+  for (const [name, contents] of Object.entries(files)) {
+    const file = path.join(root, name);
+    writeFileSync(file, contents, 'utf8');
+    utimesSync(file, earlier, earlier);
+  }
   return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
@@ -71,7 +86,12 @@ test('S9.1: a reference naming a missing file returns reference-not-found, namin
       if (resolved.ok) return;
       assert.equal(resolved.error.code, 'reference-not-found');
       assert.equal(resolved.error.resultKind, 'precondition');
+      // The criterion and the contract's error table both require *both*
+      // names: the reference, and the declaration that wanted it. The variant
+      // carries only `ref`, so the declaration reaches the operator through
+      // the summary.
       assert.match(resolved.error.summary, new RegExp(REF));
+      assert.match(resolved.error.summary, new RegExp(REPO_A));
       // The reference that *does* exist in the mount was never read, so no
       // value can have leaked through the failure path.
       assert.equal(JSON.stringify(resolved.error).includes(SECRET), false);
@@ -184,6 +204,31 @@ test('S9.5: the mark clears by hand, and listFailing is what the health view rea
 
       // Cleared by hand means the next operation may try again.
       assert.equal((await resolver.resolveInto(REF, REPO_A, new Map())).ok, true);
+    } finally {
+      secrets.cleanup();
+    }
+  });
+});
+
+test('a mark store that cannot be read fails closed: resolution refuses rather than reporting the reference healthy', async () => {
+  await withVolumeAsync(async (volumeRoot) => {
+    await migratedVolume(volumeRoot);
+    const secrets = mount({ [REF]: SECRET });
+    try {
+      const resolver = createCredentialResolver({ credentialMountRoot: secrets.root, volumeRoot, clock: systemClock });
+      await resolver.markFailing(REF, REPO_A, 'the remote refused this credential');
+
+      // A store SQLite cannot open at all. "No marks" and "no answer" must not
+      // be the same verdict — collapsing them hands out a credential the
+      // service has already been told is failing.
+      writeFileSync(path.join(volumeRoot, 'store.sqlite'), 'this is not a database', 'utf8');
+
+      const resolved = await resolver.resolveInto(REF, REPO_A, new Map());
+      assert.equal(resolved.ok, false);
+      if (resolved.ok) return;
+      assert.equal(resolved.error.resultKind, 'infrastructure');
+      assert.match(resolved.error.summary, /not known whether/);
+      assert.equal(resolved.error.summary.includes(SECRET), false);
     } finally {
       secrets.cleanup();
     }

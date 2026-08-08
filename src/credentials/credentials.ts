@@ -45,19 +45,29 @@ interface MarkRow {
   readonly marked_at: string;
 }
 
-function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): T | null {
+/**
+ * Returns an outcome rather than `null`, because for the mark store the two
+ * are not the same answer. "No row" means this reference is healthy for this
+ * declaration; "the store could not be read" means nothing is known about it,
+ * and collapsing the second into the first would let a busy or corrupt store
+ * silently readmit a credential that is marked failing. `resolveInto` is the
+ * caller that must tell them apart.
+ */
+type DbOutcome<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly reason: string };
+
+function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): DbOutcome<T> {
   let db: DatabaseSync;
   try {
     mkdirSync(volumeRoot, { recursive: true });
     db = new DatabaseSync(path.join(volumeRoot, 'store.sqlite'));
     db.exec('PRAGMA foreign_keys = ON;');
-  } catch {
-    return null;
+  } catch (cause) {
+    return { ok: false, reason: cause instanceof Error ? cause.message : String(cause) };
   }
   try {
-    return fn(db);
-  } catch {
-    return null;
+    return { ok: true, value: fn(db) };
+  } catch (cause) {
+    return { ok: false, reason: cause instanceof Error ? cause.message : String(cause) };
   } finally {
     db.close();
   }
@@ -90,34 +100,49 @@ export function createCredentialResolver(deps: CredentialResolverDependencies): 
     return path.join(credentialMountRoot, path.basename(ref as string));
   }
 
-  function readSecret(ref: CredentialRef): Outcome<string, CredentialError> {
+  /**
+   * `declarationId` is here only to be named in the summary. The contract's
+   * error table requires `reference-not-found` to name "the reference and the
+   * declaration, never a value", and the variant itself carries only `ref` —
+   * so the declaration has to reach the operator through the prose, which is
+   * the half an operator actually reads when deciding which repository is
+   * misconfigured.
+   */
+  function readSecret(ref: CredentialRef, declarationId: DeclarationId): Outcome<string, CredentialError> {
     const file = secretPath(ref);
     if (!existsSync(file)) {
-      return err(credentialError({ code: 'reference-not-found', ref }, `no credential reference named '${ref}' in the mount`));
+      return err(
+        credentialError({ code: 'reference-not-found', ref }, `no credential reference named '${ref}' in the mount, required by declaration '${declarationId}'`),
+      );
     }
     try {
       // A file written by an editor almost always ends in a newline, and a
       // token with a trailing newline authenticates as a different token.
       return ok(readFileSync(file, 'utf8').replace(/\r?\n$/, ''));
     } catch {
-      return err(credentialError({ code: 'reference-unreadable', ref }, `credential reference '${ref}' could not be read`));
+      return err(credentialError({ code: 'reference-unreadable', ref }, `credential reference '${ref}', required by declaration '${declarationId}', could not be read`));
     }
   }
 
-  function readMark(ref: CredentialRef, declarationId: DeclarationId): CredentialFailureMark | null {
+  function toMark(row: MarkRow): CredentialFailureMark {
+    return {
+      ref: row.credential_ref as CredentialRef,
+      declarationId: row.declaration_id as DeclarationId,
+      reason: row.reason,
+      markedAt: row.marked_at as IsoUtcTimestamp,
+    };
+  }
+
+  /** `ok: true` with a `null` value means "no mark"; `ok: false` means "unknown", which is not the same thing. */
+  function readMark(ref: CredentialRef, declarationId: DeclarationId): DbOutcome<CredentialFailureMark | null> {
     const rows = withDb(volumeRoot, (db) =>
       db
         .prepare('SELECT credential_ref, declaration_id, reason, marked_at FROM credential_failure_mark WHERE credential_ref = ? AND declaration_id = ?')
         .all(ref as string, declarationId as string) as unknown as MarkRow[],
     );
-    const found = rows?.[0];
-    if (!found) return null;
-    return {
-      ref: found.credential_ref as CredentialRef,
-      declarationId: found.declaration_id as DeclarationId,
-      reason: found.reason,
-      markedAt: found.marked_at as IsoUtcTimestamp,
-    };
+    if (!rows.ok) return rows;
+    const found = rows.value[0];
+    return { ok: true, value: found ? toMark(found) : null };
   }
 
   /**
@@ -139,7 +164,14 @@ export function createCredentialResolver(deps: CredentialResolverDependencies): 
    */
   function secretChangedSince(ref: CredentialRef, markedAt: IsoUtcTimestamp): boolean {
     try {
-      return statSync(secretPath(ref)).mtimeMs > Date.parse(markedAt);
+      // Floored, and strictly greater. `mtimeMs` carries sub-millisecond
+      // precision while an `IsoUtcTimestamp` is truncated to whole
+      // milliseconds, so a file written *before* the mark but inside the same
+      // millisecond compares as newer — and the mark clears itself the instant
+      // it is taken. Flooring puts both on the same scale, and requiring a
+      // strictly later millisecond makes a tie mean "not changed", which is
+      // the direction that keeps the mark.
+      return Math.floor(statSync(secretPath(ref)).mtimeMs) > Date.parse(markedAt);
     } catch {
       return false;
     }
@@ -153,10 +185,26 @@ export function createCredentialResolver(deps: CredentialResolverDependencies): 
 
   return {
     async resolveInto(ref: CredentialRef, declarationId: DeclarationId, env: MutableEnv): Promise<Outcome<CredentialBinding, CredentialError>> {
-      const secret = readSecret(ref);
+      const secret = readSecret(ref, declarationId);
       if (!secret.ok) return secret;
 
-      const mark = readMark(ref, declarationId);
+      // Fail closed. A store that cannot be read is not a store with no marks
+      // in it, and treating the two alike would hand out a credential the
+      // service has already been told is failing. `reference-unreadable` is
+      // the only `infrastructure`-class variant the contract's four-way
+      // `CredentialError` gives this module; its summary names the real cause
+      // so an operator is not sent to look at the mount for a store fault.
+      const markRead = readMark(ref, declarationId);
+      if (!markRead.ok) {
+        return err(
+          credentialError(
+            { code: 'reference-unreadable', ref },
+            `could not read the failure marks for '${ref}' on '${declarationId}', so it is not known whether this credential is marked failing: ${markRead.reason}`,
+          ),
+        );
+      }
+
+      const mark = markRead.value;
       if (mark !== null) {
         if (!secretChangedSince(ref, mark.markedAt)) {
           return err(
@@ -206,17 +254,18 @@ export function createCredentialResolver(deps: CredentialResolverDependencies): 
 
     clearFailing,
 
+    /**
+     * Returns `[]` on a store read failure, which is indistinguishable from
+     * "no references are failing" — the same gap issue #42 records for
+     * `Journal`'s four query methods, and for the same reason: the contract
+     * fixes this signature with no error channel. `resolveInto` above does not
+     * share the gap, because its signature *has* one and it fails closed.
+     */
     async listFailing(): Promise<readonly CredentialFailureMark[]> {
-      const rows =
-        withDb(volumeRoot, (db) =>
-          db.prepare('SELECT credential_ref, declaration_id, reason, marked_at FROM credential_failure_mark ORDER BY marked_at').all() as unknown as MarkRow[],
-        ) ?? [];
-      return rows.map((row) => ({
-        ref: row.credential_ref as CredentialRef,
-        declarationId: row.declaration_id as DeclarationId,
-        reason: row.reason,
-        markedAt: row.marked_at as IsoUtcTimestamp,
-      }));
+      const rows = withDb(volumeRoot, (db) =>
+        db.prepare('SELECT credential_ref, declaration_id, reason, marked_at FROM credential_failure_mark ORDER BY marked_at').all() as unknown as MarkRow[],
+      );
+      return rows.ok ? rows.value.map(toMark) : [];
     },
   };
 }

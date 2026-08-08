@@ -93,10 +93,28 @@ export const GIT_FETCH_RECOVERY: RecoveryDescriptor = {
 
 export const SYNC_BASE_RECOVERY: RecoveryDescriptor = {
   tool: 'sync_base' as never,
-  // A base sync that completed left the local base branch at the fetched
-  // upstream. Checked against the tracked ref rather than the fetched sha,
-  // which the journal entry does not carry.
-  expectedPostState: (entry, observed) => observed.upstreamSha !== entry.preState.upstreamSha || observed.headSha !== entry.preState.headSha,
+  /**
+   * **Never claims completion, deliberately.** `sync_base` is two side effects
+   * — a fetch, then an advance of `refs/heads/<base>` — and a crash between
+   * them is the whole reason this descriptor exists.
+   *
+   * `ObservedGitState` is `PreState` plus a timestamp: the checked-out branch,
+   * its head, *its* upstream, and two digests. It carries no value for
+   * `refs/heads/<base>` when the base is not the branch checked out, which is
+   * the normal case for a repository parked on a feature branch. So the one
+   * fact that would distinguish "fetched and advanced" from "fetched and
+   * died" is not in what `classify` is handed.
+   *
+   * An earlier version tested `upstreamSha !== preState.upstreamSha`, which
+   * returns true the moment the *fetch* lands — reporting a half-finished sync
+   * as complete, and settling a journal entry whose second effect never ran.
+   * Parking is the honest verdict for a window that cannot be observed, and
+   * `10-design.md` § retries is explicit that nothing mutating a repository is
+   * retried automatically. Deciding it properly needs a journal step naming
+   * the base ref and a post-state that can read it — a contract question, not
+   * a predicate this file can be clever about.
+   */
+  expectedPostState: () => false,
   resume: null,
 };
 
