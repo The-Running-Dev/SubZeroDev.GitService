@@ -55,6 +55,7 @@ export async function recoverDeclaration(deps: RecoveryDependencies, declaration
 
   const entries = await deps.journal.unsettled(declarationId, declaration.generation);
   const verdicts: RecoveryClassification[] = [];
+  let enqueuedNotification = false;
 
   for (const entry of entries) {
     // An entry already parked by a previous pass stays parked. Re-classifying
@@ -108,15 +109,13 @@ export async function recoverDeclaration(deps: RecoveryDependencies, declaration
             ? { severity: 'attention' as const, declarationId, subject: verdict.terminal, summary: `'${entry.tool}' reached a terminal state during recovery` }
             : null;
         const settled = await deps.journal.settle(entry.operationId, notify);
-        // Fired, not awaited: delivery is a separate concern from recovery
-        // finishing, and a slow or unreachable webhook must not hold up the
-        // ladder working through the rest of the unsettled entries.
-        if (settled.ok && notify && deps.notifier) {
-          void deps.notifier.deliverPending().catch(() => {
-            // `deliverPending` never throws by construction; this is belt
-            // and braces against a future implementation that does.
-          });
-        }
+        // Recorded here, delivered once after the loop. Firing a pass per
+        // entry started one concurrent pass for every recovered terminal
+        // state, and each of them selected the same `pending` rows — so
+        // recovering fifty entries sent up to fifty copies of every
+        // notification. One pass at the end covers every row this ladder
+        // enqueued.
+        if (settled.ok && notify) enqueuedNotification = true;
         break;
       }
 
@@ -152,6 +151,15 @@ export async function recoverDeclaration(deps: RecoveryDependencies, declaration
         await park(deps, entry, declarationId, verdict.reason);
         break;
     }
+  }
+
+  // One pass, after the loop, and still fired rather than awaited: a slow or
+  // unreachable webhook must not hold up the caller that triggered recovery.
+  if (enqueuedNotification && deps.notifier) {
+    void deps.notifier.deliverPending().catch(() => {
+      // `deliverPending` reports rather than throwing; belt and braces
+      // against a future implementation that does.
+    });
   }
 
   return verdicts;

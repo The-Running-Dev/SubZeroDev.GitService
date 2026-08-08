@@ -448,24 +448,34 @@ async function main(): Promise<void> {
   // stays up. This is the composition root's job rather than a member on
   // `Notifier`: the contract's interface has no start/stop, and a module that
   // owns its own timer cannot be driven deterministically by a test.
-  let deliveryInFlight = false;
+  // Tracked so shutdown can wait for it. `Notifier` serialises its own passes,
+  // so this is not a concurrency guard — it is the handle that keeps a pass
+  // from outliving the instance lease.
+  let deliveryInFlight: Promise<unknown> | null = null;
   const deliveryTimer = setInterval(() => {
-    // Never overlap passes. A pass slower than the interval would otherwise
-    // have a second one selecting the same `pending` rows and sending them
-    // again — the duplicate the outbox exists to avoid.
     if (deliveryInFlight) return;
-    deliveryInFlight = true;
-    void notifier
+    deliveryInFlight = notifier
       .deliverPending()
       .then((report) => {
-        for (const error of report.errors) console.warn(`server: notifier delivery — ${error.summary}`);
+        // Summarised, never one line per row. A deployment with no webhook
+        // and a few hundred accumulated rows would otherwise print the same
+        // sentence hundreds of times every interval, burying every other
+        // diagnostic and filling the volume the design works to keep bounded.
+        if (report.errors.length === 0) return;
+        const distinct = new Map<string, number>();
+        for (const error of report.errors) distinct.set(error.summary, (distinct.get(error.summary) ?? 0) + 1);
+        const rendered = [...distinct.entries()].slice(0, 3).map(([summary, count]) => (count > 1 ? `${summary} (×${count})` : summary));
+        const remainder = distinct.size > rendered.length ? `, and ${distinct.size - rendered.length} other kind(s)` : '';
+        console.warn(
+          `server: notifier delivered ${report.delivered}, failed ${report.failed}, still pending ${report.stillPending} — ${rendered.join('; ')}${remainder}`,
+        );
       })
       .catch(() => {
         // `deliverPending` reports rather than throwing; this is belt and
         // braces so a future implementation cannot kill the timer.
       })
       .finally(() => {
-        deliveryInFlight = false;
+        deliveryInFlight = null;
       });
   }, resolveNotifierIntervalSeconds() * 1000);
   // Unreferenced, so a pending timer never keeps the process alive on its own.
@@ -475,7 +485,15 @@ async function main(): Promise<void> {
     ready = false;
     clearInterval(deliveryTimer);
     server.close(() => {
-      void lifecycle.shutdown('signal').then(() => process.exit(0));
+      // A delivery pass holds its own connections to `store.sqlite`, so
+      // releasing the lease while one is still running would let this
+      // process keep writing after a replacement has taken the volume —
+      // two writers, which is the single invariant the lease exists for.
+      // Bounded because every attempt now carries a timeout.
+      void Promise.resolve(deliveryInFlight)
+        .catch(() => undefined)
+        .then(() => lifecycle.shutdown('signal'))
+        .then(() => process.exit(0));
     });
     void signal;
   };

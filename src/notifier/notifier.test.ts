@@ -48,9 +48,18 @@ function counts(report: DeliveryReport): { delivered: number; failed: number; st
   return { delivered: report.delivered, failed: report.failed, stillPending: report.stillPending };
 }
 
-function readOutboxRows(volume: string): { status: string; attempts: number; delivered_at: string | null }[] {
+interface OutboxRowSnapshot {
+  status: string;
+  attempts: number;
+  delivered_at: string | null;
+  /** Included so a test can prove a pass that attempted nothing also *wrote* nothing — these are the columns a no-op pass used to stamp. */
+  last_attempt_at: string | null;
+  last_error: string | null;
+}
+
+function readOutboxRows(volume: string): OutboxRowSnapshot[] {
   const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
-  const rows = db.prepare('SELECT status, attempts, delivered_at FROM notification_outbox').all() as { status: string; attempts: number; delivered_at: string | null }[];
+  const rows = db.prepare('SELECT status, attempts, delivered_at, last_attempt_at, last_error FROM notification_outbox ORDER BY created_at').all() as unknown as OutboxRowSnapshot[];
   db.close();
   return rows;
 }
@@ -227,15 +236,14 @@ test('S11.6 — a notifier endpoint that hangs does not delay the operation that
   });
 });
 
-test('redriveUndelivered re-attempts pending and failed rows alike, the boot path', async () => {
+test('redriveUndelivered re-attempts pending rows, and leaves failed ones for the operator rather than re-sending history', async () => {
   await migratedVolume(async (volume) => {
     const journal = createJournal({ volumeRoot: volume, clock: systemClock });
     await journal.begin(beginInputFor('op-1'));
     await journal.settle('op-1' as never, TERMINAL_NOTIFICATIONS[0]!);
-    await journal.begin(beginInputFor('op-2'));
-    await journal.settle('op-2' as never, TERMINAL_NOTIFICATIONS[1]!);
 
-    // First pass: fail both, exhausting attempts so op-1's row goes to `failed`.
+    // op-1 exhausts its retries and goes `failed` — a notification that has
+    // already reached a decision.
     const failing = createNotifier({
       volumeRoot: volume,
       clock: systemClock,
@@ -243,21 +251,114 @@ test('redriveUndelivered re-attempts pending and failed rows alike, the boot pat
       maxAttempts: 1,
       deliverFn: async () => ({ ok: false, status: 503 }),
     });
-    const firstPass = await failing.deliverPending();
-    assert.deepEqual(counts(firstPass), { delivered: 0, failed: 2, stillPending: 0 });
+    assert.deepEqual(counts(await failing.deliverPending()), { delivered: 0, failed: 1, stillPending: 0 });
 
-    // Simulate a restart: a fresh notifier instance, now with a healthy transport.
+    // A second, still-pending row arrives afterwards.
+    await journal.begin(beginInputFor('op-2'));
+    await journal.settle('op-2' as never, TERMINAL_NOTIFICATIONS[1]!);
+
+    // Restart: a fresh instance with a healthy transport.
+    let delivered = 0;
     const recovered = createNotifier({
       volumeRoot: volume,
       clock: systemClock,
       webhookUrl: 'https://hooks.example.invalid/notify' as never,
-      deliverFn: async () => ({ ok: true, status: 200 }),
+      deliverFn: async () => {
+        delivered += 1;
+        return { ok: true, status: 200 };
+      },
     });
     const redriven = await recovered.redriveUndelivered();
-    assert.deepEqual(counts(redriven), { delivered: 2, failed: 0, stillPending: 0 });
 
+    // Only the pending row is sent. Re-driving the failed one would page the
+    // operator with a terminal state they have already been shown and, at
+    // scale, with the entire backlog at once the moment a webhook is fixed.
+    assert.deepEqual(counts(redriven), { delivered: 1, failed: 0, stillPending: 0 });
+    assert.equal(delivered, 1, 'exactly one POST — the failed row was not re-sent');
+
+    const stillFailed = await recovered.listFailed();
+    assert.equal(stillFailed.length, 1, 'and the failed row is still surfaced, never dropped');
+  });
+});
+
+test('a delivery attempt that never responds is abandoned at the timeout rather than hanging the pass', async () => {
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin(beginInputFor('op-1'));
+    await journal.settle('op-1' as never, TERMINAL_NOTIFICATIONS[0]!);
+
+    // The endpoint accepts and then never answers — a firewall that DROPs
+    // rather than refuses. Without a bound this pass never settles, and every
+    // caller waiting on it waits forever.
+    const notifier = createNotifier({
+      volumeRoot: volume,
+      clock: systemClock,
+      webhookUrl: 'https://hooks.example.invalid/notify' as never,
+      maxAttempts: 1,
+      deliveryTimeoutSeconds: 1,
+      deliverFn: () => new Promise(() => {}),
+    });
+
+    const startedAt = Date.now();
+    const report = await notifier.deliverPending();
+    const elapsedMs = Date.now() - startedAt;
+
+    assert.ok(elapsedMs < 5000, `the pass returned in ${elapsedMs}ms rather than hanging`);
+    assert.equal(report.failed, 1);
+    assert.match(report.errors.map((e) => e.summary).join(' '), /did not respond within 1s/);
+  });
+});
+
+test('concurrent passes are serialised, so a row is never selected and sent twice', async () => {
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin(beginInputFor('op-1'));
+    await journal.settle('op-1' as never, TERMINAL_NOTIFICATIONS[0]!);
+
+    let posts = 0;
+    const notifier = createNotifier({
+      volumeRoot: volume,
+      clock: systemClock,
+      webhookUrl: 'https://hooks.example.invalid/notify' as never,
+      deliverFn: async () => {
+        posts += 1;
+        // Slow enough that an unserialised second pass would comfortably
+        // select the same still-`pending` row.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return { ok: true, status: 200 };
+      },
+    });
+
+    // Exactly the shape recovery, boot and the timer produce between them.
+    await Promise.all([notifier.deliverPending(), notifier.deliverPending(), notifier.redriveUndelivered()]);
+
+    assert.equal(posts, 1, 'the row was POSTed once despite three overlapping passes');
     const rows = readOutboxRows(volume);
-    assert.equal(rows.every((r) => r.status === 'delivered'), true);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!.status, 'delivered');
+  });
+});
+
+test('with no webhook, a pass writes nothing and reports the condition once rather than once per row', async () => {
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    for (const [i, notify] of TERMINAL_NOTIFICATIONS.entries()) {
+      await journal.begin(beginInputFor(`op-${i}`));
+      await journal.settle(`op-${i}` as never, notify);
+    }
+
+    const before = readOutboxRows(volume);
+    const notifier = createNotifier({ volumeRoot: volume, clock: systemClock, webhookUrl: null });
+    const report = await notifier.deliverPending();
+
+    assert.equal(report.errors.length, 1, 'one error for the pass, not one per row');
+    assert.equal(report.errors[0]!.code, 'no-transport-configured');
+    assert.equal(report.stillPending, 3, 'and the rows are still counted');
+
+    // Nothing was attempted, so nothing may be written — otherwise every pass
+    // rewrites the whole outbox forever on a deployment with no webhook.
+    const after = readOutboxRows(volume);
+    assert.deepEqual(after, before, 'no row was touched');
   });
 });
 

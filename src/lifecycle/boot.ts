@@ -305,16 +305,27 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       const recoveryPending = deps.recovery ? declarationsWithUnsettledEntries(await deps.recovery.journal.allUnsettled()) : [];
 
       // "Boot re-drives every undelivered row" (`10-design.md` § control flow
-      // #1, step 11) — the same durability reasoning as the lease takeover
-      // record above: a row left `pending` or `failed` by the previous
-      // process is exactly the notification that most needed to reach an
-      // operator, and a restart is the natural checkpoint to try it again.
-      // Awaited, unlike recovery's own lazy pass, because `redriveUndelivered`
-      // touches no git or host state and each attempt is already bounded —
-      // there is nothing here that could hold the service down the way a
-      // resume step could.
+      // #1, step 11) — a row left `pending` by the previous process is
+      // exactly the notification that most needed to reach an operator, and a
+      // restart is the natural checkpoint to try it again.
+      //
+      // **Fired, never awaited.** An earlier version awaited this, on the
+      // reasoning that each attempt is bounded and so nothing here could hold
+      // the service down. That was wrong twice over: the bound is per
+      // attempt, not per pass, so at the default five attempts a single
+      // unreachable row costs ~30 s of backoff and rows are processed
+      // sequentially — twenty of them blocked boot for ten minutes, during
+      // which `/healthz` does not answer and no transport listens, so an
+      // orchestrator kills the container and the replacement does the same
+      // thing again. This is the same rule recovery already follows for the
+      // same reason (`recoverDeclaration` is deliberately not called here):
+      // readiness and the transports come up first, and deferred work runs
+      // behind them.
       if (deps.notifier) {
-        await deps.notifier.redriveUndelivered();
+        void deps.notifier.redriveUndelivered().catch(() => {
+          // `redriveUndelivered` reports rather than throwing; belt and
+          // braces so a boot cannot fail on a notification.
+        });
       }
 
       return ok({

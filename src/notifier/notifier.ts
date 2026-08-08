@@ -28,14 +28,22 @@ export interface NotifierDependencies {
   /** `DeploymentConfig.notifierWebhook` — `null` means no transport is configured. */
   readonly webhookUrl: HttpsUrl | null;
   /** Injected for tests. Defaults to a real `fetch` call. */
-  readonly deliverFn?: (url: string, body: string) => Promise<{ readonly ok: boolean; readonly status: number }>;
+  readonly deliverFn?: (url: string, body: string, signal: AbortSignal) => Promise<{ readonly ok: boolean; readonly status: number }>;
   /** Injected for tests, so backoff does not really sleep. */
   readonly sleepFn?: (ms: number) => Promise<void>;
   readonly maxAttempts?: number;
+  /**
+   * How long a single delivery attempt may take before it is abandoned.
+   * Without a bound, an endpoint that accepts the connection and then never
+   * answers — a firewall that DROPs rather than refuses — hangs the pass
+   * forever, and every caller waiting on it with it.
+   */
+  readonly deliveryTimeoutSeconds?: number;
 }
 
 const MAX_ATTEMPTS_DEFAULT = 5;
 const BACKOFF_CAP_MS = 30_000;
+const DELIVERY_TIMEOUT_SECONDS_DEFAULT = 10;
 
 function backoffMs(attempts: number): number {
   return Math.min(1000 * 2 ** attempts, BACKOFF_CAP_MS);
@@ -53,8 +61,11 @@ interface DeliveryAttempt {
   readonly errors: readonly NotifierError[];
 }
 
-async function realDeliver(url: string, body: string): Promise<{ readonly ok: boolean; readonly status: number }> {
-  const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+async function realDeliver(url: string, body: string, signal: AbortSignal): Promise<{ readonly ok: boolean; readonly status: number }> {
+  // The signal is passed to `fetch` as well as being raced in `tryDeliver`,
+  // so an abandoned attempt actually closes its socket rather than leaving
+  // the request in flight with nobody waiting on it.
+  const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body, signal });
   return { ok: res.ok, status: res.status };
 }
 
@@ -124,6 +135,49 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
   const deliverFn = deps.deliverFn ?? realDeliver;
   const sleepFn = deps.sleepFn ?? realSleep;
   const maxAttempts = deps.maxAttempts ?? MAX_ATTEMPTS_DEFAULT;
+  const deliveryTimeoutSeconds = deps.deliveryTimeoutSeconds ?? DELIVERY_TIMEOUT_SECONDS_DEFAULT;
+
+  /**
+   * Passes are serialised, and that is a correctness requirement rather than
+   * tidiness. A row is selected while `pending` and keeps that status on disk
+   * until the whole retry loop for it has finished, so a second pass starting
+   * in that window selects the same row and POSTs it again. There are three
+   * independent callers — boot's redrive, recovery, and the composition
+   * root's timer — so overlap is the normal case, not a rare one.
+   *
+   * An in-process chain is sufficient precisely because the instance lease
+   * (S2) guarantees exactly one process owns this volume. It would not be
+   * sufficient without that, and if the lease invariant ever weakens this
+   * needs to become a claim on the row itself.
+   */
+  let passChain: Promise<unknown> = Promise.resolve();
+  function serialised(run: () => Promise<DeliveryReport>): Promise<DeliveryReport> {
+    const next = passChain.then(run, run);
+    passChain = next.catch(() => undefined);
+    return next;
+  }
+
+  /**
+   * One attempt, bounded. The timeout is enforced here rather than only
+   * inside `realDeliver`, so it applies to any injected transport too — a
+   * bound that only the default implementation honours is not a bound.
+   */
+  async function attemptDelivery(body: string): Promise<{ readonly ok: boolean; readonly status: number }> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), deliveryTimeoutSeconds * 1000);
+    // Never let the timeout itself hold the process open.
+    timer.unref?.();
+    try {
+      return await Promise.race([
+        deliverFn(webhookUrl as unknown as string, body, controller.signal),
+        new Promise<never>((_, reject) => {
+          controller.signal.addEventListener('abort', () => reject(new Error(`the webhook did not respond within ${deliveryTimeoutSeconds}s`)), { once: true });
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   /**
    * One row, delivered with up to `maxAttempts` tries and an exponential
@@ -137,17 +191,9 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
     const errors: NotifierError[] = [];
 
     for (;;) {
-      if (webhookUrl === null) {
-        // Not a delivery failure — there is nothing to deliver *to*. The
-        // contract's own table says the row stays `pending` and is surfaced,
-        // which is why this returns rather than counting an attempt.
-        errors.push(notifierError({ code: 'no-transport-configured' }, 'no notifier webhook is configured, so the row stays pending'));
-        return { delivered: false, attempts, errors };
-      }
-
       attempts += 1;
       try {
-        const result = await deliverFn(webhookUrl as unknown as string, row.payload);
+        const result = await attemptDelivery(row.payload);
         if (result.ok) {
           // Delivered — but any earlier failures still travel with it.
           return { delivered: true, attempts, errors };
@@ -176,6 +222,25 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
 
   /** Shared by `deliverPending` and `redriveUndelivered`: attempt every row in `statuses`, write back the outcome, and tally the report. */
   async function deliverRows(statuses: readonly OutboxRowStatus[]): Promise<DeliveryReport> {
+    if (webhookUrl === null) {
+      // Nothing was attempted, so nothing is written. Falling through would
+      // stamp `last_attempt_at` on every row for an attempt that never
+      // happened — and since no row can leave `pending` without a transport,
+      // and nothing prunes `pending` rows, that rewrote the entire outbox on
+      // every pass forever. No transport is one fact about the deployment,
+      // reported once, not once per row.
+      const counted = withDb(volumeRoot, (db) => {
+        const placeholders = statuses.map(() => '?').join(',');
+        return (db.prepare(`SELECT COUNT(*) AS n FROM notification_outbox WHERE status IN (${placeholders})`).get(...statuses) as { n: number } | undefined)?.n ?? 0;
+      });
+      return {
+        delivered: 0,
+        failed: 0,
+        stillPending: counted.ok ? counted.value : 0,
+        errors: [notifierError({ code: 'no-transport-configured' }, 'no notifier webhook is configured, so no row was attempted and every row stays pending')],
+      };
+    }
+
     const selected = withDb(volumeRoot, (db) => {
       const placeholders = statuses.map(() => '?').join(',');
       return db.prepare(`SELECT * FROM notification_outbox WHERE status IN (${placeholders}) ORDER BY created_at ASC`).all(...statuses) as unknown as OutboxRowDb[];
@@ -277,19 +342,28 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
     },
 
     async deliverPending(): Promise<DeliveryReport> {
-      return deliverRows(['pending']);
+      return serialised(() => deliverRows(['pending']));
     },
 
     /**
-     * Boot's call. Re-attempts every row that never reached `delivered` —
-     * `pending` and `failed` alike, because a restart is exactly the durable
-     * checkpoint `10-design.md` names as the reason no row is ever dropped:
-     * "the one terminal state that most needed to reach you is the one that
-     * never does" applies equally to a row this instance had already given
-     * up on before the restart.
+     * Boot's call. `pending` only, deliberately.
+     *
+     * The durability argument behind boot re-driving is about rows caught
+     * mid-flight when a process died — those are `pending`. A `failed` row
+     * was not lost to a crash: it exhausted its retries and reached a
+     * decision, and the contract's answer for it is "mark it failed and
+     * surface it, never drop it" — which `listFailed` and the health view
+     * already do. Surfacing is not resending.
+     *
+     * Including `failed` here meant every restart re-POSTed the entire
+     * history: fix a webhook credential that expired a week ago, restart, and
+     * the operator is paged with hundreds of stale terminal states — merge
+     * conflicts long since resolved, timeouts for operations already settled.
+     * `clearFailed` is the sanctioned way back for a row an operator judges
+     * still worth sending, one at a time and by a human's decision.
      */
     async redriveUndelivered(): Promise<DeliveryReport> {
-      return deliverRows(['pending', 'failed']);
+      return serialised(() => deliverRows(['pending']));
     },
 
     async listFailed(): Promise<readonly OutboxRow[]> {
@@ -303,7 +377,7 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
      * its attempt count zeroed, which is what gives it the "try again" an
      * operator clearing it from the health view is asking for.
      */
-    async clearFailed(id: OutboxRowId, _actor: ActorRef): Promise<Outcome<void, NotifierError>> {
+    async clearFailed(id: OutboxRowId, actor: ActorRef): Promise<Outcome<void, NotifierError>> {
       const found = withDb(volumeRoot, (db) => db.prepare(`SELECT id FROM notification_outbox WHERE id = ? AND status = 'failed'`).get(id as string));
       if (!found.ok || !found.value) {
         return err(notifierError({ code: 'row-not-found', rowId: id }, `no failed outbox row '${id}'`));
@@ -311,6 +385,18 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
       withDb(volumeRoot, (db) => {
         db.prepare(`UPDATE notification_outbox SET status = 'pending', attempts = 0, last_attempt_at = NULL, last_error = NULL WHERE id = ?`).run(id as string);
       });
+      // `actor` is recorded rather than discarded, because resetting a row
+      // that had already reached a terminal decision is an operator judgement
+      // and someone will later ask who made it.
+      //
+      // **This is a log line, not an audit record, and that is a shortfall
+      // rather than a design.** A durable, hash-chained record needs an
+      // `AuditRecordBody` form for it, and none of the seven existing forms
+      // describes an operator clearing an outbox row — adding one is a
+      // contract amendment. This member has no HTTP route and no production
+      // caller yet, so the amendment belongs with whichever slice gives it
+      // one, alongside the route's own authorization.
+      console.info(`notifier: outbox row '${id}' cleared back to pending by ${actor.kind}:${actor.subject}`);
       return ok(undefined);
     },
 
