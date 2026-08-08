@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { gitSha, type BranchName, type GitSha, type RemoteHost } from './shared/brands.ts';
+import { gitSha, type BranchName, type GitSha, type HttpsUrl, type RemoteHost } from './shared/brands.ts';
 import type { CapabilityName, DeploymentCeiling } from './contract/capabilities.ts';
 import { systemClock } from './clock/clock.ts';
 import { createStructuredStore } from './store/structured-store.ts';
@@ -17,6 +17,7 @@ import { createCloneStore, type CloneStore } from './clone/clone-store.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './surfaces/http-server.ts';
 import { createGitOperations } from './git/git-operations.ts';
 import { createJournal } from './journal/journal.ts';
+import { createNotifier } from './notifier/notifier.ts';
 import { createRecoveryCatalogue } from './recovery/catalogue.ts';
 import { LOCAL_MUTATION_RECOVERY_DESCRIPTORS, REMOTE_OPERATION_RECOVERY_DESCRIPTORS } from './git/recovery-descriptors.ts';
 import { createCredentialResolver } from './credentials/credentials.ts';
@@ -102,6 +103,40 @@ function resolveCeiling(): DeploymentCeiling {
         .filter((c) => c.length > 0)
     : [];
   return new Set(names as CapabilityName[]) as unknown as DeploymentCeiling;
+}
+
+/** `DeploymentConfig.notifierWebhook` — `null` until configured is the safe direction: no transport means outbox rows accumulate `pending` rather than sending anywhere unintended. */
+function resolveNotifierWebhook(): HttpsUrl | null {
+  const raw = process.env.NOTIFIER_WEBHOOK_URL;
+  if (!raw || raw.trim().length === 0) return null;
+  if (!raw.startsWith('https://')) {
+    console.error(`server: NOTIFIER_WEBHOOK_URL must be an https:// URL (got '${raw}')`);
+    process.exit(1);
+  }
+  return raw as HttpsUrl;
+}
+
+/**
+ * How often the composition root drives `deliverPending`.
+ *
+ * **The contract fixes no value for this.** `RetentionWindows` and
+ * `TimeoutBudget` name every operational number the design settled, and a
+ * notifier delivery cadence is not among them — so this is a deployment-set
+ * value with a documented fallback, read the same way the admission limits
+ * are, rather than a constant invented in a module and invisible in
+ * production. 30 s is chosen to be well under any human's idea of "promptly"
+ * while leaving a hanging endpoint's bounded retry room to finish between
+ * passes; it is not a number the design blessed.
+ */
+function resolveNotifierIntervalSeconds(): number {
+  const raw = process.env.NOTIFIER_INTERVAL_SECONDS;
+  if (raw === undefined || raw.trim().length === 0) return 30;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    console.error(`server: NOTIFIER_INTERVAL_SECONDS must be an integer of at least 1 (got '${raw}')`);
+    process.exit(1);
+  }
+  return value;
 }
 
 function resolveCommitSha(): GitSha {
@@ -190,6 +225,7 @@ async function main(): Promise<void> {
   // runtime image) intact here.
   const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit, declarations, credentials, credentialEnv });
   const journal = createJournal({ volumeRoot, clock: systemClock });
+  const notifier = createNotifier({ volumeRoot, clock: systemClock, webhookUrl: resolveNotifierWebhook() });
   const moduleAdapter = createModuleAdapter();
   moduleAdapter.register('git.status' as ModuleTargetName, toModuleHandler(gitOperations.status));
   moduleAdapter.register('git.log' as ModuleTargetName, toModuleHandler(gitOperations.log));
@@ -283,6 +319,7 @@ async function main(): Promise<void> {
     clock: systemClock,
     declarations,
     cloneStore,
+    notifier,
   };
 
   const lifecycle = createLifecycle({
@@ -298,6 +335,7 @@ async function main(): Promise<void> {
     registryEntries: PRODUCTION_TOOL_DECLARATIONS,
     registeredModuleTargets: moduleAdapter.registeredTargets(),
     recovery,
+    notifier,
     onTakeover: (previous, current) => {
       // The durable `lease-takeover` audit record is written by boot itself
       // (S3); this is operator-visible defense in depth, so a takeover is
@@ -394,6 +432,7 @@ async function main(): Promise<void> {
     },
     failingCredentialRefs: () => credentials.listFailing(),
     clearFailingCredential: (ref, declarationId) => credentials.clearFailing(ref, declarationId),
+    failedOutboxRows: async () => (await notifier.listFailed()).length,
     identity: operatorIdentity,
     sessionAbsoluteSeconds: SESSION_ABSOLUTE_SECONDS_DEFAULT,
     declarations,
@@ -402,10 +441,59 @@ async function main(): Promise<void> {
     contractCapabilitySet,
   });
 
+  // What actually drives delivery. Boot re-drives once, and recovery fires a
+  // pass after settling a terminal state — but a notification enqueued during
+  // ordinary operation had nothing to send it until the next restart, which
+  // makes "unwatched" mean "unnoticed" for exactly as long as the process
+  // stays up. This is the composition root's job rather than a member on
+  // `Notifier`: the contract's interface has no start/stop, and a module that
+  // owns its own timer cannot be driven deterministically by a test.
+  // Tracked so shutdown can wait for it. `Notifier` serialises its own passes,
+  // so this is not a concurrency guard — it is the handle that keeps a pass
+  // from outliving the instance lease.
+  let deliveryInFlight: Promise<unknown> | null = null;
+  const deliveryTimer = setInterval(() => {
+    if (deliveryInFlight) return;
+    deliveryInFlight = notifier
+      .deliverPending()
+      .then((report) => {
+        // Summarised, never one line per row. A deployment with no webhook
+        // and a few hundred accumulated rows would otherwise print the same
+        // sentence hundreds of times every interval, burying every other
+        // diagnostic and filling the volume the design works to keep bounded.
+        if (report.errors.length === 0) return;
+        const distinct = new Map<string, number>();
+        for (const error of report.errors) distinct.set(error.summary, (distinct.get(error.summary) ?? 0) + 1);
+        const rendered = [...distinct.entries()].slice(0, 3).map(([summary, count]) => (count > 1 ? `${summary} (×${count})` : summary));
+        const remainder = distinct.size > rendered.length ? `, and ${distinct.size - rendered.length} other kind(s)` : '';
+        console.warn(
+          `server: notifier delivered ${report.delivered}, failed ${report.failed}, still pending ${report.stillPending} — ${rendered.join('; ')}${remainder}`,
+        );
+      })
+      .catch(() => {
+        // `deliverPending` reports rather than throwing; this is belt and
+        // braces so a future implementation cannot kill the timer.
+      })
+      .finally(() => {
+        deliveryInFlight = null;
+      });
+  }, resolveNotifierIntervalSeconds() * 1000);
+  // Unreferenced, so a pending timer never keeps the process alive on its own.
+  deliveryTimer.unref();
+
   const shutdown = (signal: NodeJS.Signals): void => {
     ready = false;
+    clearInterval(deliveryTimer);
     server.close(() => {
-      void lifecycle.shutdown('signal').then(() => process.exit(0));
+      // A delivery pass holds its own connections to `store.sqlite`, so
+      // releasing the lease while one is still running would let this
+      // process keep writing after a replacement has taken the volume —
+      // two writers, which is the single invariant the lease exists for.
+      // Bounded because every attempt now carries a timeout.
+      void Promise.resolve(deliveryInFlight)
+        .catch(() => undefined)
+        .then(() => lifecycle.shutdown('signal'))
+        .then(() => process.exit(0));
     });
     void signal;
   };

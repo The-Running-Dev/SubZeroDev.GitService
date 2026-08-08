@@ -10,6 +10,17 @@ import { createStructuredStore } from '../store/structured-store.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
 import { NO_CONSOLE_FINGERPRINT } from '../surfaces/http-server.ts';
 import { createOperatorIdentity } from '../operator-identity/operator-identity.ts';
+import { DatabaseSync } from 'node:sqlite';
+import { createJournal } from '../journal/journal.ts';
+import { createNotifier, type Notifier } from '../notifier/notifier.ts';
+
+/** The outbox as it stands on disk, for the redrive tests below. */
+function readOutboxRows(volume: string): { status: string }[] {
+  const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+  const rows = db.prepare('SELECT status FROM notification_outbox').all() as unknown as { status: string }[];
+  db.close();
+  return rows;
+}
 import type { Audit } from '../audit/audit.ts';
 import type { CapabilityName, DeploymentCeiling } from '../contract/capabilities.ts';
 import { fixtureTool } from '../contract/fixtures.ts';
@@ -61,7 +72,11 @@ const EMPTY_CEILING = new Set() as unknown as DeploymentCeiling;
 function lifecycleFor(
   volume: string,
   acquirer?: LockAcquirer,
-  options: { readonly ceiling?: DeploymentCeiling; readonly registryDeclarations?: Parameters<typeof compiler.compile>[0] } = {},
+  options: {
+    readonly ceiling?: DeploymentCeiling;
+    readonly registryDeclarations?: Parameters<typeof compiler.compile>[0];
+    readonly notifier?: Pick<Notifier, 'redriveUndelivered'>;
+  } = {},
 ) {
   const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
   const audit = createAudit({ volumeRoot: volume, clock: systemClock });
@@ -75,6 +90,7 @@ function lifecycleFor(
     consoleFingerprint: NO_CONSOLE_FINGERPRINT,
     ceiling: options.ceiling ?? EMPTY_CEILING,
     ...(acquirer ? { acquirer } : {}),
+    ...(options.notifier ? { notifier: options.notifier } : {}),
   });
   return { store, audit, lifecycle };
 }
@@ -92,6 +108,101 @@ test('boot takes the lease, applies migrations and reports both', async () => {
       assert.equal(booted.value.migrationsApplied, 1, 'migration 0001 applied');
       assert.match(booted.value.registryFingerprint, /^[0-9a-f]{64}$/);
       assert.deepEqual(booted.value.clones, [], 'step 8 derives an empty clone set with none declared');
+    } finally {
+      await lifecycle.shutdown('operator');
+    }
+  });
+});
+
+test('S11 — boot re-drives the rows left undelivered by the previous process', async () => {
+  await withVolumeAsync(async (volume) => {
+    // Seed one pending row, as if left behind by a previous process —
+    // migrated ahead of `boot()` so the outbox table exists to seed;
+    // `boot()`'s own `migrate()` call is idempotent on top.
+    const seedStore = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    await seedStore.open();
+    await seedStore.migrate();
+    await seedStore.close();
+
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin({
+      operationId: 'op-1' as never,
+      declarationId: 'repo-a' as never,
+      generation: 1 as never,
+      tool: 'git_stage' as never,
+      input: {},
+      actorRef: { kind: 'mcp', subject: 'sub' as never, clientId: null, grantId: null },
+      scheduledJobId: null,
+      context: 'normal',
+      preState: { branch: 'main' as never, headSha: 'a'.repeat(40) as never, upstreamSha: 'a'.repeat(40) as never, indexDigest: 'b'.repeat(64) as never, worktreeDigest: 'c'.repeat(64) as never },
+    });
+    await journal.settle('op-1' as never, {
+      severity: 'attention',
+      declarationId: 'repo-a' as never,
+      subject: { kind: 'operation-parked', operationId: 'op-1' as never, reason: 'left behind by the previous process' },
+      summary: 'a row left over from before the restart',
+    });
+
+    let calls = 0;
+    const seededNotifier = createNotifier({
+      volumeRoot: volume,
+      clock: systemClock,
+      webhookUrl: 'https://hooks.example.invalid/notify' as never,
+      deliverFn: async () => {
+        calls += 1;
+        return { ok: true, status: 200 };
+      },
+    });
+
+    const { lifecycle } = lifecycleFor(volume, undefined, { notifier: seededNotifier });
+    try {
+      const booted = await lifecycle.boot();
+      assert.equal(booted.ok, true);
+
+      // Fired during boot, but boot does not wait for it — see the
+      // non-blocking test below for why that distinction is load-bearing.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(calls, 1, 'the row left over from the previous process was re-driven');
+
+      const rows = readOutboxRows(volume);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]!.status, 'delivered');
+    } finally {
+      await lifecycle.shutdown('operator');
+    }
+  });
+});
+
+test('S11 — a slow or unreachable webhook does not delay boot: readiness and the transports come up first', async () => {
+  await withVolumeAsync(async (volume) => {
+    const seedStore = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    await seedStore.open();
+    await seedStore.migrate();
+    await seedStore.close();
+
+    // A redrive that never settles at all — the worst case, and the one that
+    // used to mean the service never started. Awaiting this inside boot()
+    // blocked readiness indefinitely; at production defaults even a merely
+    // *unreachable* webhook cost ~30 s of backoff per row, sequentially, so
+    // twenty accumulated rows kept /healthz silent for ten minutes and an
+    // orchestrator killed the container before it ever served.
+    let redriveStarted = false;
+    const hangingNotifier = {
+      redriveUndelivered: () => {
+        redriveStarted = true;
+        return new Promise<never>(() => {});
+      },
+    } as unknown as Pick<Notifier, 'redriveUndelivered'>;
+
+    const { lifecycle } = lifecycleFor(volume, undefined, { notifier: hangingNotifier });
+    try {
+      const startedAt = Date.now();
+      const booted = await lifecycle.boot();
+      const bootDurationMs = Date.now() - startedAt;
+
+      assert.equal(booted.ok, true, 'boot succeeds even though delivery never will');
+      assert.equal(redriveStarted, true, 'the redrive was still started');
+      assert.ok(bootDurationMs < 5000, `boot returned in ${bootDurationMs}ms rather than waiting on the notifier`);
     } finally {
       await lifecycle.shutdown('operator');
     }

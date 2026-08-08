@@ -125,6 +125,40 @@ test('settle with a notification writes the outbox row in the same call, still p
   });
 });
 
+test('S11.1 — a crash forced inside the settle transaction leaves NEITHER the state change nor the outbox row', async () => {
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin(beginInputFor('op-atomic'));
+    await journal.markApplied('op-atomic' as never);
+
+    // The crash is forced *between* the two writes, which is the only window
+    // the criterion cares about: the UPDATE has already run when the INSERT
+    // violates `notification_outbox`'s own CHECK (severity IN
+    // ('attention','info')) and throws. A severity outside the union is the
+    // cheapest way to fault the second statement without faulting the first,
+    // and it exercises the real ROLLBACK path rather than a mocked one.
+    const settled = await journal.settle('op-atomic' as never, {
+      severity: 'not-a-severity' as never,
+      declarationId: 'repo-a' as never,
+      subject: { kind: 'operation-parked', operationId: 'op-atomic' as never, reason: 'forced' },
+      summary: 'this insert must fault after the state change has been written',
+    });
+    assert.equal(settled.ok, false, 'the faulted transaction is reported, not swallowed');
+
+    // Both tables inspected, per the criterion. The forbidden state is
+    // "entry settled AND row missing" — so the entry must have rolled back
+    // to `applied` rather than being left `settled` with nothing to deliver.
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    const entry = db.prepare('SELECT state FROM journal_entry WHERE operation_id = ?').get('op-atomic') as { state: string } | undefined;
+    const rows = db.prepare('SELECT id FROM notification_outbox').all() as { id: string }[];
+    db.close();
+
+    assert.equal(entry?.state, 'applied', 'the state change rolled back with the failed insert');
+    assert.notEqual(entry?.state, 'settled', 'the forbidden state — settled with no outbox row — must not exist');
+    assert.equal(rows.length, 0, 'and no partial row was left behind');
+  });
+});
+
 test('park moves the entry to attention with a reason, and settling a settled entry is refused as invalid-transition', async () => {
   await migratedVolume(async (volume) => {
     const journal = createJournal({ volumeRoot: volume, clock: systemClock });

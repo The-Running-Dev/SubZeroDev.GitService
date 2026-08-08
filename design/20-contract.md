@@ -861,11 +861,24 @@ interface DeliveryReport {
   readonly delivered: number;
   readonly failed: number;
   readonly stillPending: number;
+  readonly errors: readonly NotifierError[];
 }
 ```
 
 Every `TerminalState` is `attention` severity; `MaintenanceSummary` is `info`, one per pass rather
 than one per clone.
+
+**`DeliveryReport.errors` is where three of the four `NotifierError` variants become reachable.**
+`deliverPending` and `redriveUndelivered` return a report rather than an `Outcome`, because one row
+failing must not fail the pass — the other rows still have to be attempted. Without `errors` that
+leaves `no-transport-configured`, `delivery-failed` and `retries-exhausted` with nowhere to surface,
+and a variant nothing can construct constrains nothing. It carries them **as data, not as a thrown
+failure**, which preserves the rule that delivery never blocks the operation it describes: a caller
+that ignores `errors` behaves exactly as before.
+
+Reporting, not raising, is also what the error table already asks for. `delivery-failed` says the
+caller does "nothing"; `retries-exhausted` says "mark the row `failed` and surface it, never drop
+it". Both are descriptions of a pass that continues, which is what a report is.
 
 ### Volume, retention and maintenance
 
@@ -1586,8 +1599,11 @@ particular spelling beyond its being stable within one call.
 ### L1 — structured store
 
 ```ts
+type SqlParameter = string | number | bigint | null | Uint8Array;
+
 interface StoreTransaction {
   readonly id: string;
+  run(sql: string, ...parameters: readonly SqlParameter[]): void;
 }
 
 interface BackupStamp {
@@ -1613,6 +1629,18 @@ interface StructuredStore {
 
 `incrementalVacuum` returns the bytes actually returned to the filesystem, which is what the
 maintenance pass reports rather than the rows it deleted.
+
+**`StoreTransaction` carries `run`, and that is what makes every `tx`-taking member honest.** Four
+members take one — `Notifier.enqueue`, `Declarations.bumpGrantEpoch`, `Scheduler.cancelForDeclaration`
+and `Authorization.revokeGrantsForResource` — and each promises its write commits with the caller's.
+An opaque `{ id }` token cannot deliver that: a participant holding only an identifier has no way to
+reach the open transaction, so it opens its own connection instead and the write lands outside. It
+then either survives the caller's rollback, or is refused as busy and lost silently, since three of
+the four return no error channel. Participants therefore write through `run`.
+
+It exposes no `BEGIN`, `COMMIT` or `ROLLBACK` **by design**: the module that opened the transaction
+is the only one permitted to end it. A participant that could commit its caller's transaction is a
+worse defect than the one this replaces.
 
 ### L1 — clone store
 

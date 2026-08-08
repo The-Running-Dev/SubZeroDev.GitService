@@ -12,6 +12,7 @@ import type { OperatorIdentity } from '../operator-identity/operator-identity.ts
 import type { ModuleTargetName } from '../shared/brands.ts';
 import type { ToolDeclaration } from '../contract/tool-declaration.ts';
 import type { RecoveryClassification } from '../recovery/types.ts';
+import type { Notifier } from '../notifier/notifier.ts';
 import { acquireLease, type InstanceLease, type LeaseGuard, type LockAcquirer } from './lease.ts';
 import { verifyRegistryArtifact } from './registry-integrity.ts';
 import { declarationsWithUnsettledEntries, recoverDeclaration as runRecoveryLadder, type RecoveryDependencies } from './recovery.ts';
@@ -121,6 +122,11 @@ export interface LifecycleDependencies {
    * silently claiming there was nothing to recover.
    */
   readonly recovery?: RecoveryDependencies;
+  /**
+   * S11. Optional so a `Lifecycle` built before the notifier existed still
+   * compiles: without it, boot simply has nothing to re-drive.
+   */
+  readonly notifier?: Pick<Notifier, 'redriveUndelivered'>;
 }
 
 const SYSTEM_ACTOR = { kind: 'recovery', subject: 'system' as Subject, clientId: null, grantId: null } as const;
@@ -297,6 +303,30 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       // repository's unfinished work, and — worse — would run resume steps
       // that touch a host before anything was ready to supervise them.
       const recoveryPending = deps.recovery ? declarationsWithUnsettledEntries(await deps.recovery.journal.allUnsettled()) : [];
+
+      // "Boot re-drives every undelivered row" (`10-design.md` § control flow
+      // #1, step 11) — a row left `pending` by the previous process is
+      // exactly the notification that most needed to reach an operator, and a
+      // restart is the natural checkpoint to try it again.
+      //
+      // **Fired, never awaited.** An earlier version awaited this, on the
+      // reasoning that each attempt is bounded and so nothing here could hold
+      // the service down. That was wrong twice over: the bound is per
+      // attempt, not per pass, so at the default five attempts a single
+      // unreachable row costs ~30 s of backoff and rows are processed
+      // sequentially — twenty of them blocked boot for ten minutes, during
+      // which `/healthz` does not answer and no transport listens, so an
+      // orchestrator kills the container and the replacement does the same
+      // thing again. This is the same rule recovery already follows for the
+      // same reason (`recoverDeclaration` is deliberately not called here):
+      // readiness and the transports come up first, and deferred work runs
+      // behind them.
+      if (deps.notifier) {
+        void deps.notifier.redriveUndelivered().catch(() => {
+          // `redriveUndelivered` reports rather than throwing; belt and
+          // braces so a boot cannot fail on a notification.
+        });
+      }
 
       return ok({
         lease: leaseResult.value.lease,

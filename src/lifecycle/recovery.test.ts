@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
+import path from 'node:path';
 import { ok, err, type Outcome } from '../shared/outcome.ts';
 import { systemClock } from '../clock/clock.ts';
 import { createJournal } from '../journal/journal.ts';
@@ -10,6 +12,8 @@ import { cloneStoreError, type CloneStoreError } from '../clone/errors.ts';
 import type { ObservedGitState } from '../clone/types.ts';
 import type { Declaration } from '../declarations/types.ts';
 import type { JournalBeginInput } from '../journal/types.ts';
+import type { Notifier } from '../notifier/notifier.ts';
+import type { RecoveryClassification } from '../recovery/types.ts';
 import { declarationsWithUnsettledEntries, recoverDeclaration, type RecoveryDependencies } from './recovery.ts';
 
 const ACTOR = { kind: 'mcp' as const, subject: 'sub' as never, clientId: null, grantId: null };
@@ -58,6 +62,14 @@ async function harness(
     readonly observed?: () => Outcome<ObservedGitState, CloneStoreError>;
     readonly descriptors?: readonly Parameters<ReturnType<typeof createRecoveryCatalogue>['register']>[0][];
     readonly dispatch?: RecoveryDependencies['dispatch'];
+    /**
+     * Overrides `Journal.classify` outright. `createJournal`'s real
+     * implementation never returns a non-null `terminal` today — nothing
+     * populates one yet — so this is the seam a test uses to exercise
+     * recovery's own handling of a `completed` verdict that does carry one.
+     */
+    readonly classify?: RecoveryDependencies['journal']['classify'];
+    readonly notifier?: Pick<Notifier, 'deliverPending'>;
   } = {},
 ): Promise<Harness> {
   const journal = createJournal({ volumeRoot: volume, clock: systemClock });
@@ -67,7 +79,7 @@ async function harness(
   const marked: string[] = [];
 
   const deps: RecoveryDependencies = {
-    journal,
+    journal: options.classify ? { ...journal, classify: options.classify } : journal,
     catalogue,
     clock: systemClock,
     declarations: { get: async () => DECLARATION },
@@ -79,6 +91,7 @@ async function harness(
       },
     },
     ...(options.dispatch ? { dispatch: options.dispatch, recoverySession: { grant: new Set() } as never } : {}),
+    ...(options.notifier ? { notifier: options.notifier } : {}),
   };
 
   return { deps, journal, marked };
@@ -93,6 +106,44 @@ async function migratedVolume<T>(fn: (volume: string) => Promise<T>): Promise<T>
     return fn(volume);
   });
 }
+
+test('S11.7 — recovery settling a terminal state the caller never saw fires the notification, and delivery is fired without being awaited', async () => {
+  await migratedVolume(async (volume) => {
+    const terminal: RecoveryClassification = {
+      verdict: 'completed',
+      terminal: { kind: 'wait-timeout', waitedSeconds: 1800, tool: 'host_await_checks' as never },
+    };
+    let deliverCalls = 0;
+    const { deps, journal } = await harness(volume, {
+      // The real `Journal.classify` never produces a non-null `terminal`
+      // today (nothing populates one) — this stubs just enough of it to
+      // exercise recovery's own responsibility: building the notification
+      // request from whatever verdict it is handed, and firing delivery
+      // once `settle` has committed it.
+      classify: () => terminal,
+      notifier: {
+        deliverPending: async () => {
+          deliverCalls += 1;
+          return { delivered: 0, failed: 0, stillPending: 1, errors: [] };
+        },
+      },
+    });
+
+    await journal.begin(beginInputFor('op-1'));
+    const verdicts = await recoverDeclaration(deps, 'repo-a' as never);
+
+    assert.deepEqual(verdicts, [terminal]);
+    assert.equal(deliverCalls, 1, 'delivery was fired once the terminal-bearing settle committed');
+
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    const rows = db.prepare('SELECT severity, status, payload FROM notification_outbox').all() as { severity: string; status: string; payload: string }[];
+    db.close();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!.severity, 'attention');
+    const payload = JSON.parse(rows[0]!.payload) as { subject: { kind: string } };
+    assert.equal(payload.subject.kind, 'wait-timeout');
+  });
+});
 
 test('S8.2 — an entry written but never acted on classifies nothing-happened and settles', async () => {
   await migratedVolume(async (volume) => {

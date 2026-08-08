@@ -8,6 +8,7 @@ import type { Declarations } from '../declarations/declarations.ts';
 import type { RecoveryCatalogue } from '../recovery/catalogue.ts';
 import type { RecoveryClassification } from '../recovery/types.ts';
 import type { Dispatch } from '../dispatch/dispatch-pipeline.ts';
+import type { Notifier } from '../notifier/notifier.ts';
 
 export interface RecoveryDependencies {
   readonly journal: Pick<Journal, 'unsettled' | 'allUnsettled' | 'classify' | 'settle' | 'park'>;
@@ -15,6 +16,14 @@ export interface RecoveryDependencies {
   readonly declarations: Pick<Declarations, 'get'>;
   readonly catalogue: Pick<RecoveryCatalogue, 'lookup'>;
   readonly clock: Clock;
+  /**
+   * S11. Optional so a `RecoveryDependencies` assembled before the notifier
+   * existed still compiles. Delivery is fired, never awaited, after a settle
+   * that actually enqueued a row — `10-design.md` § Notifier: "never blocks
+   * a caller", and this caller is recovery itself, not the operation whose
+   * terminal state is being reported.
+   */
+  readonly notifier?: Pick<Notifier, 'deliverPending'>;
   /**
    * Injected per invariant B2 — the lifecycle module receives `Dispatch`
    * rather than importing the pipeline. Only the `resume` verdict needs it,
@@ -46,6 +55,7 @@ export async function recoverDeclaration(deps: RecoveryDependencies, declaration
 
   const entries = await deps.journal.unsettled(declarationId, declaration.generation);
   const verdicts: RecoveryClassification[] = [];
+  let enqueuedNotification = false;
 
   for (const entry of entries) {
     // An entry already parked by a previous pass stays parked. Re-classifying
@@ -87,18 +97,27 @@ export async function recoverDeclaration(deps: RecoveryDependencies, declaration
 
     switch (verdict.verdict) {
       case 'nothing-happened':
-      case 'completed':
+      case 'completed': {
         // Both settle. `completed` may carry a `TerminalState` the operator
-        // should hear about; S11 owns delivery, so the hook is placed here
-        // and the request is passed to `settle`, which commits the outbox row
-        // in the same transaction as the state change.
-        await deps.journal.settle(
-          entry.operationId,
+        // should hear about; the request is passed to `settle`, which
+        // commits the outbox row in the same transaction as the state
+        // change (`10-design.md` § control flow #1, step 11: "the caller's
+        // connection died with the process, so suppressing it here would
+        // recreate the failure one level up").
+        const notify =
           verdict.verdict === 'completed' && verdict.terminal
-            ? { severity: 'attention', declarationId, subject: verdict.terminal, summary: `'${entry.tool}' reached a terminal state during recovery` }
-            : null,
-        );
+            ? { severity: 'attention' as const, declarationId, subject: verdict.terminal, summary: `'${entry.tool}' reached a terminal state during recovery` }
+            : null;
+        const settled = await deps.journal.settle(entry.operationId, notify);
+        // Recorded here, delivered once after the loop. Firing a pass per
+        // entry started one concurrent pass for every recovered terminal
+        // state, and each of them selected the same `pending` rows — so
+        // recovering fifty entries sent up to fifty copies of every
+        // notification. One pass at the end covers every row this ladder
+        // enqueued.
+        if (settled.ok && notify) enqueuedNotification = true;
         break;
+      }
 
       case 'resume': {
         if (!deps.dispatch || !deps.recoverySession) {
@@ -132,6 +151,15 @@ export async function recoverDeclaration(deps: RecoveryDependencies, declaration
         await park(deps, entry, declarationId, verdict.reason);
         break;
     }
+  }
+
+  // One pass, after the loop, and still fired rather than awaited: a slow or
+  // unreachable webhook must not hold up the caller that triggered recovery.
+  if (enqueuedNotification && deps.notifier) {
+    void deps.notifier.deliverPending().catch(() => {
+      // `deliverPending` reports rather than throwing; belt and braces
+      // against a future implementation that does.
+    });
   }
 
   return verdicts;
