@@ -8,3 +8,7 @@ volume/
 # Per-machine session costs, written by the SessionEnd hook. Regenerable from
 # the transcripts at any time, and meaningless on another machine.
 .claude/session-costs.tsv
+
+# Per-machine gate discovery cache, written by Test-GatesCache.ps1. Regenerable
+# by running /verify on any tree.
+.claude/gates.json
