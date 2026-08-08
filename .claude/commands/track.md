@@ -74,6 +74,8 @@ For each `## S<n> — <name>` in `design/30-slices.md`:
   - **An id is in the issue but not the doc** — a criterion was removed or, worse, renumbered. Report it and say which; a renumber means an existing checkbox now refers to something else.
 - **Change nothing on a mismatch** — not the issue, not the doc. Which side is wrong is the user's call.
 - **Never rewrite anything outside the `<!-- agent:start -->` … `<!-- agent:end -->` fence.** A ticked checkbox is progress someone recorded and an edited narrative is someone's deliberate wording. Inside the fence, regenerating is safe and is how a stale commit pin gets refreshed.
+- **If a drift finding is worth leaving on the issue itself, it goes inside the fence, never above it.** "The doc still marks this `Not started` but PR #205 already merged" is exactly the kind of note that is tempting to drop right under the title where it will be seen first — don't. That is investigative/ADR-style detail, not the user story the narrative exists to carry (`AGENTS.md`, *Tracking work*). Report it to the user in chat (below), and only write it onto the issue as an addition inside the agent block if there's a concrete reason a future reader of the issue needs it there.
+- **An open issue with every `Done when` box ticked gets closed.** Ticking is now itself a trusted signal (`AGENTS.md`, *Tracking work*) — `/slice` only ticks a box in the same run it confirms the criterion by id, so a fully-ticked issue has already had every criterion reported met. Say which issue and that you closed it. An issue with any box unticked is not closed, regardless of how old it is.
 
 `design/30-slices.md` stays authoritative for what a slice *is*. The issue tracks whether it is *done*.
 
@@ -92,7 +94,7 @@ For each bullet under `## Open` in `design/90-decisions.md`:
 
 `$1` names the milestone; with no argument, do not invent one — ask.
 
-**Creating a milestone needs explicit approval.** Propose the name and which issues would attach, then wait. Milestones are structural and few; issues are cheap and many, which is why only the latter is carved out.
+**Creating a milestone is carved out of the authorization rule**, the same as an issue (`AGENTS.md`, *Tracking work*). Create it and attach the issues named, and say what you did. Deleting one is not carved out.
 
 ## Bugs and stories are not synced
 
@@ -109,8 +111,8 @@ Use `slice` and `open` if they exist. Create them if missing — say that you di
 The convention is **one project per repository, named after it**.
 
 - Look for a project whose title matches this repository's name. If one exists, **add every issue you opened to it** and say so.
-- If none exists, **say so and carry on.** Do not create one — board structure is columns, fields and views, and a command gets that generically wrong. Creating it is an approval step, and a bare project is worth less than the thirty seconds it saves.
-- Never remove an issue from a project, change its status field, or reorder a board. Adding is the only project write.
+- If none exists, **create one named after the repository and add every issue you opened.** This is carved out of the authorization rule the same as an issue or a milestone (`AGENTS.md`, *Tracking work*) — say that you created it. It will be bare: no custom columns, fields, or views, since board structure is a design choice this command gets generically wrong. Note that plainly rather than dressing it up.
+- Never remove an issue from a project, change its status field, reorder a board, or delete a project. Creating one and adding to it are the only project writes.
 
 GitHub Projects v2 needs the `project` token scope, which `repo` does not include. If `gh project list --owner <owner>` fails on scope, **say so and continue with issues and milestones** — a missing board is not a reason to abandon the sync. The fix is the user running `gh auth refresh -s project` in an interactive terminal; you cannot complete an OAuth flow.
 
@@ -118,16 +120,16 @@ GitHub Projects v2 needs the `project` token scope, which `repo` does not includ
 
 - Issues opened, with numbers and titles
 - Issues that already existed, skipped
+- Issues closed, with numbers and titles
 - Slices whose criteria drifted from their issue
 - Open items removed from `90-decisions.md`
-- Whether a matching project was found, and what was added to it
+- Whether a matching project was found or created, and what was added to it
 - Anything skipped, and why
 
 **Then ask.** Drift between a slice and its issue is a reconciliation, and **a reconciliation ends in a decision, not a report** (`AGENTS.md`, *Working with me*). For each mismatch, put the resolution to the user with a recommendation — amend the doc, amend the issue, or accept the difference — and say what each costs. Report a clean run as clean; do not invent a question to close on.
 
 ## Never
 
-- Close an issue. Work being finished is not something this command can observe.
-- Comment on, edit, or label an issue opened by someone else.
-- Write to a repository the user does not own.
-- Delete a milestone or a label.
+- Close an issue that is not fully ticked. A ticked box is the only doneness signal this command trusts; the working tree, the commit log, and code that looks finished are not.
+- Write to a repository the user does not own — the one boundary the carve-outs in `AGENTS.md`, *Tracking work* do not relax.
+- Delete a milestone, a project, or a label.
