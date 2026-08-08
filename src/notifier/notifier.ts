@@ -57,7 +57,10 @@ function backoffMs(attempts: number): number {
  */
 interface DeliveryAttempt {
   readonly delivered: boolean;
+  /** The running total to persist — every try this row has ever had, across every pass. */
   readonly attempts: number;
+  /** Tries in *this* call. What the `maxAttempts` bound is measured against. */
+  readonly tries: number;
   readonly errors: readonly NotifierError[];
 }
 
@@ -185,18 +188,30 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
    * with backoff" is a property of one delivery attempt rather than
    * something that only emerges from being invoked repeatedly by a
    * scheduler this slice does not build (S16).
+   *
+   * The bound is on `tries` — this call's own count — never on the persisted
+   * total. Seeding the counter from `row.attempts` gave the right answer only
+   * because three separate facts happened to hold together: `redriveUndelivered`
+   * selects `pending` alone, `clearFailed` zeroes `attempts` on the way back to
+   * `pending`, and this loop never returns un-exhausted without having
+   * delivered — so no row reaching here can carry a non-zero count. Any one of
+   * those changing would have silently turned the bound into a budget already
+   * spent, giving the row a single try with no backoff. The total is still what
+   * gets written back, since that is the figure that tells an operator how
+   * flaky their webhook is.
    */
   async function tryDeliver(row: OutboxRowDb): Promise<DeliveryAttempt> {
-    let attempts = row.attempts;
+    let tries = 0;
     const errors: NotifierError[] = [];
 
     for (;;) {
-      attempts += 1;
+      tries += 1;
+      const attempts = row.attempts + tries;
       try {
         const result = await attemptDelivery(row.payload);
         if (result.ok) {
           // Delivered — but any earlier failures still travel with it.
-          return { delivered: true, attempts, errors };
+          return { delivered: true, attempts, tries, errors };
         }
         errors.push(notifierError({ code: 'delivery-failed', status: result.status, attempts }, `the webhook responded ${result.status} on attempt ${attempts}`));
       } catch (cause) {
@@ -204,7 +219,7 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
         errors.push(notifierError({ code: 'delivery-failed', status: null, attempts }, `the webhook could not be reached on attempt ${attempts}: ${message}`));
       }
 
-      if (attempts >= maxAttempts) {
+      if (tries >= maxAttempts) {
         // The bound is reached, so the row is about to become `failed`. That
         // is a different statement from the last attempt's failure, and the
         // contract gives it its own variant: never dropped, always surfaced.
@@ -214,9 +229,9 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
             `delivery of outbox row '${row.id}' was abandoned after ${attempts} attempt(s); the row is marked failed and kept`,
           ),
         );
-        return { delivered: false, attempts, errors };
+        return { delivered: false, attempts, tries, errors };
       }
-      await sleepFn(backoffMs(attempts));
+      await sleepFn(backoffMs(tries));
     }
   }
 
@@ -299,7 +314,7 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
       errors.push(...outcome.errors);
       const lastError = outcome.errors.at(-1) ?? null;
 
-      const nextStatus: OutboxRowStatus = outcome.delivered ? 'delivered' : outcome.attempts >= maxAttempts ? 'failed' : 'pending';
+      const nextStatus: OutboxRowStatus = outcome.delivered ? 'delivered' : outcome.tries >= maxAttempts ? 'failed' : 'pending';
 
       const written = outcome.delivered
         ? withDb(volumeRoot, (db) => {
@@ -444,9 +459,21 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
       if (!found.ok || !found.value) {
         return err(notifierError({ code: 'row-not-found', rowId: id }, `no failed outbox row '${id}'`));
       }
-      withDb(volumeRoot, (db) => {
+      // Checked, not assumed — the same discipline `deliverRows` applies to
+      // its own write-back a few lines up. Returning `ok` on a write that did
+      // not land tells an operator the row is cleared while it is still
+      // `failed` on disk, and this member has an error channel precisely so it
+      // need not. It matters more here than for a delivery write-back: a
+      // delivery that cannot be recorded is retried by the next pass, whereas
+      // `clearFailed` is the *only* way back for a `failed` row now that
+      // `redriveUndelivered` is `pending`-only, so a silently lost clear
+      // strands the row until someone thinks to try again.
+      const cleared = withDb(volumeRoot, (db) => {
         db.prepare(`UPDATE notification_outbox SET status = 'pending', attempts = 0, last_attempt_at = NULL, last_error = NULL WHERE id = ?`).run(id as string);
       });
+      if (!cleared.ok) {
+        return err(notifierError({ code: 'delivery-failed', status: null, attempts: 0 }, `outbox row '${id}' could not be cleared: ${cleared.reason}`));
+      }
       // `actor` is recorded rather than discarded, because resetting a row
       // that had already reached a terminal decision is an operator judgement
       // and someone will later ask who made it.
