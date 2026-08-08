@@ -7,6 +7,8 @@ import type { AuditChainState } from '../audit/types.ts';
 import { createStubOperatorIdentity } from '../operator-identity/testing/stub-operator-identity.ts';
 import { createStubDeclarations } from '../declarations/testing/stub-declarations.ts';
 import { createStubCloneStore } from '../clone/testing/stub-clone-store.ts';
+import { createStubDispatchPipeline } from '../dispatch/testing/stub-dispatch-pipeline.ts';
+import type { ContractCapabilitySet } from '../contract/capabilities.ts';
 
 const COMMIT_SHA = '0'.repeat(40) as GitSha;
 const CONTRACT_FINGERPRINT = '1'.repeat(64) as Sha256Hex;
@@ -39,6 +41,8 @@ async function withServer<T>(options: ServerOptions, fn: (baseUrl: string) => Pr
     sessionAbsoluteSeconds: 43_200,
     declarations: createStubDeclarations(),
     cloneStore: createStubCloneStore(),
+    dispatchPipeline: createStubDispatchPipeline(),
+    contractCapabilitySet: new Set() as unknown as ContractCapabilitySet,
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address() as AddressInfo;
@@ -150,6 +154,8 @@ test('a throwing handler answers 500 and leaves the process serving, rather than
     sessionAbsoluteSeconds: 43_200,
     declarations: createStubDeclarations(),
     cloneStore: createStubCloneStore(),
+    dispatchPipeline: createStubDispatchPipeline(),
+    contractCapabilitySet: new Set() as unknown as ContractCapabilitySet,
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;

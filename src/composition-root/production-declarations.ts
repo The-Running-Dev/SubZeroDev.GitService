@@ -1,8 +1,210 @@
+import type { ModuleTargetName, RegistryToolName } from '../shared/brands.ts';
+import type { JsonSchema } from '../contract/json.ts';
 import type { ToolDeclaration } from '../contract/tool-declaration.ts';
 
+function toolName(name: string): RegistryToolName {
+  return name as RegistryToolName;
+}
+
+function moduleTarget(target: string): { readonly kind: 'module'; readonly target: ModuleTargetName } {
+  return { kind: 'module', target: target as ModuleTargetName };
+}
+
+const EMPTY_INPUT_SCHEMA = { type: 'object', properties: {}, additionalProperties: false } as unknown as JsonSchema;
+
+const READ_STAMP_SCHEMA = {
+  type: 'object',
+  properties: {
+    lastSettledOperationId: { type: ['string', 'null'] },
+    mutationInFlight: { type: 'boolean' },
+  },
+  required: ['lastSettledOperationId', 'mutationInFlight'],
+} as const;
+
+const REPO_STATUS_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    branch: { type: 'string' },
+    baseBranch: { type: 'string' },
+    dirty: { type: 'boolean' },
+    parkedOffBase: { type: 'boolean' },
+    ahead: { type: 'number' },
+    behind: { type: 'number' },
+    changedPaths: {
+      type: 'array',
+      items: { type: 'object', properties: { path: { type: 'string' }, staged: { type: 'boolean' } }, required: ['path', 'staged'] },
+    },
+    observedRemote: { type: ['string', 'null'] },
+    readStamp: READ_STAMP_SCHEMA,
+  },
+  required: ['branch', 'baseBranch', 'dirty', 'parkedOffBase', 'ahead', 'behind', 'changedPaths', 'observedRemote', 'readStamp'],
+} as unknown as JsonSchema;
+
+const GIT_LOG_INPUT_SCHEMA = {
+  type: 'object',
+  properties: { ref: { type: ['string', 'null'] } },
+  additionalProperties: false,
+} as unknown as JsonSchema;
+
+const GIT_LOG_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    ref: { type: 'string' },
+    commits: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          sha: { type: 'string' },
+          authorName: { type: 'string' },
+          authorEmail: { type: 'string' },
+          authorDate: { type: 'string' },
+          subject: { type: 'string' },
+        },
+        required: ['sha', 'authorName', 'authorEmail', 'authorDate', 'subject'],
+      },
+    },
+    readStamp: READ_STAMP_SCHEMA,
+  },
+  required: ['ref', 'commits', 'readStamp'],
+} as unknown as JsonSchema;
+
+const GIT_BRANCHES_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    baseBranch: { type: 'string' },
+    branches: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          current: { type: 'boolean' },
+          ahead: { type: 'number' },
+          behind: { type: 'number' },
+          lastCommitAt: { type: ['string', 'null'] },
+        },
+        required: ['name', 'current', 'ahead', 'behind', 'lastCommitAt'],
+      },
+    },
+    readStamp: READ_STAMP_SCHEMA,
+  },
+  required: ['baseBranch', 'branches', 'readStamp'],
+} as unknown as JsonSchema;
+
+const REPO_HEALTH_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    branch: { type: 'string' },
+    baseBranch: { type: 'string' },
+    dirty: { type: 'boolean' },
+    parkedOffBase: { type: 'boolean' },
+    ahead: { type: 'number' },
+    behind: { type: 'number' },
+    commitsLast7Days: { type: 'number' },
+    daysSinceLastCommit: { type: ['number', 'null'] },
+    staleBranches: {
+      type: 'object',
+      properties: { count: { type: 'number' }, names: { type: 'array', items: { type: 'string' } } },
+      required: ['count', 'names'],
+    },
+    readStamp: READ_STAMP_SCHEMA,
+  },
+  required: ['branch', 'baseBranch', 'dirty', 'parkedOffBase', 'ahead', 'behind', 'commitsLast7Days', 'daysSinceLastCommit', 'staleBranches', 'readStamp'],
+} as unknown as JsonSchema;
+
+const GIT_DIFF_INPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    staged: { type: 'boolean' },
+    paths: { type: ['array', 'null'], items: { type: 'string' } },
+  },
+  required: ['staged', 'paths'],
+  additionalProperties: false,
+} as unknown as JsonSchema;
+
+const GIT_DIFF_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    diff: { type: 'string' },
+    checkClean: { type: 'boolean' },
+    checkOutput: { type: 'string' },
+    readStamp: READ_STAMP_SCHEMA,
+  },
+  required: ['diff', 'checkClean', 'checkOutput', 'readStamp'],
+} as unknown as JsonSchema;
+
 /**
- * The real, deployed tool inventory. Empty until U1 (`20-contract.md` §
- * Unresolved) is answered — S1 explicitly excludes declaring any product
- * tool (`30-slices.md` § S1, "Out of scope"). The first entries arrive in S6.
+ * The real, deployed tool inventory. S1 through S5 shipped none (U1 was
+ * wholly open); S6 resolves U1 for the five read operations and ships their
+ * registry entries here — see `20-contract.md` § L2 — git operations,
+ * "S6 resolves U1 for the five read operations", for the rationale behind
+ * each tool's capabilities, annotations and limits.
  */
-export const PRODUCTION_TOOL_DECLARATIONS: readonly ToolDeclaration[] = [];
+export const PRODUCTION_TOOL_DECLARATIONS: readonly ToolDeclaration[] = [
+  {
+    name: toolName('repo_status'),
+    description: 'Read-only snapshot of the current branch, working-tree cleanliness, ahead/behind counts against the base branch, and the observed remote.',
+    inputSchema: EMPTY_INPUT_SCHEMA,
+    outputSchema: REPO_STATUS_OUTPUT_SCHEMA,
+    scopes: ['read'],
+    capabilities: ['repo.read'],
+    capabilityScope: 'declaration',
+    executionClass: 'read',
+    annotations: { schedulable: false, dropTarget: false, untrustedOutput: false },
+    limits: { timeoutSeconds: 30, maxResultBytes: 65_536 },
+    target: moduleTarget('git.status'),
+  },
+  {
+    name: toolName('git_log'),
+    description: "Recent commit history from a ref, defaulting to origin/<base> rather than HEAD so it reflects what's published, not wherever the checkout happens to be parked.",
+    inputSchema: GIT_LOG_INPUT_SCHEMA,
+    outputSchema: GIT_LOG_OUTPUT_SCHEMA,
+    scopes: ['read'],
+    capabilities: ['repo.read'],
+    capabilityScope: 'declaration',
+    executionClass: 'read',
+    annotations: { schedulable: false, dropTarget: false, untrustedOutput: true },
+    limits: { timeoutSeconds: 30, maxResultBytes: 1_048_576 },
+    target: moduleTarget('git.log'),
+  },
+  {
+    name: toolName('git_branches'),
+    description: 'Lists local branches with ahead/behind counts against the base branch, each one’s last commit time, and which one is currently checked out.',
+    inputSchema: EMPTY_INPUT_SCHEMA,
+    outputSchema: GIT_BRANCHES_OUTPUT_SCHEMA,
+    scopes: ['read'],
+    capabilities: ['repo.read'],
+    capabilityScope: 'declaration',
+    executionClass: 'read',
+    annotations: { schedulable: false, dropTarget: false, untrustedOutput: false },
+    limits: { timeoutSeconds: 30, maxResultBytes: 262_144 },
+    target: moduleTarget('git.branches'),
+  },
+  {
+    name: toolName('repo_health'),
+    description: 'Consolidated local repository health: branch, cleanliness, ahead/behind, recent commit activity and a stale-branch count. Local only — no host-derived data.',
+    inputSchema: EMPTY_INPUT_SCHEMA,
+    outputSchema: REPO_HEALTH_OUTPUT_SCHEMA,
+    scopes: ['read'],
+    capabilities: ['repo.read'],
+    capabilityScope: 'declaration',
+    executionClass: 'read',
+    annotations: { schedulable: false, dropTarget: false, untrustedOutput: false },
+    limits: { timeoutSeconds: 30, maxResultBytes: 65_536 },
+    target: moduleTarget('git.health'),
+  },
+  {
+    name: toolName('git_diff'),
+    description: 'Shows a unified diff (staged or working tree), plus a whitespace/no-newline-at-eof check.',
+    inputSchema: GIT_DIFF_INPUT_SCHEMA,
+    outputSchema: GIT_DIFF_OUTPUT_SCHEMA,
+    scopes: ['read'],
+    capabilities: ['repo.read'],
+    capabilityScope: 'declaration',
+    executionClass: 'read',
+    annotations: { schedulable: false, dropTarget: false, untrustedOutput: true },
+    limits: { timeoutSeconds: 30, maxResultBytes: 4_194_304 },
+    target: moduleTarget('git.diff'),
+  },
+];

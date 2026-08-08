@@ -9,6 +9,8 @@ import type { Audit } from '../audit/audit.ts';
 import type { StructuredStore } from '../store/structured-store.ts';
 import type { StoreError } from '../store/errors.ts';
 import type { OperatorIdentity } from '../operator-identity/operator-identity.ts';
+import type { ModuleTargetName } from '../shared/brands.ts';
+import type { ToolDeclaration } from '../contract/tool-declaration.ts';
 import { acquireLease, type InstanceLease, type LeaseGuard, type LockAcquirer } from './lease.ts';
 import { verifyRegistryArtifact } from './registry-integrity.ts';
 
@@ -88,6 +90,17 @@ export interface LifecycleDependencies {
   readonly ceiling: DeploymentCeiling;
   /** Step 8 re-derives clone state from disk. Optional so a `Lifecycle` used only up through S4's concerns need not supply one. */
   readonly deriveCloneStatesFromDisk?: () => Promise<readonly Clone[]>;
+  /**
+   * Invariant B5 (verified at boot: "every registry entry has exactly one
+   * executor registered"). Both optional so a `Lifecycle` built before any
+   * registry entry existed (S1–S5, always an empty declaration array) needs
+   * no change. `registryEntries` is the production declaration set, not the
+   * build artifact's re-parsed JSON — the artifact is already verified
+   * byte-for-byte against its fingerprint (step 2) and this check only needs
+   * to know which module targets a real executor claims.
+   */
+  readonly registryEntries?: readonly ToolDeclaration[];
+  readonly registeredModuleTargets?: ReadonlySet<ModuleTargetName>;
   readonly acquirer?: LockAcquirer;
   /** Fires alongside the durable `lease-takeover` audit record — operator-visible even if the trail itself cannot be written. */
   readonly onTakeover?: (previousHolder: InstanceLease, current: InstanceLease) => void;
@@ -173,6 +186,30 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
             `the deployment ceiling names ${outsideContract.length} capabilit(y/ies) absent from the contract set: ${outsideContract.join(', ')}`,
           ),
         );
+      }
+
+      // Invariant B5 — every registry entry with a module execution target
+      // must have a registered executor. Checked here, alongside step 3,
+      // for the same reason: a registry entry nothing can execute is a
+      // deployment/build wiring defect, not a runtime one, and is cheapest
+      // to catch before the store ever opens. Only entries are skippable
+      // when neither optional dependency is supplied (S1–S5's empty
+      // registries); an http-targeted entry has no adapter to check against
+      // yet and is not examined here.
+      if (deps.registryEntries && deps.registeredModuleTargets) {
+        const missingExecutors = deps.registryEntries
+          .filter((entry) => entry.target.kind === 'module' && !deps.registeredModuleTargets!.has(entry.target.target))
+          .map((entry) => entry.name);
+        if (missingExecutors.length > 0) {
+          guard.release();
+          guard = null;
+          return err(
+            bootError(
+              { code: 'executor-missing', tools: missingExecutors },
+              `${missingExecutors.length} registry entr(y/ies) have no registered executor: ${missingExecutors.join(', ')}`,
+            ),
+          );
+        }
       }
 
       // Step 4 — open the store, integrity-check it, take the pre-migration

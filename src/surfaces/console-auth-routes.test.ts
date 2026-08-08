@@ -19,6 +19,8 @@ import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './http-server.ts';
 import type { GitSha, Sha256Hex } from '../shared/brands.ts';
 import { createStubDeclarations } from '../declarations/testing/stub-declarations.ts';
 import { createStubCloneStore } from '../clone/testing/stub-clone-store.ts';
+import { createStubDispatchPipeline } from '../dispatch/testing/stub-dispatch-pipeline.ts';
+import type { ContractCapabilitySet } from '../contract/capabilities.ts';
 
 const COMMIT_SHA = '0'.repeat(40) as GitSha;
 const CONTRACT_FINGERPRINT = '1'.repeat(64) as Sha256Hex;
@@ -55,6 +57,8 @@ async function withServer<T>(volume: string, fn: (baseUrl: string, identity: Ope
     sessionAbsoluteSeconds: 43_200,
     declarations: createStubDeclarations(),
     cloneStore: createStubCloneStore(),
+    dispatchPipeline: createStubDispatchPipeline(),
+    contractCapabilitySet: new Set() as unknown as ContractCapabilitySet,
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address() as AddressInfo;

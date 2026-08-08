@@ -7,6 +7,7 @@ import type { CredentialFailureMark } from '../credentials/types.ts';
 import { NO_VOLUME_USAGE, type VolumeUsage } from '../store/volume-usage.ts';
 import { handleConsoleAuthRoute, type ConsoleAuthDependencies } from './console-auth-routes.ts';
 import { handleDeclarationRoute, type DeclarationRoutesDependencies } from './declaration-routes.ts';
+import { handleToolRoute, type ToolRoutesDependencies } from './tool-routes.ts';
 
 /**
  * `LivenessReport` is the sole unauthenticated payload in the whole service
@@ -54,7 +55,10 @@ export interface HealthReport {
   readonly volume: VolumeUsage;
 }
 
-export interface SurfacesDependencies extends ConsoleAuthDependencies, Pick<DeclarationRoutesDependencies, 'declarations' | 'cloneStore'> {
+export interface SurfacesDependencies
+  extends ConsoleAuthDependencies,
+    Pick<DeclarationRoutesDependencies, 'declarations' | 'cloneStore'>,
+    Pick<ToolRoutesDependencies, 'dispatchPipeline' | 'contractCapabilitySet'> {
   readonly commitSha: GitSha;
   readonly contractFingerprint: Sha256Hex;
   readonly consoleFingerprint: Sha256Hex;
@@ -100,6 +104,11 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
   }
 
   if (url.pathname.startsWith('/declarations')) {
+    // More specific first: `/declarations/:id/tools*` is its own route
+    // family, and `handleDeclarationRoute` would otherwise 404 it itself
+    // before this ever got a chance to look.
+    const toolsHandled = await handleToolRoute(deps, req, res, url);
+    if (toolsHandled) return;
     const handled = await handleDeclarationRoute(deps, req, res, url);
     if (handled) return;
   }
