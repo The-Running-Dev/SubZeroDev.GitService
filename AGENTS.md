@@ -82,7 +82,31 @@ If the current session is weaker than the required tier, say which model and eff
 - `/redteam`: preferably a strongest model from a different vendor than the design author. If Claude must be used, use a fresh `opus`, `high` session.
 - `/slice`: `sonnet`, normally `medium`; use `high` for a large or difficult slice.
 - `/reconcile`: `opus`, `high` while deciding which side of drift is correct; `sonnet`, `medium` for mechanical edits after I decide.
+- `/make-human-docs`: `sonnet`, `medium`. Escalate only if the design turns out to be ambiguous — then stop, do not resolve it in prose.
+- `/track`: `sonnet`, `medium`. Mechanical sync; escalate only to judge whether a drifted slice is a design change.
+- `/verify`: `sonnet`, `medium`. Escalate to deep reasoning only to diagnose a failure, never to run the gates.
+- `/pr`: `sonnet`, `medium`.
+- `/resolve`: `sonnet`, `medium`. Escalate to judge a contested finding, not to triage the obvious ones.
+- `/refine`: `sonnet`, `medium`. Never escalates — an architectural ask is routed to the command that owns it, not refined.
 - `/install`: `sonnet`, `medium`.
+- `/kit-help`: `haiku`, `low`. Orientation from file existence and a tracker listing; escalate only where the repository's state matches no stage.
+
+### Session boundaries
+
+Routing says which model runs a command. This says **when a session must end.** A boundary exists wherever carrying context would corrupt the next step's judgement, or wherever the next step must read the tree rather than remember it. **The artifact is the handoff, not the conversation** — a stage that writes one has already handed over everything the next stage is entitled to.
+
+| Boundary | Rule | Why |
+|---|---|---|
+| `/design` → `/redteam` | **Fresh session, and a different vendor.** | A model recognises its own output distribution and defends it. Fresh context on the same model is already the weak form; the same session is not a review at all. |
+| Any stage that writes an artifact → the next | Fresh. | The next stage's input is the committed file. A session that also remembers the arguments behind it will design against the arguments. |
+| `/slices` → `/slice` | Fresh, and **one slice per session**. | A slice that does not fit one session without compaction is too large — that is a `/slices` defect, so say so rather than pressing on. |
+| `/slice` → `/verify` → `/pr` → `/resolve` | **Same session.** | These act on the branch and worktree the slice just produced, and `/pr` must carry `/verify`'s did-not-run list into the description **verbatim**. A fresh session would restate it from a summary, which is the fabricated gate result *Verification* exists to prevent. |
+| merge → `/track` | Fresh. | `/track` reads the tracker and `design/` as they now stand. The session that just implemented the slice holds an opinion about whether it is done, and doneness is my mark, not an agent's. |
+| implementation → `/reconcile` | Fresh. | It compares the tree against the docs. The session that wrote the code carries what it *intended* to write, which is the one thing the comparison must not be given. |
+
+**Compaction is a boundary you did not choose.** If a session compacts mid-slice, report it — the slice was mis-sized, and the work after the compaction was done against a summary of the contract rather than the contract.
+
+The red-team stopping rule below is a boundary of a different kind — it bounds how many passes a phase gets, not where a session ends. Both apply to `/redteam`.
 
 ### Red-team stopping rule
 
@@ -106,6 +130,25 @@ A red-team pass is an independent phase gate, not an iterative design loop.
 - Once a policy decision is signed off and recorded, do not relitigate it without new evidence.
 - Spend frontier-model reasoning on decisions that are expensive to reverse, not on producing more prose.
 
+### What should stop being model work
+
+Routing decides *which* model does a job. This decides whether a model should be doing it at all.
+
+| | Work | Where it belongs |
+|---|---|---|
+| 🟢 **Necessary** | Architecture, contracts, root-cause analysis, design tradeoffs, adjudicating findings | A model, at the tier above |
+| 🟡 **Maybe avoidable** | Regenerating context already established, duplicate repository scans, rewriting boilerplate | A model, but the repetition is a signal — say so |
+| 🔴 **Definitely avoidable** | Formatting, mechanical text transformation, arithmetic over files, counting, collecting metrics | Code. It should leave the model entirely |
+
+**A red item is a defect in the tooling, not in the run.** Noticing one is worth a line; performing it repeatedly and never saying so is the failure. When a red item recurs, put it in `## Open` in `design/90-decisions.md` so `/track` can turn it into an issue — that is the existing path, and there is no separate mechanism for this.
+
+Two distinctions that are easy to get wrong:
+
+- **The mechanical half of a task is red; the judgement half is not.** Opening an issue is an API call, but deciding what warrants one is not. Writing a PR description is a template, but which merge convention governs is not — `/pr` exists because that half is real. Do not classify a whole command by its cheapest step.
+- **Do not report a cost you did not measure.** A model is not given its own token counts or elapsed time, so any figure it states about its own run is an estimate presented as a measurement. `tools/Measure-Session.ps1` reads the real per-call usage from the session transcript, and runs as a `SessionEnd` hook. Use it, or say nothing.
+
+This repository is itself a bet on that distinction: a service that makes git operations reachable without a model driving a terminal is red work leaving the model, at estate scale.
+
 ## Hard rules
 
 - **Non-goals are binding.** Anything listed as a non-goal in the brief is out of scope even if it looks trivial, even if you are already touching that file.
@@ -125,7 +168,7 @@ A red-team pass is an independent phase gate, not an iterative design loop.
 ## Verification
 
 - **Verify, don't assert.** State only what you have checked. Assert nothing from memory that a command could confirm — remembered values and inferred contracts are how wrong facts get written down confidently.
-- **Do not claim a gate passed that did not run.** If a tool is unavailable, say so plainly and name what was not checked. "Tests pass" means you ran them and read the output.
+- **Do not claim a gate passed that did not run.** If a tool is unavailable, say so plainly and name what was not checked. "Tests pass" means you ran them and read the output. `/verify` exists to make this checkable rather than aspirational — its report has three lists, and the one that matters is *what did not run*.
 - **Never state or imply a deployed URL or a published artifact** until the deploy for that exact commit reports success. A merged PR is not a deployed site. Poll; do not estimate.
 - **A regression test is verified by reverting the fix** and confirming it fails. A test that passes with and without the fix guards nothing.
 - **A schema or validator change is not done until it has rejected something.** Positive and negative cases both, with the counts stated. A validator that has never failed is not known to constrain anything.
@@ -134,6 +177,9 @@ A red-team pass is an independent phase gate, not an iterative design loop.
 
 - Present findings and review items **one at a time for sign-off**. Never bulk-apply findings unreviewed.
 - Surface real forks as a question with a recommendation, recommended option first. I routinely pick the more rigorous non-recommended option — so ask, do not assume.
+- **A reconciliation ends in a decision, not a report.** Any time you compare two things and find they disagree — `/reconcile`, `/install`, `/track` drift, or any time I say "reconcile" — the work is not finished at the findings. Close by asking, one divergence at a time, each with a recommendation and what the alternatives cost. **A report I have to turn into questions myself is half the job.** If a comparison genuinely found nothing, say that plainly rather than manufacturing a fork.
+  - Recommend the **resolution**, not merely which side you prefer: name what changes, in which file, and what it costs to reverse.
+  - `/redteam` is the one exception, and only partly — it must not propose fixes, since naming a fix frames the problem. It still recommends a classification, per the **Red-team stopping rule** above.
 - When I decline a suggestion, record it in the affected document as known-and-retained rather than dropping it silently. Otherwise it is rediscovered later as a bug.
 - Ask before any choice that sets policy or a public contract: licensing, compatibility promises, a major information-architecture change.
 - Call out assumptions, unverified claims, and known risks plainly. Explain the concrete evidence behind a recommendation.
@@ -144,9 +190,30 @@ A red-team pass is an independent phase gate, not an iterative design loop.
 - Run `git diff --check` before committing. Never use trailing double-spaces for a line break; it rejects them.
 - **Never force-push or rewrite published history.** If a pushed commit needs changing, add a follow-up commit.
 - **Push every commit before announcing a PR is ready.** Announcing invites an immediate merge, and a commit pushed after that lands on a branch nobody merges.
-- External writes need my authorization: creating a remote repository, changing visibility, pushing, opening or merging pull requests, changing a domain, deploying. **Discussing a decision does not authorize it.**
+- External writes need my authorization: creating a remote repository, changing visibility, pushing, opening or merging pull requests, changing a domain, deploying. **Discussing a decision does not authorize it.** One carve-out — see *Tracking work*.
 - Do not delete files, branches, or history without explicit authorization.
-- Check review **threads**, not just requested reviewers — an automated reviewer can leave blocking conversation threads that do not appear in a reviewer listing. Resolve a thread only when a validated fix satisfies it; leave ambiguous findings open and report them.
+- Check review **threads**, not just requested reviewers — an automated reviewer can leave blocking conversation threads that do not appear in a reviewer listing. Resolve a thread only when a validated fix satisfies it; leave ambiguous findings open and report them. `/resolve` does this; the query it needs is written out there.
+- **Resolving or replying to a review thread is not carved out.** The exception in *Tracking work* covers opening issues and nothing else. Where a repository delegates resolution explicitly, follow its wording; where it is silent, ask.
+
+## Tracking work
+
+**Defer work to the tracker rather than processing it inline.** A finding, a follow-up, or a defect noticed in passing goes to a GitHub issue — not into a running list in the conversation, and not into a section of a document that will rot. Prose is where work goes to be forgotten.
+
+- **Opening and labelling issues is carved out of the authorization rule.** You may open them in a repository I own, without asking. Issues are cheap and reversible, which is the entire justification; the exception is narrow and does not generalise.
+- **Closing an issue is not carved out.** Nor is commenting on, editing, or labelling anyone else's, nor writing to a repository I do not own.
+- **Milestones and projects still need approval.** They are structural and few, and a wrong one is visible on a public repository.
+- **`/track` owns every GitHub write.** No other command creates issues, milestones, or projects. It is idempotent, so run it often rather than batching.
+- `design/30-slices.md` stays authoritative for what a slice *is*; its issue tracks whether it is *done*. If the two come to describe the work differently, say so rather than editing either.
+- The `## Open` section of `design/90-decisions.md` is a staging area, not a home. Once an item becomes an issue, remove it from there. **This repository's `## Open` is already large and partly struck through** — `/track`'s first run against it is a migration, not a routine sync, and the resolved bullets should leave rather than become issues.
+- **Every issue reads human-first.** A narrative anyone can follow, then `### Done when` checkboxes, then the agent detail in a collapsed `<details>` block.
+- **The agent block is fenced** by `<!-- agent:start -->` and `<!-- agent:end -->`. Inside the fence is regenerable; **outside it is never touched** — a ticked checkbox is progress someone recorded, an edited narrative is someone's deliberate wording.
+- **Where a document already governs, the block points; where none does, it carries.** A slice names `design/30-slices.md § S<n> @ <sha>` and leaves procedure to `.claude/commands/slice.md` — copying stop conditions into an issue freezes a stale copy that nothing can go back and fix. A bug or a story has no upstream document, so its block legitimately holds the constraints. That asymmetry is the rule, not an inconsistency.
+- **Criteria carry stable ids** (`S3.1`), and drift is compared on ids, never prose. Reworded criteria are not drift; an added, removed, or renumbered id is.
+- **This repository's 22 existing slices carry unnumbered criteria**, so `/track` has no ids to compare for them and falls back to prose — which reports reworded criteria as drift. Worse, the test suite already cites ids (`S3.4`, `S4.7`, `S4.8`) that `design/30-slices.md` does not define, so the mapping from a test name to a criterion exists nowhere checkable. Whether to number the criteria is an open decision, recorded in `design/90-decisions.md`; until it is taken, treat drift reported against S1–S22 as unreliable and check it by hand. **S1 to S5 are merged and are not retrofitted or reopened** either way.
+- **Report drift, change neither side.** Which is wrong is my call.
+- **Ticking a checkbox is mine, not yours.** An agent reporting "S3.1 met" and a ticked box are different claims by different parties, and collapsing them removes the only human gate between "the tests pass" and "this is done". `/slice` ends by listing the ids it believes are met so ticking is mechanical.
+- **Bugs and stories are filed by hand** from `.github/ISSUE_TEMPLATE/`. `/track` does not open them.
+- **This does not suspend one-at-a-time sign-off.** Findings are still presented for adjudication; the tracker is where the ones you accept go, not a way to skip the conversation.
 
 ## Decision logging
 
