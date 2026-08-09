@@ -2603,6 +2603,7 @@ interface IssuedMcpGrant {
 
 interface Authorization {
   registerClient(request: ClientRegistrationRequest): Promise<Outcome<OAuthClient, AuthorizationError>>;
+  getClient(clientId: ClientId): Promise<OAuthClient | null>;
   issueMcpGrant(input: McpGrantInput, actor: ActorRef): Promise<Outcome<IssuedMcpGrant, AuthorizationError>>;
   establishMcpSession(bearer: BearerToken, resource: McpResourceUri): Promise<Outcome<Session, AuthorizationError>>;
   verifyOperatorApiToken(bearer: BearerToken): Promise<Outcome<Session, AuthorizationError>>;
@@ -2631,8 +2632,11 @@ batch, so there is no partially applied revocation to recover from.
 `issueMcpGrant` is the one durable write the authorization-code flow performs. Everything ahead of
 it — the pending-authorization record, the PKCE challenge, the issued authorization code — is
 surface-owned and ephemeral (see `### L5 — surfaces` below), the same way a login form's CSRF token
-is never a store row. By the time a surface calls `issueMcpGrant`, PKCE verification, redirect-URI
-matching and client validation have already happened; the method's only job is minting the durable
+is never a store row. `getClient` is what lets `/oauth/authorize` (`GET`) check a presented
+`redirect_uri` against the client's own registered list before a `PendingAuthorization` is ever
+created — the redirect-URI check named below has to read the same row `registerClient` wrote, not
+merely compare the value against itself at token-exchange time. By the time a surface calls
+`issueMcpGrant`, PKCE verification, redirect-URI matching and client validation have already happened; the method's only job is minting the durable
 `Grant` (`kind: 'mcp'`) and its access/refresh `Token` pair, which is what lets a client reconnect
 after a container restart without re-authorising (S14.7). A grant is never re-issued for the same
 authorization code — the surface layer deletes the ephemeral code before calling this method, so a

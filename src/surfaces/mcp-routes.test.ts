@@ -151,24 +151,34 @@ function pkce(): { verifier: string; challenge: string } {
   return { verifier, challenge };
 }
 
-/**
- * Drives the full S14.7 flow — dynamic client registration, PKCE
- * authorization, the code-for-token exchange — and returns the tokens a
- * real MCP client would end up holding. Every mechanical step an actual
- * client performs, over real HTTP, against the real routes.
- */
-async function fullOAuthFlow(baseUrl: string, declarationId: string, scopes: readonly string[]): Promise<{ accessToken: string; refreshToken: string }> {
+const CLIENT_REDIRECT_URI = 'https://client.invalid/callback';
+
+async function registerClient(baseUrl: string, redirectUris: readonly string[] = [CLIENT_REDIRECT_URI]): Promise<{ client_id: string }> {
   const registerResponse = await fetch(`${baseUrl}/oauth/register`, {
     method: 'POST',
-    body: JSON.stringify({ redirect_uris: ['https://client.invalid/callback'], client_name: 'test client' }),
+    body: JSON.stringify({ redirect_uris: redirectUris, client_name: 'test client' }),
   });
   assert.equal(registerResponse.status, 201);
-  const client = (await registerResponse.json()) as { client_id: string };
+  return (await registerResponse.json()) as { client_id: string };
+}
 
+/**
+ * Drives the `/oauth/authorize` `GET` → operator-approval `POST` half of the
+ * S14.7 flow and returns the resulting authorization code, or `null` plus
+ * the response that refused it — every mechanical step a real client and
+ * operator perform, over real HTTP, against the real routes.
+ */
+async function obtainAuthorizationCode(
+  baseUrl: string,
+  clientId: string,
+  declarationId: string,
+  scopes: readonly string[],
+  redirectUri: string = CLIENT_REDIRECT_URI,
+): Promise<{ code: string | null; verifier: string; getStatus: number; getBody: string; approveStatus?: number }> {
   const { verifier, challenge } = pkce();
   const authorizeUrl = new URL(`${baseUrl}/oauth/authorize`);
-  authorizeUrl.searchParams.set('client_id', client.client_id);
-  authorizeUrl.searchParams.set('redirect_uri', 'https://client.invalid/callback');
+  authorizeUrl.searchParams.set('client_id', clientId);
+  authorizeUrl.searchParams.set('redirect_uri', redirectUri);
   authorizeUrl.searchParams.set('response_type', 'code');
   authorizeUrl.searchParams.set('code_challenge', challenge);
   authorizeUrl.searchParams.set('code_challenge_method', 'S256');
@@ -176,37 +186,63 @@ async function fullOAuthFlow(baseUrl: string, declarationId: string, scopes: rea
   authorizeUrl.searchParams.set('scope', scopes.join(' '));
 
   const cookie = await operatorCookie(baseUrl);
+  const csrfToken = /szg_csrf=([^;]+)/.exec(cookie)?.[1];
+  assert.ok(csrfToken, 'operatorCookie must carry the double-submit CSRF cookie');
   const getResponse = await fetch(authorizeUrl, { headers: { Cookie: cookie } });
   const html = await getResponse.text();
-  assert.equal(getResponse.status, 200, html);
+  if (getResponse.status !== 200) {
+    return { code: null, verifier, getStatus: getResponse.status, getBody: html };
+  }
   const requestId = /name="request_id" value="([^"]+)"/.exec(html)?.[1];
   assert.ok(requestId, 'the approval form must carry a request_id');
 
   const approveResponse = await fetch(`${baseUrl}/oauth/authorize`, {
     method: 'POST',
     redirect: 'manual',
-    headers: { Cookie: cookie, 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers: { Cookie: cookie, Origin: baseUrl, 'X-CSRF-Token': csrfToken!, 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ request_id: requestId!, action: 'approve' }),
   });
-  assert.equal(approveResponse.status, 302);
+  if (approveResponse.status !== 302) {
+    return { code: null, verifier, getStatus: getResponse.status, getBody: html, approveStatus: approveResponse.status };
+  }
   const location = new URL(approveResponse.headers.get('Location')!);
-  const code = location.searchParams.get('code');
-  assert.ok(code, 'the redirect must carry an authorization code');
+  return { code: location.searchParams.get('code'), verifier, getStatus: getResponse.status, getBody: html, approveStatus: approveResponse.status };
+}
 
+async function exchangeCodeForTokens(
+  baseUrl: string,
+  clientId: string,
+  code: string,
+  verifier: string,
+  redirectUri: string = CLIENT_REDIRECT_URI,
+): Promise<{ status: number; body: string }> {
   const tokenResponse = await fetch(`${baseUrl}/oauth/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
       grant_type: 'authorization_code',
-      code: code!,
-      redirect_uri: 'https://client.invalid/callback',
-      client_id: client.client_id,
+      code,
+      redirect_uri: redirectUri,
+      client_id: clientId,
       code_verifier: verifier,
     }),
   });
-  const tokenBody = await tokenResponse.text();
-  assert.equal(tokenResponse.status, 200, tokenBody);
-  const tokens = JSON.parse(tokenBody) as { access_token: string; refresh_token: string };
+  return { status: tokenResponse.status, body: await tokenResponse.text() };
+}
+
+/**
+ * Drives the full S14.7 flow — dynamic client registration, PKCE
+ * authorization, the code-for-token exchange — and returns the tokens a
+ * real MCP client would end up holding. Every mechanical step an actual
+ * client performs, over real HTTP, against the real routes.
+ */
+async function fullOAuthFlow(baseUrl: string, declarationId: string, scopes: readonly string[]): Promise<{ accessToken: string; refreshToken: string }> {
+  const client = await registerClient(baseUrl);
+  const { code, verifier } = await obtainAuthorizationCode(baseUrl, client.client_id, declarationId, scopes);
+  assert.ok(code, 'the redirect must carry an authorization code');
+  const { status, body } = await exchangeCodeForTokens(baseUrl, client.client_id, code!, verifier);
+  assert.equal(status, 200, body);
+  const tokens = JSON.parse(body) as { access_token: string; refresh_token: string };
   return { accessToken: tokens.access_token, refreshToken: tokens.refresh_token };
 }
 
@@ -388,10 +424,102 @@ test('S14.7 — dynamic client registration, PKCE, and a real refresh-token exch
   });
 });
 
+test('S14 — /oauth/authorize refuses a redirect_uri the client never registered', async () => {
+  await withVolumeAsync(async (volume) => {
+    await withServer(volume, async ({ baseUrl, declarations }) => {
+      await declareRepo(declarations, 'repo-redirect', ['repo.read']);
+      const client = await registerClient(baseUrl, [CLIENT_REDIRECT_URI]);
+
+      const attempt = await obtainAuthorizationCode(baseUrl, client.client_id, 'repo-redirect', ['read'], 'https://attacker.invalid/steal');
+      assert.equal(attempt.getStatus, 400, attempt.getBody);
+      assert.equal(attempt.code, null);
+    });
+  });
+});
+
+test('S14 — POST /oauth/authorize without a matching CSRF token is refused, not approved', async () => {
+  await withVolumeAsync(async (volume) => {
+    await withServer(volume, async ({ baseUrl, declarations }) => {
+      await declareRepo(declarations, 'repo-csrf', ['repo.read']);
+      const client = await registerClient(baseUrl);
+      const { challenge } = pkce();
+      const authorizeUrl = new URL(`${baseUrl}/oauth/authorize`);
+      authorizeUrl.searchParams.set('client_id', client.client_id);
+      authorizeUrl.searchParams.set('redirect_uri', CLIENT_REDIRECT_URI);
+      authorizeUrl.searchParams.set('response_type', 'code');
+      authorizeUrl.searchParams.set('code_challenge', challenge);
+      authorizeUrl.searchParams.set('code_challenge_method', 'S256');
+      authorizeUrl.searchParams.set('resource', '/mcp/repo-csrf');
+      authorizeUrl.searchParams.set('scope', 'read');
+
+      const cookie = await operatorCookie(baseUrl);
+      const getResponse = await fetch(authorizeUrl, { headers: { Cookie: cookie } });
+      const html = await getResponse.text();
+      assert.equal(getResponse.status, 200, html);
+      const requestId = /name="request_id" value="([^"]+)"/.exec(html)?.[1];
+      assert.ok(requestId);
+
+      // Same session cookie as a real operator, but no Origin header and no
+      // X-CSRF-Token — exactly what a cross-origin forged form POST sends.
+      const forged = await fetch(`${baseUrl}/oauth/authorize`, {
+        method: 'POST',
+        redirect: 'manual',
+        headers: { Cookie: cookie, 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ request_id: requestId!, action: 'approve' }),
+      });
+      assert.equal(forged.status, 403);
+    });
+  });
+});
+
+test('S14 — token exchange for a declaration removed between authorize and exchange fails invalid_grant, not 200', async () => {
+  await withVolumeAsync(async (volume) => {
+    await withServer(volume, async ({ baseUrl, declarations }) => {
+      await declareRepo(declarations, 'repo-vanish', ['repo.read']);
+      const client = await registerClient(baseUrl);
+      const { code, verifier } = await obtainAuthorizationCode(baseUrl, client.client_id, 'repo-vanish', ['read']);
+      assert.ok(code, 'the redirect must carry an authorization code');
+
+      const actor = { kind: 'operator', subject: 'ben' as never, clientId: null, grantId: null } as const;
+      const orphaned = await declarations.orphan('repo-vanish' as never, actor);
+      assert.equal(orphaned.ok, true, orphaned.ok ? '' : orphaned.error.summary);
+      const removed = await declarations.remove('repo-vanish' as never, actor);
+      assert.equal(removed.ok, true, removed.ok ? '' : removed.error.summary);
+
+      const { status, body } = await exchangeCodeForTokens(baseUrl, client.client_id, code!, verifier);
+      assert.equal(status, 400, body);
+      const parsed = JSON.parse(body) as { error: string };
+      assert.equal(parsed.error, 'invalid_grant');
+    });
+  });
+});
+
 test('S14.9 — the stdio proxy imports no store, lock, or clone module — the property is structural, not observed at runtime', async () => {
   const { readFileSync } = await import('node:fs');
   const source = readFileSync(new URL('../mcp-proxy/proxy.ts', import.meta.url), 'utf8');
   for (const forbidden of ["from '../store/", "from '../locks/", "from '../clone/"]) {
     assert.ok(!source.includes(forbidden), `proxy.ts must not import ${forbidden} — it is a transport shim, not a participant in the volume`);
   }
+});
+
+test('S14.9 — running proxy.ts directly (as an MCP client config would) actually enters runProxy(), on this platform', async () => {
+  // Regression for the naive `file://${argv[1].replace(...)}` comparison,
+  // which never matched `import.meta.url`'s real form on Windows and made
+  // `isMain` always false there — the process would exit 0 having done
+  // nothing. Spawned as a real subprocess (not imported) because `isMain`
+  // is evaluated at module load against `process.argv`, which only a real
+  // process invocation exercises.
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const proxyPath = fileURLToPath(new URL('../mcp-proxy/proxy.ts', import.meta.url));
+  const result = spawnSync(process.execPath, [proxyPath], {
+    env: { ...process.env, SZG_ORIGIN: '', SZG_DECLARATION_ID: '', SZG_BEARER_TOKEN: '' },
+    encoding: 'utf8',
+  });
+  // If `isMain` never fires, the process exits 0 with no output at all —
+  // the failure mode this test exists to catch. If it fires, missing env
+  // vars make `resolveProxyOptionsFromEnv` throw, which the top-level
+  // `.catch` reports on stderr with exit code 1.
+  assert.equal(result.status, 1, `expected proxy.ts to run its entry point and exit 1 on missing env, got status=${result.status}, stderr=${result.stderr}`);
+  assert.match(result.stderr, /SZG_ORIGIN, SZG_DECLARATION_ID and SZG_BEARER_TOKEN must all be set/);
 });

@@ -21,6 +21,8 @@ import type { ClientRegistrationRequest, Grant, GrantKind, GrantView, IssuedMcpG
 
 export interface Authorization {
   registerClient(request: ClientRegistrationRequest): Promise<Outcome<OAuthClient, AuthorizationError>>;
+  /** The registered client named by `clientId`, or `null` if no such client exists. `handleAuthorize` needs this to check a presented `redirect_uri` against what the client actually registered — the same row `registerClient` wrote. */
+  getClient(clientId: ClientId): Promise<OAuthClient | null>;
   issueMcpGrant(input: McpGrantInput, actor: ActorRef): Promise<Outcome<IssuedMcpGrant, AuthorizationError>>;
   establishMcpSession(bearer: BearerToken, resource: McpResourceUri): Promise<Outcome<Session, AuthorizationError>>;
   verifyOperatorApiToken(bearer: BearerToken): Promise<Outcome<Session, AuthorizationError>>;
@@ -266,6 +268,14 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
         return { clientId, redirectUris: request.redirectUris, registeredAt, revokedAt: null } satisfies OAuthClient;
       });
       return result;
+    },
+
+    async getClient(clientId: ClientId): Promise<OAuthClient | null> {
+      const result = withDb(deps.volumeRoot, (db) => {
+        const row = db.prepare('SELECT * FROM oauth_client WHERE client_id = ?').get(clientId) as ClientRow | undefined;
+        return row ? toClient(row) : null;
+      });
+      return result.ok ? result.value : null;
     },
 
     /**

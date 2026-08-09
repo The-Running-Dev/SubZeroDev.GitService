@@ -408,6 +408,23 @@ test('registerClient rejects an empty redirect-URI list and a non-https one, bot
   });
 });
 
+test('getClient returns the registered client by id, and null for an unknown or made-up id', async () => {
+  await migratedVolume(async (volume) => {
+    const auth = authFor(volume);
+    const registered = await auth.registerClient({ redirectUris: ['https://example.invalid/callback' as never], clientName: 'x' });
+    assert.equal(registered.ok, true);
+    if (!registered.ok) return;
+
+    const found = await auth.getClient(registered.value.clientId);
+    assert.ok(found);
+    assert.equal(found?.clientId, registered.value.clientId);
+    assert.deepEqual(found?.redirectUris, registered.value.redirectUris);
+
+    const missing = await auth.getClient('no-such-client' as never);
+    assert.equal(missing, null);
+  });
+});
+
 async function declaredRepo(declarations: Declarations, id: string, capabilityGrant: readonly string[], host: 'generic' | 'github' = 'generic'): Promise<Declaration> {
   const declared = await declarations.declare(
     {

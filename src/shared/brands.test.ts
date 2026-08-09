@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cloneUrl, credentialRef, declarationId, generation, grantEpoch, pathPrefix, repoRelativePath } from './brands.ts';
+import { cloneUrl, credentialRef, declarationId, generation, grantEpoch, mcpResourceUri, pathPrefix, repoRelativePath } from './brands.ts';
 import type { RemoteHost } from './brands.ts';
 
 /**
@@ -40,6 +40,26 @@ test('declarationId() accepts and rejects per ^[a-z0-9][a-z0-9-]{0,62}$, counted
   const { accepted, rejected } = runFixtures('declarationId', fixtures, declarationId);
   assert.equal(accepted, 5);
   assert.equal(rejected, 7);
+});
+
+test('mcpResourceUri() accepts and rejects per ^\\/mcp\\/[a-z0-9][a-z0-9-]{0,62}$, counted', () => {
+  const fixtures = [
+    { input: '/mcp/blog', expectOk: true },
+    { input: '/mcp/my-repo-2', expectOk: true },
+    { input: '/mcp/a', expectOk: true },
+    { input: '/mcp/0-start', expectOk: true },
+    { input: '', expectOk: false },
+    { input: '/mcp/', expectOk: false },
+    { input: 'mcp/blog', expectOk: false },
+    { input: '/mcp/-leading-dash', expectOk: false },
+    { input: '/mcp/Has-Upper', expectOk: false },
+    { input: '/mcp/has_underscore', expectOk: false },
+    { input: '/mcp/has space', expectOk: false },
+    { input: '/mcp/trailing/', expectOk: false },
+  ];
+  const { accepted, rejected } = runFixtures('mcpResourceUri', fixtures, mcpResourceUri);
+  assert.equal(accepted, 4);
+  assert.equal(rejected, 8);
 });
 
 test('cloneUrl() accepts hosts on the allowlist and rejects everything else, counted', () => {

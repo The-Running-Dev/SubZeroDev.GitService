@@ -8,6 +8,7 @@
  * config (e.g. Claude Desktop's `mcpServers` block) launches directly —
  * there is no interactive setup step.
  */
+import { pathToFileURL } from 'node:url';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -74,7 +75,11 @@ export async function runProxy(options: ProxyOptions): Promise<void> {
   await server.connect(localTransport);
 }
 
-const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}`;
+// `pathToFileURL` produces the platform-correct `file://` form (three
+// slashes on Windows, e.g. `file:///D:/foo/bar.ts`) — the naive
+// backslash-replace-and-prepend version this replaced never matched
+// `import.meta.url` on Windows, so `runProxy()` silently never ran there.
+const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
   runProxy(resolveProxyOptionsFromEnv(process.env)).catch((error: unknown) => {
     console.error('mcp-proxy: fatal —', error instanceof Error ? error.message : String(error));

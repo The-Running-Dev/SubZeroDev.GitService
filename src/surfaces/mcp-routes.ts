@@ -16,7 +16,7 @@ import type { Authorization } from '../authorization/authorization.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import type { DispatchPipeline } from '../dispatch/dispatch-pipeline.ts';
 import { authorization as authorizationResult } from '../result/envelope.ts';
-import { requireSession, type ConsoleAuthDependencies } from './console-auth-routes.ts';
+import { requireSession, csrfOk, type ConsoleAuthDependencies } from './console-auth-routes.ts';
 
 const SUPPORTED_SCOPES: readonly McpScope[] = ['read', 'write', 'raw', 'schedule'];
 const AUTHORIZATION_REQUEST_TTL_MS = 10 * 60 * 1000;
@@ -30,6 +30,17 @@ const AUTHORIZATION_CODE_TTL_MS = 5 * 60 * 1000;
  * `issueMcpGrant` write durably rather than holding an in-memory `Map`.
  */
 const MAX_PENDING_AUTHORIZATIONS = 500;
+
+/**
+ * Unlike `pendingAuthorizations`/`issuedCodes`, a `Session` carries no
+ * `expiresAt` of its own — its liveness is checked lazily against the
+ * underlying grant on every call (`resolveLiveSession`). Without a cap, a
+ * client that reconnects and re-`initialize`s repeatedly (ordinary behaviour
+ * after any network blip) grows this `Map` without bound. Evicting the
+ * oldest entry on overflow keeps it bounded the same way the other two maps
+ * are, without needing a TTL concept `Session` does not have.
+ */
+const MAX_SESSIONS = 1000;
 
 interface PendingAuthorization {
   readonly clientId: ClientId;
@@ -69,7 +80,7 @@ export function createMcpRoutesState(): McpRoutesState {
 }
 
 export interface McpRoutesDependencies extends ConsoleAuthDependencies {
-  readonly authorization: Pick<Authorization, 'registerClient' | 'issueMcpGrant' | 'establishMcpSession' | 'refresh' | 'recomputeSessionGrant' | 'grantIsLive' | 'revokeBearerToken'>;
+  readonly authorization: Pick<Authorization, 'registerClient' | 'getClient' | 'issueMcpGrant' | 'establishMcpSession' | 'refresh' | 'recomputeSessionGrant' | 'grantIsLive' | 'revokeBearerToken'>;
   readonly declarations: Pick<Declarations, 'get'>;
   readonly dispatchPipeline: Pick<DispatchPipeline, 'dispatch' | 'visibleTools'>;
   readonly mcpState: McpRoutesState;
@@ -343,9 +354,15 @@ async function handleAuthorize(deps: McpRoutesDependencies, req: IncomingMessage
       return;
     }
 
-    deps.mcpState.pendingAuthorizations.forEach((_v, k, m) => pruneExpired(m, Date.now()));
+    pruneExpired(deps.mcpState.pendingAuthorizations, Date.now());
     if (deps.mcpState.pendingAuthorizations.size >= MAX_PENDING_AUTHORIZATIONS) {
       sendHtml(res, 503, '<!doctype html><title>Server busy</title><p>Too many pending authorization requests. Try again shortly.</p>');
+      return;
+    }
+
+    const client = await deps.authorization.getClient(clientId as ClientId);
+    if (!client || client.revokedAt !== null || !(client.redirectUris as readonly string[]).includes(redirectUri)) {
+      sendHtml(res, 400, '<!doctype html><title>Authorization error</title><p>redirect_uri is not registered for this client.</p>');
       return;
     }
 
@@ -372,6 +389,10 @@ async function handleAuthorize(deps: McpRoutesDependencies, req: IncomingMessage
 
   const operatorSession = await requireSession(deps, req, res);
   if (!operatorSession) return;
+  if (!csrfOk(req)) {
+    sendJson(res, 403, { error: 'csrf-check-failed' });
+    return;
+  }
 
   const form = await readFormBody(req);
   if (!form) {
@@ -434,13 +455,18 @@ async function handleToken(deps: McpRoutesDependencies, req: IncomingMessage, re
       sendJson(res, 400, { error: 'invalid_grant' });
       return;
     }
+    const declaration = await deps.declarations.get(record.declarationId);
+    if (!declaration) {
+      sendJson(res, 400, { error: 'invalid_grant', summary: `declaration '${record.declarationId}' no longer exists` });
+      return;
+    }
     const issued = await deps.authorization.issueMcpGrant(
       {
         clientId: record.clientId,
         subject: record.clientId as unknown as Subject,
         resource: record.resource,
         declarationId: record.declarationId,
-        generation: (await deps.declarations.get(record.declarationId))?.generation ?? (1 as never),
+        generation: declaration.generation,
         scopes: record.scopes,
       },
       { kind: 'mcp', subject: record.clientId as unknown as Subject, clientId: record.clientId, grantId: null },
@@ -538,6 +564,10 @@ async function handleMcpTransport(deps: McpRoutesDependencies, req: IncomingMess
     if (!established.ok) {
       unauthorized(res, deps.origin, declarationIdValue, established.error.summary);
       return;
+    }
+    if (deps.mcpState.sessions.size >= MAX_SESSIONS) {
+      const oldest = deps.mcpState.sessions.keys().next().value;
+      if (oldest !== undefined) deps.mcpState.sessions.delete(oldest);
     }
     const sessionId = randomUUID();
     deps.mcpState.sessions.set(sessionId, established.value);
