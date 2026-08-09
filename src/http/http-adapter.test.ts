@@ -56,6 +56,22 @@ test('S12.6 — a 200 serving a different commit is precondition, naming both sh
   assert.ok(findings.some((f) => f.message === servedSha));
 });
 
+test('a signal already aborted before invoke never reaches fetch', async () => {
+  let fetched = false;
+  const adapter = createHttpAdapter({
+    clock: systemClock,
+    fetchImpl: fakeFetch(() => {
+      fetched = true;
+      return jsonResponse(200, { ready: true, commitSha: EXPECTED });
+    }),
+  });
+  const aborted = new AbortController();
+  aborted.abort();
+  const result = await adapter.invoke(VERIFY_PUBLISHED_URL_OPERATION, context(aborted.signal), { url: URL, expectedCommitSha: EXPECTED }, LIMITS);
+  assert.equal(result.ok, false);
+  assert.equal(fetched, false, 'a pre-aborted signal must cancel the GET before it goes out, not after');
+});
+
 test('S12.6 — a non-2xx status is upstream', async () => {
   const adapter = createHttpAdapter({ clock: systemClock, fetchImpl: fakeFetch(() => new Response('nope', { status: 503 })) });
   const result = await adapter.invoke(VERIFY_PUBLISHED_URL_OPERATION, context(), { url: URL, expectedCommitSha: EXPECTED }, LIMITS);

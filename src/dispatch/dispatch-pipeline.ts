@@ -118,6 +118,17 @@ function byteLength(value: unknown): number {
 }
 
 /**
+ * Whether dispatching this entry requires a materialised clone. An
+ * http-targeted entry's own module carries no credential dependency (S12.7) —
+ * materialising a clone for one would force a credentialed clone-on-demand
+ * onto a tool that never touches the tree. One predicate, consulted by every
+ * dispatch path that materialises early, so the paths cannot drift apart.
+ */
+function needsClone(entry: ToolDeclaration): boolean {
+  return entry.target.kind !== 'http';
+}
+
+/**
  * The audit trail's `changedPaths` describes what actually changed, not what
  * was requested — a rejected or partially-applied stage/restore must not
  * report its input paths as changed, and `git_commit` (no `paths` input at
@@ -240,7 +251,7 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
     let cloneRoot: CallContext['cloneRoot'] = null;
     let releasePin: (() => void) | null = null;
 
-    if (declaration !== null) {
+    if (declaration !== null && needsClone(entry)) {
       const holder = { operationId, declarationId: declaration.id, tool: entry.name, heldSince: clock.now() };
       const ensured = await cloneStore.ensure(declaration, holder, request.signal);
       if (!ensured.ok) return moduleErrorToToolResult(ensured.error);
@@ -303,7 +314,7 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
     let releasePin: (() => void) | null = null;
 
     try {
-      if (declaration !== null) {
+      if (declaration !== null && needsClone(entry)) {
         const holder = { operationId, declarationId: declaration.id, tool: entry.name, heldSince: clock.now() };
         const ensured = await cloneStore.ensure(declaration, holder, request.signal);
         if (!ensured.ok) return moduleErrorToToolResult(ensured.error);

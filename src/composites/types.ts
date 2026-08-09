@@ -4,7 +4,7 @@ import type { BranchName, GitSha } from '../shared/brands.ts';
  * `20-contract.md` § L2 — composites, S12's resolution of U1 for the two
  * composites. `TODO-NEXT.md` §7.3's `PreparePublishBranchInput` carries
  * `name`/`slug`/`kind`/`checkoutExisting` — blog-specific branch-naming
- * policy this repository does not own (`AGENTS.md`: "general git-workflow
+ * policy this repository does not own (`00-brief.md`: "general git-workflow
  * safety, not blog-specific"). The caller names the branch directly.
  */
 export interface PrepareBranchInput {

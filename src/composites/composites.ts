@@ -7,7 +7,9 @@ import type { Exec } from '../exec/exec.ts';
 import type { Journal } from '../journal/journal.ts';
 import type { GitOperations } from '../git/git-operations.ts';
 import type { HostOperations } from '../host/host-operations.ts';
-import { success, precondition, infrastructure, type Diagnostics, type ToolResult } from '../result/envelope.ts';
+import { success, precondition, infrastructure, type ToolResult } from '../result/envelope.ts';
+import { diagnosticsFor } from '../shared/diagnostics.ts';
+import { currentBranch as sharedCurrentBranch } from '../git/primitives.ts';
 import type { PrepareBranchData, PrepareBranchInput, ReconcileAfterMergeData, ReconcileAfterMergeInput } from './types.ts';
 
 /**
@@ -44,15 +46,6 @@ export interface CompositesDependencies {
 
 const LOCAL_COMMAND_TIMEOUT_SECONDS = 30;
 
-function diagnosticsFor(ctx: CallContext, startedAtMs: number, clock: Clock): Diagnostics {
-  return {
-    operationId: ctx.operationId,
-    declarationId: ctx.declarationId,
-    generation: ctx.generation,
-    durationMs: Math.max(0, Date.parse(clock.now()) - startedAtMs),
-  };
-}
-
 export function createComposites(deps: CompositesDependencies): Composites {
   const { clock, exec, gitOperations, hostOperations, journal } = deps;
 
@@ -69,10 +62,12 @@ export function createComposites(deps: CompositesDependencies): Composites {
   }
 
   async function currentBranch(cwd: ClonePath, signal: AbortSignal): Promise<BranchName | null> {
-    const result = await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'], signal);
-    if (!result.ok) return null;
-    const name = result.value.stdout.trim();
-    return name.length > 0 && name !== 'HEAD' ? (name as BranchName) : null;
+    return sharedCurrentBranch(exec, cwd, LOCAL_COMMAND_TIMEOUT_SECONDS, signal);
+  }
+
+  /** `rev-list` stdout as shas, or `fallback` when the call failed (or never ran). */
+  function revListShas(result: Awaited<ReturnType<typeof git>> | null, fallback: readonly GitSha[]): readonly GitSha[] {
+    return result !== null && result.ok ? (result.value.stdout.split('\n').filter((l) => l.length > 0) as GitSha[]) : fallback;
   }
 
   async function revParse(cwd: ClonePath, ref: string, signal: AbortSignal): Promise<GitSha | null> {
@@ -215,9 +210,14 @@ export function createComposites(deps: CompositesDependencies): Composites {
         if (existingSha !== null && (await isAncestor(cwd, remoteBaseSha, existingSha, signal))) {
           action = 'reused-existing';
         } else {
+          // The original, pre-rebase commit shas — captured before the
+          // rebase rewrites `input.branch`'s history onto `remoteBaseSha`,
+          // since afterward these shas are no longer reachable from it.
+          const preRebaseLog = existingSha !== null ? await git(cwd, ['rev-list', `${remoteBaseSha}..${existingSha}`], signal) : null;
           const rebased = await rebaseOntoRemoteBase(cwd, input.branch, remoteBaseSha, signal);
           if (!rebased.ok) return rebased.error;
           action = 'rebased-preserved-commits';
+          preservedCommits = revListShas(preRebaseLog, existingSha !== null ? [existingSha] : []);
         }
       } else if (localBaseSha === remoteBaseSha) {
         const created = await git(cwd, ['branch', input.branch, remoteBaseSha], signal);
@@ -254,9 +254,7 @@ export function createComposites(deps: CompositesDependencies): Composites {
           return infrastructure(`could not preserve '${baseBranch}'s local-only commits onto '${input.branch}': ${createdAtTip.error.summary}`);
         }
         const preservedLog = await git(cwd, ['rev-list', `${remoteBaseSha}..${preservedTip}`], signal);
-        preservedCommits = preservedLog.ok
-          ? (preservedLog.value.stdout.split('\n').filter((l) => l.length > 0) as GitSha[])
-          : [preservedTip];
+        preservedCommits = revListShas(preservedLog, [preservedTip]);
 
         const currentlyOnBase = (await currentBranch(cwd, signal)) === baseBranch;
         if (currentlyOnBase) {
@@ -277,7 +275,10 @@ export function createComposites(deps: CompositesDependencies): Composites {
 
       const stepCheckout = await step(ctx, PREPARE_BRANCH_STEPS.checkout);
       if (stepCheckout) return stepCheckout;
-      if ((await currentBranch(cwd, signal)) !== input.branch) {
+      // A successful `rebaseOntoRemoteBase` returns with `input.branch`
+      // checked out, so the rebase action needs no further checkout — and no
+      // subprocess spawned to confirm what the rebase already guarantees.
+      if (action !== 'rebased-preserved-commits' && (await currentBranch(cwd, signal)) !== input.branch) {
         const checkedOut = await git(cwd, ['checkout', input.branch], signal);
         if (!checkedOut.ok) return infrastructure(`prepared '${input.branch}' but could not check it out: ${checkedOut.error.summary}`);
       }

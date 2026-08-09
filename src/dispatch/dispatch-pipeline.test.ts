@@ -17,7 +17,7 @@ import { createCloneStore, type CloneStore } from '../clone/clone-store.ts';
 import { createBareGitRemote } from '../clone/testing/git-fixture.ts';
 import type { Declaration } from '../declarations/types.ts';
 import type { DeploymentCeiling, DeclarationScopedCapability } from '../contract/capabilities.ts';
-import { fixtureTool } from '../contract/fixtures.ts';
+import { fixtureTool, httpTarget } from '../contract/fixtures.ts';
 import type { CompiledRegistry, ToolDeclaration } from '../contract/tool-declaration.ts';
 import type { JsonSchema } from '../contract/json.ts';
 import { createModuleAdapter, toModuleHandler } from '../module-adapter/module-adapter.ts';
@@ -30,6 +30,7 @@ import type { Session } from '../shared/session.ts';
 import { createRecoveryCatalogue } from '../recovery/catalogue.ts';
 import { recoverDeclaration } from '../lifecycle/recovery.ts';
 import { createDispatchPipeline } from './dispatch-pipeline.ts';
+import type { HttpAdapter } from '../http/http-adapter.ts';
 
 const CAPABILITY_SET = new Set(['repo.read']) as unknown as DeploymentCeiling;
 const MUTATION_CAPABILITY_SET = new Set(['repo.read', 'git.local.write']) as unknown as DeploymentCeiling;
@@ -2063,5 +2064,97 @@ test('S10.7: exceeding concurrentLockFreeOperations returns conflict, naming the
 
     gate.fn?.();
     assert.equal((await first).ok, true);
+  });
+});
+
+test('an http-targeted monitoring-wait tool never materialises a clone either — the guard is shared, not read-path-only', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore }) => {
+    const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
+    const moduleAdapter = createModuleAdapter();
+
+    let ensureCalls = 0;
+    const instrumentedCloneStore: CloneStore = {
+      ...cloneStore,
+      ensure: (...args) => {
+        ensureCalls += 1;
+        return cloneStore.ensure(...args);
+      },
+    };
+
+    const entry = { ...waitingTool('http_wait'), target: httpTarget('http_wait') };
+    const httpAdapter: Pick<HttpAdapter, 'invoke'> = {
+      invoke: async (_operation, ctx) => success('waited', {}, { operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation, durationMs: 0 }),
+    };
+
+    const pipeline = createDispatchPipeline({
+      registry: registryOf([entry]),
+      ceiling: CAPABILITY_SET,
+      moduleAdapter,
+      httpAdapter,
+      declarations,
+      cloneStore: instrumentedCloneStore,
+      locks: createLocks(),
+      audit,
+      clock: systemClock,
+    });
+
+    const result = await pipeline.dispatch({
+      toolName: 'http_wait' as never,
+      input: {},
+      session: sessionWith(['repo.read']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(ensureCalls, 0, 'the monitoring-wait path must consult the same needsClone predicate as the read path');
+  });
+});
+
+test('an http-targeted read tool never materialises a clone — no credential dependency, ever (S12.7)', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore }) => {
+    const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
+    const moduleAdapter = createModuleAdapter();
+
+    let ensureCalls = 0;
+    const instrumentedCloneStore: CloneStore = {
+      ...cloneStore,
+      ensure: (...args) => {
+        ensureCalls += 1;
+        return cloneStore.ensure(...args);
+      },
+    };
+
+    const entry = fixtureTool({ name: 'verify_published_url', capabilities: ['repo.read'], target: httpTarget('verify_published_url') });
+    const httpAdapter: Pick<HttpAdapter, 'invoke'> = {
+      invoke: async (_operation, ctx) => success('verified', {}, { operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation, durationMs: 0 }),
+    };
+
+    const pipeline = createDispatchPipeline({
+      registry: registryOf([entry]),
+      ceiling: CAPABILITY_SET,
+      moduleAdapter,
+      httpAdapter,
+      declarations,
+      cloneStore: instrumentedCloneStore,
+      locks: createLocks(),
+      audit,
+      clock: systemClock,
+    });
+
+    const result = await pipeline.dispatch({
+      toolName: 'verify_published_url' as never,
+      input: {},
+      session: sessionWith(['repo.read']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(ensureCalls, 0, 'an http-targeted entry must never materialise a clone the adapter never touches');
   });
 });

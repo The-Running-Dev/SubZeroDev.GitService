@@ -289,6 +289,44 @@ test('S12.1 — a local-only commit on the base branch is preserved on the new b
   });
 });
 
+/**
+ * Distinct from S12.1's stranded-commit case above: here `input.branch`
+ * *itself* already exists locally (e.g. a prior, incomplete attempt) and
+ * needs rebasing onto a base that has since advanced — not a commit sitting
+ * on the base branch. `preservedCommits` must still be populated per
+ * `types.ts`'s documented contract for `rebased-preserved-commits`.
+ */
+test('prepareBranch: an already-existing local branch that needs rebasing reports its preserved commits', async () => {
+  await withVolumeAsync(async (volume) => {
+    const f = fixture();
+    try {
+      git(['checkout', '-b', 'feature-existing'], f.clonePath);
+      writeFileSync(path.join(f.clonePath, 'existing-branch.md'), 'existing\n', 'utf8');
+      git(['add', 'existing-branch.md'], f.clonePath);
+      git(['commit', '-m', 'commit on the existing branch'], f.clonePath);
+      const existingSha = git(['rev-parse', 'HEAD'], f.clonePath).trim() as GitSha;
+      git(['checkout', 'main'], f.clonePath);
+
+      // Origin advances independently while `feature-existing` is still based on the old tip.
+      advanceRemoteMain(f.remoteWorkDir, 'remote-advance.md');
+
+      const declaration = declarationFor('repo-a' as DeclarationId, f.bareDir);
+      await withComposites(volume, f.clonePath, declaration, stubHostOperations(new Map()), async ({ composites, ctx }) => {
+        const result = await composites.prepareBranch(ctx, { branch: 'feature-existing' as BranchName });
+        assert.equal(result.ok, true, result.ok ? '' : result.summary);
+        if (!result.ok || !result.data) return;
+        assert.equal(result.data.action, 'rebased-preserved-commits');
+        assert.deepEqual(result.data.preservedCommits, [existingSha]);
+
+        const onRebasedBranch = git(['log', 'feature-existing', '--format=%s'], f.clonePath);
+        assert.match(onRebasedBranch, /commit on the existing branch/);
+      });
+    } finally {
+      f.cleanup();
+    }
+  });
+});
+
 test('prepareBranch: a rebase conflict aborts safely — every original commit remains reachable, invariant 6', async () => {
   await withVolumeAsync(async (volume) => {
     const f = fixture();

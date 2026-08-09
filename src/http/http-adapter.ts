@@ -2,7 +2,8 @@ import type { HttpOperationName, HttpsUrl, GitSha } from '../shared/brands.ts';
 import type { CallContext } from '../shared/call-context.ts';
 import type { JsonValue } from '../contract/json.ts';
 import type { ToolLimits } from '../contract/tool-declaration.ts';
-import { success, precondition, upstream, timeout as timeoutResult, infrastructure, type Diagnostics, type ToolResult } from '../result/envelope.ts';
+import { success, precondition, upstream, timeout as timeoutResult, infrastructure, type ToolResult } from '../result/envelope.ts';
+import { diagnosticsFor } from '../shared/diagnostics.ts';
 import type { Clock } from '../clock/clock.ts';
 
 /**
@@ -35,15 +36,6 @@ export interface HttpAdapterDependencies {
   readonly clock: Clock;
   /** Injectable so a test can substitute a fixture without a real network call. Defaults to the global `fetch`. */
   readonly fetchImpl?: typeof fetch;
-}
-
-function diagnosticsFor(ctx: CallContext, startedAtMs: number, clock: Clock): Diagnostics {
-  return {
-    operationId: ctx.operationId,
-    declarationId: ctx.declarationId,
-    generation: ctx.generation,
-    durationMs: Math.max(0, Date.parse(clock.now()) - startedAtMs),
-  };
 }
 
 function isVerifyPublishedUrlInput(value: JsonValue): value is JsonValue & VerifyPublishedUrlInput {
@@ -84,6 +76,13 @@ export function createHttpAdapter(deps: HttpAdapterDependencies): HttpAdapter {
       return infrastructure(`'${VERIFY_PUBLISHED_URL_OPERATION}' received an input its own schema should have rejected`);
     }
     const { url, expectedCommitSha } = input;
+
+    // An already-aborted signal never fires 'abort' again, so the listener
+    // below would miss it and the GET would run uncancellable — the same
+    // pre-start guard `Exec.runGit` applies before spawning a child.
+    if (ctx.signal.aborted) {
+      return infrastructure(`GET ${url} was cancelled before it started`);
+    }
 
     const controller = new AbortController();
     const onAbort = () => controller.abort();

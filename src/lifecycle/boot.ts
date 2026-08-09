@@ -218,16 +218,20 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       // 3, for the same reason: a registry entry nothing can execute is a
       // deployment/build wiring defect, not a runtime one, and is cheapest
       // to catch before the store ever opens. Module and http targets are
-      // checked independently — S1–S11's registries carry no http-targeted
-      // entry and supply no `registeredHttpOperations`, so that half is
-      // simply skipped rather than treated as "nothing registered".
+      // checked against an empty set when their own registered-operations
+      // dependency is omitted — not skipped — so a registry that gained an
+      // http-targeted entry without also wiring `registeredHttpOperations`
+      // (or the module equivalent) is still caught here rather than only at
+      // first request. `registeredModuleTargets: undefined` and
+      // `registeredHttpOperations: undefined` are distinguished from "empty"
+      // only by both defaulting to empty: a `Lifecycle` built before either
+      // target kind existed still compiles, and a registry with no entry of
+      // that kind reports nothing missing regardless.
       if (deps.registryEntries) {
-        const missingModule = deps.registeredModuleTargets
-          ? deps.registryEntries.filter((entry) => entry.target.kind === 'module' && !deps.registeredModuleTargets!.has(entry.target.target))
-          : [];
-        const missingHttp = deps.registeredHttpOperations
-          ? deps.registryEntries.filter((entry) => entry.target.kind === 'http' && !deps.registeredHttpOperations!.has(entry.target.operation))
-          : [];
+        const moduleTargets = deps.registeredModuleTargets ?? new Set<ModuleTargetName>();
+        const httpOperations = deps.registeredHttpOperations ?? new Set<HttpOperationName>();
+        const missingModule = deps.registryEntries.filter((entry) => entry.target.kind === 'module' && !moduleTargets.has(entry.target.target));
+        const missingHttp = deps.registryEntries.filter((entry) => entry.target.kind === 'http' && !httpOperations.has(entry.target.operation));
         const missingExecutors = [...missingModule, ...missingHttp].map((entry) => entry.name);
         if (missingExecutors.length > 0) {
           guard.release();

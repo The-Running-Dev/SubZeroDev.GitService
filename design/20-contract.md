@@ -2203,7 +2203,7 @@ interface ReconcileAfterMergeData {
 ```
 
 `PrepareBranchInput` carries only the branch name — not `TODO-NEXT.md` §7.3's `slug`/`kind`, which is
-blog-specific branch-naming policy this repository does not own (`AGENTS.md`: "general git-workflow
+blog-specific branch-naming policy this repository does not own (`00-brief.md`: "general git-workflow
 safety, not blog-specific"). `preservedCommits` is non-empty only for `rebased-preserved-commits`.
 
 The seven protected-base invariants S12.1 requires (`TODO-NEXT.md` §7.2, the incident doc

@@ -341,6 +341,29 @@ test('git_commit refuses on the configured base branch — protected-base invari
   });
 });
 
+test('git_commit refuses to proceed when the repository config is unparseable, rather than silently allowing a base-branch commit', async () => {
+  await withVolumeAsync(async (volume) => {
+    const { clonePath, cleanup } = realClone();
+    try {
+      mkdirSync(path.join(clonePath, '.config'));
+      writeFileSync(path.join(clonePath, '.config', 'subzerodev-git.json'), '{not valid json', 'utf8');
+      writeFileSync(path.join(clonePath, 'README.md'), 'fixture\nmore\n', 'utf8');
+      const exec = createExec({ volumeRoot: volume });
+      const locks = createLocks();
+      const gitOperations = createGitOperations({ clock: systemClock, exec, locks });
+
+      const staged = await gitOperations.stage(contextFor(clonePath, ['README.md' as PathPrefix]), { paths: ['README.md' as never] });
+      assert.equal(staged.ok, true);
+
+      const result = await gitOperations.commit(contextFor(clonePath), { message: 'update README' });
+      assert.equal(result.ok, false, 'an unparseable config must not be treated as "no base branch configured"');
+      assert.equal(result.kind, 'precondition');
+    } finally {
+      cleanup();
+    }
+  });
+});
+
 test('git_restore_paths restores a well-formed, allowlisted path to HEAD, discarding the change', async () => {
   await withVolumeAsync(async (volume) => {
     const { clonePath, cleanup } = realClone();

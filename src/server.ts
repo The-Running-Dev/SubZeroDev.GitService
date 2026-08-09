@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gitSha, type BranchName, type GitSha, type HttpsUrl, type RemoteHost } from './shared/brands.ts';
-import { hostSupportedCapabilities, type CapabilityName, type DeploymentCeiling, type SessionGrant } from './contract/capabilities.ts';
+import type { CapabilityName, DeploymentCeiling, SessionGrant } from './contract/capabilities.ts';
 import { systemClock } from './clock/clock.ts';
 import { createStructuredStore } from './store/structured-store.ts';
 import { createAudit } from './audit/audit.ts';
@@ -339,17 +339,20 @@ async function main(): Promise<void> {
   let dispatchRef: Dispatch | null = null;
   // The session a resume runs under. `operator`'s `ActorProfile` is the
   // widest of the four (`declarations/types.ts`'s `OPERATOR_PROFILE`), and
-  // `hostSupportedCapabilities('github')` grants every declaration-scoped
-  // capability a resumed composite could need — `declarations.effectiveGrant`
-  // still intersects this against the declaration's own grant and the
-  // deployment ceiling, so this is a ceiling on what a resume *could* reach,
-  // not new authority.
+  // `contractCapabilitySet` grants every declaration-scoped capability a
+  // resumed composite could need — `declarations.effectiveGrant` still
+  // intersects this against the declaration's own grant and the deployment
+  // ceiling, so this is a ceiling on what a resume *could* reach, not new
+  // authority. The same "everything the registry declares" set the compiled
+  // registry and the console operator session (`tool-routes.ts`'s
+  // `sessionFor`) already use — not a second, independently-maintained
+  // enumeration that could drift from it.
   const recoverySession: Session = {
     id: 'recovery' as SessionId,
     kind: 'operator',
     actorRef: { kind: 'recovery', subject: 'system' as Subject, clientId: null, grantId: null },
     repositoryBinding: null,
-    grant: hostSupportedCapabilities('github') as unknown as SessionGrant,
+    grant: contractCapabilitySet as unknown as SessionGrant,
     writablePathPrefixes: [],
     frozenAtEpoch: 0 as GrantEpoch,
   };
