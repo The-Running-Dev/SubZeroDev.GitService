@@ -13,6 +13,10 @@ import { createOperatorIdentity } from '../operator-identity/operator-identity.t
 import { DatabaseSync } from 'node:sqlite';
 import { createJournal } from '../journal/journal.ts';
 import { createNotifier, type Notifier } from '../notifier/notifier.ts';
+import { createRecoveryCatalogue } from '../recovery/catalogue.ts';
+import { RECONCILE_AFTER_MERGE_RECOVERY } from '../composites/recovery-descriptors.ts';
+import { ok } from '../shared/outcome.ts';
+import type { RecoveryDependencies } from './recovery.ts';
 
 /** The outbox as it stands on disk, for the redrive tests below. */
 function readOutboxRows(volume: string): { status: string }[] {
@@ -76,6 +80,7 @@ function lifecycleFor(
     readonly ceiling?: DeploymentCeiling;
     readonly registryDeclarations?: Parameters<typeof compiler.compile>[0];
     readonly notifier?: Pick<Notifier, 'redriveUndelivered'>;
+    readonly recovery?: RecoveryDependencies;
   } = {},
 ) {
   const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
@@ -91,6 +96,7 @@ function lifecycleFor(
     ceiling: options.ceiling ?? EMPTY_CEILING,
     ...(acquirer ? { acquirer } : {}),
     ...(options.notifier ? { notifier: options.notifier } : {}),
+    ...(options.recovery ? { recovery: options.recovery } : {}),
   });
   return { store, audit, lifecycle };
 }
@@ -203,6 +209,82 @@ test('S11 — a slow or unreachable webhook does not delay boot: readiness and t
       assert.equal(booted.ok, true, 'boot succeeds even though delivery never will');
       assert.equal(redriveStarted, true, 'the redrive was still started');
       assert.ok(bootDurationMs < 5000, `boot returned in ${bootDurationMs}ms rather than waiting on the notifier`);
+    } finally {
+      await lifecycle.shutdown('operator');
+    }
+  });
+});
+
+test('S12.5 — a resume touching the host runs through the pipeline under its own lock, never during boot', async () => {
+  await withVolumeAsync(async (volume) => {
+    const seedStore = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    await seedStore.open();
+    await seedStore.migrate();
+    await seedStore.close();
+
+    // Left behind by a killed `reconcile_after_merge` — the composite that
+    // touches the host (`host.pr.read`). Its descriptor's `expectedPostState`
+    // always returns `false` (`composites/recovery-descriptors.ts`), so this
+    // entry classifies `resume` on the very first observation, with nothing
+    // needed from `cloneStore` to force it.
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin({
+      operationId: 'op-1' as never,
+      declarationId: 'repo-a' as never,
+      generation: 1 as never,
+      tool: 'reconcile_after_merge' as never,
+      input: { pullRequestNumber: 7 },
+      actorRef: { kind: 'mcp', subject: 'sub' as never, clientId: null, grantId: null },
+      scheduledJobId: null,
+      context: 'normal',
+      preState: { branch: 'main' as never, headSha: 'a'.repeat(40) as never, upstreamSha: 'a'.repeat(40) as never, indexDigest: 'b'.repeat(64) as never, worktreeDigest: 'c'.repeat(64) as never },
+    });
+
+    const catalogue = createRecoveryCatalogue();
+    catalogue.register(RECONCILE_AFTER_MERGE_RECOVERY);
+
+    // Stands in for the dispatch pipeline — the one thing a host-touching
+    // resume must go through, under its own mutation lock (S12's own
+    // composites.test.ts uses the same stand-in for the same reason).
+    const dispatchCalls: string[] = [];
+    const dispatchSpy: RecoveryDependencies['dispatch'] = async (request) => {
+      dispatchCalls.push(request.toolName);
+      return { ok: true, kind: 'success', summary: 'resumed', data: null, findings: [], diagnostics: null } as never;
+    };
+
+    const recovery: RecoveryDependencies = {
+      journal,
+      catalogue,
+      clock: systemClock,
+      declarations: { get: async () => ({ id: 'repo-a', generation: 1 }) as never },
+      cloneStore: {
+        // Diverged from `preState`, so `journal.classify` cannot take its
+        // `nothing-happened` shortcut and actually consults the descriptor —
+        // whose `expectedPostState` always returns `false` regardless
+        // (`composites/recovery-descriptors.ts`), landing on `resume`.
+        observeGitState: async () => ok({ branch: 'main' as never, headSha: 'd'.repeat(40) as never, upstreamSha: 'a'.repeat(40) as never, indexDigest: 'b'.repeat(64) as never, worktreeDigest: 'c'.repeat(64) as never, observedAt: '2026-08-09T00:00:00.000Z' as never }),
+        markAttention: async () => ok(undefined),
+      },
+      dispatch: dispatchSpy,
+      recoverySession: { grant: new Set() } as never,
+    };
+
+    const { lifecycle } = lifecycleFor(volume, undefined, { recovery });
+    try {
+      const booted = await lifecycle.boot();
+      assert.equal(booted.ok, true);
+      if (!booted.ok) return;
+
+      assert.deepEqual(dispatchCalls, [], 'boot never dispatches a resume — zero host calls during boot');
+      assert.deepEqual(booted.value.recoveryPending, ['repo-a'], 'the entry is reported pending, not silently dropped');
+
+      // Confirms the spy is wired correctly: the same entry resumes, and
+      // touches the host, only once asked for on demand.
+      const recovered = await lifecycle.recoverDeclaration('repo-a' as never);
+      assert.equal(recovered.ok, true);
+      if (!recovered.ok) return;
+      assert.equal(recovered.value[0]?.verdict, 'resume');
+      assert.deepEqual(dispatchCalls, ['reconcile_after_merge'], 'the resume dispatches under its own lock, on demand');
     } finally {
       await lifecycle.shutdown('operator');
     }
