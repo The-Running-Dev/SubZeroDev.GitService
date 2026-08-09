@@ -97,6 +97,21 @@ export function declarationId(value: string): Outcome<DeclarationId, ValidationF
   return { ok: true, value: value as DeclarationId };
 }
 
+/** `20-contract.md` § L5 — surfaces: the resource indicator is fixed as `/mcp/{declarationId}`. */
+const MCP_RESOURCE_URI_PATTERN = /^\/mcp\/[a-z0-9][a-z0-9-]{0,62}$/;
+
+export function mcpResourceUri(value: string): Outcome<McpResourceUri, ValidationFailure> {
+  if (!MCP_RESOURCE_URI_PATTERN.test(value)) {
+    return { ok: false, error: fail('McpResourceUri', MCP_RESOURCE_URI_PATTERN.source, value) };
+  }
+  return { ok: true, value: value as McpResourceUri };
+}
+
+/** The declaration id embedded in an already-validated `McpResourceUri` — the inverse of the template `mcpResourceUri` validates against. */
+export function declarationIdFromResource(resource: McpResourceUri): DeclarationId {
+  return (resource as unknown as string).slice('/mcp/'.length) as DeclarationId;
+}
+
 export function generation(value: number): Outcome<Generation, ValidationFailure> {
   if (!Number.isInteger(value) || value < 1) {
     return { ok: false, error: fail('Generation', 'integer >= 1', String(value)) };

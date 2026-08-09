@@ -1,6 +1,6 @@
 import type { ClientId, DeclarationId, Generation, GrantId, IsoUtcTimestamp, McpResourceUri, SaltedHash, Subject, TokenId } from '../shared/brands.ts';
 import type { BearerToken, HttpsUrl } from '../shared/brands.ts';
-import type { Scope } from '../contract/capabilities.ts';
+import type { McpScope, Scope } from '../contract/capabilities.ts';
 
 /** `20-contract.md` § Authorization records. */
 export type GrantKind = 'mcp' | 'operator-api';
@@ -56,6 +56,21 @@ export interface ClientRegistrationRequest {
 }
 
 export interface RefreshedTokens {
+  readonly access: IssuedToken;
+  readonly refresh: IssuedToken;
+}
+
+export interface McpGrantInput {
+  readonly clientId: ClientId;
+  readonly subject: Subject;
+  readonly resource: McpResourceUri;
+  readonly declarationId: DeclarationId;
+  readonly generation: Generation;
+  readonly scopes: readonly McpScope[];
+}
+
+export interface IssuedMcpGrant {
+  readonly grant: Grant;
   readonly access: IssuedToken;
   readonly refresh: IssuedToken;
 }

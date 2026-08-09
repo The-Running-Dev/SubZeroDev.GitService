@@ -15,6 +15,7 @@ import type { AdmissionLimits } from './locks/types.ts';
 import { createDeclarations, type Declarations } from './declarations/declarations.ts';
 import { createCloneStore, type CloneStore } from './clone/clone-store.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './surfaces/http-server.ts';
+import { createMcpRoutesState } from './surfaces/mcp-routes.ts';
 import { createGitOperations } from './git/git-operations.ts';
 import { createJournal } from './journal/journal.ts';
 import { createNotifier } from './notifier/notifier.ts';
@@ -58,6 +59,11 @@ function resolvePort(): number {
     process.exit(1);
   }
   return port;
+}
+
+/** The public origin MCP clients see — `20-contract.md` § L5, needed for absolute OAuth metadata URLs and the `resource_metadata` challenge. No fixed default a deployment can rely on; falls back to loopback so a local run still has something honest to report. */
+function resolveOrigin(port: number): string {
+  return process.env.PUBLIC_ORIGIN ?? `http://localhost:${port}`;
 }
 
 /** `DeploymentConfig.remoteHostAllowlist` (`20-contract.md` § Deployment configuration) — a deployment-set value with no fixed default; empty until configured means nothing can be declared, which is the safe direction to fail in. */
@@ -309,7 +315,7 @@ async function main(): Promise<void> {
   // hash, and the revocation cascade. Replaces the shared-secret bearer
   // stand-in `http-server.ts` carried since S2: a script's credential is now
   // issued from the grants view (`/grants/tokens`), not a static env var.
-  const authorization = createAuthorization({ volumeRoot, clock: systemClock, contractCapabilitySet, audit });
+  const authorization = createAuthorization({ volumeRoot, clock: systemClock, contractCapabilitySet, ceiling, declarations, audit });
 
   // S8 — the recovery catalogue, populated here from L2 and read by L1. A
   // duplicate registration is a wiring defect and fatal at composition time,
@@ -495,6 +501,8 @@ async function main(): Promise<void> {
     cloneStore,
     dispatchPipeline,
     contractCapabilitySet,
+    origin: resolveOrigin(port),
+    mcpState: createMcpRoutesState(),
   });
 
   // What actually drives delivery. Boot re-drives once, and recovery fires a

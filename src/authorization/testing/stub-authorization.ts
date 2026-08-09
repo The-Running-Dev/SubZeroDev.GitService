@@ -41,6 +41,9 @@ export function createStubAuthorization(
     async registerClient() {
       return err(authorizationError({ code: 'registration-invalid', findings: [] }, 'stub: registerClient not exercised'));
     },
+    async issueMcpGrant() {
+      return err(authorizationError({ code: 'token-unknown' }, 'stub: issueMcpGrant not exercised'));
+    },
     async establishMcpSession() {
       return err(authorizationError({ code: 'token-unknown' }, 'stub: establishMcpSession not exercised'));
     },
@@ -81,6 +84,12 @@ export function createStubAuthorization(
     },
     async revokeToken() {
       return err(authorizationError({ code: 'token-unknown' }, 'stub: revokeToken not exercised'));
+    },
+    revokeGrantsForResource() {
+      return [];
+    },
+    async revokeBearerToken() {
+      return err(authorizationError({ code: 'token-unknown' }, 'stub: revokeBearerToken not exercised'));
     },
     async runRetention() {
       return { module: 'authorization', deletedRows: 0, freedBytes: 0, skipped: ['stub'] };
