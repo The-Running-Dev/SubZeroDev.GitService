@@ -17,7 +17,7 @@ import { createCloneStore, type CloneStore } from '../clone/clone-store.ts';
 import { createBareGitRemote } from '../clone/testing/git-fixture.ts';
 import type { Declaration } from '../declarations/types.ts';
 import type { DeploymentCeiling, DeclarationScopedCapability } from '../contract/capabilities.ts';
-import { fixtureTool } from '../contract/fixtures.ts';
+import { fixtureTool, httpTarget } from '../contract/fixtures.ts';
 import type { CompiledRegistry, ToolDeclaration } from '../contract/tool-declaration.ts';
 import type { JsonSchema } from '../contract/json.ts';
 import { createModuleAdapter, toModuleHandler } from '../module-adapter/module-adapter.ts';
@@ -30,6 +30,7 @@ import type { Session } from '../shared/session.ts';
 import { createRecoveryCatalogue } from '../recovery/catalogue.ts';
 import { recoverDeclaration } from '../lifecycle/recovery.ts';
 import { createDispatchPipeline } from './dispatch-pipeline.ts';
+import type { HttpAdapter } from '../http/http-adapter.ts';
 
 const CAPABILITY_SET = new Set(['repo.read']) as unknown as DeploymentCeiling;
 const MUTATION_CAPABILITY_SET = new Set(['repo.read', 'git.local.write']) as unknown as DeploymentCeiling;
@@ -503,6 +504,11 @@ test('a real git_stage + git_commit mutation runs end to end: journal settles, a
     const ensured = await cloneStore.ensure(declaration, holder, new AbortController().signal);
     assert.equal(ensured.ok, true);
     if (!ensured.ok) return;
+    // `git_commit` refuses on the configured base branch (protected-base
+    // invariant 1, S12) — this test's commit is a plain content change, not
+    // a base-branch operation, so it runs on a topic branch like any real
+    // caller would.
+    spawnSync('git', ['checkout', '-b', 'topic'], { cwd: ensured.value.clone.path, encoding: 'utf8' });
     writeFileSync(path.join(ensured.value.clone.path, 'README.md'), 'fixture\nchanged\n', 'utf8');
     ensured.value.materialisationLock.release();
     ensured.value.activePin.release();
@@ -1743,6 +1749,12 @@ test('S9.7 — a push holds the global mutation lock across the whole transfer, 
       const ensured = await cloneStore.ensure(byId.get(declaration.id)!, holder, new AbortController().signal);
       assert.equal(ensured.ok, true);
       if (!ensured.ok) return;
+      // `git_commit` refuses on the configured base branch (protected-base
+      // invariant 1, S12) — declaration B's commit below runs through
+      // dispatch, so it needs a topic branch checked out first.
+      if (declaration.id === declarationB.id) {
+        spawnSync('git', ['checkout', '-b', 'topic'], { cwd: ensured.value.clone.path, encoding: 'utf8' });
+      }
       writeFileSync(path.join(ensured.value.clone.path, 'README.md'), `fixture\n${declaration.id}\n`, 'utf8');
       spawnSync('git', ['add', 'README.md'], { cwd: ensured.value.clone.path, encoding: 'utf8' });
       if (declaration.id === declarationA.id) {
@@ -2052,5 +2064,97 @@ test('S10.7: exceeding concurrentLockFreeOperations returns conflict, naming the
 
     gate.fn?.();
     assert.equal((await first).ok, true);
+  });
+});
+
+test('an http-targeted monitoring-wait tool never materialises a clone either — the guard is shared, not read-path-only', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore }) => {
+    const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
+    const moduleAdapter = createModuleAdapter();
+
+    let ensureCalls = 0;
+    const instrumentedCloneStore: CloneStore = {
+      ...cloneStore,
+      ensure: (...args) => {
+        ensureCalls += 1;
+        return cloneStore.ensure(...args);
+      },
+    };
+
+    const entry = { ...waitingTool('http_wait'), target: httpTarget('http_wait') };
+    const httpAdapter: Pick<HttpAdapter, 'invoke'> = {
+      invoke: async (_operation, ctx) => success('waited', {}, { operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation, durationMs: 0 }),
+    };
+
+    const pipeline = createDispatchPipeline({
+      registry: registryOf([entry]),
+      ceiling: CAPABILITY_SET,
+      moduleAdapter,
+      httpAdapter,
+      declarations,
+      cloneStore: instrumentedCloneStore,
+      locks: createLocks(),
+      audit,
+      clock: systemClock,
+    });
+
+    const result = await pipeline.dispatch({
+      toolName: 'http_wait' as never,
+      input: {},
+      session: sessionWith(['repo.read']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(ensureCalls, 0, 'the monitoring-wait path must consult the same needsClone predicate as the read path');
+  });
+});
+
+test('an http-targeted read tool never materialises a clone — no credential dependency, ever (S12.7)', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore }) => {
+    const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
+    const moduleAdapter = createModuleAdapter();
+
+    let ensureCalls = 0;
+    const instrumentedCloneStore: CloneStore = {
+      ...cloneStore,
+      ensure: (...args) => {
+        ensureCalls += 1;
+        return cloneStore.ensure(...args);
+      },
+    };
+
+    const entry = fixtureTool({ name: 'verify_published_url', capabilities: ['repo.read'], target: httpTarget('verify_published_url') });
+    const httpAdapter: Pick<HttpAdapter, 'invoke'> = {
+      invoke: async (_operation, ctx) => success('verified', {}, { operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation, durationMs: 0 }),
+    };
+
+    const pipeline = createDispatchPipeline({
+      registry: registryOf([entry]),
+      ceiling: CAPABILITY_SET,
+      moduleAdapter,
+      httpAdapter,
+      declarations,
+      cloneStore: instrumentedCloneStore,
+      locks: createLocks(),
+      audit,
+      clock: systemClock,
+    });
+
+    const result = await pipeline.dispatch({
+      toolName: 'verify_published_url' as never,
+      input: {},
+      session: sessionWith(['repo.read']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(ensureCalls, 0, 'an http-targeted entry must never materialise a clone the adapter never touches');
   });
 });

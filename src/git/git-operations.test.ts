@@ -299,6 +299,7 @@ test('git_commit commits what is staged and reports the sha, branch and changed 
   await withVolumeAsync(async (volume) => {
     const { clonePath, cleanup } = realClone();
     try {
+      git(['checkout', '-b', 'topic'], clonePath);
       writeFileSync(path.join(clonePath, 'README.md'), 'fixture\nmore\n', 'utf8');
       const exec = createExec({ volumeRoot: volume });
       const locks = createLocks();
@@ -311,8 +312,52 @@ test('git_commit commits what is staged and reports the sha, branch and changed 
       assert.equal(result.ok, true);
       if (!result.ok || !result.data) return;
       assert.match(result.data.sha, /^[0-9a-f]{40}$/);
-      assert.equal(result.data.branch, 'main');
+      assert.equal(result.data.branch, 'topic');
       assert.deepEqual(result.data.changedPaths, ['README.md']);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+test('git_commit refuses on the configured base branch — protected-base invariant 1', async () => {
+  await withVolumeAsync(async (volume) => {
+    const { clonePath, cleanup } = realClone();
+    try {
+      writeFileSync(path.join(clonePath, 'README.md'), 'fixture\nmore\n', 'utf8');
+      const exec = createExec({ volumeRoot: volume });
+      const locks = createLocks();
+      const gitOperations = createGitOperations({ clock: systemClock, exec, locks });
+
+      const staged = await gitOperations.stage(contextFor(clonePath, ['README.md' as PathPrefix]), { paths: ['README.md' as never] });
+      assert.equal(staged.ok, true);
+
+      const result = await gitOperations.commit(contextFor(clonePath), { message: 'update README' });
+      assert.equal(result.ok, false);
+      assert.equal(result.kind, 'precondition');
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+test('git_commit refuses to proceed when the repository config is unparseable, rather than silently allowing a base-branch commit', async () => {
+  await withVolumeAsync(async (volume) => {
+    const { clonePath, cleanup } = realClone();
+    try {
+      mkdirSync(path.join(clonePath, '.config'));
+      writeFileSync(path.join(clonePath, '.config', 'subzerodev-git.json'), '{not valid json', 'utf8');
+      writeFileSync(path.join(clonePath, 'README.md'), 'fixture\nmore\n', 'utf8');
+      const exec = createExec({ volumeRoot: volume });
+      const locks = createLocks();
+      const gitOperations = createGitOperations({ clock: systemClock, exec, locks });
+
+      const staged = await gitOperations.stage(contextFor(clonePath, ['README.md' as PathPrefix]), { paths: ['README.md' as never] });
+      assert.equal(staged.ok, true);
+
+      const result = await gitOperations.commit(contextFor(clonePath), { message: 'update README' });
+      assert.equal(result.ok, false, 'an unparseable config must not be treated as "no base branch configured"');
+      assert.equal(result.kind, 'precondition');
     } finally {
       cleanup();
     }

@@ -3,7 +3,8 @@ import type { CallContext, DomainOperation } from '../shared/call-context.ts';
 import type { GitSha, OperationId } from '../shared/brands.ts';
 import type { Journal } from '../journal/journal.ts';
 import type { CredentialBinding, Exec } from '../exec/exec.ts';
-import { success, validation, authorization, precondition, timeout as timeoutResult, upstream, infrastructure, type Diagnostics, type ToolResult } from '../result/envelope.ts';
+import { success, validation, authorization, precondition, timeout as timeoutResult, upstream, infrastructure, type ToolResult } from '../result/envelope.ts';
+import { diagnosticsFor } from '../shared/diagnostics.ts';
 import type { Outcome } from '../shared/outcome.ts';
 import type { ModuleErrorBase } from '../shared/result-kind.ts';
 import type { HostAdapter } from './github-adapter.ts';
@@ -75,15 +76,6 @@ export interface HostOperationsDependencies {
 
 function realSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function diagnosticsFor(ctx: CallContext, startedAtMs: number, clock: Clock): Diagnostics {
-  return {
-    operationId: ctx.operationId,
-    declarationId: ctx.declarationId,
-    generation: ctx.generation,
-    durationMs: Math.max(0, Date.parse(clock.now()) - startedAtMs),
-  };
 }
 
 /** Maps any `ModuleErrorBase`-shaped error by its own `resultKind` — which is the whole point: an `authorization` denial stays `authorization`. */

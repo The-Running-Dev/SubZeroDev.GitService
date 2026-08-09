@@ -21,10 +21,12 @@ import type { Audit } from '../audit/audit.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import type { CredentialResolver } from '../credentials/credentials.ts';
 import { prepareDeclarationCredential } from '../credentials/declaration-credential.ts';
-import { success, validation, authorization, infrastructure, precondition, upstream, type ToolResult, type ReadStamp, type Diagnostics } from '../result/envelope.ts';
+import { success, validation, authorization, infrastructure, precondition, upstream, type ToolResult, type ReadStamp } from '../result/envelope.ts';
+import { diagnosticsFor } from '../shared/diagnostics.ts';
 import type { ModuleErrorBase } from '../shared/result-kind.ts';
 import { REPOSITORY_CONFIG_DEFAULTS, type RepositoryConfig } from '../declarations/types.ts';
 import { gitOperationsError, type GitOperationsError } from './errors.ts';
+import { currentBranch as sharedCurrentBranch } from './primitives.ts';
 import type {
   BranchSummary,
   BranchesData,
@@ -120,15 +122,6 @@ function readStampFor(ctx: CallContext, locks: Pick<Locks, 'currentMutationHolde
     // which is this slice's `Touches`.
     lastSettledOperationId: null,
     mutationInFlight: holder !== null && ctx.declarationId !== null && holder.declarationId === ctx.declarationId,
-  };
-}
-
-function diagnosticsFor(ctx: CallContext, startedAtMs: number, clock: Clock): Diagnostics {
-  return {
-    operationId: ctx.operationId,
-    declarationId: ctx.declarationId,
-    generation: ctx.generation,
-    durationMs: Math.max(0, Date.parse(clock.now()) - startedAtMs),
   };
 }
 
@@ -302,10 +295,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
   }
 
   async function currentBranch(cwd: ClonePath, signal: AbortSignal): Promise<BranchName | null> {
-    const result = await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'], signal);
-    if (!result.ok) return null;
-    const name = result.value.stdout.trim();
-    return name.length > 0 && name !== 'HEAD' ? (name as BranchName) : null;
+    return sharedCurrentBranch(exec, cwd, GIT_COMMAND_TIMEOUT_SECONDS, signal);
   }
 
   async function aheadBehind(cwd: ClonePath, base: string, ref: string, signal: AbortSignal): Promise<{ readonly ahead: number; readonly behind: number }> {
@@ -560,6 +550,23 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       const cwd = ctx.cloneRoot;
       const signal = ctx.signal;
 
+      // Protected-base invariant 1 (`TODO-NEXT.md` §7.2, carried by
+      // `00-brief.md`'s "general git-workflow safety, not blog-specific" —
+      // S12 amends this operation even though it sits outside S12's own
+      // `Touches` line, because nothing else in the design owns it and
+      // S12.1 requires demonstrating all seven invariants refused, not six).
+      // A commit that lands on base is exactly the incident branch
+      // preparation exists to prevent from the other direction; refusing it
+      // here closes the door branch preparation cannot close on its own.
+      const configForBaseCheck = await loadRepositoryConfig(ctx);
+      if (!configForBaseCheck.ok) return toToolResultError(configForBaseCheck.error);
+      const checkedOutBeforeCommit = await currentBranch(cwd, signal);
+      if (checkedOutBeforeCommit !== null && checkedOutBeforeCommit === configForBaseCheck.value.baseBranch) {
+        return precondition(`refusing to commit on '${checkedOutBeforeCommit}', the configured base branch — prepare a branch first`, [
+          { path: 'branch', rule: 'not-base-branch', message: checkedOutBeforeCommit },
+        ]);
+      }
+
       const commitResult = await git(cwd, ['commit', '-m', input.message], signal);
       if (!commitResult.ok) {
         return precondition('commit failed — is anything staged?', [{ path: 'message', rule: 'stagedChangesExist', message: commitResult.error.summary }]);
@@ -575,7 +582,10 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       if (!shaResult.ok) {
         return infrastructure(`committed, but could not read the resulting sha: ${shaResult.error.summary}`);
       }
-      const branch = await currentBranch(cwd, signal);
+      // `git commit` never switches or detaches the checked-out branch, so the
+      // branch observed before the commit is still correct afterward — no
+      // need to spawn a second `rev-parse --abbrev-ref HEAD`.
+      const branch = checkedOutBeforeCommit;
       if (branch === null) {
         return infrastructure(`committed ${shaResult.value.stdout.trim()}, but could not determine the current branch`);
       }

@@ -5,6 +5,7 @@ import type { Session } from '../shared/session.ts';
 import type { CallContext } from '../shared/call-context.ts';
 import type { Clock } from '../clock/clock.ts';
 import type { ModuleAdapter } from '../module-adapter/module-adapter.ts';
+import type { HttpAdapter } from '../http/http-adapter.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import type { CloneStore } from '../clone/clone-store.ts';
 import type { PreState } from '../clone/types.ts';
@@ -46,6 +47,13 @@ export interface DispatchPipelineDependencies {
   readonly registry: CompiledRegistry;
   readonly ceiling: DeploymentCeiling;
   readonly moduleAdapter: Pick<ModuleAdapter, 'invoke'>;
+  /**
+   * S12. Optional so every pre-S12 test and every registry with no
+   * `http`-targeted entry keeps compiling unchanged — `invokeAndEnvelope`
+   * below refuses an http-targeted entry exactly as it always has when this
+   * is absent.
+   */
+  readonly httpAdapter?: Pick<HttpAdapter, 'invoke'>;
   readonly declarations: Pick<Declarations, 'get' | 'effectiveGrant' | 'effectiveWritablePrefixes'>;
   readonly cloneStore: Pick<CloneStore, 'ensure' | 'observeGitState' | 'describe'>;
   readonly locks: Pick<Locks, 'pinActiveOperation' | 'acquireMutation'> & Partial<Pick<Locks, 'admitLockFreeWait'>>;
@@ -110,6 +118,17 @@ function byteLength(value: unknown): number {
 }
 
 /**
+ * Whether dispatching this entry requires a materialised clone. An
+ * http-targeted entry's own module carries no credential dependency (S12.7) —
+ * materialising a clone for one would force a credentialed clone-on-demand
+ * onto a tool that never touches the tree. One predicate, consulted by every
+ * dispatch path that materialises early, so the paths cannot drift apart.
+ */
+function needsClone(entry: ToolDeclaration): boolean {
+  return entry.target.kind !== 'http';
+}
+
+/**
  * The audit trail's `changedPaths` describes what actually changed, not what
  * was requested — a rejected or partially-applied stage/restore must not
  * report its input paths as changed, and `git_commit` (no `paths` input at
@@ -141,7 +160,7 @@ function extractChangedPathsFromResultData(data: unknown): readonly RepoRelative
  * counters, and has its requested timeout clamped to the cap.
  */
 export function createDispatchPipeline(deps: DispatchPipelineDependencies): DispatchPipeline {
-  const { registry, ceiling, moduleAdapter, declarations, cloneStore, locks, audit, journal, clock } = deps;
+  const { registry, ceiling, moduleAdapter, httpAdapter, declarations, cloneStore, locks, audit, journal, clock } = deps;
   const exec: Pick<Exec, 'scrubJson'> = deps.exec ?? { scrubJson: (value) => value };
   const mutationLockAcquireMs = deps.mutationLockAcquireMs ?? MUTATION_LOCK_ACQUIRE_MS_DEFAULT;
   const monitoringWaitCapSeconds = deps.monitoringWaitCapSeconds ?? MONITORING_WAIT_CAP_SECONDS_DEFAULT;
@@ -205,10 +224,14 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
   }
 
   async function invokeAndEnvelope(entry: ToolDeclaration, ctx: CallContext, input: JsonValue): Promise<ToolResult<JsonValue>> {
-    if (entry.target.kind !== 'module') {
+    let result: ToolResult<JsonValue>;
+    if (entry.target.kind === 'module') {
+      result = await moduleAdapter.invoke(entry.target.target, ctx, input);
+    } else if (httpAdapter) {
+      result = await httpAdapter.invoke(entry.target.operation, ctx, input, entry.limits);
+    } else {
       return infrastructure(`http-targeted tools are not dispatched until an http adapter exists`);
     }
-    const result = await moduleAdapter.invoke(entry.target.target, ctx, input);
 
     if (result.ok && result.data !== undefined) {
       const outputFindings = validateAgainstSchema(entry.outputSchema, result.data as JsonValue);
@@ -228,7 +251,7 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
     let cloneRoot: CallContext['cloneRoot'] = null;
     let releasePin: (() => void) | null = null;
 
-    if (declaration !== null) {
+    if (declaration !== null && needsClone(entry)) {
       const holder = { operationId, declarationId: declaration.id, tool: entry.name, heldSince: clock.now() };
       const ensured = await cloneStore.ensure(declaration, holder, request.signal);
       if (!ensured.ok) return moduleErrorToToolResult(ensured.error);
@@ -291,7 +314,7 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
     let releasePin: (() => void) | null = null;
 
     try {
-      if (declaration !== null) {
+      if (declaration !== null && needsClone(entry)) {
         const holder = { operationId, declarationId: declaration.id, tool: entry.name, heldSince: clock.now() };
         const ensured = await cloneStore.ensure(declaration, holder, request.signal);
         if (!ensured.ok) return moduleErrorToToolResult(ensured.error);

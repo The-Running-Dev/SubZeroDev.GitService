@@ -23,7 +23,7 @@ function readOutboxRows(volume: string): { status: string }[] {
 }
 import type { Audit } from '../audit/audit.ts';
 import type { CapabilityName, DeploymentCeiling } from '../contract/capabilities.ts';
-import { fixtureTool } from '../contract/fixtures.ts';
+import { fixtureTool, httpTarget } from '../contract/fixtures.ts';
 import { createLifecycle } from './boot.ts';
 import type { LeaseAcquisition, LockAcquirer } from './lease.ts';
 
@@ -510,6 +510,41 @@ test('S6 — boot exits with executor-missing when a registry entry has no regis
     assert.deepEqual(booted.error.tools, ['fixture_read']);
 
     // The lease must not be left held by a boot that refused to complete.
+    const { lifecycle: retry } = lifecycleFor(volume);
+    const second = await retry.boot();
+    assert.equal(second.ok, true, 'the volume is free again after a failed boot');
+    await retry.shutdown('operator');
+  });
+});
+
+test('S12 — boot exits with executor-missing for an http-targeted entry when registeredHttpOperations is omitted, even with registeredModuleTargets supplied', async () => {
+  await withVolumeAsync(async (volume) => {
+    const registryDeclarations = [fixtureTool({ name: 'fixture_http', capabilities: ['repo.read'], target: httpTarget('fixture.unregistered') })];
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const lifecycle = createLifecycle({
+      volumeRoot: volume,
+      buildDir: writeBuildDir(volume, registryDeclarations),
+      clock: systemClock,
+      store,
+      audit,
+      operatorIdentity: operatorIdentityFor(volume, audit),
+      consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+      ceiling: new Set(['repo.read']) as unknown as DeploymentCeiling,
+      registryEntries: registryDeclarations,
+      registeredModuleTargets: new Set(),
+      // registeredHttpOperations deliberately omitted — a composition root
+      // that wires the module set but forgets the http one must still be
+      // caught here, not only once the first request reaches this entry.
+    });
+
+    const booted = await lifecycle.boot();
+    assert.equal(booted.ok, false, 'an http-targeted entry with no registeredHttpOperations dependency is fatal, not silently skipped');
+    if (booted.ok) return;
+    assert.equal(booted.error.code, 'executor-missing');
+    if (booted.error.code !== 'executor-missing') return;
+    assert.deepEqual(booted.error.tools, ['fixture_http']);
+
     const { lifecycle: retry } = lifecycleFor(volume);
     const second = await retry.boot();
     assert.equal(second.ok, true, 'the volume is free again after a failed boot');
