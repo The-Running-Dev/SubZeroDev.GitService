@@ -560,6 +560,24 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       const cwd = ctx.cloneRoot;
       const signal = ctx.signal;
 
+      // Protected-base invariant 1 (`TODO-NEXT.md` §7.2, carried by
+      // `00-brief.md`'s "general git-workflow safety, not blog-specific" —
+      // S12 amends this operation even though it sits outside S12's own
+      // `Touches` line, because nothing else in the design owns it and
+      // S12.1 requires demonstrating all seven invariants refused, not six).
+      // A commit that lands on base is exactly the incident branch
+      // preparation exists to prevent from the other direction; refusing it
+      // here closes the door branch preparation cannot close on its own.
+      const configForBaseCheck = await loadRepositoryConfig(ctx);
+      if (configForBaseCheck.ok) {
+        const checkedOut = await currentBranch(cwd, signal);
+        if (checkedOut !== null && checkedOut === configForBaseCheck.value.baseBranch) {
+          return precondition(`refusing to commit on '${checkedOut}', the configured base branch — prepare a branch first`, [
+            { path: 'branch', rule: 'not-base-branch', message: checkedOut },
+          ]);
+        }
+      }
+
       const commitResult = await git(cwd, ['commit', '-m', input.message], signal);
       if (!commitResult.ok) {
         return precondition('commit failed — is anything staged?', [{ path: 'message', rule: 'stagedChangesExist', message: commitResult.error.summary }]);

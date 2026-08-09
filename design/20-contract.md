@@ -2161,6 +2161,85 @@ catalogue. Every sub-step that mutates outside the local clone calls `Journal.ap
 making the call. Input and output types are subject to the same `## Unresolved` item as the git
 operations.
 
+**Implementation note (S12):** the shipped `GitOperations`, `HostOperations` and now `Composites`
+modules all expose plain `DomainOperation`s, with each operation's `RecoveryDescriptor` held in a
+sibling `recovery-descriptors.ts` file and registered into the catalogue by the composition root at
+startup (`git/recovery-descriptors.ts`, `host/recovery-descriptors.ts`,
+`composites/recovery-descriptors.ts`) — never bundled with the operation itself. This is a documented
+drift from the `Composite<TInput, TData>` wrapper above, which this slice does not build: the
+`{ tool, run, recovery }` bundle was written before S6–S11 established the actual pattern every other
+L2 module now follows, and building a second, different shape for composites alone would be the
+inconsistency, not the fix. Flagged for `/reconcile` rather than resolved here.
+
+**S12 resolves U1 for the two composites.** Their input and output types, fixed here:
+
+```ts
+interface PrepareBranchInput {
+  readonly branch: BranchName;
+}
+
+type PrepareBranchAction = 'reused-existing' | 'created-from-remote-base' | 'fast-forwarded-then-created' | 'rebased-preserved-commits';
+
+interface PrepareBranchData {
+  readonly branch: BranchName;
+  readonly baseBranch: BranchName;
+  readonly branchHeadSha: GitSha;
+  readonly baseSha: GitSha;
+  readonly preservedCommits: readonly GitSha[];
+  readonly action: PrepareBranchAction;
+}
+
+interface ReconcileAfterMergeInput {
+  readonly pullRequestNumber: number;
+  readonly expectedHeadSha: GitSha | null;
+}
+
+interface ReconcileAfterMergeData {
+  readonly baseBranch: BranchName;
+  readonly baseSha: GitSha;
+  readonly mergeCommitSha: GitSha;
+  readonly deletedBranch: BranchName | null;
+}
+```
+
+`PrepareBranchInput` carries only the branch name — not `TODO-NEXT.md` §7.3's `slug`/`kind`, which is
+blog-specific branch-naming policy this repository does not own (`AGENTS.md`: "general git-workflow
+safety, not blog-specific"). `preservedCommits` is non-empty only for `rebased-preserved-commits`.
+
+The seven protected-base invariants S12.1 requires (`TODO-NEXT.md` §7.2, the incident doc
+`00-brief.md`'s "protected-base invariant" paragraph names — not itself present in this repository;
+it is `SubZeroDev.Blog/tools/blog-mcp/TODO-NEXT.md`, load-bearing prior art per `AGENTS.md`):
+
+1. A publishing commit cannot be created on the configured base branch. Owned by `git_commit`
+   (`git/git-operations.ts`) — S12 amends it even though `Git operations (L2)` is outside this
+   slice's own `Touches` line, because nothing else in the design owns it and demonstrating all
+   seven, not six, is S12.1's own text. See the deviation note under `## Unresolved` § U1 history.
+2. Branch preparation fetches and evaluates ancestry before any content write. Owned by
+   `prepareBranch`.
+3. A clean local-only commit on base is preserved on the requested branch. Owned by `prepareBranch`.
+4. The branch is based on the latest `origin/<base>`. Owned by `prepareBranch`.
+5. Uncommitted changes are never carried implicitly; branch preparation refuses them. Owned by
+   `prepareBranch`.
+6. A rebase conflict stops safely without losing the original commits. Owned by `prepareBranch`.
+7. After merge, reconciliation fetches, switches to base, and fast-forwards to the merged remote
+   commit. Owned by `reconcileAfterMerge`.
+
+The two registry entries S12 ships:
+
+| `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
+|---|---|---|---|---|---|---|
+| `prepare_branch` | `{ kind: 'module', target: 'composites.prepareBranch' }` | `['git.local.write', 'git.remote.write']` | `['write']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 300, maxResultBytes: 65536 }` |
+| `reconcile_after_merge` | `{ kind: 'module', target: 'composites.reconcileAfterMerge' }` | `['git.local.write', 'git.remote.write', 'host.pr.read']` | `['write']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 300, maxResultBytes: 65536 }` |
+
+Both carry `capabilityScope: 'declaration'`, matching every other L2 tool.
+
+**Resume, not a narrower step (S12.4, S12.5).** Both descriptors' `resume` re-dispatches the *same*
+composite tool with the journal entry's original input, rather than a finer-grained step — safe only
+because both composites are written to be idempotent from any partial state (see
+`composites/recovery-descriptors.ts`'s doc comment). `expectedPostState` always returns `false` for
+both, the same honest-absence reasoning `sync_base`'s own descriptor already gives: neither
+composite's effect is fully visible in `ObservedGitState`.
+
 ### L2 — host adapter
 
 ```ts
@@ -2412,6 +2491,47 @@ interface HttpAdapter {
 
 Its one consumer is published-URL verification of a managed repository, which is unauthenticated,
 so the adapter takes no credential dependency and its L1-only dependency list stands.
+
+**S12 resolves U1 for the http adapter's one operation and ships it.** Unlike `ModuleAdapter`, this
+interface fixes no `register` method — one real consumer, fixed internally by the factory rather than
+a pluggable catalogue, is what "its one consumer" above already says.
+
+```ts
+interface VerifyPublishedUrlInput {
+  readonly url: HttpsUrl;
+  readonly expectedCommitSha: GitSha;
+}
+
+interface VerifyPublishedUrlData {
+  readonly url: HttpsUrl;
+  readonly commitSha: GitSha;
+}
+```
+
+**The convention this operation reads is a lower-bound decision, not a design fact the brief or
+`10-design.md` fixes anywhere:** the published URL is expected to answer a 200 whose JSON body carries
+`commitSha` — the one shape this design already establishes for "a running thing's commit", since this
+service's own `/healthz` answers `{ ready, commitSha }` (`surfaces/http-server.ts`, S2). A managed
+repository's deploy is expected to expose the same shape at the URL declared for verification. Recorded
+in `90-decisions.md` alongside the other slices' own U1 lower-bound choices.
+
+`verify_published_url`'s registry entry:
+
+| `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
+|---|---|---|---|---|---|---|
+| `verify_published_url` | `{ kind: 'http', operation: 'verify-published-url' }` | `['host.checks.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 4096 }` |
+
+`host.checks.read` is the capability `10-design.md`'s own capability table already maps to "check
+status, bounded waits, deploy status, **published-URL verification**" — no new capability was needed.
+
+**S12 also wires the dispatch pipeline and boot's B5 check for `http`-targeted entries**, both
+previously refusing every such entry unconditionally (`dispatch/dispatch-pipeline.ts`'s own prior
+comment: "http-targeted tools are not dispatched until an http adapter exists"; `lifecycle/boot.ts`'s
+own prior comment: "an http-targeted entry has no adapter to check against yet and is not examined
+here"). Neither file is named in S12's `Touches` line in `30-slices.md`, but both already carried a
+forward reference naming exactly this slice as the one that fills them in, and `verify_published_url`
+is unreachable dead weight in the compiled registry without both changes — the same reasoning that
+justified amending `git_commit` above.
 
 ### L4 — dispatch pipeline
 
@@ -3239,15 +3359,26 @@ output types and registry entries, `CreatePullRequestInput` included. See `### L
 above. U1 otherwise stands: `raw` and the two composites remain open for the slices that ship them,
 and `readDeployStatus` carries no tool until S12 declares one.
 
+*Narrowed further 2026-08-09:* S12 resolves U1 for `prepare_branch`, `reconcile_after_merge` and
+`verify_published_url` — their input and output types and registry entries. See `### L2 — composites`
+and `### L3 — http adapter` above. U1 otherwise stands: only `raw` remains open, for the slice that
+ships it.
+
 **U2 — The `OperatorScope` vocabulary.** The design states that an `operator-api` grant "carries
 operator scopes" and fixes the MCP scope set as `read`, `write`, `raw`, `schedule`. It does not
 name the operator scopes, nor say whether they are the same four, a superset, or disjoint.
 
-**U3 — `JournalStepState` beyond `applied`.** The design gives a step a `state` field and names
-exactly one value; recovery reads only that one, so the type above admits only it. But composites
-are said to "journal each sub-step", which implies a completed step is distinguishable from one
-that is not. Either the field is redundant and this type is right, or a second state exists and the
-recovery ladder needs a branch for it.
+**U3 — `JournalStepState` beyond `applied`, resolved 2026-08-09 by S12.** The field is redundant, and
+`type JournalStepState = 'applied'` above is right as it stands — no second value was added. A step's
+own **name**, not a second state on it, is what lets a recovery descriptor tell how far a composite
+got: `entry.steps.map(s => s.name)` compared against `observed` is already enough for `expectedPostState`
+and `resume` to decide, exactly the way `git/recovery-descriptors.ts`'s existing three local-mutation
+descriptors already read `entry.preState` rather than a step state. S12's own two composite descriptors
+(`composites/recovery-descriptors.ts`) confirm this by construction: neither reads `JournalStepState`
+at all, and both resolve `resume` from `entry.tool` and `entry.input` alone. `sync_base`'s own recovery
+descriptor (S9) is not revisited by this resolution — it sits outside S12's `Touches` line, and its own
+doc comment's "a contract question, not a predicate this file can be clever about" is now answered by
+this entry, but fixing `sync_base` itself is a separate, later change.
 
 **U4 — The HTTP API route table.** The design fixes that it is an explicit route table and never a
 call-any-tool-by-name proxy; that every route takes a repository dimension; that bearer and cookie

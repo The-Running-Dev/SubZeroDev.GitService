@@ -1,6 +1,7 @@
-import type { ModuleTargetName, RegistryToolName } from '../shared/brands.ts';
+import type { HttpOperationName, ModuleTargetName, RegistryToolName } from '../shared/brands.ts';
 import type { JsonSchema } from '../contract/json.ts';
 import type { ToolDeclaration } from '../contract/tool-declaration.ts';
+import { VERIFY_PUBLISHED_URL_OPERATION } from '../http/http-adapter.ts';
 
 function toolName(name: string): RegistryToolName {
   return name as RegistryToolName;
@@ -8,6 +9,10 @@ function toolName(name: string): RegistryToolName {
 
 function moduleTarget(target: string): { readonly kind: 'module'; readonly target: ModuleTargetName } {
   return { kind: 'module', target: target as ModuleTargetName };
+}
+
+function httpTarget(operation: HttpOperationName): { readonly kind: 'http'; readonly operation: HttpOperationName } {
+  return { kind: 'http', operation };
 }
 
 const EMPTY_INPUT_SCHEMA = { type: 'object', properties: {}, additionalProperties: false } as unknown as JsonSchema;
@@ -346,12 +351,76 @@ const CHECKS_AWAIT_OUTPUT_SCHEMA = {
   required: ['ref', 'checks', 'concluded', 'waitedSeconds'],
 } as unknown as JsonSchema;
 
+// --- S12, the composites and the http adapter's one tool (`20-contract.md` § L2 — composites, § L3 — http adapter) ---
+
+const PREPARE_BRANCH_INPUT_SCHEMA = {
+  type: 'object',
+  properties: { branch: { type: 'string' } },
+  required: ['branch'],
+  additionalProperties: false,
+} as unknown as JsonSchema;
+
+const PREPARE_BRANCH_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    branch: { type: 'string' },
+    baseBranch: { type: 'string' },
+    branchHeadSha: { type: 'string' },
+    baseSha: { type: 'string' },
+    preservedCommits: { type: 'array', items: { type: 'string' } },
+    action: { type: 'string', enum: ['reused-existing', 'created-from-remote-base', 'fast-forwarded-then-created', 'rebased-preserved-commits'] },
+  },
+  required: ['branch', 'baseBranch', 'branchHeadSha', 'baseSha', 'preservedCommits', 'action'],
+} as unknown as JsonSchema;
+
+const RECONCILE_AFTER_MERGE_INPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    pullRequestNumber: { type: 'number' },
+    expectedHeadSha: { type: ['string', 'null'] },
+  },
+  required: ['pullRequestNumber', 'expectedHeadSha'],
+  additionalProperties: false,
+} as unknown as JsonSchema;
+
+const RECONCILE_AFTER_MERGE_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    baseBranch: { type: 'string' },
+    baseSha: { type: 'string' },
+    mergeCommitSha: { type: 'string' },
+    deletedBranch: { type: ['string', 'null'] },
+  },
+  required: ['baseBranch', 'baseSha', 'mergeCommitSha', 'deletedBranch'],
+} as unknown as JsonSchema;
+
+const VERIFY_PUBLISHED_URL_INPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    url: { type: 'string' },
+    expectedCommitSha: { type: 'string' },
+  },
+  required: ['url', 'expectedCommitSha'],
+  additionalProperties: false,
+} as unknown as JsonSchema;
+
+const VERIFY_PUBLISHED_URL_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    url: { type: 'string' },
+    commitSha: { type: 'string' },
+  },
+  required: ['url', 'commitSha'],
+} as unknown as JsonSchema;
+
 /**
  * The real, deployed tool inventory. S1 through S5 shipped none (U1 was
  * wholly open); S6 resolves U1 for the five read operations, S7 for the three
- * local mutations and S9 for the three remote ones, each shipping their
- * registry entries here — see `20-contract.md` § L2 — git operations for the
- * rationale behind each tool's capabilities, annotations and limits.
+ * local mutations, S9 for the three remote ones and S12 for the two
+ * composites plus the http adapter's one tool, each shipping their registry
+ * entries here — see `20-contract.md` § L2 — git operations, § L2 —
+ * composites and § L3 — http adapter for the rationale behind each tool's
+ * capabilities, annotations and limits.
  */
 export const PRODUCTION_TOOL_DECLARATIONS: readonly ToolDeclaration[] = [
   {
@@ -587,5 +656,50 @@ export const PRODUCTION_TOOL_DECLARATIONS: readonly ToolDeclaration[] = [
     annotations: { schedulable: false, dropTarget: false, untrustedOutput: false },
     limits: { timeoutSeconds: 1800, maxResultBytes: 65_536 },
     target: moduleTarget('host.awaitChecks'),
+  },
+
+  // --- S12, the composites and the http adapter's one tool ---
+
+  {
+    name: toolName('prepare_branch'),
+    description:
+      "Transactionally prepares a publish branch: fetches, then bases the branch fresh from origin/<base> regardless of what is checked out, preserving any local-only commits on <base> rather than stranding them — the incident this tool exists to prevent.",
+    inputSchema: PREPARE_BRANCH_INPUT_SCHEMA,
+    outputSchema: PREPARE_BRANCH_OUTPUT_SCHEMA,
+    scopes: ['write'],
+    capabilities: ['git.local.write', 'git.remote.write'],
+    capabilityScope: 'declaration',
+    executionClass: 'mutating',
+    annotations: { schedulable: false, dropTarget: false, untrustedOutput: false },
+    limits: { timeoutSeconds: 300, maxResultBytes: 65_536 },
+    target: moduleTarget('composites.prepareBranch'),
+  },
+  {
+    name: toolName('reconcile_after_merge'),
+    description:
+      'Confirms a pull request merged, then fetches, fast-forwards the local base to the merge commit and deletes the local feature branch once the host confirms it merged.',
+    inputSchema: RECONCILE_AFTER_MERGE_INPUT_SCHEMA,
+    outputSchema: RECONCILE_AFTER_MERGE_OUTPUT_SCHEMA,
+    scopes: ['write'],
+    capabilities: ['git.local.write', 'git.remote.write', 'host.pr.read'],
+    capabilityScope: 'declaration',
+    executionClass: 'mutating',
+    annotations: { schedulable: false, dropTarget: false, untrustedOutput: false },
+    limits: { timeoutSeconds: 300, maxResultBytes: 65_536 },
+    target: moduleTarget('composites.reconcileAfterMerge'),
+  },
+  {
+    name: toolName('verify_published_url'),
+    description:
+      'Confirms a managed repository\'s published URL answers 200 and is serving the expected commit. Unauthenticated; carries no credential dependency.',
+    inputSchema: VERIFY_PUBLISHED_URL_INPUT_SCHEMA,
+    outputSchema: VERIFY_PUBLISHED_URL_OUTPUT_SCHEMA,
+    scopes: ['read'],
+    capabilities: ['host.checks.read'],
+    capabilityScope: 'declaration',
+    executionClass: 'read',
+    annotations: { schedulable: false, dropTarget: false, untrustedOutput: false },
+    limits: { timeoutSeconds: 30, maxResultBytes: 4_096 },
+    target: httpTarget(VERIFY_PUBLISHED_URL_OPERATION),
   },
 ];

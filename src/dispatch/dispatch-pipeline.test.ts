@@ -503,6 +503,11 @@ test('a real git_stage + git_commit mutation runs end to end: journal settles, a
     const ensured = await cloneStore.ensure(declaration, holder, new AbortController().signal);
     assert.equal(ensured.ok, true);
     if (!ensured.ok) return;
+    // `git_commit` refuses on the configured base branch (protected-base
+    // invariant 1, S12) — this test's commit is a plain content change, not
+    // a base-branch operation, so it runs on a topic branch like any real
+    // caller would.
+    spawnSync('git', ['checkout', '-b', 'topic'], { cwd: ensured.value.clone.path, encoding: 'utf8' });
     writeFileSync(path.join(ensured.value.clone.path, 'README.md'), 'fixture\nchanged\n', 'utf8');
     ensured.value.materialisationLock.release();
     ensured.value.activePin.release();
@@ -1743,6 +1748,12 @@ test('S9.7 — a push holds the global mutation lock across the whole transfer, 
       const ensured = await cloneStore.ensure(byId.get(declaration.id)!, holder, new AbortController().signal);
       assert.equal(ensured.ok, true);
       if (!ensured.ok) return;
+      // `git_commit` refuses on the configured base branch (protected-base
+      // invariant 1, S12) — declaration B's commit below runs through
+      // dispatch, so it needs a topic branch checked out first.
+      if (declaration.id === declarationB.id) {
+        spawnSync('git', ['checkout', '-b', 'topic'], { cwd: ensured.value.clone.path, encoding: 'utf8' });
+      }
       writeFileSync(path.join(ensured.value.clone.path, 'README.md'), `fixture\n${declaration.id}\n`, 'utf8');
       spawnSync('git', ['add', 'README.md'], { cwd: ensured.value.clone.path, encoding: 'utf8' });
       if (declaration.id === declarationA.id) {

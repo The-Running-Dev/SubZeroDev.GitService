@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gitSha, type BranchName, type GitSha, type HttpsUrl, type RemoteHost } from './shared/brands.ts';
-import type { CapabilityName, DeploymentCeiling } from './contract/capabilities.ts';
+import { hostSupportedCapabilities, type CapabilityName, type DeploymentCeiling, type SessionGrant } from './contract/capabilities.ts';
 import { systemClock } from './clock/clock.ts';
 import { createStructuredStore } from './store/structured-store.ts';
 import { createAudit } from './audit/audit.ts';
@@ -28,11 +28,16 @@ import { createHostOperations } from './host/host-operations.ts';
 import { PR_ENABLE_AUTO_MERGE_RECOVERY, PR_OPEN_RECOVERY } from './host/recovery-descriptors.ts';
 import type { EnvVarName, OperationId } from './shared/brands.ts';
 import { createModuleAdapter, toModuleHandler } from './module-adapter/module-adapter.ts';
-import { createDispatchPipeline } from './dispatch/dispatch-pipeline.ts';
+import { createDispatchPipeline, type Dispatch } from './dispatch/dispatch-pipeline.ts';
 import { PRODUCTION_TOOL_DECLARATIONS } from './composition-root/production-declarations.ts';
 import type { ModuleTargetName } from './shared/brands.ts';
 import type { ContractCapabilitySet } from './contract/capabilities.ts';
 import type { CompiledRegistry } from './contract/tool-declaration.ts';
+import { createComposites } from './composites/composites.ts';
+import { COMPOSITE_RECOVERY_DESCRIPTORS } from './composites/recovery-descriptors.ts';
+import { createHttpAdapter } from './http/http-adapter.ts';
+import type { Session } from './shared/session.ts';
+import type { GrantEpoch, SessionId, Subject } from './shared/brands.ts';
 
 /**
  * The composition root. It never imports the compiler (invariant B8, enforced
@@ -294,13 +299,29 @@ async function main(): Promise<void> {
   moduleAdapter.register('host.readChecks' as ModuleTargetName, toModuleHandler(hostOperations.readChecks));
   moduleAdapter.register('host.awaitChecks' as ModuleTargetName, toModuleHandler(hostOperations.awaitChecks));
 
+  // S12 — the two composites, journaling every sub-step through the same
+  // `Journal` S7's local mutations never needed to.
+  const composites = createComposites({ clock: systemClock, exec, gitOperations, hostOperations, journal });
+  moduleAdapter.register('composites.prepareBranch' as ModuleTargetName, toModuleHandler(composites.prepareBranch));
+  moduleAdapter.register('composites.reconcileAfterMerge' as ModuleTargetName, toModuleHandler(composites.reconcileAfterMerge));
+
+  // S12 — the http adapter, published-URL verification's one consumer. No
+  // credential dependency (S12.7): constructed from `clock` alone.
+  const httpAdapter = createHttpAdapter({ clock: systemClock });
+
   const contractCapabilitySet = new Set(PRODUCTION_TOOL_DECLARATIONS.flatMap((e) => e.capabilities)) as unknown as ContractCapabilitySet;
 
   // S8 — the recovery catalogue, populated here from L2 and read by L1. A
   // duplicate registration is a wiring defect and fatal at composition time,
   // which is the only time it can happen.
   const recoveryCatalogue = createRecoveryCatalogue();
-  for (const descriptor of [...LOCAL_MUTATION_RECOVERY_DESCRIPTORS, ...REMOTE_OPERATION_RECOVERY_DESCRIPTORS, PR_OPEN_RECOVERY, PR_ENABLE_AUTO_MERGE_RECOVERY]) {
+  for (const descriptor of [
+    ...LOCAL_MUTATION_RECOVERY_DESCRIPTORS,
+    ...REMOTE_OPERATION_RECOVERY_DESCRIPTORS,
+    PR_OPEN_RECOVERY,
+    PR_ENABLE_AUTO_MERGE_RECOVERY,
+    ...COMPOSITE_RECOVERY_DESCRIPTORS,
+  ]) {
     const registered = recoveryCatalogue.register(descriptor);
     if (!registered.ok) {
       console.error(`server: ${registered.error.summary}`);
@@ -309,10 +330,29 @@ async function main(): Promise<void> {
     }
   }
 
-  // `dispatch` is not wired into recovery here: no descriptor registered
-  // above returns a resume step, so no resume can be reached. The seam is in
-  // `RecoveryDependencies` and S12's composites fill it when they bring
-  // descriptors that do resume.
+  // S12 — the first descriptors that return a `resume` step need `dispatch`
+  // wired into recovery. `dispatchPipeline` does not exist yet at this point
+  // in composition (it needs the booted registry fingerprint), so this is
+  // the same mutable-forward-reference pattern `cloneStoreRef` above already
+  // uses to break the cycle: `dispatchRef` is set once `dispatchPipeline` is
+  // constructed, well before boot's lazy recovery pass can ever call it.
+  let dispatchRef: Dispatch | null = null;
+  // The session a resume runs under. `operator`'s `ActorProfile` is the
+  // widest of the four (`declarations/types.ts`'s `OPERATOR_PROFILE`), and
+  // `hostSupportedCapabilities('github')` grants every declaration-scoped
+  // capability a resumed composite could need — `declarations.effectiveGrant`
+  // still intersects this against the declaration's own grant and the
+  // deployment ceiling, so this is a ceiling on what a resume *could* reach,
+  // not new authority.
+  const recoverySession: Session = {
+    id: 'recovery' as SessionId,
+    kind: 'operator',
+    actorRef: { kind: 'recovery', subject: 'system' as Subject, clientId: null, grantId: null },
+    repositoryBinding: null,
+    grant: hostSupportedCapabilities('github') as unknown as SessionGrant,
+    writablePathPrefixes: [],
+    frozenAtEpoch: 0 as GrantEpoch,
+  };
   const recovery = {
     journal,
     catalogue: recoveryCatalogue,
@@ -320,6 +360,11 @@ async function main(): Promise<void> {
     declarations,
     cloneStore,
     notifier,
+    dispatch: (request: Parameters<Dispatch>[0]) => {
+      if (!dispatchRef) throw new Error('server: recovery dispatch accessed before composition finished');
+      return dispatchRef(request);
+    },
+    recoverySession,
   };
 
   const lifecycle = createLifecycle({
@@ -334,6 +379,7 @@ async function main(): Promise<void> {
     deriveCloneStatesFromDisk: () => cloneStore.deriveAllStatesFromDisk(),
     registryEntries: PRODUCTION_TOOL_DECLARATIONS,
     registeredModuleTargets: moduleAdapter.registeredTargets(),
+    registeredHttpOperations: httpAdapter.declaredOperations(),
     recovery,
     notifier,
     onTakeover: (previous, current) => {
@@ -371,6 +417,7 @@ async function main(): Promise<void> {
     registry,
     ceiling,
     moduleAdapter,
+    httpAdapter,
     declarations,
     cloneStore,
     locks,
@@ -380,6 +427,12 @@ async function main(): Promise<void> {
     clock: systemClock,
     recoverDeclaration: (declarationId) => lifecycle.recoverDeclaration(declarationId),
   });
+  // Closes the forward reference `recovery.dispatch` opened above — set well
+  // before boot's lazy recovery pass can reach a `resume` verdict, since that
+  // pass only ever runs from inside a call this same `dispatchPipeline`
+  // received (`10-design.md` § Boot and recovery: recovery is lazy, not a
+  // boot step).
+  dispatchRef = dispatchPipeline.dispatch;
 
   const server = createSurfacesServer({
     commitSha,

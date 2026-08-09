@@ -5,6 +5,7 @@ import type { Session } from '../shared/session.ts';
 import type { CallContext } from '../shared/call-context.ts';
 import type { Clock } from '../clock/clock.ts';
 import type { ModuleAdapter } from '../module-adapter/module-adapter.ts';
+import type { HttpAdapter } from '../http/http-adapter.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import type { CloneStore } from '../clone/clone-store.ts';
 import type { PreState } from '../clone/types.ts';
@@ -46,6 +47,13 @@ export interface DispatchPipelineDependencies {
   readonly registry: CompiledRegistry;
   readonly ceiling: DeploymentCeiling;
   readonly moduleAdapter: Pick<ModuleAdapter, 'invoke'>;
+  /**
+   * S12. Optional so every pre-S12 test and every registry with no
+   * `http`-targeted entry keeps compiling unchanged — `invokeAndEnvelope`
+   * below refuses an http-targeted entry exactly as it always has when this
+   * is absent.
+   */
+  readonly httpAdapter?: Pick<HttpAdapter, 'invoke'>;
   readonly declarations: Pick<Declarations, 'get' | 'effectiveGrant' | 'effectiveWritablePrefixes'>;
   readonly cloneStore: Pick<CloneStore, 'ensure' | 'observeGitState' | 'describe'>;
   readonly locks: Pick<Locks, 'pinActiveOperation' | 'acquireMutation'> & Partial<Pick<Locks, 'admitLockFreeWait'>>;
@@ -141,7 +149,7 @@ function extractChangedPathsFromResultData(data: unknown): readonly RepoRelative
  * counters, and has its requested timeout clamped to the cap.
  */
 export function createDispatchPipeline(deps: DispatchPipelineDependencies): DispatchPipeline {
-  const { registry, ceiling, moduleAdapter, declarations, cloneStore, locks, audit, journal, clock } = deps;
+  const { registry, ceiling, moduleAdapter, httpAdapter, declarations, cloneStore, locks, audit, journal, clock } = deps;
   const exec: Pick<Exec, 'scrubJson'> = deps.exec ?? { scrubJson: (value) => value };
   const mutationLockAcquireMs = deps.mutationLockAcquireMs ?? MUTATION_LOCK_ACQUIRE_MS_DEFAULT;
   const monitoringWaitCapSeconds = deps.monitoringWaitCapSeconds ?? MONITORING_WAIT_CAP_SECONDS_DEFAULT;
@@ -205,10 +213,14 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
   }
 
   async function invokeAndEnvelope(entry: ToolDeclaration, ctx: CallContext, input: JsonValue): Promise<ToolResult<JsonValue>> {
-    if (entry.target.kind !== 'module') {
+    let result: ToolResult<JsonValue>;
+    if (entry.target.kind === 'module') {
+      result = await moduleAdapter.invoke(entry.target.target, ctx, input);
+    } else if (httpAdapter) {
+      result = await httpAdapter.invoke(entry.target.operation, ctx, input, entry.limits);
+    } else {
       return infrastructure(`http-targeted tools are not dispatched until an http adapter exists`);
     }
-    const result = await moduleAdapter.invoke(entry.target.target, ctx, input);
 
     if (result.ok && result.data !== undefined) {
       const outputFindings = validateAgainstSchema(entry.outputSchema, result.data as JsonValue);

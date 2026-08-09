@@ -9,7 +9,7 @@ import type { Audit } from '../audit/audit.ts';
 import type { StructuredStore } from '../store/structured-store.ts';
 import { storeError, type StoreError } from '../store/errors.ts';
 import type { OperatorIdentity } from '../operator-identity/operator-identity.ts';
-import type { ModuleTargetName } from '../shared/brands.ts';
+import type { HttpOperationName, ModuleTargetName } from '../shared/brands.ts';
 import type { ToolDeclaration } from '../contract/tool-declaration.ts';
 import type { RecoveryClassification } from '../recovery/types.ts';
 import type { Notifier } from '../notifier/notifier.ts';
@@ -112,6 +112,8 @@ export interface LifecycleDependencies {
    */
   readonly registryEntries?: readonly ToolDeclaration[];
   readonly registeredModuleTargets?: ReadonlySet<ModuleTargetName>;
+  /** S12 — the same check as `registeredModuleTargets`, for the registry's http-targeted entries. Optional and independent of it: a `Lifecycle` built before the http adapter existed still compiles, and an http-targeted entry is simply not examined until this is supplied. */
+  readonly registeredHttpOperations?: ReadonlySet<HttpOperationName>;
   readonly acquirer?: LockAcquirer;
   /** Fires alongside the durable `lease-takeover` audit record — operator-visible even if the trail itself cannot be written. */
   readonly onTakeover?: (previousHolder: InstanceLease, current: InstanceLease) => void;
@@ -211,18 +213,22 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         );
       }
 
-      // Invariant B5 — every registry entry with a module execution target
-      // must have a registered executor. Checked here, alongside step 3,
-      // for the same reason: a registry entry nothing can execute is a
+      // Invariant B5 — every registry entry with a module or http execution
+      // target must have a registered executor. Checked here, alongside step
+      // 3, for the same reason: a registry entry nothing can execute is a
       // deployment/build wiring defect, not a runtime one, and is cheapest
-      // to catch before the store ever opens. Only entries are skippable
-      // when neither optional dependency is supplied (S1–S5's empty
-      // registries); an http-targeted entry has no adapter to check against
-      // yet and is not examined here.
-      if (deps.registryEntries && deps.registeredModuleTargets) {
-        const missingExecutors = deps.registryEntries
-          .filter((entry) => entry.target.kind === 'module' && !deps.registeredModuleTargets!.has(entry.target.target))
-          .map((entry) => entry.name);
+      // to catch before the store ever opens. Module and http targets are
+      // checked independently — S1–S11's registries carry no http-targeted
+      // entry and supply no `registeredHttpOperations`, so that half is
+      // simply skipped rather than treated as "nothing registered".
+      if (deps.registryEntries) {
+        const missingModule = deps.registeredModuleTargets
+          ? deps.registryEntries.filter((entry) => entry.target.kind === 'module' && !deps.registeredModuleTargets!.has(entry.target.target))
+          : [];
+        const missingHttp = deps.registeredHttpOperations
+          ? deps.registryEntries.filter((entry) => entry.target.kind === 'http' && !deps.registeredHttpOperations!.has(entry.target.operation))
+          : [];
+        const missingExecutors = [...missingModule, ...missingHttp].map((entry) => entry.name);
         if (missingExecutors.length > 0) {
           guard.release();
           guard = null;
