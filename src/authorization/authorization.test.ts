@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { systemClock } from '../clock/clock.ts';
+import { createAudit } from '../audit/audit.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
 import type { ContractCapabilitySet } from '../contract/capabilities.ts';
@@ -38,7 +39,25 @@ async function migratedVolume<T>(fn: (volume: string) => Promise<T>): Promise<T>
 }
 
 function authFor(volume: string, contractCapabilitySet: ContractCapabilitySet = FULL_CEILING) {
-  return createAuthorization({ volumeRoot: volume, clock: systemClock, contractCapabilitySet });
+  return createAuthorization({ volumeRoot: volume, clock: systemClock, contractCapabilitySet, audit: createAudit({ volumeRoot: volume, clock: systemClock }) });
+}
+
+/** Every `identity-event` the audit chain holds, in order. */
+async function auditedEvents(volume: string): Promise<readonly string[]> {
+  const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+  const page = await audit.query({
+    declarationId: null,
+    tool: null,
+    actorSubject: null,
+    form: 'identity-event',
+    from: null,
+    to: null,
+    limit: 100,
+    cursor: null,
+  });
+  await audit.close();
+  if (!page.ok) return [];
+  return page.value.records.map((record) => (record as { event?: string }).event ?? '');
 }
 
 /** Every row this test suite could see, across every table this module writes to — used by S13.3. */
@@ -250,6 +269,94 @@ test('S13.8 — the grants view lists clients, grants and tokens, with counts, a
     assert.equal(verified.ok, false);
     if (verified.ok) return;
     assert.equal(verified.error.code, 'token-revoked');
+  });
+});
+
+test('no operator-api token reaches an instance-level capability, whatever scopes it is issued with', async () => {
+  await migratedVolume(async (volume) => {
+    const auth = authFor(volume);
+    // Every scope at once — the widest token this interface can issue.
+    const issued = await auth.issueOperatorApiToken('ben' as Subject, ['read', 'write', 'raw', 'schedule'], ACTOR);
+    assert.equal(issued.ok, true);
+    if (!issued.ok) return;
+
+    const verified = await auth.verifyOperatorApiToken(issued.value.value);
+    assert.equal(verified.ok, true);
+    if (!verified.ok) return;
+    const grant = verified.value.grant as unknown as ReadonlySet<string>;
+
+    // `20-contract.md` § Scopes: "no `OperatorScope` value names them, and no
+    // operator-api token can exercise them". The ceiling here is FULL_CEILING,
+    // so nothing but the scope map itself is keeping them out.
+    for (const consoleOnly of ['declaration.manage', 'auth.manage', 'audit.read', 'attention.resolve']) {
+      assert.equal(grant.has(consoleOnly), false, `'${consoleOnly}' is console-only and must never appear in an operator-api grant`);
+    }
+    assert.equal(grant.has('repo.read'), true, 'the declaration-scoped capabilities still arrive');
+    assert.equal(grant.has('git.raw'), true);
+    assert.equal(grant.has('scheduler.manage'), true);
+  });
+});
+
+test('issuing and revoking a credential each leave an audit line naming the operator who did it', async () => {
+  await migratedVolume(async (volume) => {
+    const auth = authFor(volume);
+    const issued = await auth.issueOperatorApiToken('ben' as Subject, ['read'], ACTOR);
+    assert.equal(issued.ok, true);
+    if (!issued.ok) return;
+
+    const grants = await auth.listGrants('operator-api');
+    await auth.revokeToken(issued.value.jti, ACTOR);
+    await auth.revokeGrant(grants[0]!.grant.grantId, ACTOR);
+
+    assert.deepEqual(await auditedEvents(volume), ['token-issued', 'token-revoked', 'grant-revoked']);
+  });
+});
+
+test('a failed revocation writes no audit line — the chain records what happened, not what was attempted', async () => {
+  await migratedVolume(async (volume) => {
+    const auth = authFor(volume);
+    const revoked = await auth.revokeGrant('no-such-grant' as never, ACTOR);
+    assert.equal(revoked.ok, false);
+    assert.deepEqual(await auditedEvents(volume), []);
+  });
+});
+
+test('activeTokens counts only tokens that would actually authenticate — an expired one does not', async () => {
+  await migratedVolume(async (volume) => {
+    const auth = authFor(volume);
+    const issued = await auth.issueOperatorApiToken('ben' as Subject, ['read'], ACTOR);
+    assert.equal(issued.ok, true);
+    if (!issued.ok) return;
+
+    assert.equal((await auth.listGrants('operator-api'))[0]!.activeTokens, 1);
+
+    // Backdate the expiry rather than wait a year. The verification path
+    // rejects this token from here on, so a view still calling it active
+    // would be reporting a credential that cannot be used.
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    db.prepare('UPDATE token SET expires_at = ? WHERE jti = ?').run('2000-01-01T00:00:00.000Z', issued.value.jti);
+    db.close();
+
+    const verified = await auth.verifyOperatorApiToken(issued.value.value);
+    assert.equal(verified.ok, false);
+    if (verified.ok) return;
+    assert.equal(verified.error.code, 'token-expired');
+    assert.equal((await auth.listGrants('operator-api'))[0]!.activeTokens, 0, 'an expired token is not an active one');
+  });
+});
+
+test('revoking a grant zeroes its active token count, so the view can confirm the revocation took', async () => {
+  await migratedVolume(async (volume) => {
+    const auth = authFor(volume);
+    const issued = await auth.issueOperatorApiToken('ben' as Subject, ['read'], ACTOR);
+    assert.equal(issued.ok, true);
+    if (!issued.ok) return;
+
+    const grantId = (await auth.listGrants('operator-api'))[0]!.grant.grantId;
+    assert.equal(await auth.revokeGrant(grantId, ACTOR).then((r) => r.ok), true);
+
+    const after = await auth.listGrants('operator-api');
+    assert.equal(after[0]!.activeTokens, 0, "the token's own row is untouched, but nothing under a revoked grant is active");
   });
 });
 

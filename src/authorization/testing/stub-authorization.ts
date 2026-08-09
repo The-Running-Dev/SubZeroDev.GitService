@@ -2,8 +2,27 @@ import { randomUUID } from 'node:crypto';
 import { ok, err } from '../../shared/outcome.ts';
 import type { SessionId, Subject } from '../../shared/brands.ts';
 import type { Session } from '../../shared/session.ts';
+import type { CapabilityName } from '../../contract/capabilities.ts';
+import { storeError } from '../../store/errors.ts';
 import { authorizationError } from '../errors.ts';
 import type { Authorization } from '../authorization.ts';
+
+/**
+ * What a real token issued with all four operator scopes would carry, so a
+ * surface test exercising a route's capability gate is not silently testing
+ * an empty grant. Declaration-scoped only — the four instance-level
+ * capabilities are console-only and no operator-api token has them.
+ */
+const ALL_OPERATOR_CAPABILITIES: readonly CapabilityName[] = [
+  'repo.read',
+  'host.pr.read',
+  'host.checks.read',
+  'git.local.write',
+  'git.remote.write',
+  'host.pr.write',
+  'git.raw',
+  'scheduler.manage',
+];
 
 /**
  * A stub for tests that exercise a surface *around* bearer authentication —
@@ -14,7 +33,10 @@ import type { Authorization } from '../authorization.ts';
  * store, honest about being a stand-in rather than pretending to persist
  * anything.
  */
-export function createStubAuthorization(validTokens: ReadonlyMap<string, Subject> = new Map()): Authorization {
+export function createStubAuthorization(
+  validTokens: ReadonlyMap<string, Subject> = new Map(),
+  grant: readonly CapabilityName[] = ALL_OPERATOR_CAPABILITIES,
+): Authorization {
   const stub: Authorization = {
     async registerClient() {
       return err(authorizationError({ code: 'registration-invalid', findings: [] }, 'stub: registerClient not exercised'));
@@ -30,7 +52,7 @@ export function createStubAuthorization(validTokens: ReadonlyMap<string, Subject
         kind: 'operator',
         actorRef: { kind: 'operator', subject, clientId: null, grantId: null },
         repositoryBinding: null,
-        grant: new Set() as unknown as Session['grant'],
+        grant: new Set(grant) as unknown as Session['grant'],
         writablePathPrefixes: [],
         frozenAtEpoch: 0 as unknown as Session['frozenAtEpoch'],
       };
@@ -65,4 +87,32 @@ export function createStubAuthorization(validTokens: ReadonlyMap<string, Subject
     },
   };
   return stub;
+}
+
+/**
+ * Every member answers `store-failed` — the volume is unwritable, the file is
+ * not a database, the disk is full. Its own kind of stub: the failure a
+ * surface must report as `503` rather than fold into `401`/`404`, which is
+ * otherwise unreachable from a test without corrupting a real volume.
+ */
+export function createStoreFailingAuthorization(): Authorization {
+  const failure = () => authorizationError({ code: 'store-failed', cause: storeError({ code: 'io-failed' }, 'volume is unwritable') }, 'could not open the structured store');
+  return {
+    ...createStubAuthorization(),
+    async verifyOperatorApiToken() {
+      return err(failure());
+    },
+    async issueOperatorApiToken() {
+      return err(failure());
+    },
+    async revokeClient() {
+      return err(failure());
+    },
+    async revokeGrant() {
+      return err(failure());
+    },
+    async revokeToken() {
+      return err(failure());
+    },
+  };
 }

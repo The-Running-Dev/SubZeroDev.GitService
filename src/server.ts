@@ -309,7 +309,7 @@ async function main(): Promise<void> {
   // hash, and the revocation cascade. Replaces the shared-secret bearer
   // stand-in `http-server.ts` carried since S2: a script's credential is now
   // issued from the grants view (`/grants/tokens`), not a static env var.
-  const authorization = createAuthorization({ volumeRoot, clock: systemClock, contractCapabilitySet });
+  const authorization = createAuthorization({ volumeRoot, clock: systemClock, contractCapabilitySet, audit });
 
   // S8 — the recovery catalogue, populated here from L2 and read by L1. A
   // duplicate registration is a wiring defect and fatal at composition time,

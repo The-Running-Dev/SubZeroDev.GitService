@@ -1,9 +1,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { ClientId, GrantId, Subject, TokenId } from '../shared/brands.ts';
+import { createHash } from 'node:crypto';
+import type { ClientId, GrantId, SessionId, Subject, TokenId } from '../shared/brands.ts';
 import type { Authorization } from '../authorization/authorization.ts';
 import type { GrantKind } from '../authorization/types.ts';
 import type { OperatorScope } from '../contract/capabilities.ts';
-import type { OperatorIdentity } from '../operator-identity/operator-identity.ts';
+import type { OperatorIdentity, OperatorSession } from '../operator-identity/operator-identity.ts';
 import { csrfOk, requireSession, type ConsoleAuthDependencies } from './console-auth-routes.ts';
 
 export interface AuthorizationRoutesDependencies extends ConsoleAuthDependencies {
@@ -44,6 +45,42 @@ async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknow
   }
 }
 
+/**
+ * `OperatorSession.id` *is* the `szg_session` cookie value — `requireSession`
+ * authenticates by looking that exact string up — so it can never appear in a
+ * response body: anything that could read one listing could then wear that
+ * session. The view still needs a handle to revoke by, so it gets the SHA-256
+ * of the id instead, which is a one-way function of a 32-byte random value.
+ * `console-auth-routes.ts`'s `sessionEnvelope` omits the id for the same
+ * reason; this is that rule applied to a listing rather than to one session.
+ */
+function sessionRef(id: SessionId): string {
+  return createHash('sha256').update(id as unknown as string, 'utf8').digest('hex');
+}
+
+function sessionListing(session: OperatorSession): unknown {
+  return {
+    ref: sessionRef(session.id),
+    subject: session.subject,
+    createdAt: session.createdAt,
+    lastSeenAt: session.lastSeenAt,
+    idleExpiresAt: session.idleExpiresAt,
+    absoluteExpiresAt: session.absoluteExpiresAt,
+    revokedAt: session.revokedAt,
+  };
+}
+
+/**
+ * `store-failed` is a `503` and everything else a `404` — the module's own
+ * error semantics (`authorization/errors.ts`, `operator-identity/errors.ts`).
+ * Collapsing the two would report an unwritable store as "no such grant",
+ * which reads as "already gone" to the operator revoking a leaked credential
+ * that is in fact still live.
+ */
+function revocationStatus(error: { readonly code: string }): number {
+  return error.code === 'store-failed' ? 503 : 404;
+}
+
 function parseScopes(body: Record<string, unknown>): readonly OperatorScope[] | null {
   const raw = body.scopes;
   if (!Array.isArray(raw) || raw.length === 0) return null;
@@ -70,8 +107,8 @@ export async function handleAuthorizationRoute(deps: AuthorizationRoutesDependen
     if (!session) return true;
     const kindParam = url.searchParams.get('kind');
     const kind: GrantKind | null = kindParam === 'mcp' || kindParam === 'operator-api' ? kindParam : null;
-    const [grants, operatorSessions] = await Promise.all([deps.authorization.listGrants(kind), deps.identity.listSessions()]);
-    sendJson(res, 200, { grants, operatorSessions });
+    const [grants, sessions] = await Promise.all([deps.authorization.listGrants(kind), deps.identity.listSessions()]);
+    sendJson(res, 200, { grants, operatorSessions: sessions.map(sessionListing) });
     return true;
   }
 
@@ -110,7 +147,7 @@ export async function handleAuthorizationRoute(deps: AuthorizationRoutesDependen
       clientId: null,
       grantId: null,
     });
-    sendJson(res, revoked.ok ? 200 : 404, revoked.ok ? { revoked: true } : { error: revoked.error.code, summary: revoked.error.summary });
+    sendJson(res, revoked.ok ? 200 : revocationStatus(revoked.error), revoked.ok ? { revoked: true } : { error: revoked.error.code, summary: revoked.error.summary });
     return true;
   }
 
@@ -125,7 +162,7 @@ export async function handleAuthorizationRoute(deps: AuthorizationRoutesDependen
       clientId: null,
       grantId: null,
     });
-    sendJson(res, revoked.ok ? 200 : 404, revoked.ok ? { revoked: true } : { error: revoked.error.code, summary: revoked.error.summary });
+    sendJson(res, revoked.ok ? 200 : revocationStatus(revoked.error), revoked.ok ? { revoked: true } : { error: revoked.error.code, summary: revoked.error.summary });
     return true;
   }
 
@@ -140,7 +177,7 @@ export async function handleAuthorizationRoute(deps: AuthorizationRoutesDependen
       clientId: null,
       grantId: null,
     });
-    sendJson(res, revoked.ok ? 200 : 404, revoked.ok ? { revoked: true } : { error: revoked.error.code, summary: revoked.error.summary });
+    sendJson(res, revoked.ok ? 200 : revocationStatus(revoked.error), revoked.ok ? { revoked: true } : { error: revoked.error.code, summary: revoked.error.summary });
     return true;
   }
 
@@ -149,13 +186,22 @@ export async function handleAuthorizationRoute(deps: AuthorizationRoutesDependen
     const session = await requireSession(deps, req, res);
     if (!session) return true;
     if (!requireCsrf(req, res)) return true;
-    const revoked = await deps.identity.revokeSession(decodeURIComponent(revokeOperatorSessionMatch[1]!) as never, {
+    // The path carries the digest the listing published, not the session id,
+    // so the id has to be recovered here. Comparing digests leaks nothing
+    // about the id even if the ref is guessed or logged.
+    const ref = decodeURIComponent(revokeOperatorSessionMatch[1]!);
+    const target = (await deps.identity.listSessions()).find((candidate) => sessionRef(candidate.id) === ref);
+    if (!target) {
+      sendJson(res, 404, { error: 'session-unknown', summary: 'no operator session matches that reference' });
+      return true;
+    }
+    const revoked = await deps.identity.revokeSession(target.id, {
       kind: 'operator',
       subject: session.subject as Subject,
       clientId: null,
       grantId: null,
     });
-    sendJson(res, revoked.ok ? 200 : 404, revoked.ok ? { revoked: true } : { error: revoked.error.code, summary: revoked.error.summary });
+    sendJson(res, revoked.ok ? 200 : revocationStatus(revoked.error), revoked.ok ? { revoked: true } : { error: revoked.error.code, summary: revoked.error.summary });
     return true;
   }
 

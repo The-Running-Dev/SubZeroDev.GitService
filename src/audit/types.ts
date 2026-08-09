@@ -77,7 +77,16 @@ export interface AuditRecordBase {
   readonly hash: Sha256Hex;
 }
 
-export type IdentityEvent = 'enrolment' | 'recovery-code-used' | 'break-glass-used' | 'totp-reenrolled' | 'session-revoked';
+export type IdentityEvent =
+  | 'enrolment'
+  | 'recovery-code-used'
+  | 'break-glass-used'
+  | 'totp-reenrolled'
+  | 'session-revoked'
+  | 'token-issued'
+  | 'client-revoked'
+  | 'grant-revoked'
+  | 'token-revoked';
 
 export type DropOutcome =
   | { readonly kind: 'succeeded'; readonly pullRequest: PullRequestRef }

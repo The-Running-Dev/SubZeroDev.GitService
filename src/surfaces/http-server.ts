@@ -6,6 +6,7 @@ import type { CredentialFailureMark } from '../credentials/types.ts';
 import type { CredentialRef, DeclarationId, OperationId } from '../shared/brands.ts';
 import type { ActorRef } from '../shared/actor.ts';
 import type { Session } from '../shared/session.ts';
+import type { CapabilityName } from '../contract/capabilities.ts';
 import type { Authorization } from '../authorization/authorization.ts';
 import type { ObservedGitState, PreState } from '../clone/types.ts';
 import type { OperationJournalEntry } from '../journal/types.ts';
@@ -136,17 +137,50 @@ function stateComparison(preState: PreState, observed: ObservedGitState | null):
 }
 
 /**
- * `null` for a missing or malformed header, and for a cookie presented
- * instead of a bearer — a bearer route reads only `Authorization`, never
- * `Cookie`, so a cookie alone can never authenticate one (S13.2's "bearer
- * routes reject a cookie" half; the other half, `console-auth-routes.ts`'s
- * `requireSession`, reads only `Cookie`).
+ * `null` with the response already sent, mirroring `console-auth-routes.ts`'s
+ * `requireSession`. `null` for a missing or malformed header, and for a
+ * cookie presented instead of a bearer — a bearer route reads only
+ * `Authorization`, never `Cookie`, so a cookie alone can never authenticate
+ * one (S13.2's "bearer routes reject a cookie" half; the other half,
+ * `requireSession` itself, reads only `Cookie`).
+ *
+ * Three distinct answers, because collapsing them misdirects the operator:
+ * `401` the credential is not good, `403` it is good but its scopes do not
+ * reach this route, `503` the store could not answer — the last is what
+ * `authorization/errors.ts` fixes for `store-failed`, and reporting it as
+ * `401` sends an operator hunting a revoked token instead of a sick volume.
+ *
+ * `required` is `null` on the two mutating routes: the capabilities that
+ * would gate them (`attention.resolve`, `declaration.manage`) are
+ * console-only, so no operator-api token can ever carry one and a gate here
+ * would simply delete the route. The full route-to-capability mapping is
+ * `20-contract.md` § U4's to settle.
  */
-async function authorizedSession(deps: Pick<SurfacesDependencies, 'authorization'>, req: IncomingMessage): Promise<Session | null> {
+async function requireBearerSession(
+  deps: Pick<SurfacesDependencies, 'authorization'>,
+  req: IncomingMessage,
+  res: ServerResponse,
+  required: CapabilityName | null,
+): Promise<Session | null> {
   const header = req.headers.authorization;
-  if (!header || !header.startsWith('Bearer ')) return null;
+  if (!header || !header.startsWith('Bearer ')) {
+    sendJson(res, 401, { error: 'unauthorized' });
+    return null;
+  }
   const verified = await deps.authorization.verifyOperatorApiToken(header.slice('Bearer '.length) as BearerToken);
-  return verified.ok ? verified.value : null;
+  if (!verified.ok) {
+    if (verified.error.code === 'store-failed') {
+      sendJson(res, 503, { error: verified.error.code, summary: verified.error.summary });
+      return null;
+    }
+    sendJson(res, 401, { error: 'unauthorized' });
+    return null;
+  }
+  if (required !== null && !(verified.value.grant as unknown as ReadonlySet<CapabilityName>).has(required)) {
+    sendJson(res, 403, { error: 'forbidden', summary: `this token's scopes do not carry '${required}'` });
+    return null;
+  }
+  return verified.value;
 }
 
 function resolverActorFor(session: Session): ActorRef {
@@ -199,10 +233,7 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
   }
 
   if (req.method === 'GET' && url.pathname === '/version') {
-    if (!(await authorizedSession(deps, req))) {
-      sendJson(res, 401, { error: 'unauthorized' });
-      return;
-    }
+    if (!(await requireBearerSession(deps, req, res, 'repo.read'))) return;
     const report: VersionReport = {
       commitSha: deps.commitSha,
       contractFingerprint: deps.contractFingerprint,
@@ -218,10 +249,7 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
   // access. Authenticated, like every route but `/healthz`: a parked
   // operation names a declaration and a tool, which is operator data.
   if (req.method === 'GET' && url.pathname === '/parked-operations') {
-    if (!(await authorizedSession(deps, req))) {
-      sendJson(res, 401, { error: 'unauthorized' });
-      return;
-    }
+    if (!(await requireBearerSession(deps, req, res, 'repo.read'))) return;
     const parked = deps.parkedOperations ? await deps.parkedOperations() : [];
     const operations = [];
     for (const entry of parked) {
@@ -247,10 +275,7 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
   // been fixed somewhere other than the file.
   const clearCredentialMatch = /^\/failing-credentials\/([^/]+)\/([^/]+)\/clear$/.exec(url.pathname);
   if (req.method === 'POST' && clearCredentialMatch) {
-    if (!(await authorizedSession(deps, req))) {
-      sendJson(res, 401, { error: 'unauthorized' });
-      return;
-    }
+    if (!(await requireBearerSession(deps, req, res, null))) return;
     if (!deps.clearFailingCredential) {
       sendJson(res, 503, { error: 'unavailable', summary: 'no credential resolver is wired into this server' });
       return;
@@ -266,11 +291,8 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
   // not calling this, so there is deliberately no route for it.
   const resolveMatch = /^\/parked-operations\/([^/]+)\/resolve$/.exec(url.pathname);
   if (req.method === 'POST' && resolveMatch) {
-    const session = await authorizedSession(deps, req);
-    if (!session) {
-      sendJson(res, 401, { error: 'unauthorized' });
-      return;
-    }
+    const session = await requireBearerSession(deps, req, res, null);
+    if (!session) return;
     if (!deps.resolveParkedOperation) {
       sendJson(res, 503, { error: 'unavailable', summary: 'no journal is wired into this server' });
       return;
@@ -281,10 +303,7 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
   }
 
   if (req.method === 'GET' && url.pathname === '/health') {
-    if (!(await authorizedSession(deps, req))) {
-      sendJson(res, 401, { error: 'unauthorized' });
-      return;
-    }
+    if (!(await requireBearerSession(deps, req, res, 'repo.read'))) return;
     const auditChain = await deps.auditChain();
     const parked = deps.parkedOperations ? await deps.parkedOperations() : [];
     const report: HealthReport = {

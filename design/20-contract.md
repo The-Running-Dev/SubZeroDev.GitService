@@ -606,7 +606,11 @@ type IdentityEvent =
   | 'recovery-code-used'
   | 'break-glass-used'
   | 'totp-reenrolled'
-  | 'session-revoked';
+  | 'session-revoked'
+  | 'token-issued'
+  | 'client-revoked'
+  | 'grant-revoked'
+  | 'token-revoked';
 
 type AuditRecordBody =
   | { readonly form: 'call'; readonly resultKind: ResultKind; readonly changedPaths: readonly RepoRelativePath[] }

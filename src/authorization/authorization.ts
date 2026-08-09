@@ -8,6 +8,8 @@ import type { BearerToken, HttpsUrl } from '../shared/brands.ts';
 import type { ActorRef } from '../shared/actor.ts';
 import type { Session } from '../shared/session.ts';
 import type { Clock } from '../clock/clock.ts';
+import type { Audit } from '../audit/audit.ts';
+import type { IdentityEvent } from '../audit/types.ts';
 import type { Declaration } from '../declarations/types.ts';
 import type { ContractCapabilitySet, CapabilityName, Scope, OperatorScope } from '../contract/capabilities.ts';
 import { storeError } from '../store/errors.ts';
@@ -37,6 +39,13 @@ export interface AuthorizationDependencies {
   readonly clock: Clock;
   /** Only used to intersect an operator-api token's granted scopes against what the deployment actually registers — never widens past it (invariant A1). */
   readonly contractCapabilitySet: ContractCapabilitySet;
+  /**
+   * Issuing and revoking a durable credential are audited here rather than at
+   * the console route, because the store write is what actually happened —
+   * a route that recorded its own intent would log a revocation the store
+   * then failed to perform. Append-only, and only on the success path.
+   */
+  readonly audit: Pick<Audit, 'append'>;
 }
 
 /** A year — long enough that a script's credential outlives ordinary use, short enough that an abandoned token does not stay live forever. Not fixed by the contract (`design/90-decisions.md` follows S4's `sessionAbsoluteSeconds` precedent: a number this interface cannot exist without). */
@@ -134,10 +143,17 @@ function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): Outcome<T, 
  * because `verifyOperatorApiToken` needs *some* honest, non-decorative
  * answer now — a token issued with only `read` must not carry `git.raw`.
  * `design/90-decisions.md`, 2026-08-09.
+ *
+ * Declaration-scoped capabilities only. The four instance-level ones —
+ * `declaration.manage`, `auth.manage`, `audit.read`, `attention.resolve` —
+ * appear in no scope, because `20-contract.md` § Scopes says of them "no
+ * `OperatorScope` value names them, and no operator-api token can exercise
+ * them", and the 2026-08-09 decision rejected the superset reading by name.
+ * Adding one here is how that decision gets reversed by accident.
  */
 const SCOPE_CAPABILITIES: Readonly<Record<OperatorScope, readonly CapabilityName[]>> = {
-  read: ['repo.read', 'host.pr.read', 'host.checks.read', 'audit.read'],
-  write: ['git.local.write', 'git.remote.write', 'host.pr.write', 'declaration.manage', 'attention.resolve', 'auth.manage'],
+  read: ['repo.read', 'host.pr.read', 'host.checks.read'],
+  write: ['git.local.write', 'git.remote.write', 'host.pr.write'],
   raw: ['git.raw'],
   schedule: ['scheduler.manage'],
 };
@@ -158,6 +174,26 @@ const NOT_WIRED = authorizationError(
 );
 
 export function createAuthorization(deps: AuthorizationDependencies): Authorization {
+  /**
+   * One audit line per credential mutation that actually reached the store.
+   * `operationId`/`declarationId`/`generation`/`tool` are all null: none of
+   * these is a tool call against a repository, which is the same shape
+   * `operator-identity.ts` already uses for its own identity events.
+   */
+  async function auditCredentialEvent(event: IdentityEvent, actor: ActorRef): Promise<void> {
+    await deps.audit.append({
+      at: deps.clock.now(),
+      operationId: null,
+      declarationId: null,
+      generation: null,
+      tool: null,
+      actorRef: actor,
+      context: 'normal',
+      form: 'identity-event',
+      event,
+    });
+  }
+
   return {
     async registerClient(request: ClientRegistrationRequest): Promise<Outcome<OAuthClient, AuthorizationError>> {
       const findings: { readonly path: string; readonly rule: string; readonly message: string }[] = request.redirectUris
@@ -214,7 +250,7 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
         ).run(jti, grantId, verifierHash, now, expiresAt);
         return { jti, value: rawValue, expiresAt } satisfies IssuedToken;
       });
-      void actor; // audited by the caller (the console route), same as every other console-issued mutation.
+      if (result.ok) await auditCredentialEvent('token-issued', actor);
       return result;
     },
 
@@ -280,12 +316,21 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
     },
 
     async listGrants(kind: GrantKind | null): Promise<readonly GrantView[]> {
+      const now = deps.clock.now();
       const result = withDb(deps.volumeRoot, (db) => {
         const rows = (kind ? db.prepare('SELECT * FROM "grant" WHERE kind = ? ORDER BY created_at ASC').all(kind) : db.prepare('SELECT * FROM "grant" ORDER BY created_at ASC').all()) as unknown as GrantRow[];
         return rows.map((row): GrantView => {
           const grant = toGrant(row);
           const clientRow = grant.clientId ? (db.prepare('SELECT * FROM oauth_client WHERE client_id = ?').get(grant.clientId) as ClientRow | undefined) : undefined;
-          const activeTokens = (db.prepare('SELECT COUNT(*) AS n FROM token WHERE grant_id = ? AND revoked_at IS NULL').get(row.grant_id) as { n: number }).n;
+          // "Active" has to mean the same thing the verification path means by
+          // it, or the view cannot be used to confirm a revocation took
+          // effect: not revoked, not expired, and under a grant that is
+          // itself still live. `expires_at` compares lexicographically
+          // because every writer of it goes through `Date.toISOString()`.
+          const activeTokens =
+            row.revoked_at !== null
+              ? 0
+              : (db.prepare('SELECT COUNT(*) AS n FROM token WHERE grant_id = ? AND revoked_at IS NULL AND expires_at > ?').get(row.grant_id, now) as { n: number }).n;
           return {
             grant,
             client: clientRow ? toClient(clientRow) : null,
@@ -302,9 +347,8 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
     },
 
     async revokeClient(clientId: ClientId, actor: ActorRef): Promise<Outcome<void, AuthorizationError>> {
-      void actor;
       const now = deps.clock.now();
-      return withDb(deps.volumeRoot, (db) => {
+      const result = withDb(deps.volumeRoot, (db) => {
         const info = db.prepare('UPDATE oauth_client SET revoked_at = ? WHERE client_id = ? AND revoked_at IS NULL').run(now, clientId);
         if (info.changes === 0) {
           const existing = db.prepare('SELECT client_id FROM oauth_client WHERE client_id = ?').get(clientId);
@@ -312,30 +356,34 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
           // Already revoked — revocation is idempotent, not an error.
         }
       });
+      if (result.ok) await auditCredentialEvent('client-revoked', actor);
+      return result;
     },
 
     async revokeGrant(grantId: GrantId, actor: ActorRef): Promise<Outcome<void, AuthorizationError>> {
-      void actor;
       const now = deps.clock.now();
-      return withDb(deps.volumeRoot, (db) => {
+      const result = withDb(deps.volumeRoot, (db) => {
         const info = db.prepare('UPDATE "grant" SET revoked_at = ? WHERE grant_id = ? AND revoked_at IS NULL').run(now, grantId);
         if (info.changes === 0) {
           const existing = db.prepare('SELECT grant_id FROM "grant" WHERE grant_id = ?').get(grantId);
           if (!existing) throw authorizationError({ code: 'token-unknown' }, `no such grant '${grantId}'`);
         }
       });
+      if (result.ok) await auditCredentialEvent('grant-revoked', actor);
+      return result;
     },
 
     async revokeToken(jti: TokenId, actor: ActorRef): Promise<Outcome<void, AuthorizationError>> {
-      void actor;
       const now = deps.clock.now();
-      return withDb(deps.volumeRoot, (db) => {
+      const result = withDb(deps.volumeRoot, (db) => {
         const info = db.prepare('UPDATE token SET revoked_at = ? WHERE jti = ? AND revoked_at IS NULL').run(now, jti);
         if (info.changes === 0) {
           const existing = db.prepare('SELECT jti FROM token WHERE jti = ?').get(jti);
           if (!existing) throw authorizationError({ code: 'token-unknown' }, `no such token '${jti}'`);
         }
       });
+      if (result.ok) await auditCredentialEvent('token-revoked', actor);
+      return result;
     },
 
     async runRetention() {
