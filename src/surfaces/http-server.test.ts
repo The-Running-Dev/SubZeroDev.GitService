@@ -10,11 +10,14 @@ import { createStubOperatorIdentity } from '../operator-identity/testing/stub-op
 import { createStubDeclarations } from '../declarations/testing/stub-declarations.ts';
 import { createStubCloneStore } from '../clone/testing/stub-clone-store.ts';
 import { createStubDispatchPipeline } from '../dispatch/testing/stub-dispatch-pipeline.ts';
+import { createStubAuthorization, createStoreFailingAuthorization } from '../authorization/testing/stub-authorization.ts';
+import type { Authorization } from '../authorization/authorization.ts';
 import type { ContractCapabilitySet } from '../contract/capabilities.ts';
 
 const COMMIT_SHA = '0'.repeat(40) as GitSha;
 const CONTRACT_FINGERPRINT = '1'.repeat(64) as Sha256Hex;
 const TOKEN = 'test-operator-token';
+const AUTHORIZATION = createStubAuthorization(new Map([[TOKEN, 'operator-api' as never]]));
 
 const HEALTHY_CHAIN: AuditChainState = {
   verifiedThrough: 3,
@@ -32,6 +35,7 @@ interface ServerOptions {
   readonly observed?: ObservedGitState | null;
   readonly resolve?: (operationId: string) => Promise<{ readonly ok: boolean; readonly summary: string }>;
   readonly failedOutboxRows?: number;
+  readonly authorization?: Authorization;
 }
 
 async function withServer<T>(options: ServerOptions, fn: (baseUrl: string) => Promise<T>): Promise<T> {
@@ -42,7 +46,7 @@ async function withServer<T>(options: ServerOptions, fn: (baseUrl: string) => Pr
     ready: () => options.ready ?? true,
     provisioningPending: async () => options.provisioningPending ?? false,
     auditChain: async () => options.auditChain ?? HEALTHY_CHAIN,
-    operatorApiToken: TOKEN,
+    authorization: options.authorization ?? AUTHORIZATION,
     parkedOperations: async () => options.parked ?? [],
     observeGitState: async () => options.observed ?? null,
     ...(options.resolve ? { resolveParkedOperation: async (operationId: string) => options.resolve!(operationId) } : {}),
@@ -62,6 +66,24 @@ async function withServer<T>(options: ServerOptions, fn: (baseUrl: string) => Pr
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 }
+
+test('a store that cannot answer is a 503 on every bearer route, not a 401 — the token is not the thing that is wrong', async () => {
+  const failing = createStoreFailingAuthorization();
+  await withServer({ authorization: failing }, async (baseUrl) => {
+    for (const path of ['/version', '/health', '/parked-operations']) {
+      const response = await fetch(`${baseUrl}${path}`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+      assert.equal(response.status, 503, `${path} must report the store failure, not deny the credential`);
+      assert.equal(((await response.json()) as { error: string }).error, 'store-failed');
+    }
+  });
+
+  // The distinction only means something if a genuinely bad credential still
+  // answers 401 against the same server.
+  await withServer({ authorization: failing }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/health`);
+    assert.equal(response.status, 401, 'no credential at all is still an auth failure, not a store failure');
+  });
+});
 
 test('/healthz returns 200 with exactly ready and commitSha, and no other key', async () => {
   await withServer({ ready: true }, async (baseUrl) => {
@@ -159,7 +181,7 @@ test('a throwing handler answers 500 and leaves the process serving, rather than
     auditChain: async () => {
       throw new Error('file is not a database');
     },
-    operatorApiToken: TOKEN,
+    authorization: AUTHORIZATION,
     identity: createStubOperatorIdentity(),
     sessionAbsoluteSeconds: 43_200,
     declarations: createStubDeclarations(),

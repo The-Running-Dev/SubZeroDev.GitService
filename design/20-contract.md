@@ -165,11 +165,17 @@ The `host.*` capabilities are present in `hostSupportedCapabilities('github')` a
 
 ```ts
 type McpScope = 'read' | 'write' | 'raw' | 'schedule';
-type OperatorScope = Brand<string, 'OperatorScope'>;
+type OperatorScope = McpScope;
 type Scope = McpScope | OperatorScope;
 ```
 
-The `OperatorScope` vocabulary is not fixed here — see `## Unresolved`.
+**U2, resolved 2026-08-09 by S13.** `OperatorScope` carries the same four values as `McpScope` —
+`read`, `write`, `raw`, `schedule` — gating the same declaration-scoped capability classes an
+`operator-api` grant reaches through the HTTP API's route (which carries the repository) rather
+than through a resource indicator. The four instance-level capabilities (`declaration.manage`,
+`auth.manage`, `audit.read`, `attention.resolve`) stay reachable only from the console, per their
+existing "console-only" language above — no `OperatorScope` value names them, and no operator-api
+token can exercise them. See `design/90-decisions.md`, 2026-08-09.
 
 ### Declaration
 
@@ -600,7 +606,11 @@ type IdentityEvent =
   | 'recovery-code-used'
   | 'break-glass-used'
   | 'totp-reenrolled'
-  | 'session-revoked';
+  | 'session-revoked'
+  | 'token-issued'
+  | 'client-revoked'
+  | 'grant-revoked'
+  | 'token-revoked';
 
 type AuditRecordBody =
   | { readonly form: 'call'; readonly resultKind: ResultKind; readonly changedPaths: readonly RepoRelativePath[] }
@@ -3364,9 +3374,8 @@ and `readDeployStatus` carries no tool until S12 declares one.
 and `### L3 — http adapter` above. U1 otherwise stands: only `raw` remains open, for the slice that
 ships it.
 
-**U2 — The `OperatorScope` vocabulary.** The design states that an `operator-api` grant "carries
-operator scopes" and fixes the MCP scope set as `read`, `write`, `raw`, `schedule`. It does not
-name the operator scopes, nor say whether they are the same four, a superset, or disjoint.
+**U2 — The `OperatorScope` vocabulary, resolved 2026-08-09 by S13.** `OperatorScope` is the same
+four values as `McpScope`. See `### Scopes` above and `design/90-decisions.md`, 2026-08-09.
 
 **U3 — `JournalStepState` beyond `applied`, resolved 2026-08-09 by S12.** The field is redundant, and
 `type JournalStepState = 'applied'` above is right as it stands — no second value was added. A step's

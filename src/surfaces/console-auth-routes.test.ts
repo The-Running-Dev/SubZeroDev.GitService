@@ -20,6 +20,7 @@ import type { GitSha, Sha256Hex } from '../shared/brands.ts';
 import { createStubDeclarations } from '../declarations/testing/stub-declarations.ts';
 import { createStubCloneStore } from '../clone/testing/stub-clone-store.ts';
 import { createStubDispatchPipeline } from '../dispatch/testing/stub-dispatch-pipeline.ts';
+import { createStubAuthorization } from '../authorization/testing/stub-authorization.ts';
 import type { ContractCapabilitySet } from '../contract/capabilities.ts';
 
 const COMMIT_SHA = '0'.repeat(40) as GitSha;
@@ -52,7 +53,7 @@ async function withServer<T>(volume: string, fn: (baseUrl: string, identity: Ope
     ready: () => true,
     provisioningPending: async () => (await identity.provisioningState()) === 'pending',
     auditChain: async () => ({ verifiedThrough: null, headHash: null, mirroredHeadHash: null, retainedAnchors: [], chainBreak: null }),
-    operatorApiToken: OPERATOR_API_TOKEN,
+    authorization: createStubAuthorization(new Map([[OPERATOR_API_TOKEN, 'operator-api' as never]])),
     identity,
     sessionAbsoluteSeconds: 43_200,
     declarations: createStubDeclarations(),
