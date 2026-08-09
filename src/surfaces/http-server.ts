@@ -1,17 +1,19 @@
 import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { sha256Hex, type GitSha, type Sha256Hex } from '../shared/brands.ts';
-import { timingSafeStringEqual } from '../shared/timing-safe.ts';
+import { sha256Hex, type BearerToken, type GitSha, type Sha256Hex } from '../shared/brands.ts';
 import type { AuditChainState } from '../audit/types.ts';
 import type { CredentialFailureMark } from '../credentials/types.ts';
 import type { CredentialRef, DeclarationId, OperationId } from '../shared/brands.ts';
 import type { ActorRef } from '../shared/actor.ts';
+import type { Session } from '../shared/session.ts';
+import type { Authorization } from '../authorization/authorization.ts';
 import type { ObservedGitState, PreState } from '../clone/types.ts';
 import type { OperationJournalEntry } from '../journal/types.ts';
 import { NO_VOLUME_USAGE, type VolumeUsage } from '../store/volume-usage.ts';
 import { handleConsoleAuthRoute, type ConsoleAuthDependencies } from './console-auth-routes.ts';
 import { handleDeclarationRoute, type DeclarationRoutesDependencies } from './declaration-routes.ts';
 import { handleToolRoute, type ToolRoutesDependencies } from './tool-routes.ts';
+import { handleAuthorizationRoute, type AuthorizationRoutesDependencies } from './authorization-routes.ts';
 
 /**
  * `LivenessReport` is the sole unauthenticated payload in the whole service
@@ -61,6 +63,7 @@ export interface HealthReport {
 
 export interface SurfacesDependencies
   extends ConsoleAuthDependencies,
+    AuthorizationRoutesDependencies,
     Pick<DeclarationRoutesDependencies, 'declarations' | 'cloneStore' | 'declarationsAwaitingRecovery'>,
     Pick<ToolRoutesDependencies, 'dispatchPipeline' | 'contractCapabilitySet'> {
   readonly commitSha: GitSha;
@@ -74,12 +77,6 @@ export interface SurfacesDependencies
    */
   readonly provisioningPending: () => Promise<boolean>;
   readonly auditChain: () => Promise<AuditChainState>;
-  /**
-   * A shared-secret bearer check standing in for the L4 Authorization module
-   * (S13 onward), which this slice does not touch. Good enough to prove
-   * "authenticated route, 401 without a credential" without building OAuth.
-   */
-  readonly operatorApiToken: string;
   /**
    * The parked-operations view (S8). Live for the same reason
    * `provisioningPending` is: recovery parks and a repair session unparks
@@ -139,20 +136,21 @@ function stateComparison(preState: PreState, observed: ObservedGitState | null):
 }
 
 /**
- * The bearer token is a shared secret standing in for the Authorization
- * module (S13), so there is no real subject behind it yet. Named explicitly
- * rather than left implicit: when S13 lands, this is the line that has to
- * become the authenticated operator's own `ActorRef`, and `clearAttention`
- * already takes the actor so the audit trail is ready for it.
+ * `null` for a missing or malformed header, and for a cookie presented
+ * instead of a bearer — a bearer route reads only `Authorization`, never
+ * `Cookie`, so a cookie alone can never authenticate one (S13.2's "bearer
+ * routes reject a cookie" half; the other half, `console-auth-routes.ts`'s
+ * `requireSession`, reads only `Cookie`).
  */
-const RESOLVER_ACTOR: ActorRef = { kind: 'operator', subject: 'operator-api' as ActorRef['subject'], clientId: null, grantId: null };
-
-function isAuthorized(req: IncomingMessage, token: string): boolean {
+async function authorizedSession(deps: Pick<SurfacesDependencies, 'authorization'>, req: IncomingMessage): Promise<Session | null> {
   const header = req.headers.authorization;
-  if (!header || !header.startsWith('Bearer ')) {
-    return false;
-  }
-  return timingSafeStringEqual(header.slice('Bearer '.length), token);
+  if (!header || !header.startsWith('Bearer ')) return null;
+  const verified = await deps.authorization.verifyOperatorApiToken(header.slice('Bearer '.length) as BearerToken);
+  return verified.ok ? verified.value : null;
+}
+
+function resolverActorFor(session: Session): ActorRef {
+  return session.actorRef;
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -182,6 +180,18 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
     if (handled) return;
   }
 
+  if (
+    url.pathname === '/grants' ||
+    url.pathname === '/grants/tokens' ||
+    /^\/grants\/[^/]+\/revoke$/.test(url.pathname) ||
+    /^\/tokens\/[^/]+\/revoke$/.test(url.pathname) ||
+    /^\/clients\/[^/]+\/revoke$/.test(url.pathname) ||
+    /^\/operator-sessions\/[^/]+\/revoke$/.test(url.pathname)
+  ) {
+    const handled = await handleAuthorizationRoute(deps, req, res, url);
+    if (handled) return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/healthz') {
     const report: LivenessReport = { ready: deps.ready(), commitSha: deps.commitSha };
     sendJson(res, 200, report);
@@ -189,7 +199,7 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
   }
 
   if (req.method === 'GET' && url.pathname === '/version') {
-    if (!isAuthorized(req, deps.operatorApiToken)) {
+    if (!(await authorizedSession(deps, req))) {
       sendJson(res, 401, { error: 'unauthorized' });
       return;
     }
@@ -208,7 +218,7 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
   // access. Authenticated, like every route but `/healthz`: a parked
   // operation names a declaration and a tool, which is operator data.
   if (req.method === 'GET' && url.pathname === '/parked-operations') {
-    if (!isAuthorized(req, deps.operatorApiToken)) {
+    if (!(await authorizedSession(deps, req))) {
       sendJson(res, 401, { error: 'unauthorized' });
       return;
     }
@@ -237,7 +247,7 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
   // been fixed somewhere other than the file.
   const clearCredentialMatch = /^\/failing-credentials\/([^/]+)\/([^/]+)\/clear$/.exec(url.pathname);
   if (req.method === 'POST' && clearCredentialMatch) {
-    if (!isAuthorized(req, deps.operatorApiToken)) {
+    if (!(await authorizedSession(deps, req))) {
       sendJson(res, 401, { error: 'unauthorized' });
       return;
     }
@@ -256,7 +266,8 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
   // not calling this, so there is deliberately no route for it.
   const resolveMatch = /^\/parked-operations\/([^/]+)\/resolve$/.exec(url.pathname);
   if (req.method === 'POST' && resolveMatch) {
-    if (!isAuthorized(req, deps.operatorApiToken)) {
+    const session = await authorizedSession(deps, req);
+    if (!session) {
       sendJson(res, 401, { error: 'unauthorized' });
       return;
     }
@@ -264,13 +275,13 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
       sendJson(res, 503, { error: 'unavailable', summary: 'no journal is wired into this server' });
       return;
     }
-    const resolved = await deps.resolveParkedOperation(resolveMatch[1] as OperationId, RESOLVER_ACTOR);
+    const resolved = await deps.resolveParkedOperation(resolveMatch[1] as OperationId, resolverActorFor(session));
     sendJson(res, resolved.ok ? 200 : 409, resolved.ok ? { resolved: true, summary: resolved.summary } : { error: 'not-resolved', summary: resolved.summary });
     return;
   }
 
   if (req.method === 'GET' && url.pathname === '/health') {
-    if (!isAuthorized(req, deps.operatorApiToken)) {
+    if (!(await authorizedSession(deps, req))) {
       sendJson(res, 401, { error: 'unauthorized' });
       return;
     }

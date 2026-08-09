@@ -49,7 +49,8 @@ export function capabilityScopeOf(capability: CapabilityName): CapabilityScope {
 }
 
 export type McpScope = 'read' | 'write' | 'raw' | 'schedule';
-export type OperatorScope = Brand<string, 'OperatorScope'>;
+/** `20-contract.md` § U2, resolved 2026-08-09 by S13: the same four values as `McpScope`. */
+export type OperatorScope = McpScope;
 export type Scope = McpScope | OperatorScope;
 
 /**

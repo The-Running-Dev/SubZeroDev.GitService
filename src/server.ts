@@ -36,6 +36,7 @@ import type { CompiledRegistry } from './contract/tool-declaration.ts';
 import { createComposites } from './composites/composites.ts';
 import { COMPOSITE_RECOVERY_DESCRIPTORS } from './composites/recovery-descriptors.ts';
 import { createHttpAdapter } from './http/http-adapter.ts';
+import { createAuthorization } from './authorization/authorization.ts';
 import type { Session } from './shared/session.ts';
 import type { GrantEpoch, SessionId, Subject } from './shared/brands.ts';
 
@@ -156,13 +157,6 @@ function resolveCommitSha(): GitSha {
 }
 
 async function main(): Promise<void> {
-  const operatorApiToken = process.env.OPERATOR_API_TOKEN;
-  if (!operatorApiToken) {
-    console.error('server: OPERATOR_API_TOKEN is not set — refusing to start without a way to authenticate the version route');
-    process.exit(1);
-    return;
-  }
-
   const volumeRoot = process.env.VOLUME_ROOT ?? path.join(repoRoot, 'volume');
   // The credential mount is a second, separate mount from the data volume —
   // the TOTP sealing key must never share a backup with the secret it opens
@@ -311,6 +305,12 @@ async function main(): Promise<void> {
 
   const contractCapabilitySet = new Set(PRODUCTION_TOOL_DECLARATIONS.flatMap((e) => e.capabilities)) as unknown as ContractCapabilitySet;
 
+  // S13 — clients, grants, opaque operator-api tokens verified by stored
+  // hash, and the revocation cascade. Replaces the shared-secret bearer
+  // stand-in `http-server.ts` carried since S2: a script's credential is now
+  // issued from the grants view (`/grants/tokens`), not a static env var.
+  const authorization = createAuthorization({ volumeRoot, clock: systemClock, contractCapabilitySet });
+
   // S8 — the recovery catalogue, populated here from L2 and read by L1. A
   // duplicate registration is a wiring defect and fatal at composition time,
   // which is the only time it can happen.
@@ -447,7 +447,7 @@ async function main(): Promise<void> {
     // restart (`10-design.md` § First provisioning).
     provisioningPending: () => operatorIdentity.provisioningState().then((state) => state === 'pending'),
     auditChain: () => audit.chainState(),
-    operatorApiToken,
+    authorization,
     declarationsAwaitingRecovery: async () => new Set((await journal.allUnsettled()).map((entry) => entry.declarationId as string)),
     parkedOperations: () => journal.parked(),
     observeGitState: async (declarationId) => {

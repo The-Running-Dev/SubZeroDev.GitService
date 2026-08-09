@@ -10,11 +10,13 @@ import { createStubOperatorIdentity } from '../operator-identity/testing/stub-op
 import { createStubDeclarations } from '../declarations/testing/stub-declarations.ts';
 import { createStubCloneStore } from '../clone/testing/stub-clone-store.ts';
 import { createStubDispatchPipeline } from '../dispatch/testing/stub-dispatch-pipeline.ts';
+import { createStubAuthorization } from '../authorization/testing/stub-authorization.ts';
 import type { ContractCapabilitySet } from '../contract/capabilities.ts';
 
 const COMMIT_SHA = '0'.repeat(40) as GitSha;
 const CONTRACT_FINGERPRINT = '1'.repeat(64) as Sha256Hex;
 const TOKEN = 'test-operator-token';
+const AUTHORIZATION = createStubAuthorization(new Map([[TOKEN, 'operator-api' as never]]));
 
 const HEALTHY_CHAIN: AuditChainState = {
   verifiedThrough: 3,
@@ -42,7 +44,7 @@ async function withServer<T>(options: ServerOptions, fn: (baseUrl: string) => Pr
     ready: () => options.ready ?? true,
     provisioningPending: async () => options.provisioningPending ?? false,
     auditChain: async () => options.auditChain ?? HEALTHY_CHAIN,
-    operatorApiToken: TOKEN,
+    authorization: AUTHORIZATION,
     parkedOperations: async () => options.parked ?? [],
     observeGitState: async () => options.observed ?? null,
     ...(options.resolve ? { resolveParkedOperation: async (operationId: string) => options.resolve!(operationId) } : {}),
@@ -159,7 +161,7 @@ test('a throwing handler answers 500 and leaves the process serving, rather than
     auditChain: async () => {
       throw new Error('file is not a database');
     },
-    operatorApiToken: TOKEN,
+    authorization: AUTHORIZATION,
     identity: createStubOperatorIdentity(),
     sessionAbsoluteSeconds: 43_200,
     declarations: createStubDeclarations(),
