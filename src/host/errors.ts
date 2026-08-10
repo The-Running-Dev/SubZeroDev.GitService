@@ -10,7 +10,7 @@ export type HostError = ModuleErrorBase &
     | { readonly code: 'server-error'; readonly status: number; readonly attempts: number }
     | { readonly code: 'auth-rejected'; readonly ref: CredentialRef; readonly declarationId: DeclarationId }
     | { readonly code: 'merge-conflict'; readonly pullRequest: PullRequestRef; readonly headSha: GitSha; readonly baseSha: GitSha }
-    | { readonly code: 'required-check-failed'; readonly check: string }
+    | { readonly code: 'required-check-failed'; readonly check: string; readonly pullRequest: PullRequestRef }
     | { readonly code: 'not-found'; readonly resource: string }
     | { readonly code: 'timed-out'; readonly limitSeconds: number }
   );

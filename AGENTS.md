@@ -219,6 +219,7 @@ A command that refuses reports `Frozen because` and `Lifts when` **verbatim** ra
 - **Push every commit before announcing a PR is ready.** Announcing invites an immediate merge, and a commit pushed after that lands on a branch nobody merges.
 - External writes need my authorization: creating a remote repository, changing visibility, pushing, opening or merging pull requests, changing a domain, deploying. **Discussing a decision does not authorize it.** One carve-out — see *Tracking work*.
 - Do not delete files, branches, or history without explicit authorization.
+- **Deleting a *local* branch that `git branch --merged` independently confirms is carved out**, and `/done` may do it without asking. `-d` only, never `-D`; never a remote branch; a `-d` refusal is reported and asked about separately. The confirmation is what makes this safe to automate — the commits are already on the default branch, so the branch is a label rather than work. Nothing else about deletion is carved out.
 - Check review **threads**, not just requested reviewers — an automated reviewer can leave blocking conversation threads that do not appear in a reviewer listing. Resolve a thread only when a validated fix satisfies it; leave ambiguous findings open and report them. `/resolve` does this; the query it needs is written out there.
 - **Resolving or replying to a review thread is not carved out.** The exception in *Tracking work* covers opening issues and nothing else. Where a repository delegates resolution explicitly, follow its wording; where it is silent, ask.
 

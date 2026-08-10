@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { read } from '../journal/testing/read.ts';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
@@ -561,9 +562,9 @@ test('a real git_stage + git_commit mutation runs end to end: journal settles, a
     assert.equal(commitResult.kind, 'success');
 
     // The journal entry for the commit settled.
-    const parked = await journal.parked();
+    const parked = read(await journal.parked());
     assert.equal(parked.length, 0);
-    const unsettled = await journal.allUnsettled();
+    const unsettled = read(await journal.allUnsettled());
     assert.equal(unsettled.length, 0, 'both mutations settled — nothing left unsettled');
 
     // A `call` audit record exists for the commit.
@@ -1365,7 +1366,7 @@ test('S8.9 — resolving a parked entry returns the clone to ready and the decla
     const described = await cloneStore.describe('repo-a' as never);
     assert.equal(described.ok && described.value.state, 'ready');
     assert.equal(described.ok && described.value.attentionReason, null);
-    assert.equal((await journal.parked()).length, 0);
+    assert.equal((read(await journal.parked())).length, 0);
 
     assert.equal((await mutate()).kind, 'success', 'ordinary service resumes');
   });
@@ -1568,8 +1569,8 @@ test('a resume dispatched from inside the lazy pass is not refused by the pass i
     // The resume succeeded, so the entry settled. If the resume had been
     // refused as `recovery-pending` by the very pass that issued it, the
     // ladder would have read that as a failed resume and parked it instead.
-    assert.equal((await journal.parked()).length, 0, 'the resumed entry must not be parked');
-    assert.equal((await journal.allUnsettled()).length, 0, 'both the resumed entry and the triggering call settled');
+    assert.equal((read(await journal.parked())).length, 0, 'the resumed entry must not be parked');
+    assert.equal((read(await journal.allUnsettled())).length, 0, 'both the resumed entry and the triggering call settled');
 
     const repairAudit = await audit.query({ declarationId: 'repo-a' as never, tool: 'git_stage' as never, actorSubject: null, form: 'call', from: null, to: null, limit: 10, cursor: null });
     assert.equal(repairAudit.ok, true);
@@ -2205,7 +2206,7 @@ test('S15.7 — a timed-out git_raw call parks its journal entry and marks the c
     });
 
     assert.equal(result.kind, 'timeout');
-    const parked = await journal.parked();
+    const parked = read(await journal.parked());
     assert.equal(parked.length, 1);
     assert.equal(parked[0]?.tool, 'git_raw');
     assert.equal(parked[0]?.context, 'hatch');

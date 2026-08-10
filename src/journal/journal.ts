@@ -23,10 +23,10 @@ export interface Journal {
 
   classify(entry: OperationJournalEntry, observed: ObservedGitState, descriptor: RecoveryDescriptor | null): RecoveryClassification;
 
-  unsettled(declarationId: DeclarationId, generation: Generation): Promise<readonly OperationJournalEntry[]>;
-  allUnsettled(): Promise<readonly OperationJournalEntry[]>;
-  findByScheduledJob(jobId: ScheduledJobId): Promise<OperationJournalEntry | null>;
-  parked(): Promise<readonly OperationJournalEntry[]>;
+  unsettled(declarationId: DeclarationId, generation: Generation): Promise<Outcome<readonly OperationJournalEntry[], JournalError>>;
+  allUnsettled(): Promise<Outcome<readonly OperationJournalEntry[], JournalError>>;
+  findByScheduledJob(jobId: ScheduledJobId): Promise<Outcome<OperationJournalEntry | null, JournalError>>;
+  parked(): Promise<Outcome<readonly OperationJournalEntry[], JournalError>>;
   runRetention(): Promise<RetentionReport>;
 }
 
@@ -95,6 +95,24 @@ function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): Outcome<T, 
   } finally {
     db.close();
   }
+}
+
+/**
+ * The read half of `withDb`. `withDb` shapes every unexpected failure as
+ * `intent-write-failed`, which is the right code for the four writers and the
+ * wrong one for the four queries — so this re-labels it `read-failed`, the
+ * variant `20-contract.md` § Error semantics › Journal gives them.
+ *
+ * **The point is that a store failure is no longer an empty result.** These
+ * four queries drive recovery, boot readiness and the parked view; returning
+ * `[]` for an unreadable store told every one of them that there was nothing
+ * to recover, which is the one answer that is unsafe to be wrong about.
+ */
+function readEntries<T>(read: () => Outcome<T, JournalError>): Outcome<T, JournalError> {
+  const result = read();
+  if (result.ok) return result;
+  if (result.error.code !== 'intent-write-failed') return result;
+  return err(journalError({ code: 'read-failed', cause: result.error.cause }, result.error.summary));
 }
 
 function toStep(row: JournalStepRow): JournalStep {
@@ -309,39 +327,43 @@ export function createJournal(deps: JournalDependencies): Journal {
       return { verdict: 'park', reason: `post-state does not match '${entry.tool}'s expectation and it registers no resume step` };
     },
 
-    async unsettled(declarationId: DeclarationId, generation: Generation): Promise<readonly OperationJournalEntry[]> {
-      const result = withDb(volumeRoot, (db) => {
-        const rows = db
-          .prepare(`SELECT * FROM journal_entry WHERE declaration_id = ? AND generation = ? AND state <> 'settled' ORDER BY started_at ASC`)
-          .all(declarationId, generation) as unknown as JournalEntryRow[];
-        return rowsToEntries(db, rows);
-      });
-      return result.ok ? result.value : [];
+    async unsettled(declarationId: DeclarationId, generation: Generation): Promise<Outcome<readonly OperationJournalEntry[], JournalError>> {
+      return readEntries(() =>
+        withDb(volumeRoot, (db) => {
+          const rows = db
+            .prepare(`SELECT * FROM journal_entry WHERE declaration_id = ? AND generation = ? AND state <> 'settled' ORDER BY started_at ASC`)
+            .all(declarationId, generation) as unknown as JournalEntryRow[];
+          return rowsToEntries(db, rows);
+        }),
+      );
     },
 
-    async allUnsettled(): Promise<readonly OperationJournalEntry[]> {
-      const result = withDb(volumeRoot, (db) => {
-        const rows = db.prepare(`SELECT * FROM journal_entry WHERE state <> 'settled' ORDER BY started_at ASC`).all() as unknown as JournalEntryRow[];
-        return rowsToEntries(db, rows);
-      });
-      return result.ok ? result.value : [];
+    async allUnsettled(): Promise<Outcome<readonly OperationJournalEntry[], JournalError>> {
+      return readEntries(() =>
+        withDb(volumeRoot, (db) => {
+          const rows = db.prepare(`SELECT * FROM journal_entry WHERE state <> 'settled' ORDER BY started_at ASC`).all() as unknown as JournalEntryRow[];
+          return rowsToEntries(db, rows);
+        }),
+      );
     },
 
-    async findByScheduledJob(jobId: ScheduledJobId): Promise<OperationJournalEntry | null> {
-      const result = withDb(volumeRoot, (db) => {
-        const rows = db.prepare('SELECT * FROM journal_entry WHERE scheduled_job_id = ?').all(jobId) as unknown as JournalEntryRow[];
-        const row = rows[0];
-        return row ? toEntry(row, loadSteps(db, row.operation_id as OperationId)) : null;
-      });
-      return result.ok ? result.value : null;
+    async findByScheduledJob(jobId: ScheduledJobId): Promise<Outcome<OperationJournalEntry | null, JournalError>> {
+      return readEntries(() =>
+        withDb(volumeRoot, (db) => {
+          const rows = db.prepare('SELECT * FROM journal_entry WHERE scheduled_job_id = ?').all(jobId) as unknown as JournalEntryRow[];
+          const row = rows[0];
+          return row ? toEntry(row, loadSteps(db, row.operation_id as OperationId)) : null;
+        }),
+      );
     },
 
-    async parked(): Promise<readonly OperationJournalEntry[]> {
-      const result = withDb(volumeRoot, (db) => {
-        const rows = db.prepare(`SELECT * FROM journal_entry WHERE state = 'attention' ORDER BY started_at ASC`).all() as unknown as JournalEntryRow[];
-        return rowsToEntries(db, rows);
-      });
-      return result.ok ? result.value : [];
+    async parked(): Promise<Outcome<readonly OperationJournalEntry[], JournalError>> {
+      return readEntries(() =>
+        withDb(volumeRoot, (db) => {
+          const rows = db.prepare(`SELECT * FROM journal_entry WHERE state = 'attention' ORDER BY started_at ASC`).all() as unknown as JournalEntryRow[];
+          return rowsToEntries(db, rows);
+        }),
+      );
     },
 
     async runRetention(): Promise<RetentionReport> {

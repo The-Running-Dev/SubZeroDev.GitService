@@ -1,4 +1,4 @@
-import { err } from '../../shared/outcome.ts';
+import { err, ok } from '../../shared/outcome.ts';
 import { declarationError } from '../errors.ts';
 import type { Declarations } from '../declarations.ts';
 
@@ -38,7 +38,7 @@ export function createStubDeclarations(): Declarations {
       return declaration.writablePathPrefixes;
     },
     bumpGrantEpoch() {
-      return 0 as unknown as ReturnType<Declarations['bumpGrantEpoch']>;
+      return ok(0) as unknown as ReturnType<Declarations['bumpGrantEpoch']>;
     },
     remoteHostAllowlist() {
       return [];

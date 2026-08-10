@@ -273,6 +273,44 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
     }
   }
 
+  /**
+   * Git's remote-helper syntax is `<transport>::<address>`, and `ext::` runs
+   * the address as a command outright. None of it parses as a URL, so
+   * `normaliseRemote` returns null for it and the operand rules below would
+   * wave it through as "not remote-shaped".
+   */
+  const REMOTE_HELPER = /^[a-z][a-z0-9+.-]*::/i;
+
+  /**
+   * The options whose value is a repository. A remote reaches the network
+   * through these as well as through a bare operand — `git archive
+   * --remote=<repo>` is a transfer, and `archive` is not one of the
+   * subcommands the network rule below looks at.
+   */
+  const REMOTE_VALUED_OPTIONS = new Set(['--remote', '--reference', '--reference-if-able', '--upload-pack', '--receive-pack']);
+
+  /** Every position a caller could put a repository in: the bare operands, plus the values of the options that take one, in either `--opt=value` or `--opt value` form. */
+  function remoteCandidates(operands: readonly string[]): readonly string[] {
+    const values: string[] = [];
+    for (let index = 0; index < operands.length; index += 1) {
+      const arg = operands[index]!;
+      if (!arg.startsWith('-')) {
+        values.push(arg);
+        continue;
+      }
+      const equals = arg.indexOf('=');
+      if (equals > 0 && REMOTE_VALUED_OPTIONS.has(arg.slice(0, equals))) {
+        values.push(arg.slice(equals + 1));
+        continue;
+      }
+      if (REMOTE_VALUED_OPTIONS.has(arg) && operands[index + 1] !== undefined) {
+        values.push(operands[index + 1]!);
+        index += 1;
+      }
+    }
+    return values;
+  }
+
   function rawArgvRejection(argv: readonly string[], cloneUrl: CloneUrl): string | null {
     if (argv.length === 0 || argv[0]?.trim() === '') return 'argv must name a git subcommand';
     if (argv[0]!.startsWith('-')) return `global option '${argv[0]}' cannot precede the fixed git subcommand`;
@@ -299,25 +337,49 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       return "'git filter-branch' filter arguments select executable shell text";
     }
     if (subcommand === 'config') {
+      // `--file`/`--blob` redirect the read *or* the write at an arbitrary
+      // path, so they escape this clone in both directions — a write lands in
+      // another declaration's `.git/config`, and a read dumps whatever file is
+      // named. Refused before the read/write split below, which only decides
+      // *what* is being asked of the config, not *whose* config it is.
+      if (operands.some((arg) => arg === '--file' || arg === '-f' || arg.startsWith('--file=') || arg === '--blob' || arg.startsWith('--blob='))) {
+        return "'git config --file'/'--blob' reads or writes configuration outside this clone";
+      }
+      if (operands.some((arg) => ['--global', '--system', '--edit', '-e'].includes(arg))) {
+        return "this 'git config' form edits configuration outside this clone's own config or launches an editor";
+      }
+      // **Every config write is refused, not an enumerated subset.** Git's
+      // configuration selects executables (`core.sshCommand`, `alias.*`,
+      // `filter.*.process`), credential helpers (`credential.helper` *and*
+      // the URL-scoped `credential.<url>.helper`), remotes (`remote.*`,
+      // `url.*.insteadOf`) and transports (`http.proxy`, `protocol.ext.allow`)
+      // across a key surface that grows with every git release. A blocklist
+      // has to enumerate that surface correctly forever; this rule does not,
+      // and reading configuration — which is what a caller diagnosing a
+      // repository actually needs — stays available.
+      const writeFlags = ['--add', '--replace-all', '--unset', '--unset-all', '--remove-section', '--rename-section', '--set-all'];
       const positional = operands.filter((arg) => !arg.startsWith('-'));
-      const readOnly = operands.some((arg) => ['--get', '--get-all', '--get-regexp', '--list', '-l'].includes(arg));
-      if (operands.some((arg) => ['--edit', '-e', '--global', '--system'].includes(arg))) {
-        return "this 'git config' form edits configuration outside the constrained key/value path or launches an editor";
-      }
-      if (!readOnly && positional.some((arg) => /^remote\./i.test(arg))) return "a 'remote.*' config write persists a caller-supplied remote";
-      if (!readOnly && positional.some((arg) => /^(url\..*\.(?:insteadOf|pushInsteadOf)|submodule\..*\.url|include(?:If)?\.)/i.test(arg))) {
-        return 'this config write can persist or include a caller-supplied remote redirect';
-      }
-      if (!readOnly && positional.some((arg) => /^(alias\.|credential\.helper|core\.(?:sshCommand|hooksPath|fsmonitor|pager)|pager\.|diff\..*\.command|merge\..*\.driver|sequence\.editor)/i.test(arg))) {
-        return 'this config write selects an executable, hook, helper, driver, or pager';
+      if (operands.some((arg) => writeFlags.includes(arg)) || positional.length >= 2) {
+        return "'git config' writes are refused through the hatch: configuration selects executables, credential helpers, remotes and transports, so the hatch reads configuration but never persists it";
       }
     }
     if (subcommand === 'clone' && operands.some((arg) => arg === '-c' || arg === '--config' || arg.startsWith('--config='))) {
       return "'git clone --config' injects repository configuration";
     }
 
+    if (operands.some((arg) => arg === '--template' || arg.startsWith('--template='))) {
+      return "'--template' selects a template directory, which can carry hooks";
+    }
+
     const declared = normaliseRemote(cloneUrl as unknown as string);
-    for (const operand of operands) {
+    // Scanned over every position a repository can occupy, not only the bare
+    // operands: `git archive --remote=<repo>` reaches a transport through an
+    // option, and `archive` is not one of the subcommands the network rule
+    // below inspects.
+    for (const operand of remoteCandidates(operands)) {
+      if (REMOTE_HELPER.test(operand)) {
+        return `remote operand '${operand}' uses git's remote-helper transport syntax, which selects a helper program`;
+      }
       if (/^https?:\/\/[^/\s]*@/i.test(operand)) return `remote operand '${operand}' carries caller-supplied credentials`;
       if (operand === (cloneUrl as unknown as string)) continue;
       const remote = normaliseRemote(operand);
@@ -890,15 +952,30 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       const declaration = await deps.declarations.get(ctx.declarationId);
       if (!declaration) return infrastructure(`declaration '${ctx.declarationId}' disappeared before git.raw ran`);
 
-      const rejection = rawArgvRejection(input.argv, declaration.cloneUrl);
-      if (rejection) return validation(rejection, [{ path: 'argv', rule: 'argv-rejected', message: rejection }]);
-
+      // **The intent line is written before the argv is judged, not after.**
+      // A refused vector is the single most attributable thing the hatch ever
+      // sees — an attempt at one of the six operations the default path exists
+      // to withhold — and writing the pair only for vectors that pass left
+      // exactly that attempt invisible, while the registry entry promises
+      // "every use is separately audited". Both records still carry the
+      // scrubbed argv and the actor, so a refusal is attributable to the same
+      // standard as an execution.
       const scrub = deps.exec.scrub ?? ((value: string) => value);
       const intent = await audit.append({
         at: clock.now(), operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation,
         tool: 'git_raw' as never, actorRef: ctx.actorRef, context: 'hatch', form: 'hatch-intent', argv: input.argv.map(scrub),
       });
       if (!intent.appended) return infrastructure(`git.raw refused to start because its intent audit line could not be written (${intent.reason})`);
+
+      const rejection = rawArgvRejection(input.argv, declaration.cloneUrl);
+      if (rejection) {
+        const refused = validation(rejection, [{ path: 'argv', rule: 'argv-rejected', message: rejection }]);
+        await audit.append({
+          at: clock.now(), operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation,
+          tool: 'git_raw' as never, actorRef: ctx.actorRef, context: 'hatch', form: 'hatch-outcome', resultKind: refused.kind, changedPaths: [],
+        });
+        return refused;
+      }
 
       const cwd = ctx.cloneRoot;
       const before = await rawStatus(cwd, ctx.signal);

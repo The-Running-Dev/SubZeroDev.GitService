@@ -309,10 +309,14 @@ test('bumpGrantEpoch writes inside the caller transaction: a committed one raise
     if (!result.ok) return;
 
     assert.equal(grantEpochOnDisk(volume, 'repo-e1'), before + 1, 'the increment committed with the caller');
+    // Two `Outcome`s deep: the transaction's, and the bump's own. The inner one
+    // is what stops a missing row reporting itself as epoch zero.
+    assert.equal(result.value.ok, true, 'the bump itself reported success');
+    if (!result.value.ok) return;
     // The read-back is the half `run` alone could not deliver: a second
     // connection cannot see the caller's uncommitted increment, so it would
     // have returned the stale epoch — the one value this member exists for.
-    assert.equal(result.value, before + 1, 'and the epoch returned is the one just written, not the value before it');
+    assert.equal(result.value.value, before + 1, 'and the epoch returned is the one just written, not the value before it');
   });
 });
 
@@ -324,9 +328,7 @@ test('bumpGrantEpoch writes inside the caller transaction: a rolled-back one lea
 
     // The regression for the defect this member shipped with. Opening a
     // private connection here made the bump survive this rollback — every
-    // outstanding grant invalidated for a change that never happened, and
-    // this member returns `GrantEpoch` rather than an `Outcome`, so there is
-    // no channel through which a caller could ever learn it.
+    // outstanding grant invalidated for a change that never happened.
     const result = await store.transaction(async (tx) => {
       declarations.bumpGrantEpoch('repo-e2' as DeclareInput['id'], tx);
       throw new Error('the caller failed after bumping the epoch');

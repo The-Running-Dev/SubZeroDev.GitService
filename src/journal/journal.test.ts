@@ -1,6 +1,8 @@
 import { test } from 'node:test';
+import { read } from './testing/read.ts';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { systemClock } from '../clock/clock.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
@@ -64,7 +66,7 @@ test('appendStep records one applied step, in order, before markApplied moves th
     const applied = await journal.markApplied('op-2' as never);
     assert.equal(applied.ok, true);
 
-    const unsettled = await journal.unsettled('repo-a' as never, 1 as never);
+    const unsettled = read(await journal.unsettled('repo-a' as never, 1 as never));
     const entry = unsettled.find((e) => e.operationId === ('op-2' as never));
     assert.ok(entry);
     assert.equal(entry!.state, 'applied');
@@ -84,7 +86,7 @@ test('settle moves the entry to settled and drops it out of unsettled()', async 
     const settled = await journal.settle('op-3' as never, null);
     assert.equal(settled.ok, true);
 
-    const unsettled = await journal.unsettled('repo-a' as never, 1 as never);
+    const unsettled = read(await journal.unsettled('repo-a' as never, 1 as never));
     assert.equal(
       unsettled.some((e) => e.operationId === ('op-3' as never)),
       false,
@@ -167,7 +169,7 @@ test('park moves the entry to attention with a reason, and settling a settled en
     const parked = await journal.park('op-5' as never, 'no descriptor registered');
     assert.equal(parked.ok, true);
 
-    const all = await journal.parked();
+    const all = read(await journal.parked());
     assert.equal(all.length, 1);
     assert.equal(all[0]!.attentionReason, 'no descriptor registered');
 
@@ -198,7 +200,7 @@ test('classify: an entry carrying an applied step never classifies nothing-happe
     const journal = createJournal({ volumeRoot: volume, clock: systemClock });
     await journal.begin(beginInputFor('op-7'));
     await journal.appendStep('op-7' as never, 'git_stage');
-    const unsettled = await journal.unsettled('repo-a' as never, 1 as never);
+    const unsettled = read(await journal.unsettled('repo-a' as never, 1 as never));
     const entry = unsettled.find((e) => e.operationId === ('op-7' as never))!;
 
     const identicalObserved = { ...entry.preState, observedAt: systemClock.now() };
@@ -216,7 +218,7 @@ test('classify never throws and is total — an entry with steps, no descriptor,
     const journal = createJournal({ volumeRoot: volume, clock: systemClock });
     await journal.begin(beginInputFor('op-8'));
     await journal.appendStep('op-8' as never, 'git_stage');
-    const unsettled = await journal.unsettled('repo-a' as never, 1 as never);
+    const unsettled = read(await journal.unsettled('repo-a' as never, 1 as never));
     const entry = unsettled.find((e) => e.operationId === ('op-8' as never))!;
 
     const mismatchedObserved = { ...entry.preState, headSha: 'f'.repeat(40) as never, observedAt: systemClock.now() };
@@ -263,12 +265,43 @@ test('unsettled() is scoped to the declaration and generation pair, never crossi
     await journal.begin(beginInputFor('op-9', 'repo-a'));
     await journal.begin(beginInputFor('op-10', 'repo-b'));
 
-    const repoAUnsettled = await journal.unsettled('repo-a' as never, 1 as never);
+    const repoAUnsettled = read(await journal.unsettled('repo-a' as never, 1 as never));
     assert.equal(repoAUnsettled.length, 1);
     assert.equal(repoAUnsettled[0]!.operationId, 'op-9');
 
-    const allUnsettled = await journal.allUnsettled();
+    const allUnsettled = read(await journal.allUnsettled());
     assert.equal(allUnsettled.length, 2);
+  });
+});
+
+test('an unreadable store fails the four queries closed rather than reporting an empty result', async () => {
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin(beginInputFor('op-11', 'repo-a'));
+    await journal.park('op-11' as never, 'parked so a working read has something to find');
+
+    // The store reads fine first — otherwise an empty result below would prove
+    // nothing, since a journal with no rows also returns nothing.
+    assert.equal(read(await journal.parked()).length, 1);
+    assert.equal(read(await journal.allUnsettled()).length, 1);
+
+    // Replacing the database with a directory makes every open fail: the same
+    // observable an unreadable volume produces, without depending on file
+    // permissions, which do not behave the same way across platforms.
+    const store = path.join(volume, 'store.sqlite');
+    rmSync(store, { force: true });
+    mkdirSync(store, { recursive: true });
+
+    for (const query of [
+      journal.parked(),
+      journal.allUnsettled(),
+      journal.unsettled('repo-a' as never, 1 as never),
+      journal.findByScheduledJob('job-1' as never),
+    ]) {
+      const result = await query;
+      assert.equal(result.ok, false, 'an unreadable store is not an empty journal');
+      if (!result.ok) assert.equal(result.error.code, 'read-failed');
+    }
   });
 });
 
@@ -277,7 +310,7 @@ test('S8.1 — classify is pure: repeat calls return identical verdicts, and it 
     const journal = createJournal({ volumeRoot: volume, clock: systemClock });
     await journal.begin(beginInputFor('op-9'));
     await journal.appendStep('op-9' as never, 'git_stage');
-    const entry = (await journal.unsettled('repo-a' as never, 1 as never)).find((e) => e.operationId === ('op-9' as never))!;
+    const entry = (read(await journal.unsettled('repo-a' as never, 1 as never))).find((e) => e.operationId === ('op-9' as never))!;
     const observed = { ...entry.preState, headSha: 'e'.repeat(40) as never, observedAt: systemClock.now() };
 
     // A descriptor whose answer depends only on its arguments, so any
