@@ -216,6 +216,25 @@ const SYNC_BASE_OUTPUT_SCHEMA = {
   required: ['baseBranch', 'headSha', 'upstreamSha', 'fastForwarded'],
 } as unknown as JsonSchema;
 
+const GIT_RAW_INPUT_SCHEMA = {
+  type: 'object',
+  properties: { argv: { type: 'array', items: { type: 'string' } } },
+  required: ['argv'],
+  additionalProperties: false,
+} as unknown as JsonSchema;
+
+const GIT_RAW_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    exitCode: { type: 'number' },
+    stdout: { type: 'string' },
+    stderr: { type: 'string' },
+    durationMs: { type: 'number' },
+    changedPaths: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['exitCode', 'stdout', 'stderr', 'durationMs', 'changedPaths'],
+} as unknown as JsonSchema;
+
 // --- S10, the host tools (`20-contract.md` § L2 — host adapter) ---
 
 /**
@@ -565,6 +584,19 @@ export const PRODUCTION_TOOL_DECLARATIONS: readonly ToolDeclaration[] = [
     annotations: { schedulable: false, dropTarget: false, untrustedOutput: false },
     limits: { timeoutSeconds: 300, maxResultBytes: 65_536 },
     target: moduleTarget('git.syncBase'),
+  },
+  {
+    name: toolName('git_raw'),
+    description: 'Runs a deliberately granted raw git argument vector after rejecting configuration, executable, and foreign-remote forms; every use is separately audited.',
+    inputSchema: GIT_RAW_INPUT_SCHEMA,
+    outputSchema: GIT_RAW_OUTPUT_SCHEMA,
+    scopes: ['raw'],
+    capabilities: ['git.raw'],
+    capabilityScope: 'declaration',
+    executionClass: 'mutating',
+    annotations: { schedulable: false, dropTarget: false, untrustedOutput: true },
+    limits: { timeoutSeconds: 60, maxResultBytes: 4_194_304 },
+    target: moduleTarget('git.raw'),
   },
   {
     name: toolName('pr_open'),

@@ -61,12 +61,37 @@ test('S9.1: a reference naming a file in the mount resolves into the env, and re
       assert.equal(resolved.value.ref, REF);
       assert.equal(resolved.value.declarationId, REPO_A);
       assert.equal(resolved.value.variableName, envVarNameFor(REF));
+      assert.equal(resolved.value.username, null);
 
       // The value reached the env and nothing else. The trailing newline the
       // file carried is gone — a token with one authenticates as a different
       // token.
       assert.equal(env.get(resolved.value.variableName), SECRET);
       assert.equal(JSON.stringify(resolved.value).includes(SECRET), false);
+    } finally {
+      secrets.cleanup();
+    }
+  });
+});
+
+test('the optional collision-free username file is returned, and malformed usernames are rejected', async () => {
+  await withVolumeAsync(async (volumeRoot) => {
+    await migratedVolume(volumeRoot);
+    const secrets = mount({ [REF]: SECRET, [`_${REF}.username`]: 'deploy-token-user\n' });
+    try {
+      const resolver = createCredentialResolver({ credentialMountRoot: secrets.root, volumeRoot, clock: systemClock });
+      const resolved = await resolver.resolveInto(REF, REPO_A, new Map());
+      assert.equal(resolved.ok, true);
+      if (resolved.ok) assert.equal(resolved.value.username, 'deploy-token-user');
+
+      const rejected: string[] = ['', 'two\nlines', 'nul\0inside'];
+      for (const username of rejected) {
+        writeFileSync(path.join(secrets.root, `_${REF}.username`), username, 'utf8');
+        const result = await resolver.resolveInto(REF, REPO_A, new Map());
+        assert.equal(result.ok, false, JSON.stringify(username));
+        if (!result.ok) assert.equal(result.error.code, 'reference-unreadable');
+      }
+      assert.equal(rejected.length, 3);
     } finally {
       secrets.cleanup();
     }

@@ -3,7 +3,7 @@ import type { ModuleErrorBase } from '../shared/result-kind.ts';
 export type ExecError = ModuleErrorBase &
   (
     | { readonly code: 'spawn-failed' }
-    | { readonly code: 'nonzero-exit'; readonly exitCode: number; readonly stderr: string }
+    | { readonly code: 'nonzero-exit'; readonly exitCode: number; readonly stdout: string; readonly stderr: string }
     | { readonly code: 'timed-out'; readonly limitSeconds: number }
     | { readonly code: 'argv-rejected'; readonly rule: string }
     | { readonly code: 'cancelled' }

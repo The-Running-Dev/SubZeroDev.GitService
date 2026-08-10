@@ -123,3 +123,10 @@ export const REMOTE_OPERATION_RECOVERY_DESCRIPTORS: readonly RecoveryDescriptor[
   GIT_FETCH_RECOVERY,
   SYNC_BASE_RECOVERY,
 ];
+
+/** A raw command can change refs, index, worktree, remotes, hooks, or other state no fixed predicate can classify. */
+export const GIT_RAW_RECOVERY: RecoveryDescriptor = {
+  tool: 'git_raw' as never,
+  expectedPostState: () => false,
+  resume: null,
+};

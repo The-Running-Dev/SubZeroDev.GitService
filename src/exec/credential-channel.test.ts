@@ -38,7 +38,7 @@ test('S9.2: the credential reaches the child as configuration naming a variable,
         argv: ['config', '--list'],
         cwd: repo.cwd,
         timeoutSeconds: 30,
-        credential: { ref: 'fixture' as CredentialRef, declarationId: 'repo-a' as DeclarationId, variableName: VARIABLE },
+        credential: { ref: 'fixture' as CredentialRef, declarationId: 'repo-a' as DeclarationId, variableName: VARIABLE, username: null },
         signal: new AbortController().signal,
       });
 
@@ -94,7 +94,7 @@ test('a credential naming a variable the shared env does not hold runs without o
         argv: ['config', '--list'],
         cwd: repo.cwd,
         timeoutSeconds: 30,
-        credential: { ref: 'fixture' as CredentialRef, declarationId: 'repo-a' as DeclarationId, variableName: VARIABLE },
+        credential: { ref: 'fixture' as CredentialRef, declarationId: 'repo-a' as DeclarationId, variableName: VARIABLE, username: null },
         signal: new AbortController().signal,
       });
 

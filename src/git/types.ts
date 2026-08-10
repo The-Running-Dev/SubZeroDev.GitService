@@ -147,6 +147,19 @@ export interface SyncBaseData {
   readonly fastForwarded: boolean;
 }
 
+/** `20-contract.md` § L2 — git operations, S15's resolution of U1 for the escape hatch. */
+export interface GitRawInput {
+  readonly argv: readonly string[];
+}
+
+export interface GitRawData {
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly durationMs: number;
+  readonly changedPaths: readonly RepoRelativePath[];
+}
+
 /** `20-contract.md` § L2 — git operations, `validateWritePath`'s three-way refusal. */
 export type PathRejection =
   | { readonly kind: 'malformed'; readonly rule: string }

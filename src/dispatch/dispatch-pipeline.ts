@@ -55,11 +55,11 @@ export interface DispatchPipelineDependencies {
    */
   readonly httpAdapter?: Pick<HttpAdapter, 'invoke'>;
   readonly declarations: Pick<Declarations, 'get' | 'effectiveGrant' | 'effectiveWritablePrefixes'>;
-  readonly cloneStore: Pick<CloneStore, 'ensure' | 'observeGitState' | 'describe'>;
+  readonly cloneStore: Pick<CloneStore, 'ensure' | 'observeGitState' | 'describe'> & Partial<Pick<CloneStore, 'markAttention'>>;
   readonly locks: Pick<Locks, 'pinActiveOperation' | 'acquireMutation'> & Partial<Pick<Locks, 'admitLockFreeWait'>>;
   readonly audit: Pick<Audit, 'append'>;
   /** Required only once a `mutating` registry entry exists (S7); every S6-only registry never reaches the branch that calls it. */
-  readonly journal?: Pick<Journal, 'begin' | 'markApplied' | 'settle'>;
+  readonly journal?: Pick<Journal, 'begin' | 'markApplied' | 'settle'> & Partial<Pick<Journal, 'park'>>;
   /** `scrubJson` only — `JournalBeginInput.input` must be scrubbed before it is persisted (`20-contract.md` § Operation journal). Optional so every pre-S7 read-only call site keeps compiling; the mutating path is the only one that ever reaches it. */
   readonly exec?: Pick<Exec, 'scrubJson'>;
   readonly clock: Clock;
@@ -433,7 +433,8 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
     // as recovery, not as an operator repairing one, and the audit trail must
     // not relabel it.
     const repairing = isRepair && !isRecoveryResume && described.ok && described.value.state === 'needs-attention';
-    const effective: DispatchRequest = repairing ? { ...request, context: 'repair' } : request;
+    const repaired: DispatchRequest = repairing ? { ...request, context: 'repair' } : request;
+    const effective: DispatchRequest = (entry.name as string) === 'git_raw' ? { ...repaired, context: 'hatch' } : repaired;
 
     const holder = { operationId, declarationId: declaration.id, tool: entry.name, heldSince: clock.now() };
 
@@ -518,20 +519,31 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
       const ctx = buildContext(effective, entry, declaration, operationId, actorRef, cloneRoot);
       const result = await invokeAndEnvelope(entry, ctx, effective.input);
 
+      if ((entry.name as string) === 'git_raw' && result.kind === 'timeout') {
+        const parked = await journal.park?.(operationId, result.summary);
+        if (!parked?.ok) return infrastructure(`git.raw timed out, but its journal entry could not be parked: ${parked?.error.summary ?? 'journal park is unavailable'}`);
+        await cloneStore.markAttention?.(declaration.id, result.summary);
+        return result;
+      }
+
       await journal.markApplied(operationId);
 
-      await audit.append({
-        at: clock.now(),
-        operationId,
-        declarationId: declaration.id,
-        generation: declaration.generation,
-        tool: entry.name,
-        actorRef,
-        context: effective.context,
-        form: 'call',
-        resultKind: result.kind,
-        changedPaths: result.ok ? extractChangedPathsFromResultData(result.data) : [],
-      });
+      // git_raw writes its attributable intent/outcome pair inside the handler;
+      // a third generic call line would make the two-line audit contract false.
+      if ((entry.name as string) !== 'git_raw') {
+        await audit.append({
+          at: clock.now(),
+          operationId,
+          declarationId: declaration.id,
+          generation: declaration.generation,
+          tool: entry.name,
+          actorRef,
+          context: effective.context,
+          form: 'call',
+          resultKind: result.kind,
+          changedPaths: result.ok ? extractChangedPathsFromResultData(result.data) : [],
+        });
+      }
 
       await journal.settle(operationId, null);
 

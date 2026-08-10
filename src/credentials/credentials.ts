@@ -100,6 +100,24 @@ export function createCredentialResolver(deps: CredentialResolverDependencies): 
     return path.join(credentialMountRoot, path.basename(ref as string));
   }
 
+  function usernamePath(ref: CredentialRef): string {
+    return path.join(deps.credentialMountRoot, `_${path.basename(ref as string)}.username`);
+  }
+
+  function readUsername(ref: CredentialRef): Outcome<string | null, CredentialError> {
+    const file = usernamePath(ref);
+    if (!existsSync(file)) return ok(null);
+    try {
+      const username = readFileSync(file, 'utf8').replace(/\r?\n$/, '');
+      if (username.length === 0 || /[\r\n\0]/.test(username)) {
+        return err(credentialError({ code: 'reference-unreadable', ref }, `credential username for '${ref}' must be non-empty and contain no CR, LF or NUL`));
+      }
+      return ok(username);
+    } catch {
+      return err(credentialError({ code: 'reference-unreadable', ref }, `credential username for '${ref}' could not be read`));
+    }
+  }
+
   /**
    * `declarationId` is here only to be named in the summary. The contract's
    * error table requires `reference-not-found` to name "the reference and the
@@ -219,8 +237,10 @@ export function createCredentialResolver(deps: CredentialResolverDependencies): 
       }
 
       const variableName = envVarNameFor(ref);
+      const username = readUsername(ref);
+      if (!username.ok) return username;
       env.set(variableName, secret.value);
-      return ok({ ref, declarationId, variableName });
+      return ok({ ref, declarationId, variableName, username: username.value });
     },
 
     async allowedHosts(ref: CredentialRef): Promise<Outcome<readonly RemoteHost[], CredentialError>> {
