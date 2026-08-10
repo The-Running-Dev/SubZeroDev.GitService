@@ -18,6 +18,7 @@ import type { Clock } from '../clock/clock.ts';
 import type { CredentialBinding, Exec, MutableEnv } from '../exec/exec.ts';
 import type { Locks } from '../locks/locks.ts';
 import type { Audit } from '../audit/audit.ts';
+import type { Journal } from '../journal/journal.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import type { CredentialResolver } from '../credentials/credentials.ts';
 import { prepareDeclarationCredential } from '../credentials/declaration-credential.ts';
@@ -82,6 +83,8 @@ export interface GitOperationsDependencies {
   readonly locks: Pick<Locks, 'currentMutationHolder'>;
   /** Optional so every pre-S7 call site (read-only, never rejects a path) keeps compiling unchanged; a caller of `stage`/`restorePaths` that omits it simply gets no audit trail for a rejected path. */
   readonly audit?: Pick<Audit, 'append'>;
+  /** Required by operations that may mutate outside the local clone. Those operations fail closed when the writer is absent. */
+  readonly journal?: Pick<Journal, 'appendStep'>;
   /**
    * S9's three remote operations only. `CallContext` carries no credential
    * reference and no clone URL — both are `Declaration` fields — so reaching a
@@ -273,6 +276,14 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
     }
   }
 
+  function remoteCarriesPassword(raw: string): boolean {
+    try {
+      return new URL(raw).password.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Git's remote-helper syntax is `<transport>::<address>`, and `ext::` runs
    * the address as a command outright. None of it parses as a URL, so
@@ -304,6 +315,19 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
         continue;
       }
       if (REMOTE_VALUED_OPTIONS.has(arg) && operands[index + 1] !== undefined) {
+        values.push(operands[index + 1]!);
+        index += 1;
+      }
+    }
+    return values;
+  }
+
+  function optionValues(operands: readonly string[], option: string): readonly string[] {
+    const values: string[] = [];
+    for (let index = 0; index < operands.length; index += 1) {
+      const arg = operands[index]!;
+      if (arg.startsWith(`${option}=`)) values.push(arg.slice(option.length + 1));
+      else if (arg === option && operands[index + 1] !== undefined) {
         values.push(operands[index + 1]!);
         index += 1;
       }
@@ -380,10 +404,19 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       if (REMOTE_HELPER.test(operand)) {
         return `remote operand '${operand}' uses git's remote-helper transport syntax, which selects a helper program`;
       }
+      if (remoteCarriesPassword(operand)) return `remote operand '${operand}' carries a caller-supplied password`;
       if (/^https?:\/\/[^/\s]*@/i.test(operand)) return `remote operand '${operand}' carries caller-supplied credentials`;
       if (operand === (cloneUrl as unknown as string)) continue;
       const remote = normaliseRemote(operand);
       if (remote !== null && remote !== declared) return `remote operand '${operand}' does not match this declaration's cloneUrl`;
+    }
+    // `archive --remote=<name>` is outside the network-subcommand list below,
+    // and an opaque name does not parse as a URL. It still names a repository,
+    // so it is admitted only for the one configured alias or URL.
+    for (const operand of optionValues(operands, '--remote')) {
+      if (operand === 'origin' || operand === (cloneUrl as unknown as string)) continue;
+      const remote = normaliseRemote(operand);
+      if (remote === null || remote !== declared) return `remote operand '${operand}' is neither origin nor this declaration's cloneUrl`;
     }
     if (['push', 'fetch', 'pull', 'ls-remote', 'clone'].includes(subcommand)) {
       const optionsWithValues = new Set([
@@ -408,15 +441,15 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
     return null;
   }
 
-  async function rawStatus(cwd: ClonePath, signal: AbortSignal): Promise<ReadonlyMap<string, string>> {
+  async function rawStatus(cwd: ClonePath, signal: AbortSignal) {
     const observed = await git(cwd, ['status', '--porcelain=v1', '-z'], signal);
+    if (!observed.ok) return observed;
     const result = new Map<string, string>();
-    if (!observed.ok) return result;
     for (const entry of observed.value.stdout.split('\0').filter(Boolean)) {
       const pathName = entry.slice(3).trim();
       if (pathName) result.set(pathName, entry.slice(0, 2));
     }
-    return result;
+    return ok(result as ReadonlyMap<string, string>);
   }
 
   function changedRawPaths(before: ReadonlyMap<string, string>, after: ReadonlyMap<string, string>): readonly RepoRelativePath[] {
@@ -450,6 +483,12 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
     const prepared = await prepareDeclarationCredential(deps, ctx);
     if (!prepared.ok) return err(moduleErrorToToolResult(prepared.error));
     return ok(prepared.value);
+  }
+
+  async function appendExternalStep(ctx: CallContext, name: string): Promise<ToolResult<never> | null> {
+    if (!deps.journal) return infrastructure(`'${ctx.operationId}' cannot start '${name}' because the journal step writer is unavailable`);
+    const appended = await deps.journal.appendStep(ctx.operationId, name);
+    return appended.ok ? null : infrastructure(`'${name}' refused before acting because its recovery step could not be written: ${appended.error.summary}`);
   }
 
   /** Records the rejection against this declaration only — never reference-wide. See `credential_failure_mark`'s composite key. */
@@ -819,6 +858,9 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       const prepared = await prepareRemote(ctx);
       if (!prepared.ok) return prepared.error;
 
+      const stepFailure = await appendExternalStep(ctx, 'git.push.remote');
+      if (stepFailure) return stepFailure;
+
       // `--porcelain` so "everything up to date" is a parseable line rather
       // than prose, and no `--force` — there is none in `GitPushInput` and
       // none here.
@@ -978,36 +1020,52 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       }
 
       const cwd = ctx.cloneRoot;
-      const before = await rawStatus(cwd, ctx.signal);
-      const prepared = await prepareRemote(ctx);
       let result: ToolResult<GitRawData>;
-      let changedPaths: readonly RepoRelativePath[] = [];
-      if (!prepared.ok) {
-        result = prepared.error;
+      let changedPaths: readonly RepoRelativePath[] | null = [];
+      const before = await rawStatus(cwd, ctx.signal);
+      if (!before.ok) {
+        result = infrastructure(`git.raw refused before acting because its initial status could not be observed: ${before.error.summary}`);
       } else {
-        const executed = await exec.runGit({ argv: input.argv, cwd, timeoutSeconds: rawTimeoutSeconds, credential: prepared.value.credential, signal: ctx.signal });
-        const after = await rawStatus(cwd, new AbortController().signal);
-        changedPaths = changedRawPaths(before, after);
-        if (executed.ok) {
-          result = success(
-            `git ${input.argv[0]} completed`,
-            {
-              exitCode: executed.value.exitCode,
-              stdout: executed.value.stdout,
-              stderr: executed.value.stderr,
-              durationMs: executed.value.durationMs,
-              changedPaths,
-            },
-            diagnosticsFor(ctx, startedAtMs, clock),
-          );
-        } else if (executed.error.code === 'timed-out') {
-          result = timeoutResult(executed.error.summary, executed.error.limitSeconds);
-        } else if (executed.error.code === 'cancelled') {
-          result = conflict(executed.error.summary, null);
-        } else if (executed.error.code === 'nonzero-exit') {
-          result = infrastructure(`${executed.error.summary}: ${executed.error.stderr || executed.error.stdout}`);
+        const prepared = await prepareRemote(ctx);
+        if (!prepared.ok) {
+          result = prepared.error;
         } else {
-          result = infrastructure(executed.error.summary);
+          const stepFailure = await appendExternalStep(ctx, 'git.raw.child');
+          if (stepFailure) {
+            result = stepFailure;
+          } else {
+            const executed = await exec.runGit({ argv: input.argv, cwd, timeoutSeconds: rawTimeoutSeconds, credential: prepared.value.credential, signal: ctx.signal });
+            const after = await rawStatus(cwd, new AbortController().signal);
+            changedPaths = after.ok ? changedRawPaths(before.value, after.value) : null;
+
+            if (!after.ok && executed.ok) {
+              result = infrastructure(`git ${input.argv[0]} completed, but its post-state could not be observed: ${after.error.summary}`);
+            } else if (executed.ok) {
+              result = success(
+                `git ${input.argv[0]} completed`,
+                {
+                  exitCode: executed.value.exitCode,
+                  stdout: executed.value.stdout,
+                  stderr: executed.value.stderr,
+                  durationMs: executed.value.durationMs,
+                  changedPaths: changedPaths!,
+                },
+                diagnosticsFor(ctx, startedAtMs, clock),
+              );
+            } else if (executed.error.code === 'timed-out') {
+              result = timeoutResult(
+                after.ok ? executed.error.summary : `${executed.error.summary}; post-state observation also failed: ${after.error.summary}`,
+                executed.error.limitSeconds,
+              );
+            } else if (executed.error.code === 'cancelled') {
+              result = conflict(after.ok ? executed.error.summary : `${executed.error.summary}; post-state observation also failed: ${after.error.summary}`, null);
+            } else if (executed.error.code === 'nonzero-exit') {
+              const childSummary = `${executed.error.summary}: ${executed.error.stderr || executed.error.stdout}`;
+              result = infrastructure(after.ok ? childSummary : `${childSummary}; post-state observation also failed: ${after.error.summary}`);
+            } else {
+              result = infrastructure(after.ok ? executed.error.summary : `${executed.error.summary}; post-state observation also failed: ${after.error.summary}`);
+            }
+          }
         }
       }
 
