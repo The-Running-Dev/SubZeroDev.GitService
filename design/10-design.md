@@ -592,9 +592,11 @@ same reason every other cascade here is: there is no partially applied batch to 
 #### `AuditEntry`
 
 One scrubbed JSON line per mutating call: timestamp, `operationId`, `declarationId`, `generation`,
-`tool`, `actorRef`, `context`, result kind and changed paths. Best-effort append that never fails
-the call it describes, per the prior art. `actorRef` is what makes definition-of-done item 8's
-"attributable" true rather than asserted.
+`tool`, `actorRef`, `context`, result kind and changed paths. A `git.raw` outcome uses
+`changedPaths: null` when its post-state could not be observed after the caller child ran; an empty
+array means either that child never started or that the observation succeeded and found no status
+change. Best-effort append that never fails the call it describes, per the prior art. `actorRef` is
+what makes definition-of-done item 8's "attributable" true rather than asserted.
 
 **`context` — `normal`, `repair`, `recovery` or `hatch` — records what kind of action a line
 describes, which the tool name alone cannot.** Four things this design already treats as distinct
@@ -1409,13 +1411,20 @@ close it, and both are needed:
   allowlist is the right shape for `cloneUrl` at declaration time, where the question is which
   hosts this deployment may talk to at all; it is the wrong shape for an operand, where the
   question is which *repository*. `git push origin`, `git fetch origin` and an explicit spelling
-  of the declaration's own remote all pass.
-- **Subcommands that persist a remote are refused outright** — `remote add`, `remote set-url`,
-  `submodule add`, and any `config` write matching `remote.*`. Checking operands alone is
-  defeated by two calls that are individually legal: `git remote add sink <url>` followed by
-  `git push sink`, where the second argument vector contains no URL at all. The repository-local
-  config is the one configuration surface the neutral-home rule does not cover, so it is closed
-  here by subcommand rather than by environment.
+  of the declaration's own remote all pass. A password-bearing URL is rejected before
+  normalisation so discarding its password cannot make it equal to the declaration URL.
+- **Remote-valued options are operands too.** An opaque value such as `--remote=sink` is refused;
+  the only opaque remote name accepted is `origin`. An explicit URL must pass the same exact
+  declaration-URL check as a positional operand.
+- **Subcommands that persist a remote are refused outright** — `remote add`, `remote set-url`, and
+  `submodule add`. Checking operands alone is defeated by two calls that are individually legal:
+  `git remote add sink <url>` followed by `git push sink`, where the second argument vector
+  contains no URL at all.
+- **Every `git config` write is refused.** Repository-local configuration is the one configuration
+  surface the neutral-home rule does not cover, and a write can select an executable, credential
+  helper, proxy, transport, URL rewrite or future remote without spelling that effect in the later
+  call. Configuration reads remain reachable, except for file, blob, global, system and editor
+  forms that read outside the declaration's repository-local configuration or start an editor.
 
 This is enumeration, and enumeration is weaker than construction. It holds for the hatch's
 argument vector; it does not hold against code the hatch reaches by other means, which is the

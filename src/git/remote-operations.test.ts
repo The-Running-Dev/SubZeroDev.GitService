@@ -16,12 +16,14 @@ import type { CallContext } from '../shared/call-context.ts';
 import type { ClonePath, CredentialRef, DeclarationId, EnvVarName, OperationId } from '../shared/brands.ts';
 import type { Declaration } from '../declarations/types.ts';
 import type { AuditAppendInput, AuditAppendOutcome } from '../audit/types.ts';
+import { ok } from '../shared/outcome.ts';
 import { createGitOperations } from './git-operations.ts';
 
 const REF = 'fixture-token' as CredentialRef;
 const DECLARATION = 'repo-a' as DeclarationId;
 const OTHER_DECLARATION = 'repo-b' as DeclarationId;
 const SECRET = 'ghp-fixture-secret-0123456789';
+const successfulJournal = { appendStep: async () => ok(undefined) };
 
 function git(args: readonly string[], cwd: string): void {
   const result = spawnSync('git', args, {
@@ -184,6 +186,52 @@ test('S9.8: git_push has no force option anywhere in its input schema', () => {
   assert.equal(schema.additionalProperties, false);
 });
 
+test('git_push commits its recovery step before spawning the remote child', async () => {
+  await withVolumeAsync(async (volumeRoot) => {
+    await migratedVolume(volumeRoot);
+    const clone = realClone();
+    const mount = secretsMount(SECRET, null);
+    try {
+      const credentialEnv = new Map<EnvVarName, string>();
+      const events: string[] = [];
+      const exec = createExec({
+        volumeRoot,
+        credentialEnv,
+        onSpawn: (_executable, argv) => {
+          if (argv.includes('push')) events.push('push-child');
+        },
+      });
+      const declaration = fixtureDeclaration(DECLARATION, clone.bareDir);
+      const operations = createGitOperations({
+        clock: systemClock,
+        exec,
+        locks: createLocks(),
+        journal: {
+          async appendStep() {
+            events.push('step:git.push.remote');
+            return ok(undefined);
+          },
+        },
+        declarations: { get: async () => declaration },
+        credentials: createCredentialResolver({ credentialMountRoot: mount.root, volumeRoot, clock: systemClock }),
+        credentialEnv,
+      });
+
+      writeFileSync(path.join(clone.clonePath, 'STEP.md'), 'step\n', 'utf8');
+      git(['add', 'STEP.md'], clone.clonePath);
+      git(['commit', '-m', 'exercise recovery ordering'], clone.clonePath);
+
+      const result = await operations.push(contextFor(clone.clonePath), { branch: null });
+
+      assert.equal(result.kind, 'success');
+      assert.deepEqual(events, ['step:git.push.remote', 'push-child']);
+    } finally {
+      mount.cleanup();
+      clone.cleanup();
+    }
+  });
+});
+
 test('S9.2 + S9.4 + S9.6: a push the remote refuses reaches it with the resolved secret, keeps it out of every argv, result and audit record, and marks the reference for this declaration only', async () => {
   await withVolumeAsync(async (volumeRoot) => {
     await migratedVolume(volumeRoot);
@@ -210,6 +258,7 @@ test('S9.2 + S9.4 + S9.6: a push the remote refuses reaches it with the resolved
         clock: systemClock,
         exec: recordingExec,
         locks: createLocks(),
+        journal: successfulJournal,
         audit,
         declarations: { get: async (id) => (id === DECLARATION ? declaration : fixtureDeclaration(OTHER_DECLARATION, remote.url)) },
         credentials: counted.resolver,
@@ -277,6 +326,7 @@ test('S9.3: replacing the secret file changes what the next push sends, with no 
         clock: systemClock,
         exec,
         locks: createLocks(),
+        journal: successfulJournal,
         declarations: { get: async () => declaration },
         credentials: resolver,
         credentialEnv,
@@ -328,6 +378,7 @@ test('S9.9: a fetch that fails mid-transfer leaves every remote-tracking ref exa
         clock: systemClock,
         exec,
         locks: createLocks(),
+        journal: successfulJournal,
         declarations: { get: async () => declaration },
         credentials: createCredentialResolver({ credentialMountRoot: mount.root, volumeRoot, clock: systemClock }),
         credentialEnv,
@@ -361,6 +412,7 @@ test('a push against a reachable remote succeeds, and sync_base fast-forwards th
         clock: systemClock,
         exec,
         locks: createLocks(),
+        journal: successfulJournal,
         declarations: { get: async () => declaration },
         credentials: createCredentialResolver({ credentialMountRoot: mount.root, volumeRoot, clock: systemClock }),
         credentialEnv,
@@ -412,6 +464,7 @@ test('sync_base fast-forwards a base branch the remote has moved ahead of, and r
         clock: systemClock,
         exec,
         locks: createLocks(),
+        journal: successfulJournal,
         declarations: { get: async () => declaration },
         credentials: createCredentialResolver({ credentialMountRoot: mount.root, volumeRoot, clock: systemClock }),
         credentialEnv,
@@ -476,6 +529,7 @@ test('push refuses a branch input that is a revision expression rather than a lo
         clock: systemClock,
         exec,
         locks: createLocks(),
+        journal: successfulJournal,
         declarations: { get: async () => declaration },
         credentials: createCredentialResolver({ credentialMountRoot: mount.root, volumeRoot, clock: systemClock }),
         credentialEnv,
@@ -524,6 +578,7 @@ test('a credential reference not permitted to reach the remote refuses with auth
         clock: systemClock,
         exec: recordingExec,
         locks: createLocks(),
+        journal: successfulJournal,
         declarations: { get: async () => declaration },
         credentials: createCredentialResolver({ credentialMountRoot: mount.root, volumeRoot, clock: systemClock }),
         credentialEnv,

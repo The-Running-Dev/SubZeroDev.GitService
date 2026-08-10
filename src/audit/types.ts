@@ -97,7 +97,7 @@ export type AuditRecordBody =
   | { readonly form: 'call'; readonly resultKind: ResultKind; readonly changedPaths: readonly RepoRelativePath[] }
   | { readonly form: 'authorization-rejection'; readonly missing: readonly CapabilityName[]; readonly rejectedPath: RepoRelativePath | null }
   | { readonly form: 'hatch-intent'; readonly argv: readonly string[] }
-  | { readonly form: 'hatch-outcome'; readonly resultKind: ResultKind; readonly changedPaths: readonly RepoRelativePath[] }
+  | { readonly form: 'hatch-outcome'; readonly resultKind: ResultKind; readonly changedPaths: readonly RepoRelativePath[] | null }
   | { readonly form: 'content-drop'; readonly file: DropFileName; readonly outcome: DropOutcome }
   | { readonly form: 'identity-event'; readonly event: IdentityEvent }
   | { readonly form: 'lease-takeover'; readonly previousHolder: InstanceLease };

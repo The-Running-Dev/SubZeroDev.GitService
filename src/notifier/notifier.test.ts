@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { chmodSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { systemClock } from '../clock/clock.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
@@ -520,20 +520,24 @@ test('clearFailed reports a write that did not land rather than returning ok', a
     const failed = await notifier.listFailed();
     assert.equal(failed.length, 1);
 
-    // The volume goes read-only between the lookup and the write — SQLite can
-    // still read the row, but cannot create the journal file it needs to
-    // change it. `clearFailed` is the only way back for a `failed` row now
-    // that `redriveUndelivered` is `pending`-only, so reporting success on a
-    // write that did not land strands the row until someone tries again.
-    chmodSync(volume, 0o555);
-    try {
-      const cleared = await notifier.clearFailed(failed[0]!.id, ACTOR);
-      assert.equal(cleared.ok, false, 'a write that could not land is not success');
-      if (cleared.ok) return;
-      assert.match(cleared.error.summary, /could not be cleared/);
-    } finally {
-      chmodSync(volume, 0o755);
-    }
+    // A deterministic SQLite refusal rather than a POSIX permission change:
+    // chmod does not make this directory unwritable on Windows. The trigger
+    // leaves the lookup readable and rejects only the write under test.
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    db.exec(`
+      CREATE TRIGGER refuse_clear_failed
+      BEFORE UPDATE ON notification_outbox
+      WHEN OLD.id = '${failed[0]!.id}' AND OLD.status = 'failed'
+      BEGIN
+        SELECT RAISE(ABORT, 'forced clear failure');
+      END;
+    `);
+    db.close();
+
+    const cleared = await notifier.clearFailed(failed[0]!.id, ACTOR);
+    assert.equal(cleared.ok, false, 'a write that could not land is not success');
+    if (cleared.ok) return;
+    assert.match(cleared.error.summary, /could not be cleared/);
 
     assert.equal(readOutboxRows(volume)[0]!.status, 'failed', 'and the row really is still failed');
   });

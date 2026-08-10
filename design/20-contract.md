@@ -616,7 +616,7 @@ type AuditRecordBody =
   | { readonly form: 'call'; readonly resultKind: ResultKind; readonly changedPaths: readonly RepoRelativePath[] }
   | { readonly form: 'authorization-rejection'; readonly missing: readonly CapabilityName[]; readonly rejectedPath: RepoRelativePath | null }
   | { readonly form: 'hatch-intent'; readonly argv: readonly string[] }
-  | { readonly form: 'hatch-outcome'; readonly resultKind: ResultKind; readonly changedPaths: readonly RepoRelativePath[] }
+  | { readonly form: 'hatch-outcome'; readonly resultKind: ResultKind; readonly changedPaths: readonly RepoRelativePath[] | null }
   | { readonly form: 'content-drop'; readonly file: DropFileName; readonly outcome: DropOutcome }
   | { readonly form: 'identity-event'; readonly event: IdentityEvent }
   | { readonly form: 'lease-takeover'; readonly previousHolder: InstanceLease };
@@ -1933,11 +1933,14 @@ interface GitRawInput { readonly argv: readonly string[] }
 ```
 
 `GitLogInput.ref` defaults to `origin/<baseBranch>` when null, never to `HEAD`. `GitRawInput.argv`
-is rejected before the process starts when it selects an executable, injects configuration, carries
-a remote operand that does not normalise to this declaration's own `cloneUrl`, or invokes a
-subcommand that persists a remote — `remote add`, `remote set-url`, `submodule add`, or a `config`
-write matching `remote.*`. There is no force flag anywhere in `GitPushInput`, and there is no
-reset, clean, rebase or branch-delete operation on this interface.
+is rejected before the process starts when it selects an executable, injects configuration, writes
+configuration, carries a password-bearing remote URL, carries a remote operand that does not
+normalise to this declaration's own `cloneUrl`, or invokes a subcommand that persists a remote —
+`remote add`, `remote set-url`, or `submodule add`. Remote-valued options such as `--remote` are
+remote operands too; an opaque remote name is accepted only when it is `origin`. Configuration
+reads remain reachable except for the file, blob, global, system and editor forms that escape the
+declaration's repository-local configuration. There is no force flag anywhere in `GitPushInput`,
+and there is no reset, clean, rebase or branch-delete operation on this interface.
 
 **S6 resolves U1 for the five read operations.** Their input and output types, fixed here:
 
@@ -2172,7 +2175,13 @@ interface GitRawData {
 `exitCode: 0`; a non-zero child exit maps to an error envelope rather than successful data.
 `changedPaths` is the sorted, duplicate-free set of repository-relative paths whose index or
 worktree status differs between the journaled pre-state and the observation after the child exits.
-It is the same list written into the `hatch-outcome` audit record.
+It is the same list written into the `hatch-outcome` audit record. If the initial status observation
+fails, the caller-authored child is not started, the operation returns `infrastructure`, and the
+outcome carries `changedPaths: []` because that child caused no change. If the post-state observation
+fails after the child ran, the outcome record carries `changedPaths: null`, meaning unknown — never
+an empty set — and a child that otherwise succeeded returns `infrastructure`. A primary timeout,
+cancellation or non-zero child result remains the returned result kind while the outcome summary
+also records that post-state observation failed.
 
 The registry entry S15 ships:
 
@@ -2854,7 +2863,7 @@ type ExecError = ModuleErrorBase & (
 | `spawn-failed` | The fixed executable could not be started | no | `infrastructure` — the environment is wrong, not the request |
 | `nonzero-exit` | The child exited non-zero; `stdout` and `stderr` are already scrubbed | no | Classify by domain: auth rejection to `upstream`, a refused push to `precondition`; informational commands retain both streams for diagnosis |
 | `timed-out` | The declared cap elapsed and the child was killed | no | `timeout`, and park the journal entry — what the command achieved is not knowable |
-| `argv-rejected` | The vector selects an executable, injects configuration, carries a foreign remote operand, or persists a remote | no | `validation`; no authority could ever permit it |
+| `argv-rejected` | The vector selects an executable, injects or writes configuration, carries credentials or a foreign or opaque remote operand, or persists a remote | no | `validation`; no authority could ever permit it |
 | `cancelled` | The caller's signal aborted | no | `conflict`, releasing locks in reverse acquisition order |
 
 ### Locks

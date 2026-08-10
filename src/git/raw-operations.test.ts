@@ -70,11 +70,12 @@ function credentials(env: MutableEnv): CredentialResolver {
   };
 }
 
-function operationsFor(rawFixture: ReturnType<typeof fixture>, options: { exec?: Exec; env?: MutableEnv; failIntent?: boolean; failOutcome?: boolean; rawTimeoutSeconds?: number } = {}) {
+function operationsFor(rawFixture: ReturnType<typeof fixture>, options: { exec?: Exec; env?: MutableEnv; failIntent?: boolean; failOutcome?: boolean; failStep?: boolean; rawTimeoutSeconds?: number; declarationUrl?: string } = {}) {
   const env = options.env ?? new Map<EnvVarName, string>();
   const records: AuditAppendInput[] = [];
+  const steps: string[] = [];
   const exec = options.exec ?? createExec({ volumeRoot: rawFixture.root, credentialEnv: env });
-  const repo = declaration(rawFixture.remoteUrl);
+  const repo = declaration(options.declarationUrl ?? rawFixture.remoteUrl);
   const audit = {
     async append(input: AuditAppendInput): Promise<AuditAppendOutcome> {
       if (options.failIntent && input.form === 'hatch-intent') return { appended: false, reason: 'volume-full' };
@@ -85,8 +86,23 @@ function operationsFor(rawFixture: ReturnType<typeof fixture>, options: { exec?:
   };
   return {
     records,
+    steps,
     operations: createGitOperations({
-      clock: systemClock, exec, locks: createLocks(), audit, declarations: { get: async () => repo }, credentials: credentials(env), credentialEnv: env,
+      clock: systemClock,
+      exec,
+      locks: createLocks(),
+      audit,
+      journal: {
+        async appendStep(_operationId, name) {
+          steps.push(name);
+          return options.failStep
+            ? { ok: false as const, error: { code: 'intent-write-failed', resultKind: 'infrastructure', retryable: false, summary: 'forced step failure', cause: {} as never } }
+            : ok(undefined);
+        },
+      },
+      declarations: { get: async () => repo },
+      credentials: credentials(env),
+      credentialEnv: env,
       ...(options.rawTimeoutSeconds === undefined ? {} : { rawTimeoutSeconds: options.rawTimeoutSeconds }),
     }),
   };
@@ -121,7 +137,7 @@ test('S15 contract schemas accept two valid values and reject three invalid valu
 test('S15.2 — all six default-path refusals are reachable through the hatch and produce six attributable intent/outcome pairs', async () => {
   const f = fixture();
   try {
-    const { operations, records } = operationsFor(f);
+    const { operations, records, steps } = operationsFor(f);
     writeFileSync(path.join(f.work, 'README.md'), 'changed\n', 'utf8');
     const reset = await operations.raw(context(f.work), { argv: ['reset', '--hard', 'HEAD'] });
     assert.equal(reset.ok, true);
@@ -137,6 +153,7 @@ test('S15.2 — all six default-path refusals are reachable through the hatch an
 
     assert.equal(records.filter((record) => record.form === 'hatch-intent').length, 6);
     assert.equal(records.filter((record) => record.form === 'hatch-outcome').length, 6);
+    assert.deepEqual(steps, Array(6).fill('git.raw.child'));
     const resetOutcome = records.find((record) => record.form === 'hatch-outcome');
     assert.deepEqual(resetOutcome?.form === 'hatch-outcome' ? resetOutcome.changedPaths : [], ['README.md']);
     assert.equal(records.every((record) => record.declarationId === 'repo-a' && record.actorRef.subject === 'fixture' && record.context === 'hatch'), true);
@@ -212,6 +229,7 @@ test('S15.3 — the config, remote-helper and template forms that reach an execu
       ['fetch', 'fd::7'],
       // A foreign remote through an option rather than a bare operand.
       ['archive', '--remote=https://github.com/attacker/sink.git', 'HEAD'],
+      ['archive', '--remote=sink', 'HEAD'],
       ['clone', '--template=/tmp/evil-hooks', f.remoteUrl],
     ]) {
       const before = spawned.length;
@@ -219,6 +237,20 @@ test('S15.3 — the config, remote-helper and template forms that reach an execu
       assert.equal(result.kind, 'validation', `${argv.join(' ')} was not refused`);
       assert.equal(spawned.length, before, `${argv.join(' ')} spawned a child`);
     }
+  } finally { f.cleanup(); }
+});
+
+test('S15.4 — a password-bearing non-HTTP remote is refused even when removing the password would match the declaration', async () => {
+  const f = fixture();
+  try {
+    const env = new Map<EnvVarName, string>();
+    const spawned: string[][] = [];
+    const exec = createExec({ volumeRoot: f.root, credentialEnv: env, onSpawn: (_exe, argv) => spawned.push([...argv]) });
+    const declared = 'ssh://git@example.com/org/repo.git';
+    const { operations } = operationsFor(f, { exec, env, declarationUrl: declared });
+    const result = await operations.raw(context(f.work), { argv: ['ls-remote', 'ssh://git:secret@example.com/org/repo.git'] });
+    assert.equal(result.kind, 'validation');
+    assert.equal(spawned.length, 0);
   } finally { f.cleanup(); }
 });
 
@@ -306,5 +338,74 @@ test('S15.7 — exceeding the hatch budget kills a real child rather than waitin
     const result = await operations.raw(context(f.work), { argv: ['credential', 'fill'] });
     assert.equal(result.kind, 'timeout');
     assert.equal(Date.now() - started < 2_000, true, 'the blocked child was killed promptly');
+  } finally { f.cleanup(); }
+});
+
+test('git_raw fails closed before acting when its initial status cannot be observed', async () => {
+  const f = fixture();
+  try {
+    const children: readonly string[][] = [];
+    const fake: Exec = {
+      async runGit(request) {
+        (children as string[][]).push([...request.argv]);
+        return { ok: false, error: execError({ code: 'nonzero-exit', exitCode: 128, stdout: '', stderr: 'status failed' }, 'status failed') };
+      },
+      scrub: (value) => value,
+      scrubJson: (value) => value,
+      async runGh() { throw new Error('not used'); },
+    };
+    const { operations, records, steps } = operationsFor(f, { exec: fake });
+    const result = await operations.raw(context(f.work), { argv: ['gc'] });
+    assert.equal(result.kind, 'infrastructure');
+    assert.deepEqual(children, [['status', '--porcelain=v1', '-z']]);
+    assert.deepEqual(steps, []);
+    const outcome = records.find((record) => record.form === 'hatch-outcome');
+    assert.deepEqual(outcome?.form === 'hatch-outcome' ? outcome.changedPaths : null, []);
+  } finally { f.cleanup(); }
+});
+
+test('git_raw fails closed before the caller child when its recovery step cannot be written', async () => {
+  const f = fixture();
+  try {
+    const children: readonly string[][] = [];
+    const real = createExec({
+      volumeRoot: f.root,
+      credentialEnv: new Map<EnvVarName, string>(),
+      onSpawn: (_executable, argv) => (children as string[][]).push([...argv]),
+    });
+    const { operations, steps } = operationsFor(f, { exec: real, failStep: true });
+
+    const result = await operations.raw(context(f.work), { argv: ['gc'] });
+
+    assert.equal(result.kind, 'infrastructure');
+    assert.deepEqual(steps, ['git.raw.child']);
+    assert.equal(children.some((argv) => argv.includes('gc')), false);
+  } finally { f.cleanup(); }
+});
+
+test('git_raw records unknown changed paths when its post-state cannot be observed', async () => {
+  const f = fixture();
+  try {
+    let statusCalls = 0;
+    const fake: Exec = {
+      async runGit(request) {
+        if (request.argv[0] === 'status') {
+          statusCalls += 1;
+          if (statusCalls === 2) {
+            return { ok: false, error: execError({ code: 'nonzero-exit', exitCode: 128, stdout: '', stderr: 'post-status failed' }, 'post-status failed') };
+          }
+        }
+        return ok({ exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false });
+      },
+      scrub: (value) => value,
+      scrubJson: (value) => value,
+      async runGh() { throw new Error('not used'); },
+    };
+    const { operations, records, steps } = operationsFor(f, { exec: fake });
+    const result = await operations.raw(context(f.work), { argv: ['gc'] });
+    assert.equal(result.kind, 'infrastructure');
+    assert.deepEqual(steps, ['git.raw.child']);
+    const outcome = records.find((record) => record.form === 'hatch-outcome');
+    assert.equal(outcome?.form === 'hatch-outcome' ? outcome.changedPaths : [], null);
   } finally { f.cleanup(); }
 });

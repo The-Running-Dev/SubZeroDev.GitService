@@ -222,14 +222,14 @@ async function main(): Promise<void> {
   });
   const cloneStore = createCloneStore({ volumeRoot, clock: systemClock, exec, locks, declarations });
   cloneStoreRef = cloneStore;
+  const journal = createJournal({ volumeRoot, clock: systemClock });
 
   // The five S6 read tools plus S7's three local mutating tools: git
   // operations dispatched through a module adapter and the dispatch
   // pipeline. `PRODUCTION_TOOL_DECLARATIONS` is plain data (no compiler
   // call), which is what keeps invariant B8 (the compiler absent from the
   // runtime image) intact here.
-  const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit, declarations, credentials, credentialEnv });
-  const journal = createJournal({ volumeRoot, clock: systemClock });
+  const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit, journal, declarations, credentials, credentialEnv });
   const notifier = createNotifier({ volumeRoot, clock: systemClock, webhookUrl: resolveNotifierWebhook() });
   const moduleAdapter = createModuleAdapter();
   moduleAdapter.register('git.status' as ModuleTargetName, toModuleHandler(gitOperations.status));
