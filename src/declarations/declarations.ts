@@ -133,6 +133,38 @@ function toDeclaration(row: DeclarationRow): Declaration {
   };
 }
 
+/** The core of `bumpGrantEpoch`, extracted so `amend`/`orphan` below can raise the epoch inside the same `BEGIN`/`COMMIT` as their own write, through a `StoreTransaction` wrapping that same connection — not a second one. */
+function bumpGrantEpochImpl(id: DeclarationId, now: IsoUtcTimestamp, tx: StoreTransaction): GrantEpoch {
+  tx.run("UPDATE declaration SET grant_epoch = grant_epoch + 1, updated_at = ? WHERE id = ? AND state = 'active'", now, id);
+  const rows = tx.all('SELECT grant_epoch FROM declaration WHERE id = ? AND state = ?', id, 'active') as { grant_epoch: number }[];
+  const epoch = validateGrantEpoch(rows[0]?.grant_epoch ?? 0);
+  return epoch.ok ? epoch.value : (0 as GrantEpoch);
+}
+
+/** A `StoreTransaction` wrapping a single already-open connection with an explicit `BEGIN`/`COMMIT` around it — for a caller (`amend`, `orphan`) that needs its own write and an epoch bump to commit or roll back together, without depending on the shared `StructuredStore` instance no `DeclarationsDependencies` carries a reference to. */
+function withLocalTransaction<T>(db: DatabaseSync, work: (tx: StoreTransaction) => T): T {
+  const tx: StoreTransaction = {
+    id: 'declarations-local',
+    run: (sql, ...parameters) => {
+      db.prepare(sql).run(...parameters);
+    },
+    all: (sql, ...parameters) => db.prepare(sql).all(...parameters),
+  };
+  db.exec('BEGIN;');
+  try {
+    const value = work(tx);
+    db.exec('COMMIT;');
+    return value;
+  } catch (cause) {
+    try {
+      db.exec('ROLLBACK;');
+    } catch {
+      // Already rolled back by the failure itself.
+    }
+    throw cause;
+  }
+}
+
 function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): Outcome<T, StoreError> {
   mkdirSync(volumeRoot, { recursive: true });
   const dbPath = path.join(volumeRoot, 'store.sqlite');
@@ -361,32 +393,46 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
         return err(declarationError({ code: 'drop-tool-not-annotated', tool: nextContentDrop.tool }, `tool '${nextContentDrop.tool}' is not annotated a drop target`));
       }
 
+      // Order-independent: a patch naming the same set back is not a change,
+      // and does not narrow anything a live MCP session is holding — bumping
+      // the epoch for it would just be needless churn on every no-op amend.
+      const capabilityGrantChanged =
+        patch.capabilityGrant !== null &&
+        (nextCapabilityGrant.length !== existing.capabilityGrant.size || nextCapabilityGrant.some((c) => !existing.capabilityGrant.has(c)));
+
       const now = clock.now();
-      const written = withDb(volumeRoot, (db) => {
-        db.prepare(
-          `UPDATE declaration SET
-             clone_url = ?, credential_ref = ?, capability_grant = ?, writable_path_prefixes = ?,
-             pinned = ?, content_drop_tool = ?, content_drop_auto_merge = ?,
-             git_user_name = ?, git_user_email = ?, updated_at = ?
-           WHERE id = ? AND generation = ?`,
-        ).run(
-          nextCloneUrl,
-          patch.credentialRef ?? existing.credentialRef,
-          JSON.stringify(nextCapabilityGrant),
-          JSON.stringify(patch.writablePathPrefixes ?? existing.writablePathPrefixes),
-          (patch.pinned ?? existing.pinned) ? 1 : 0,
-          nextContentDrop?.tool ?? null,
-          nextContentDrop ? (nextContentDrop.autoMerge ? 1 : 0) : null,
-          patch.identity?.gitUserName ?? existing.identity.gitUserName,
-          patch.identity?.gitUserEmail ?? existing.identity.gitUserEmail,
-          now,
-          id,
-          existing.generation,
-        );
-        const row = latestRowFor(db, id);
-        if (!row) throw new Error('unreachable: row existed a moment ago');
-        return row;
-      });
+      const written = withDb(volumeRoot, (db) =>
+        withLocalTransaction(db, (tx) => {
+          tx.run(
+            `UPDATE declaration SET
+               clone_url = ?, credential_ref = ?, capability_grant = ?, writable_path_prefixes = ?,
+               pinned = ?, content_drop_tool = ?, content_drop_auto_merge = ?,
+               git_user_name = ?, git_user_email = ?, updated_at = ?
+             WHERE id = ? AND generation = ?`,
+            nextCloneUrl,
+            patch.credentialRef ?? existing.credentialRef,
+            JSON.stringify(nextCapabilityGrant),
+            JSON.stringify(patch.writablePathPrefixes ?? existing.writablePathPrefixes),
+            (patch.pinned ?? existing.pinned) ? 1 : 0,
+            nextContentDrop?.tool ?? null,
+            nextContentDrop ? (nextContentDrop.autoMerge ? 1 : 0) : null,
+            patch.identity?.gitUserName ?? existing.identity.gitUserName,
+            patch.identity?.gitUserEmail ?? existing.identity.gitUserEmail,
+            now,
+            id,
+            existing.generation,
+          );
+          // `10-design.md` § the grant epoch: a `capabilityGrant` change is
+          // one of the three triggers that bumps it, so a narrowing reaches
+          // a live MCP session on its next call (S14.4) — in the same
+          // transaction as the write it is bumping for, so a rolled-back
+          // amend never invalidates a grant for a change that never landed.
+          if (capabilityGrantChanged) bumpGrantEpochImpl(id, now, tx);
+          const row = latestRowFor(db, id);
+          if (!row) throw new Error('unreachable: row existed a moment ago');
+          return row;
+        }),
+      );
       if (!written.ok) return err(declarationError({ code: 'store-failed', cause: written.error }, written.error.summary));
 
       return ok(toDeclaration(written.value));
@@ -509,14 +555,13 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
      * uncommitted increment, so it would return a stale epoch — the one value
      * this member exists to produce.
      *
-     * Still not exercised end to end (S14 is where the grant epoch reaches a
-     * live session), but it is now correct when it is.
+     * Exercised end to end as of S14: `amend` calls this (through its own
+     * local transaction, see `withLocalTransaction` above) whenever
+     * `capabilityGrant` actually changes, which is what lets a narrowing
+     * reach a live MCP session on its next call.
      */
     bumpGrantEpoch(id: DeclarationId, tx: StoreTransaction): GrantEpoch {
-      tx.run("UPDATE declaration SET grant_epoch = grant_epoch + 1, updated_at = ? WHERE id = ? AND state = 'active'", clock.now(), id);
-      const rows = tx.all("SELECT grant_epoch FROM declaration WHERE id = ? AND state = 'active'", id) as { grant_epoch: number }[];
-      const epoch = validateGrantEpoch(rows[0]?.grant_epoch ?? 0);
-      return epoch.ok ? epoch.value : (0 as GrantEpoch);
+      return bumpGrantEpochImpl(id, clock.now(), tx);
     },
 
     remoteHostAllowlist(): readonly RemoteHost[] {

@@ -3,22 +3,27 @@ import { mkdirSync } from 'node:fs';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { ok, err, type Outcome } from '../shared/outcome.ts';
-import type { ClientId, GrantId, IsoUtcTimestamp, McpResourceUri, SaltedHash, SessionId, Subject, TokenId } from '../shared/brands.ts';
+import type { ClientId, DeclarationId, Generation, GrantId, IsoUtcTimestamp, McpResourceUri, SaltedHash, SessionId, Subject, TokenId } from '../shared/brands.ts';
 import type { BearerToken, HttpsUrl } from '../shared/brands.ts';
 import type { ActorRef } from '../shared/actor.ts';
 import type { Session } from '../shared/session.ts';
 import type { Clock } from '../clock/clock.ts';
 import type { Audit } from '../audit/audit.ts';
 import type { IdentityEvent } from '../audit/types.ts';
-import type { Declaration } from '../declarations/types.ts';
-import type { ContractCapabilitySet, CapabilityName, Scope, OperatorScope } from '../contract/capabilities.ts';
+import type { Declarations } from '../declarations/declarations.ts';
+import { MCP_PROFILE, type Declaration } from '../declarations/types.ts';
+import type { ContractCapabilitySet, DeploymentCeiling, CapabilityName, McpScope, Scope, OperatorScope } from '../contract/capabilities.ts';
+import type { StoreTransaction } from '../store/structured-store.ts';
 import { storeError } from '../store/errors.ts';
 import { timingSafeStringEqual } from '../shared/timing-safe.ts';
 import { authorizationError, type AuthorizationError } from './errors.ts';
-import type { ClientRegistrationRequest, Grant, GrantKind, GrantView, IssuedToken, OAuthClient, RefreshedTokens } from './types.ts';
+import type { ClientRegistrationRequest, Grant, GrantKind, GrantView, IssuedMcpGrant, IssuedToken, McpGrantInput, OAuthClient, RefreshedTokens } from './types.ts';
 
 export interface Authorization {
   registerClient(request: ClientRegistrationRequest): Promise<Outcome<OAuthClient, AuthorizationError>>;
+  /** The registered client named by `clientId`, or `null` if no such client exists. `handleAuthorize` needs this to check a presented `redirect_uri` against what the client actually registered — the same row `registerClient` wrote. */
+  getClient(clientId: ClientId): Promise<OAuthClient | null>;
+  issueMcpGrant(input: McpGrantInput, actor: ActorRef): Promise<Outcome<IssuedMcpGrant, AuthorizationError>>;
   establishMcpSession(bearer: BearerToken, resource: McpResourceUri): Promise<Outcome<Session, AuthorizationError>>;
   verifyOperatorApiToken(bearer: BearerToken): Promise<Outcome<Session, AuthorizationError>>;
   issueOperatorApiToken(subject: Subject, scopes: readonly OperatorScope[], actor: ActorRef): Promise<Outcome<IssuedToken, AuthorizationError>>;
@@ -31,14 +36,20 @@ export interface Authorization {
   revokeClient(clientId: ClientId, actor: ActorRef): Promise<Outcome<void, AuthorizationError>>;
   revokeGrant(grantId: GrantId, actor: ActorRef): Promise<Outcome<void, AuthorizationError>>;
   revokeToken(jti: TokenId, actor: ActorRef): Promise<Outcome<void, AuthorizationError>>;
+  revokeGrantsForResource(declarationId: DeclarationId, generation: Generation, tx: StoreTransaction): readonly GrantId[];
+  revokeBearerToken(bearer: BearerToken, actor: ActorRef): Promise<Outcome<void, AuthorizationError>>;
   runRetention(): Promise<{ readonly module: string; readonly deletedRows: number; readonly freedBytes: number; readonly skipped: readonly string[] }>;
 }
 
 export interface AuthorizationDependencies {
   readonly volumeRoot: string;
   readonly clock: Clock;
-  /** Only used to intersect an operator-api token's granted scopes against what the deployment actually registers — never widens past it (invariant A1). */
+  /** Only used to intersect a token's granted scopes against what the deployment actually registers — never widens past it (invariant A1). */
   readonly contractCapabilitySet: ContractCapabilitySet;
+  /** The deployment ceiling (layer 2), needed to compute an MCP session's real effective grant the same way `Declarations.effectiveGrant` does for every other layer-4 caller. */
+  readonly ceiling: DeploymentCeiling;
+  /** Declaration lookups and the shared four-layer intersection — `establishMcpSession` and `recomputeSessionGrant` both need it, and duplicating `effectiveGrant`'s logic here would be the second copy `git/primitives.ts` already exists to warn against. */
+  readonly declarations: Pick<Declarations, 'get' | 'effectiveGrant' | 'effectiveWritablePrefixes'>;
   /**
    * Issuing and revoking a durable credential are audited here rather than at
    * the console route, because the store write is what actually happened —
@@ -50,6 +61,17 @@ export interface AuthorizationDependencies {
 
 /** A year — long enough that a script's credential outlives ordinary use, short enough that an abandoned token does not stay live forever. Not fixed by the contract (`design/90-decisions.md` follows S4's `sessionAbsoluteSeconds` precedent: a number this interface cannot exist without). */
 const OPERATOR_API_TOKEN_TTL_SECONDS_DEFAULT = 365 * 24 * 60 * 60;
+
+/**
+ * An hour and thirty days — the same pair `SubZeroDev.Blog/tools/blog-mcp`'s
+ * `OAuthService` uses. Short-lived access tokens limit what a leaked one is
+ * worth; the refresh token is what carries S14.7's "reconnects after a
+ * container restart without re-authorising" — durable, unlike blog-mcp's
+ * process-local version, because it is a real row in `token` rather than an
+ * in-memory `Map`.
+ */
+const MCP_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
+const MCP_REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 interface ClientRow {
   readonly client_id: string;
@@ -111,6 +133,36 @@ function sha256Digest(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
+/** Both halves of a token pair, written as two `token` rows under the same grant. Shared by `issueMcpGrant` and `refresh`, since the pair they mint is identical in shape. */
+function issueTokenPair(db: DatabaseSync, grantId: string, now: string): { readonly access: IssuedToken; readonly refresh: IssuedToken } {
+  const accessJti = randomUUID() as TokenId;
+  const accessValue = randomBytes(32).toString('hex') as BearerToken;
+  const accessExpiresAt = new Date(new Date(now).getTime() + MCP_ACCESS_TOKEN_TTL_SECONDS * 1000).toISOString() as IsoUtcTimestamp;
+  db.prepare('INSERT INTO token (jti, grant_id, kind, verifier_hash, issued_at, expires_at, revoked_at) VALUES (?, ?, \'access\', ?, ?, ?, NULL)').run(
+    accessJti,
+    grantId,
+    sha256Digest(accessValue),
+    now,
+    accessExpiresAt,
+  );
+
+  const refreshJti = randomUUID() as TokenId;
+  const refreshValue = randomBytes(32).toString('hex') as BearerToken;
+  const refreshExpiresAt = new Date(new Date(now).getTime() + MCP_REFRESH_TOKEN_TTL_SECONDS * 1000).toISOString() as IsoUtcTimestamp;
+  db.prepare('INSERT INTO token (jti, grant_id, kind, verifier_hash, issued_at, expires_at, revoked_at) VALUES (?, ?, \'refresh\', ?, ?, ?, NULL)').run(
+    refreshJti,
+    grantId,
+    sha256Digest(refreshValue),
+    now,
+    refreshExpiresAt,
+  );
+
+  return {
+    access: { jti: accessJti, value: accessValue, expiresAt: accessExpiresAt },
+    refresh: { jti: refreshJti, value: refreshValue, expiresAt: refreshExpiresAt },
+  };
+}
+
 function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): Outcome<T, AuthorizationError> {
   let db: DatabaseSync;
   try {
@@ -168,11 +220,6 @@ function expandScopes(scopes: readonly OperatorScope[], contractCapabilitySet: C
   return granted as unknown as Session['grant'];
 }
 
-const NOT_WIRED = authorizationError(
-  { code: 'store-failed', cause: storeError({ code: 'io-failed' }, 'MCP session establishment is not wired until S14') },
-  'MCP session establishment is not wired until S14',
-);
-
 export function createAuthorization(deps: AuthorizationDependencies): Authorization {
   /**
    * One audit line per credential mutation that actually reached the store.
@@ -223,12 +270,145 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
       return result;
     },
 
-    async establishMcpSession(): Promise<Outcome<Session, AuthorizationError>> {
-      return err(NOT_WIRED);
+    async getClient(clientId: ClientId): Promise<OAuthClient | null> {
+      const result = withDb(deps.volumeRoot, (db) => {
+        const row = db.prepare('SELECT * FROM oauth_client WHERE client_id = ?').get(clientId) as ClientRow | undefined;
+        return row ? toClient(row) : null;
+      });
+      return result.ok ? result.value : null;
     },
 
-    async refresh(): Promise<Outcome<RefreshedTokens, AuthorizationError>> {
-      return err(NOT_WIRED);
+    /**
+     * The one durable write the authorization-code exchange performs
+     * (`20-contract.md` § L4 — authorization). Everything ahead of this —
+     * the pending authorization, the PKCE challenge, the issued code — is
+     * surface-owned and ephemeral; by the time a caller reaches here, PKCE
+     * verification, the redirect URI and the client have already been
+     * checked, so this method's only job is minting the durable `Grant` and
+     * its access/refresh pair.
+     */
+    async issueMcpGrant(input: McpGrantInput, actor: ActorRef): Promise<Outcome<IssuedMcpGrant, AuthorizationError>> {
+      const now = deps.clock.now();
+      const grantId = randomUUID() as GrantId;
+
+      const result = withDb(deps.volumeRoot, (db) => {
+        db.prepare(
+          `INSERT INTO "grant" (grant_id, kind, client_id, subject, resource, declaration_id, generation, scopes, created_at, last_used_at, revoked_at)
+           VALUES (?, 'mcp', ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+        ).run(grantId, input.clientId, input.subject, input.resource, input.declarationId, input.generation, JSON.stringify(input.scopes), now);
+        const pair = issueTokenPair(db, grantId, now);
+        const grantRow = db.prepare('SELECT * FROM "grant" WHERE grant_id = ?').get(grantId) as unknown as GrantRow;
+        return { grant: toGrant(grantRow), access: pair.access, refresh: pair.refresh } satisfies IssuedMcpGrant;
+      });
+      if (result.ok) await auditCredentialEvent('token-issued', actor);
+      return result;
+    },
+
+    /**
+     * `20-contract.md` § control flow step 2: issuer, signature (the
+     * lookup itself, since a hash match *is* the signature check for an
+     * opaque token), expiry, audience against the exact resource URI, and —
+     * once the token checks out — that the declaration it names still
+     * exists, is not orphaned, and is still at the generation the grant was
+     * issued against. Every failure here is one of the first nine
+     * `AuthorizationError` variants: transport-level `401`, never a
+     * `ToolResult`.
+     */
+    async establishMcpSession(bearer: BearerToken, resource: McpResourceUri): Promise<Outcome<Session, AuthorizationError>> {
+      const candidateHash = sha256Digest(bearer);
+      const now = deps.clock.now();
+
+      const tokenResult = withDb(deps.volumeRoot, (db) => {
+        const tokenRow = db.prepare("SELECT * FROM token WHERE verifier_hash = ? AND kind = 'access'").get(candidateHash) as TokenRow | undefined;
+        if (!tokenRow || !timingSafeStringEqual(candidateHash, tokenRow.verifier_hash)) {
+          throw authorizationError({ code: 'token-unknown' }, 'no access token matches the presented bearer value');
+        }
+        if (tokenRow.revoked_at !== null) throw authorizationError({ code: 'token-revoked' }, `token '${tokenRow.jti}' was revoked`);
+        if (tokenRow.expires_at <= now) throw authorizationError({ code: 'token-expired' }, `token '${tokenRow.jti}' expired at ${tokenRow.expires_at}`);
+
+        const grantRow = db.prepare('SELECT * FROM "grant" WHERE grant_id = ?').get(tokenRow.grant_id) as unknown as GrantRow | undefined;
+        if (!grantRow || grantRow.kind !== 'mcp') {
+          throw authorizationError({ code: 'token-unknown' }, 'the token names no live mcp grant');
+        }
+        if (grantRow.revoked_at !== null) throw authorizationError({ code: 'grant-revoked' }, `grant '${grantRow.grant_id}' was revoked`);
+        if (grantRow.client_id !== null) {
+          const clientRow = db.prepare('SELECT revoked_at FROM oauth_client WHERE client_id = ?').get(grantRow.client_id) as { revoked_at: string | null } | undefined;
+          if (clientRow && clientRow.revoked_at !== null) throw authorizationError({ code: 'client-revoked' }, `client '${grantRow.client_id}' was revoked`);
+        }
+        if (grantRow.resource !== (resource as unknown as string)) {
+          throw authorizationError(
+            { code: 'audience-mismatch', expected: grantRow.resource as unknown as McpResourceUri },
+            `this token's grant is for resource '${grantRow.resource}', not '${resource}'`,
+          );
+        }
+
+        db.prepare('UPDATE "grant" SET last_used_at = ? WHERE grant_id = ?').run(now, grantRow.grant_id);
+        return grantRow;
+      });
+      if (!tokenResult.ok) return tokenResult;
+      const grantRow = tokenResult.value;
+
+      const declaration = await deps.declarations.get(grantRow.declaration_id as DeclarationId);
+      if (!declaration) {
+        return err(authorizationError({ code: 'resource-unknown', resource }, `resource '${resource}' names no declaration`));
+      }
+      if (declaration.state === 'orphaned') {
+        return err(authorizationError({ code: 'declaration-orphaned', declarationId: declaration.id }, `declaration '${declaration.id}' is orphaned`));
+      }
+      if (declaration.generation !== (grantRow.generation as unknown as Generation)) {
+        return err(
+          authorizationError(
+            { code: 'generation-stale', granted: grantRow.generation as unknown as Generation, current: declaration.generation },
+            `grant was issued against generation ${grantRow.generation}, declaration is now at ${declaration.generation}`,
+          ),
+        );
+      }
+
+      const scopes = JSON.parse(grantRow.scopes) as readonly McpScope[];
+      const expanded = expandScopes(scopes, deps.contractCapabilitySet);
+      const effective = deps.declarations.effectiveGrant(deps.contractCapabilitySet, deps.ceiling, declaration, expanded);
+      const session: Session = {
+        id: randomUUID() as SessionId,
+        kind: 'mcp',
+        actorRef: { kind: 'mcp', subject: grantRow.subject as Subject, clientId: grantRow.client_id as ClientId | null, grantId: grantRow.grant_id as GrantId },
+        repositoryBinding: declaration.id,
+        grant: effective as unknown as Session['grant'],
+        writablePathPrefixes: deps.declarations.effectiveWritablePrefixes(declaration, MCP_PROFILE),
+        frozenAtEpoch: declaration.grantEpoch,
+      };
+      return ok(session);
+    },
+
+    /**
+     * RFC 6749 refresh-token rotation: the presented refresh token is
+     * single-use, revoked here regardless of whether issuing its
+     * replacement succeeds, and a fresh access/refresh pair is minted under
+     * the same grant.
+     */
+    async refresh(bearer: BearerToken): Promise<Outcome<RefreshedTokens, AuthorizationError>> {
+      const candidateHash = sha256Digest(bearer);
+      const now = deps.clock.now();
+
+      const result = withDb(deps.volumeRoot, (db) => {
+        const tokenRow = db.prepare("SELECT * FROM token WHERE verifier_hash = ? AND kind = 'refresh'").get(candidateHash) as TokenRow | undefined;
+        if (!tokenRow || !timingSafeStringEqual(candidateHash, tokenRow.verifier_hash)) {
+          throw authorizationError({ code: 'token-unknown' }, 'no refresh token matches the presented bearer value');
+        }
+        if (tokenRow.revoked_at !== null) throw authorizationError({ code: 'token-revoked' }, `token '${tokenRow.jti}' was revoked`);
+        if (tokenRow.expires_at <= now) throw authorizationError({ code: 'token-expired' }, `token '${tokenRow.jti}' expired at ${tokenRow.expires_at}`);
+
+        const grantRow = db.prepare('SELECT * FROM "grant" WHERE grant_id = ?').get(tokenRow.grant_id) as unknown as GrantRow | undefined;
+        if (!grantRow) throw authorizationError({ code: 'token-unknown' }, 'the refresh token names no grant');
+        if (grantRow.revoked_at !== null) throw authorizationError({ code: 'grant-revoked' }, `grant '${grantRow.grant_id}' was revoked`);
+        if (grantRow.client_id !== null) {
+          const clientRow = db.prepare('SELECT revoked_at FROM oauth_client WHERE client_id = ?').get(grantRow.client_id) as { revoked_at: string | null } | undefined;
+          if (clientRow && clientRow.revoked_at !== null) throw authorizationError({ code: 'client-revoked' }, `client '${grantRow.client_id}' was revoked`);
+        }
+
+        db.prepare('UPDATE token SET revoked_at = ? WHERE jti = ?').run(now, tokenRow.jti);
+        return issueTokenPair(db, grantRow.grant_id, now);
+      });
+      return result;
     },
 
     async issueOperatorApiToken(subject: Subject, scopes: readonly OperatorScope[], actor: ActorRef): Promise<Outcome<IssuedToken, AuthorizationError>> {
@@ -294,14 +474,29 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
     },
 
     recomputeSessionGrant(session: Session, declaration: Declaration | null): Outcome<Session, AuthorizationError> {
-      void declaration;
-      // No declaration dimension reaches an operator-api or operator session
-      // (`repositoryBinding` is null for both), so there is nothing to
-      // narrow against here — the four-layer intersection this exists to
-      // perform is exercised by S14's MCP sessions instead. Total and a
-      // no-op, which trivially satisfies invariant A2 (a no-op recomputation
-      // is its own subset).
-      return ok(session);
+      if (session.kind !== 'mcp') {
+        // No declaration dimension reaches an operator-api or operator
+        // session (`repositoryBinding` is null for both) — nothing to
+        // narrow against. Total and a no-op, which trivially satisfies
+        // invariant A2 (a no-op recomputation is its own subset).
+        return ok(session);
+      }
+      // `effectiveGrant` filters the *existing* session grant against the
+      // current contract/ceiling/declaration intersection — it only ever
+      // removes a capability the session already carried, never introduces
+      // one it did not. That is what makes a narrowed declaration grant
+      // reach a live session on its next call (S14.4) while a widened one
+      // cannot (S14.5): re-intersecting against a wider `capabilityGrant`
+      // still filters the same frozen `session.grant`, so nothing new gets
+      // in. `declaration: null` (orphaned/removed mid-session) drops every
+      // declaration-scoped capability the same way it does for any other
+      // caller of `effectiveGrant`.
+      const recomputed = deps.declarations.effectiveGrant(deps.contractCapabilitySet, deps.ceiling, declaration, session.grant);
+      return ok({
+        ...session,
+        grant: recomputed as unknown as Session['grant'],
+        frozenAtEpoch: declaration ? declaration.grantEpoch : session.frozenAtEpoch,
+      });
     },
 
     async grantIsLive(grantId: GrantId): Promise<boolean> {
@@ -384,6 +579,38 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
       });
       if (result.ok) await auditCredentialEvent('token-revoked', actor);
       return result;
+    },
+
+    /** `/oauth/revoke` (RFC 7009): resolves the presented opaque value to its `jti` by the same hash lookup `establishMcpSession`/`refresh` use, then revokes it exactly as `revokeToken` would. Unknown or already-revoked is not an error — revocation is idempotent, the same as every other revoke method here. */
+    async revokeBearerToken(bearer: BearerToken, actor: ActorRef): Promise<Outcome<void, AuthorizationError>> {
+      const candidateHash = sha256Digest(bearer);
+      const now = deps.clock.now();
+      const result = withDb(deps.volumeRoot, (db) => {
+        const tokenRow = db.prepare('SELECT * FROM token WHERE verifier_hash = ?').get(candidateHash) as TokenRow | undefined;
+        if (!tokenRow || !timingSafeStringEqual(candidateHash, tokenRow.verifier_hash)) return;
+        db.prepare('UPDATE token SET revoked_at = ? WHERE jti = ? AND revoked_at IS NULL').run(now, tokenRow.jti);
+      });
+      if (result.ok) await auditCredentialEvent('token-revoked', actor);
+      return result;
+    },
+
+    /**
+     * `20-contract.md` § L4 — authorization: the one member this module
+     * takes a `StoreTransaction` for, writing and reading back inside the
+     * caller's own transaction rather than opening its own connection —
+     * same shape as `Declarations.bumpGrantEpoch` (issue #50's note on the
+     * four `tx`-taking members). No caller wires this in yet; it is correct
+     * when one does, the same way `bumpGrantEpoch` was before this slice.
+     * Revocation never deletes or writes a token row directly — `grant`
+     * revoked is enough for both `establishMcpSession` and `grantIsLive` to
+     * treat every token under it as dead, the same cascade
+     * `revokeGrant`/`revokeClient` already rely on.
+     */
+    revokeGrantsForResource(declarationId: DeclarationId, generation: Generation, tx: StoreTransaction): readonly GrantId[] {
+      const now = deps.clock.now();
+      tx.run('UPDATE "grant" SET revoked_at = ? WHERE declaration_id = ? AND generation = ? AND revoked_at IS NULL', now, declarationId, generation);
+      const rows = tx.all('SELECT grant_id FROM "grant" WHERE declaration_id = ? AND generation = ? AND revoked_at = ?', declarationId, generation, now) as { grant_id: string }[];
+      return rows.map((row) => row.grant_id as GrantId);
     },
 
     async runRetention() {

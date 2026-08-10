@@ -2586,8 +2586,25 @@ interface RefreshedTokens {
   readonly refresh: IssuedToken;
 }
 
+interface McpGrantInput {
+  readonly clientId: ClientId;
+  readonly subject: Subject;
+  readonly resource: McpResourceUri;
+  readonly declarationId: DeclarationId;
+  readonly generation: Generation;
+  readonly scopes: readonly McpScope[];
+}
+
+interface IssuedMcpGrant {
+  readonly grant: Grant;
+  readonly access: IssuedToken;
+  readonly refresh: IssuedToken;
+}
+
 interface Authorization {
   registerClient(request: ClientRegistrationRequest): Promise<Outcome<OAuthClient, AuthorizationError>>;
+  getClient(clientId: ClientId): Promise<OAuthClient | null>;
+  issueMcpGrant(input: McpGrantInput, actor: ActorRef): Promise<Outcome<IssuedMcpGrant, AuthorizationError>>;
   establishMcpSession(bearer: BearerToken, resource: McpResourceUri): Promise<Outcome<Session, AuthorizationError>>;
   verifyOperatorApiToken(bearer: BearerToken): Promise<Outcome<Session, AuthorizationError>>;
   issueOperatorApiToken(subject: Subject, scopes: readonly OperatorScope[], actor: ActorRef): Promise<Outcome<IssuedToken, AuthorizationError>>;
@@ -2601,13 +2618,29 @@ interface Authorization {
   revokeGrant(grantId: GrantId, actor: ActorRef): Promise<Outcome<void, AuthorizationError>>;
   revokeToken(jti: TokenId, actor: ActorRef): Promise<Outcome<void, AuthorizationError>>;
   revokeGrantsForResource(declarationId: DeclarationId, generation: Generation, tx: StoreTransaction): readonly GrantId[];
+  revokeBearerToken(bearer: BearerToken, actor: ActorRef): Promise<Outcome<void, AuthorizationError>>;
   runRetention(): Promise<RetentionReport>;
 }
 ```
 
+`revokeBearerToken` is `/oauth/revoke`'s (RFC 7009) one call: the client presents the opaque value it holds, not the `TokenId` it was never given, so revocation has to resolve by hash the same way `establishMcpSession` and `refresh` already do rather than by id.
+
 `recomputeSessionGrant` is synchronous and total, and its result is always a subset of the session
 it was handed. `grantIsLive` walks the cascade upward at check time; nothing writes a cascade as a
 batch, so there is no partially applied revocation to recover from.
+
+`issueMcpGrant` is the one durable write the authorization-code flow performs. Everything ahead of
+it — the pending-authorization record, the PKCE challenge, the issued authorization code — is
+surface-owned and ephemeral (see `### L5 — surfaces` below), the same way a login form's CSRF token
+is never a store row. `getClient` is what lets `/oauth/authorize` (`GET`) check a presented
+`redirect_uri` against the client's own registered list before a `PendingAuthorization` is ever
+created — the redirect-URI check named below has to read the same row `registerClient` wrote, not
+merely compare the value against itself at token-exchange time. By the time a surface calls
+`issueMcpGrant`, PKCE verification, redirect-URI matching and client validation have already happened; the method's only job is minting the durable
+`Grant` (`kind: 'mcp'`) and its access/refresh `Token` pair, which is what lets a client reconnect
+after a container restart without re-authorising (S14.7). A grant is never re-issued for the same
+authorization code — the surface layer deletes the ephemeral code before calling this method, so a
+replay finds no code to exchange rather than reaching the store twice.
 
 ### L4 — operator identity
 
@@ -2718,6 +2751,51 @@ not fixed here — see `## Unresolved`.
 `GET /health`, the latter two authenticated. U4 still owns the rest of the route table, but these
 three are externally observable — an operator's monitoring binds to them — so U4 resolving later
 must accept them rather than rename a live endpoint.
+
+#### OAuth endpoints and the MCP transport (resolves U5)
+
+```ts
+interface ProtectedResourceMetadata {
+  readonly resource: McpResourceUri;
+  readonly authorization_servers: readonly [string];
+  readonly scopes_supported: readonly McpScope[];
+  readonly bearer_methods_supported: readonly ['header'];
+}
+
+interface AuthorizationServerMetadata {
+  readonly issuer: string;
+  readonly authorization_endpoint: string;
+  readonly token_endpoint: string;
+  readonly registration_endpoint: string;
+  readonly revocation_endpoint: string;
+  readonly response_types_supported: readonly ['code'];
+  readonly grant_types_supported: readonly ['authorization_code', 'refresh_token'];
+  readonly token_endpoint_auth_methods_supported: readonly ['none'];
+  readonly code_challenge_methods_supported: readonly ['S256'];
+  readonly scopes_supported: readonly McpScope[];
+}
+```
+
+| Path | Method | Auth | Carries |
+|---|---|---|---|
+| `/.well-known/oauth-protected-resource/mcp/{declarationId}` | `GET` | none | `ProtectedResourceMetadata` for that declaration's resource URI |
+| `/.well-known/oauth-authorization-server` | `GET` | none | `AuthorizationServerMetadata`, one server for the whole instance |
+| `/oauth/register` | `POST` | none | Dynamic Client Registration (RFC 7591) — wraps `registerClient` |
+| `/oauth/authorize` | `GET`, `POST` | operator console cookie | The approval step; issues a short-lived, process-local authorization code bound to a PKCE `code_challenge` (S256) and the `resource` being granted. Ephemeral — a restart mid-flow means starting over, not a re-authorization of an already-connected client |
+| `/oauth/token` | `POST` | none (PKCE substitutes for a client secret) | `authorization_code` grant (with `code_verifier`) calls `issueMcpGrant`; `refresh_token` grant calls `refresh` |
+| `/oauth/revoke` | `POST` | bearer | Revokes the presented token via `revokeToken` (RFC 7009) |
+| `/mcp/{declarationId}` | `POST` | bearer, audience-checked against the path | The MCP JSON-RPC transport: `initialize`, `tools/list`, `tools/call` |
+
+A `401` from `/mcp/{declarationId}` — audience mismatch, unknown/expired/revoked token or grant —
+answers `WWW-Authenticate: Bearer realm="subzerodev-git", resource_metadata="<origin>/.well-known/oauth-protected-resource/mcp/{declarationId}"`
+and no `ToolResult` envelope, per `AuthorizationError`'s first nine variants (`## Error semantics`
+above). Only the operator console's own cookie session may approve `/oauth/authorize` — the same
+authenticated-operator gate `console-auth-routes.ts` already uses elsewhere, not a new one.
+`/oauth/authorize` and `/oauth/register` are unauthenticated by transport (registration and the
+initial approval redirect have no token yet) but bounded: a deployment-fixed cap on pending
+authorizations and registered clients keeps an unauthenticated caller from growing either without
+bound, mirroring the prior art's `MAX_PENDING_AUTHORIZATIONS` / `MAX_REGISTERED_CLIENTS`
+(`SubZeroDev.Blog/tools/blog-mcp/src/serve/oauth.ts`).
 
 **No route handler may take the process down.** An unhandled rejection in a handler is fatal to the
 service, which would hand anyone able to make one throw the same power that refusing to start on a
@@ -3394,10 +3472,10 @@ call-any-tool-by-name proxy; that every route takes a repository dimension; that
 routes are disjoint; and that four views are operator-only. It does not enumerate the routes, their
 paths, or their request and response bodies.
 
-**U5 — OAuth endpoint paths and the protected-resource metadata document.** The protocol shapes are
-fixed by their RFCs and the resource indicator is fixed as `/mcp/{declarationId}`. The paths for
-registration, authorization, token and revocation, and the exact contents of the metadata document
-returned with a `401` challenge, are not stated.
+**U5 — OAuth endpoint paths and the protected-resource metadata document, resolved 2026-08-10 by
+S14.** Standard RFC-shaped paths under `/oauth/*` and `/.well-known/*`, with `issueMcpGrant` added
+to `Authorization` as the one durable write the authorization-code exchange performs. See
+`### L5 — surfaces` above and `design/90-decisions.md`, 2026-08-10.
 
 **U6 — Operational numbers the design explicitly defers.** `mutationQueueDepth`,
 `concurrentWaitsPerSession`, `concurrentLockFreeOperations`, `mutationLockAcquireMs`,

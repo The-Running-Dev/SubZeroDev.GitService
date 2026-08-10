@@ -16,6 +16,7 @@ import {
 } from '../operator-identity/operator-identity.ts';
 import { base32Decode, currentTotpCode } from '../operator-identity/totp.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './http-server.ts';
+import { createMcpRoutesState } from './mcp-routes.ts';
 import type { GitSha, Sha256Hex } from '../shared/brands.ts';
 import { createStubDeclarations } from '../declarations/testing/stub-declarations.ts';
 import { createStubCloneStore } from '../clone/testing/stub-clone-store.ts';
@@ -60,6 +61,8 @@ async function withServer<T>(volume: string, fn: (baseUrl: string, identity: Ope
     cloneStore: createStubCloneStore(),
     dispatchPipeline: createStubDispatchPipeline(),
     contractCapabilitySet: new Set() as unknown as ContractCapabilitySet,
+    origin: 'http://localhost',
+    mcpState: createMcpRoutesState(),
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address() as AddressInfo;

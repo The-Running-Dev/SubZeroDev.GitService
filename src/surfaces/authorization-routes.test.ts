@@ -14,11 +14,12 @@ import { base32Decode, currentTotpCode } from '../operator-identity/totp.ts';
 import { createAuthorization, type Authorization } from '../authorization/authorization.ts';
 import { createStoreFailingAuthorization } from '../authorization/testing/stub-authorization.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './http-server.ts';
+import { createMcpRoutesState } from './mcp-routes.ts';
 import type { GitSha, Sha256Hex } from '../shared/brands.ts';
 import { createStubDeclarations } from '../declarations/testing/stub-declarations.ts';
 import { createStubCloneStore } from '../clone/testing/stub-clone-store.ts';
 import { createStubDispatchPipeline } from '../dispatch/testing/stub-dispatch-pipeline.ts';
-import type { ContractCapabilitySet } from '../contract/capabilities.ts';
+import type { ContractCapabilitySet, DeploymentCeiling } from '../contract/capabilities.ts';
 
 const COMMIT_SHA = '0'.repeat(40) as GitSha;
 const CONTRACT_FINGERPRINT = '1'.repeat(64) as Sha256Hex;
@@ -48,6 +49,8 @@ async function withServer<T>(volume: string, fn: (baseUrl: string) => Promise<T>
     volumeRoot: volume,
     clock: systemClock,
     contractCapabilitySet: CEILING,
+    ceiling: CEILING as unknown as DeploymentCeiling,
+    declarations: createStubDeclarations(),
     audit: createAudit({ volumeRoot: volume, clock: systemClock }),
   });
   // The override replaces only the members a test names, so login, issuance
@@ -67,6 +70,8 @@ async function withServer<T>(volume: string, fn: (baseUrl: string) => Promise<T>
     cloneStore: createStubCloneStore(),
     dispatchPipeline: createStubDispatchPipeline(),
     contractCapabilitySet: CEILING,
+    origin: 'http://localhost',
+    mcpState: createMcpRoutesState(),
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address() as AddressInfo;

@@ -41,6 +41,12 @@ export function createStubAuthorization(
     async registerClient() {
       return err(authorizationError({ code: 'registration-invalid', findings: [] }, 'stub: registerClient not exercised'));
     },
+    async getClient() {
+      return null;
+    },
+    async issueMcpGrant() {
+      return err(authorizationError({ code: 'token-unknown' }, 'stub: issueMcpGrant not exercised'));
+    },
     async establishMcpSession() {
       return err(authorizationError({ code: 'token-unknown' }, 'stub: establishMcpSession not exercised'));
     },
@@ -82,6 +88,12 @@ export function createStubAuthorization(
     async revokeToken() {
       return err(authorizationError({ code: 'token-unknown' }, 'stub: revokeToken not exercised'));
     },
+    revokeGrantsForResource() {
+      return [];
+    },
+    async revokeBearerToken() {
+      return err(authorizationError({ code: 'token-unknown' }, 'stub: revokeBearerToken not exercised'));
+    },
     async runRetention() {
       return { module: 'authorization', deletedRows: 0, freedBytes: 0, skipped: ['stub'] };
     },
@@ -105,6 +117,9 @@ export function createStoreFailingAuthorization(): Authorization {
     async issueOperatorApiToken() {
       return err(failure());
     },
+    async issueMcpGrant() {
+      return err(failure());
+    },
     async revokeClient() {
       return err(failure());
     },
@@ -112,6 +127,9 @@ export function createStoreFailingAuthorization(): Authorization {
       return err(failure());
     },
     async revokeToken() {
+      return err(failure());
+    },
+    async revokeBearerToken() {
       return err(failure());
     },
   };

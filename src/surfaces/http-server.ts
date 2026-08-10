@@ -15,6 +15,7 @@ import { handleConsoleAuthRoute, type ConsoleAuthDependencies } from './console-
 import { handleDeclarationRoute, type DeclarationRoutesDependencies } from './declaration-routes.ts';
 import { handleToolRoute, type ToolRoutesDependencies } from './tool-routes.ts';
 import { handleAuthorizationRoute, type AuthorizationRoutesDependencies } from './authorization-routes.ts';
+import { handleMcpRoute, type McpRoutesDependencies } from './mcp-routes.ts';
 
 /**
  * `LivenessReport` is the sole unauthenticated payload in the whole service
@@ -66,7 +67,8 @@ export interface SurfacesDependencies
   extends ConsoleAuthDependencies,
     AuthorizationRoutesDependencies,
     Pick<DeclarationRoutesDependencies, 'declarations' | 'cloneStore' | 'declarationsAwaitingRecovery'>,
-    Pick<ToolRoutesDependencies, 'dispatchPipeline' | 'contractCapabilitySet'> {
+    Pick<ToolRoutesDependencies, 'dispatchPipeline' | 'contractCapabilitySet'>,
+    Pick<McpRoutesDependencies, 'mcpState' | 'origin'> {
   readonly commitSha: GitSha;
   readonly contractFingerprint: Sha256Hex;
   readonly consoleFingerprint: Sha256Hex;
@@ -223,6 +225,15 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
     /^\/operator-sessions\/[^/]+\/revoke$/.test(url.pathname)
   ) {
     const handled = await handleAuthorizationRoute(deps, req, res, url);
+    if (handled) return;
+  }
+
+  if (
+    url.pathname.startsWith('/mcp/') ||
+    url.pathname.startsWith('/oauth/') ||
+    url.pathname.startsWith('/.well-known/oauth-')
+  ) {
+    const handled = await handleMcpRoute(deps, req, res, url);
     if (handled) return;
   }
 
