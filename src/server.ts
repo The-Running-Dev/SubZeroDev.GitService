@@ -40,6 +40,7 @@ import { createHttpAdapter } from './http/http-adapter.ts';
 import { createAuthorization } from './authorization/authorization.ts';
 import type { Session } from './shared/session.ts';
 import type { GrantEpoch, SessionId, Subject } from './shared/brands.ts';
+import { createWatcher } from './watcher/watcher.ts';
 
 /**
  * The composition root. It never imports the compiler (invariant B8, enforced
@@ -151,6 +152,16 @@ function resolveNotifierIntervalSeconds(): number {
   return value;
 }
 
+/** S17's first two switches. Both default off: unattended publishing is opt-in. */
+function resolveBoolean(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim().length === 0) return fallback;
+  if (raw === '1' || raw.toLowerCase() === 'true') return true;
+  if (raw === '0' || raw.toLowerCase() === 'false') return false;
+  console.error(`server: ${name} must be true/false or 1/0 (got '${raw}')`);
+  process.exit(1);
+}
+
 function resolveCommitSha(): GitSha {
   const fromEnv = process.env.GIT_COMMIT_SHA;
   const raw = fromEnv ?? execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim();
@@ -185,6 +196,8 @@ async function main(): Promise<void> {
   const locks = createLocks(resolveAdmissionLimits());
   const ceiling = resolveCeiling();
   const remoteHostAllowlist = resolveRemoteHostAllowlist();
+  const remoteOperationsPermitted = resolveBoolean('REMOTE_OPERATIONS_PERMITTED', false);
+  const watcherEnabled = resolveBoolean('WATCHER_ENABLED', false);
 
   // `Declarations` and `CloneStore` depend on each other for different
   // reasons (`declarations.ts`'s `CloneAdoptionCheck` doc comment): adoption
@@ -199,6 +212,7 @@ async function main(): Promise<void> {
     clock: systemClock,
     remoteHostAllowlist,
     ceiling,
+    isDropTarget: (tool) => PRODUCTION_TOOL_DECLARATIONS.some((entry) => entry.name === tool && entry.annotations.dropTarget),
     cloneAdoptionCheck: () => {
       const store = cloneStoreRef;
       if (!store) throw new Error('cloneStore accessed before composition finished');
@@ -445,6 +459,33 @@ async function main(): Promise<void> {
   // boot step).
   dispatchRef = dispatchPipeline.dispatch;
 
+  const watcher = createWatcher({
+    volumeRoot,
+    clock: systemClock,
+    remoteOperationsPermitted,
+    enabled: watcherEnabled,
+    pollIntervalSeconds: 15,
+    declarations,
+    cloneStore,
+    isDropTarget: (tool) => PRODUCTION_TOOL_DECLARATIONS.some((entry) => entry.name === tool && entry.annotations.dropTarget),
+    dispatch: dispatchPipeline.dispatch,
+    audit,
+  });
+
+  // A disabled watcher is intentionally inert. Once explicitly enabled, a
+  // configuration missing either of its other two switches is a fatal setup
+  // error rather than a service that looks healthy while dropping files.
+  if (watcherEnabled) {
+    const watcherStarted = await watcher.start();
+    if (!watcherStarted.ok) {
+      ready = false;
+      console.error(`server: watcher did not start (${watcherStarted.error.code}) — ${watcherStarted.error.summary}`);
+      await lifecycle.shutdown('fatal');
+      process.exit(1);
+      return;
+    }
+  }
+
   const server = createSurfacesServer({
     commitSha,
     contractFingerprint: booted.value.registryFingerprint,
@@ -572,6 +613,7 @@ async function main(): Promise<void> {
       // Bounded because every attempt now carries a timeout.
       void Promise.resolve(deliveryInFlight)
         .catch(() => undefined)
+        .then(() => watcher.stop())
         .then(() => lifecycle.shutdown('signal'))
         .then(() => process.exit(0));
     });

@@ -762,6 +762,12 @@ interface DropCandidate {
   readonly isSymlink: boolean;
 }
 
+/** The complete input passed by the watcher to a consumer-owned `dropTarget` tool. */
+interface ContentDropInput {
+  readonly fileName: DropFileName;
+  readonly content: string;
+}
+
 interface PendingPullRequest {
   readonly declarationId: DeclarationId;
   readonly number: number;
@@ -2579,6 +2585,11 @@ Constructed with `Dispatch` injected, exactly as the scheduler is. Every git and
 through that dispatch, so the watcher depends on neither `GitOperations` nor `HostAdapter`.
 `start` fails unless all three switches are on: remote operations permitted, watcher enabled, and
 at least one declaration naming a drop.
+
+Every registry tool annotated `dropTarget` takes `ContentDropInput` as its complete input. The
+watcher reads the claimed file and passes inert `fileName` and `content`; the target validates that
+content and chooses every repository path. It never receives a host filesystem path or a capability
+to inspect the drop directory.
 
 ### L3 — module adapter
 
