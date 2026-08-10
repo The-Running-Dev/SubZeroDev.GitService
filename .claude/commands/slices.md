@@ -2,6 +2,12 @@
 description: Break the contract into vertical slices with acceptance criteria
 ---
 
+## Stop if `design/` is frozen
+
+If `design/FROZEN.md` exists, **stop before doing anything else.** Report its `Frozen because` and `Lifts when` lines verbatim and write nothing. The rule and the marker's format live in `AGENTS.md`, *The design freeze* — not restated here.
+
+This includes **resizing or splitting an existing slice**, which is the edit most likely to look harmless mid-freeze and is the one that renumbers criteria and desyncs the tracker. If a slice turns out to be mis-sized while frozen, say so and stop; it is a real finding, and it is the user's to schedule.
+
 Read `design/10-design.md` and `design/20-contract.md`. Write `design/30-slices.md`.
 
 Slices are **vertical**: each one goes from entry point to persistence and leaves the system runnable. A slice that only adds a layer ("build the data access layer") is wrong — it cannot be run, so it cannot be verified, so it accumulates undetected error.

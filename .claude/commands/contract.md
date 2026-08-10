@@ -2,6 +2,12 @@
 description: Derive the interface contract from the design doc
 ---
 
+## Stop if `design/` is frozen
+
+If `design/FROZEN.md` exists, **stop before doing anything else.** Report its `Frozen because` and `Lifts when` lines verbatim and write nothing. The rule and the marker's format live in `AGENTS.md`, *The design freeze* — not restated here.
+
+This is the gate a blocked slice most often arrives at: a slice that needs a contract amendment stops and escalates, and while frozen that escalation is answered by the user, not absorbed here. Thawing to amend is a legitimate answer — **it is just not this command's to decide.**
+
 Read `design/10-design.md`. Write `design/20-contract.md`.
 
 This is the artifact that constrains the implementing agent. Everything downstream is checked against it. Precision here is what makes it safe to implement with a cheaper model.

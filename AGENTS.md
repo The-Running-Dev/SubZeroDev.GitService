@@ -158,6 +158,33 @@ This repository is itself a bet on that distinction: a service that makes git op
 - **Ask instead of assuming.** If two readings of the spec are both defensible, stop and present both. Do not pick one and proceed.
 - **Every slice ends runnable.** No half-wired states committed.
 
+## The design freeze
+
+The pipeline's normal loop keeps `design/` live: a slice lands, `/reconcile` writes reality back, `/track` resyncs the tracker. That is right while the design is still being settled and **wrong once implementation is the bottleneck**, because each pass is generative rather than merely checking — landing slice N rewrites slice N+1's specification, which desyncs the tracker, which needs `/track`, which finds drift, which needs `/reconcile`. The loop has no fixed point. Freezing is how it is escaped.
+
+**`design/FROZEN.md` is the marker, and its existence is the whole mechanism.** It is tracked, not ignored — a freeze is a statement to everyone working in the repository, not local state. While it exists:
+
+- **`/reconcile` and `/track` do not run.** The tracker is deliberately allowed to go stale.
+- **`/design`, `/contract` and `/slices` refuse.** Authoring is gated too, so the docs cannot drift forward while the implementation is being checked against them.
+- **Slices implement against `20-contract.md` as a fixed artifact**, at the SHA the marker names.
+- **A contradiction found while implementing is stated in that slice's pull request and left in the document.** Do not fix it in `design/`. The staleness is the point; recording it in the PR is what makes the eventual reconciliation cheap.
+
+**Lifting it is deliberate and manual: delete the file, then run one reconciliation pass** — `/reconcile`, then `/track`. There is no command that lifts a freeze, because a freeze that something can lift on your behalf is one that gets lifted by habit. A slice that turns out to need a contract amendment stops and says so; that escalation is the user's to answer, and answering it may well be "thaw, amend, re-freeze."
+
+The marker's format, which the five gated commands read and must not restate:
+
+```markdown
+# design/ is frozen
+
+Frozen at: <sha>, <YYYY-MM-DD>
+Frozen because: <what the freeze is escaping>
+Lifts when: <the checkable condition — "tier one is code-complete", not "when we are ready">
+
+To lift: delete this file, then run `/reconcile`, then `/track`.
+```
+
+A command that refuses reports `Frozen because` and `Lifts when` **verbatim** rather than paraphrasing them — the point of a stated condition is that it can be checked against, and a paraphrase is where it stops being checkable.
+
 ## Single ownership
 
 - **Reference, never restate.** A rule that lives in another document is linked, not copied. Two copies of a rule is a promise they will diverge and a guarantee nobody notices which is stale.

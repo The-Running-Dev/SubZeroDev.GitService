@@ -3,6 +3,12 @@ description: Sync design/ into GitHub issues and milestones. Idempotent - safe t
 argument-hint: [milestone name]
 ---
 
+## Stop if `design/` is frozen
+
+If `design/FROZEN.md` exists, **stop before doing anything else.** Report its `Frozen because` and `Lifts when` lines verbatim and take no other action — no issue is opened, edited, closed or repinned. The rule and the marker's format live in `AGENTS.md`, *The design freeze* — not restated here.
+
+A frozen repository's tracker is **deliberately** stale, so drift found here is expected rather than actionable. Resyncing it one slice at a time is the loop the freeze exists to escape.
+
 Reconcile `design/` against this repository's GitHub tracker. This command is the kit's single home for GitHub writes, and the authorization carve-out that permits them is in `AGENTS.md`, *Tracking work* — read it before writing anything.
 
 Re-running must be a no-op when nothing has changed. That is the property that makes this safe to run often, and it is the first thing to get right.
