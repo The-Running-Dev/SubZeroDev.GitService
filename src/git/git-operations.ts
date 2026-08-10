@@ -7,8 +7,10 @@ import {
   type ClonePath,
   type CloneUrl,
   type CredentialRef,
+  type DeclarationId,
   type GitSha,
   type IsoUtcTimestamp,
+  type OperationId,
   type RepoRelativePath,
 } from '../shared/brands.ts';
 import { isJsonObject, type JsonValue } from '../contract/json.ts';
@@ -16,10 +18,12 @@ import { ok, err, type Outcome } from '../shared/outcome.ts';
 import type { CallContext, DomainOperation } from '../shared/call-context.ts';
 import type { Clock } from '../clock/clock.ts';
 import type { CredentialBinding, Exec, MutableEnv } from '../exec/exec.ts';
+import type { ExecError } from '../exec/errors.ts';
 import type { Locks } from '../locks/locks.ts';
 import type { Audit } from '../audit/audit.ts';
 import type { Journal } from '../journal/journal.ts';
 import type { Declarations } from '../declarations/declarations.ts';
+import type { CloneStore } from '../clone/clone-store.ts';
 import type { CredentialResolver } from '../credentials/credentials.ts';
 import { prepareDeclarationCredential } from '../credentials/declaration-credential.ts';
 import { success, validation, authorization, infrastructure, precondition, upstream, timeout as timeoutResult, conflict, type ToolResult, type ReadStamp } from '../result/envelope.ts';
@@ -83,8 +87,16 @@ export interface GitOperationsDependencies {
   readonly locks: Pick<Locks, 'currentMutationHolder'>;
   /** Optional so every pre-S7 call site (read-only, never rejects a path) keeps compiling unchanged; a caller of `stage`/`restorePaths` that omits it simply gets no audit trail for a rejected path. */
   readonly audit?: Pick<Audit, 'append'>;
-  /** Required by operations that may mutate outside the local clone. Those operations fail closed when the writer is absent. */
-  readonly journal?: Pick<Journal, 'appendStep'>;
+  /**
+   * Required by operations that may mutate outside the local clone. Those
+   * operations fail closed when the writer is absent. `markApplied`/`settle`/
+   * `park` are `git.raw`'s alone: its argv is caller-authored, so only the
+   * handler that observed the post-state can tell an ordinary completion
+   * apart from one dispatch cannot safely settle on its own — the same
+   * reason it writes its own audit trail rather than relying on dispatch's
+   * generic line.
+   */
+  readonly journal?: Pick<Journal, 'appendStep' | 'markApplied' | 'settle' | 'park'>;
   /**
    * S9's three remote operations only. `CallContext` carries no credential
    * reference and no clone URL — both are `Declaration` fields — so reaching a
@@ -93,6 +105,8 @@ export interface GitOperationsDependencies {
    * resolver refuses rather than reaching a remote unauthenticated.
    */
   readonly declarations?: Pick<Declarations, 'get'>;
+  /** `git.raw` only, alongside `journal` above — marks the clone for attention when it parks its own journal entry. */
+  readonly cloneStore?: Pick<CloneStore, 'markAttention'>;
   readonly credentials?: CredentialResolver;
   /**
    * The same `MutableEnv` the `Exec` above was built with. `resolveInto`
@@ -300,13 +314,28 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
    */
   const REMOTE_VALUED_OPTIONS = new Set(['--remote', '--reference', '--reference-if-able', '--upload-pack', '--receive-pack']);
 
-  /** Every position a caller could put a repository in: the bare operands, plus the values of the options that take one, in either `--opt=value` or `--opt value` form. */
-  function remoteCandidates(operands: readonly string[]): readonly string[] {
+  /** The subcommands whose grammar is `[remote] [refspec-or-pattern...]` — only the first bare positional is ever a remote; `20-contract.md`'s hatch rules validate that one position precisely below, against `declared`. */
+  const NETWORK_SUBCOMMANDS = new Set(['push', 'fetch', 'pull', 'ls-remote', 'clone']);
+
+  /**
+   * Every position a caller could put a repository in: the bare operands,
+   * plus the values of the options that take one, in either `--opt=value` or
+   * `--opt value` form.
+   *
+   * For a `NETWORK_SUBCOMMANDS` entry, only the *first* bare positional is
+   * included — every later one is a refspec or ref pattern, not a remote, and
+   * git's own `src:dst` refspec syntax can make one look SCP-shaped (e.g.
+   * `release.1.0:release.1.0`) without naming a remote at all.
+   */
+  function remoteCandidates(operands: readonly string[], subcommand: string): readonly string[] {
     const values: string[] = [];
+    const onlyFirstBarePositional = NETWORK_SUBCOMMANDS.has(subcommand);
+    let sawBarePositional = false;
     for (let index = 0; index < operands.length; index += 1) {
       const arg = operands[index]!;
       if (!arg.startsWith('-')) {
-        values.push(arg);
+        if (!onlyFirstBarePositional || !sawBarePositional) values.push(arg);
+        sawBarePositional = true;
         continue;
       }
       const equals = arg.indexOf('=');
@@ -382,8 +411,14 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       // and reading configuration — which is what a caller diagnosing a
       // repository actually needs — stays available.
       const writeFlags = ['--add', '--replace-all', '--unset', '--unset-all', '--remove-section', '--rename-section', '--set-all'];
+      // `--get`/`--get-all`/`--get-regexp`/`--get-urlmatch` are reads that
+      // legitimately take a second positional — a value pattern or URL to
+      // filter by — so a bare `positional.length >= 2` misreads them as the
+      // two-positional write form `git config <name> <value>`.
+      const readFlagsTakingValuePattern = ['--get', '--get-all', '--get-regexp', '--get-urlmatch'];
       const positional = operands.filter((arg) => !arg.startsWith('-'));
-      if (operands.some((arg) => writeFlags.includes(arg)) || positional.length >= 2) {
+      const isRead = operands.some((arg) => readFlagsTakingValuePattern.includes(arg));
+      if (operands.some((arg) => writeFlags.includes(arg)) || (positional.length >= 2 && !isRead)) {
         return "'git config' writes are refused through the hatch: configuration selects executables, credential helpers, remotes and transports, so the hatch reads configuration but never persists it";
       }
     }
@@ -400,7 +435,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
     // operands: `git archive --remote=<repo>` reaches a transport through an
     // option, and `archive` is not one of the subcommands the network rule
     // below inspects.
-    for (const operand of remoteCandidates(operands)) {
+    for (const operand of remoteCandidates(operands, subcommand)) {
       if (REMOTE_HELPER.test(operand)) {
         return `remote operand '${operand}' uses git's remote-helper transport syntax, which selects a helper program`;
       }
@@ -418,7 +453,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       const remote = normaliseRemote(operand);
       if (remote === null || remote !== declared) return `remote operand '${operand}' is neither origin nor this declaration's cloneUrl`;
     }
-    if (['push', 'fetch', 'pull', 'ls-remote', 'clone'].includes(subcommand)) {
+    if (NETWORK_SUBCOMMANDS.has(subcommand)) {
       const optionsWithValues = new Set([
         '--depth', '--deepen', '--shallow-since', '--shallow-exclude', '--jobs', '-j', '--server-option',
         '--negotiation-tip', '--filter', '--refmap', '--submodule-prefix', '--origin', '-o', '--branch', '-b',
@@ -445,9 +480,22 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
     const observed = await git(cwd, ['status', '--porcelain=v1', '-z'], signal);
     if (!observed.ok) return observed;
     const result = new Map<string, string>();
-    for (const entry of observed.value.stdout.split('\0').filter(Boolean)) {
+    const tokens = observed.value.stdout.split('\0').filter(Boolean);
+    for (let index = 0; index < tokens.length; index += 1) {
+      const entry = tokens[index]!;
+      const status = entry.slice(0, 2);
       const pathName = entry.slice(3).trim();
-      if (pathName) result.set(pathName, entry.slice(0, 2));
+      if (pathName) result.set(pathName, status);
+      // A rename or copy (`XY` starting with `R`/`C`) carries a second
+      // NUL-terminated token for the pre-image path, with no "XY " prefix of
+      // its own — consumed here as a bare path rather than left for the next
+      // iteration, which would wrongly strip its first 3 characters as if
+      // they were a status prefix.
+      if ((status[0] === 'R' || status[0] === 'C') && index + 1 < tokens.length) {
+        index += 1;
+        const otherPath = tokens[index]!;
+        if (otherPath) result.set(otherPath, status);
+      }
     }
     return ok(result as ReadonlyMap<string, string>);
   }
@@ -491,10 +539,56 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
     return appended.ok ? null : infrastructure(`'${name}' refused before acting because its recovery step could not be written: ${appended.error.summary}`);
   }
 
+  /**
+   * `git.raw` completes its own journal entry — settled ordinarily, or
+   * parked when the post-state genuinely cannot be accounted for — rather
+   * than leaving it to dispatch's generic completion (`dispatch-pipeline.ts`
+   * skips that path for this one tool). Only the handler that observed the
+   * post-state can tell an ordinary completion apart from one dispatch
+   * cannot safely settle on its own; the same reasoning that already has
+   * this handler write its own audit trail instead of the generic line.
+   */
+  async function finishRawJournal(operationId: OperationId, declarationId: DeclarationId | null, unknownPostState: boolean, reason: string): Promise<void> {
+    if (!deps.journal) return;
+    if (unknownPostState) {
+      await deps.journal.park(operationId, reason);
+      if (declarationId !== null) await deps.cloneStore?.markAttention(declarationId, reason);
+      return;
+    }
+    await deps.journal.markApplied(operationId);
+    await deps.journal.settle(operationId, null);
+  }
+
   /** Records the rejection against this declaration only — never reference-wide. See `credential_failure_mark`'s composite key. */
   async function markRejected(ctx: CallContext, ref: CredentialRef | null, stderr: string): Promise<void> {
     if (ref === null || !deps.credentials || ctx.declarationId === null) return;
     await deps.credentials.markFailing(ref, ctx.declarationId, `the remote refused this credential: ${stderr.trim().slice(0, 200)}`);
+  }
+
+  /**
+   * Every remote git failure across `push`/`fetch`/`syncBase` goes through
+   * one classifier: `20-contract.md`'s `ExecError` table maps a `timed-out`
+   * child to `timeout`, and dispatch parks a `timeout`-kind mutation's
+   * journal entry — a transfer that timed out leaves the tree in a state the
+   * caller cannot account for, the same reasoning `git.raw`'s own timeout
+   * handling already applies. An authentication rejection marks the
+   * credential failing for this declaration; everything else is `upstream`.
+   */
+  async function classifyRemoteFailure(
+    ctx: CallContext,
+    ref: CredentialRef | null,
+    error: ExecError,
+    describe: (summary: string) => string,
+  ): Promise<ToolResult<never>> {
+    if (error.code === 'timed-out') {
+      return timeoutResult(describe(error.summary), error.limitSeconds);
+    }
+    const stderr = execStderr(error);
+    if (looksLikeAuthRejection(stderr)) {
+      await markRejected(ctx, ref, stderr);
+      return upstream(`the remote refused the credential for '${ctx.declarationId}'; the reference is marked failing for this declaration only`, null);
+    }
+    return upstream(describe(error.summary), null);
   }
 
   /** `refs/remotes/origin/*` and their values, which is what a fetch is observed to have changed. */
@@ -866,12 +960,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       // none here.
       const pushResult = await remoteGit(cwd, ['push', '--porcelain', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], signal, prepared.value.credential);
       if (!pushResult.ok) {
-        const stderr = execStderr(pushResult.error);
-        if (looksLikeAuthRejection(stderr)) {
-          await markRejected(ctx, prepared.value.ref, stderr);
-          return upstream(`the remote refused the credential for '${ctx.declarationId}'; the reference is marked failing for this declaration only`, null);
-        }
-        return upstream(`push of '${branch}' failed: ${pushResult.error.summary}`, null);
+        return await classifyRemoteFailure(ctx, prepared.value.ref, pushResult.error, (summary) => `push of '${branch}' failed: ${summary}`);
       }
 
       // `--porcelain` prefixes each ref line with a status character: `=` for
@@ -901,15 +990,12 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
 
       const fetchResult = await remoteGit(cwd, ['fetch', 'origin'], signal, prepared.value.credential);
       if (!fetchResult.ok) {
-        const stderr = execStderr(fetchResult.error);
-        if (looksLikeAuthRejection(stderr)) {
-          await markRejected(ctx, prepared.value.ref, stderr);
-          return upstream(`the remote refused the credential for '${ctx.declarationId}'; the reference is marked failing for this declaration only`, null);
-        }
         // Git applies a fetch's ref updates only once the transfer completes,
         // so a transfer that fails part-way leaves every remote-tracking ref
-        // where it was. Nothing is undone here because nothing was done.
-        return upstream(`fetch failed: ${fetchResult.error.summary}`, null);
+        // where it was. Nothing is undone here because nothing was done —
+        // except on a timeout, where the transfer's own outcome (not just the
+        // refs this function reads) is genuinely unknown, hence `timeout`.
+        return await classifyRemoteFailure(ctx, prepared.value.ref, fetchResult.error, (summary) => `fetch failed: ${summary}`);
       }
 
       const after = await remoteTrackingRefs(cwd, signal);
@@ -933,12 +1019,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
 
       const fetchResult = await remoteGit(cwd, ['fetch', 'origin', baseBranch], signal, prepared.value.credential);
       if (!fetchResult.ok) {
-        const stderr = execStderr(fetchResult.error);
-        if (looksLikeAuthRejection(stderr)) {
-          await markRejected(ctx, prepared.value.ref, stderr);
-          return upstream(`the remote refused the credential for '${ctx.declarationId}'; the reference is marked failing for this declaration only`, null);
-        }
-        return upstream(`could not fetch '${baseBranch}': ${fetchResult.error.summary}`, null);
+        return await classifyRemoteFailure(ctx, prepared.value.ref, fetchResult.error, (summary) => `could not fetch '${baseBranch}': ${summary}`);
       }
 
       const upstreamResult = await git(cwd, ['rev-parse', 'FETCH_HEAD'], signal);
@@ -989,10 +1070,22 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
 
     async raw(ctx, input: GitRawInput): Promise<ToolResult<GitRawData>> {
       const startedAtMs = Date.now();
-      if (ctx.cloneRoot === null || ctx.declarationId === null) return infrastructure('no clone or declaration materialised for this operation');
-      if (!deps.declarations) return infrastructure('declaration lookup is unavailable for git.raw');
+      if (ctx.cloneRoot === null || ctx.declarationId === null) {
+        const summary = 'no clone or declaration materialised for this operation';
+        await finishRawJournal(ctx.operationId, ctx.declarationId, false, summary);
+        return infrastructure(summary);
+      }
+      if (!deps.declarations) {
+        const summary = 'declaration lookup is unavailable for git.raw';
+        await finishRawJournal(ctx.operationId, ctx.declarationId, false, summary);
+        return infrastructure(summary);
+      }
       const declaration = await deps.declarations.get(ctx.declarationId);
-      if (!declaration) return infrastructure(`declaration '${ctx.declarationId}' disappeared before git.raw ran`);
+      if (!declaration) {
+        const summary = `declaration '${ctx.declarationId}' disappeared before git.raw ran`;
+        await finishRawJournal(ctx.operationId, ctx.declarationId, false, summary);
+        return infrastructure(summary);
+      }
 
       // **The intent line is written before the argv is judged, not after.**
       // A refused vector is the single most attributable thing the hatch ever
@@ -1007,7 +1100,11 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
         at: clock.now(), operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation,
         tool: 'git_raw' as never, actorRef: ctx.actorRef, context: 'hatch', form: 'hatch-intent', argv: input.argv.map(scrub),
       });
-      if (!intent.appended) return infrastructure(`git.raw refused to start because its intent audit line could not be written (${intent.reason})`);
+      if (!intent.appended) {
+        const summary = `git.raw refused to start because its intent audit line could not be written (${intent.reason})`;
+        await finishRawJournal(ctx.operationId, ctx.declarationId, false, summary);
+        return infrastructure(summary);
+      }
 
       const rejection = rawArgvRejection(input.argv, declaration.cloneUrl);
       if (rejection) {
@@ -1016,6 +1113,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
           at: clock.now(), operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation,
           tool: 'git_raw' as never, actorRef: ctx.actorRef, context: 'hatch', form: 'hatch-outcome', resultKind: refused.kind, changedPaths: [],
         });
+        await finishRawJournal(ctx.operationId, ctx.declarationId, false, rejection);
         return refused;
       }
 
@@ -1037,6 +1135,8 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
             const executed = await exec.runGit({ argv: input.argv, cwd, timeoutSeconds: rawTimeoutSeconds, credential: prepared.value.credential, signal: ctx.signal });
             const after = await rawStatus(cwd, new AbortController().signal);
             changedPaths = after.ok ? changedRawPaths(before.value, after.value) : null;
+            const withPostStateNote = (summary: string): string =>
+              after.ok ? summary : `${summary}; post-state observation also failed: ${after.error.summary}`;
 
             if (!after.ok && executed.ok) {
               result = infrastructure(`git ${input.argv[0]} completed, but its post-state could not be observed: ${after.error.summary}`);
@@ -1053,17 +1153,14 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
                 diagnosticsFor(ctx, startedAtMs, clock),
               );
             } else if (executed.error.code === 'timed-out') {
-              result = timeoutResult(
-                after.ok ? executed.error.summary : `${executed.error.summary}; post-state observation also failed: ${after.error.summary}`,
-                executed.error.limitSeconds,
-              );
+              result = timeoutResult(withPostStateNote(executed.error.summary), executed.error.limitSeconds);
             } else if (executed.error.code === 'cancelled') {
-              result = conflict(after.ok ? executed.error.summary : `${executed.error.summary}; post-state observation also failed: ${after.error.summary}`, null);
+              result = conflict(withPostStateNote(executed.error.summary), null);
             } else if (executed.error.code === 'nonzero-exit') {
               const childSummary = `${executed.error.summary}: ${executed.error.stderr || executed.error.stdout}`;
-              result = infrastructure(after.ok ? childSummary : `${childSummary}; post-state observation also failed: ${after.error.summary}`);
+              result = infrastructure(withPostStateNote(childSummary));
             } else {
-              result = infrastructure(after.ok ? executed.error.summary : `${executed.error.summary}; post-state observation also failed: ${after.error.summary}`);
+              result = infrastructure(withPostStateNote(executed.error.summary));
             }
           }
         }
@@ -1073,6 +1170,13 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
         at: clock.now(), operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation,
         tool: 'git_raw' as never, actorRef: ctx.actorRef, context: 'hatch', form: 'hatch-outcome', resultKind: result.kind, changedPaths,
       });
+      // Parked on a timeout regardless of whether the post-state observation
+      // itself succeeded — a timed-out child leaves what it did mid-operation
+      // unaccounted for even when the tree looks unchanged — and parked
+      // whenever `changedPaths` is `null`, meaning the post-state observation
+      // failed outright, whatever the child's own outcome was.
+      const mustPark = result.kind === 'timeout' || changedPaths === null;
+      await finishRawJournal(ctx.operationId, ctx.declarationId, mustPark, result.summary);
       return result;
     },
 

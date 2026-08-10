@@ -74,6 +74,10 @@ function operationsFor(rawFixture: ReturnType<typeof fixture>, options: { exec?:
   const env = options.env ?? new Map<EnvVarName, string>();
   const records: AuditAppendInput[] = [];
   const steps: string[] = [];
+  const parked: { operationId: OperationId; reason: string }[] = [];
+  const applied: OperationId[] = [];
+  const settled: OperationId[] = [];
+  const attentionMarks: { declarationId: DeclarationId; reason: string }[] = [];
   const exec = options.exec ?? createExec({ volumeRoot: rawFixture.root, credentialEnv: env });
   const repo = declaration(options.declarationUrl ?? rawFixture.remoteUrl);
   const audit = {
@@ -87,6 +91,10 @@ function operationsFor(rawFixture: ReturnType<typeof fixture>, options: { exec?:
   return {
     records,
     steps,
+    parked,
+    applied,
+    settled,
+    attentionMarks,
     operations: createGitOperations({
       clock: systemClock,
       exec,
@@ -99,10 +107,28 @@ function operationsFor(rawFixture: ReturnType<typeof fixture>, options: { exec?:
             ? { ok: false as const, error: { code: 'intent-write-failed', resultKind: 'infrastructure', retryable: false, summary: 'forced step failure', cause: {} as never } }
             : ok(undefined);
         },
+        async markApplied(operationId) {
+          applied.push(operationId);
+          return ok(undefined);
+        },
+        async settle(operationId) {
+          settled.push(operationId);
+          return ok(undefined);
+        },
+        async park(operationId, reason) {
+          parked.push({ operationId, reason });
+          return ok(undefined);
+        },
       },
       declarations: { get: async () => repo },
       credentials: credentials(env),
       credentialEnv: env,
+      cloneStore: {
+        async markAttention(declarationId, reason) {
+          attentionMarks.push({ declarationId, reason });
+          return ok(undefined);
+        },
+      },
       ...(options.rawTimeoutSeconds === undefined ? {} : { rawTimeoutSeconds: options.rawTimeoutSeconds }),
     }),
   };
@@ -321,10 +347,16 @@ test('S15.7 — the 60-second raw request maps an Exec timeout to the timeout en
       scrubJson: (value) => value,
       async runGh() { throw new Error('not used'); },
     };
-    const { operations, records } = operationsFor(f, { exec: fake });
+    const { operations, records, parked, settled, attentionMarks } = operationsFor(f, { exec: fake });
     const result = await operations.raw(context(f.work), { argv: ['gc'] });
     assert.equal(result.kind, 'timeout');
     assert.deepEqual(records.map((record) => record.form), ['hatch-intent', 'hatch-outcome']);
+    // A timed-out child parks the journal entry regardless of tool name —
+    // `git.raw` completes its own journal entry now rather than relying on
+    // dispatch's generic timeout handling.
+    assert.equal(parked.length, 1);
+    assert.equal(settled.length, 0);
+    assert.equal(attentionMarks.length, 1);
   } finally { f.cleanup(); }
 });
 
@@ -354,13 +386,17 @@ test('git_raw fails closed before acting when its initial status cannot be obser
       scrubJson: (value) => value,
       async runGh() { throw new Error('not used'); },
     };
-    const { operations, records, steps } = operationsFor(f, { exec: fake });
+    const { operations, records, steps, parked, settled } = operationsFor(f, { exec: fake });
     const result = await operations.raw(context(f.work), { argv: ['gc'] });
     assert.equal(result.kind, 'infrastructure');
     assert.deepEqual(children, [['status', '--porcelain=v1', '-z']]);
     assert.deepEqual(steps, []);
     const outcome = records.find((record) => record.form === 'hatch-outcome');
     assert.deepEqual(outcome?.form === 'hatch-outcome' ? outcome.changedPaths : null, []);
+    // Refused before any child ran — `changedPaths: []` is known-empty, not
+    // unknown, so this settles rather than parks.
+    assert.equal(parked.length, 0);
+    assert.equal(settled.length, 1);
   } finally { f.cleanup(); }
 });
 
@@ -401,11 +437,19 @@ test('git_raw records unknown changed paths when its post-state cannot be observ
       scrubJson: (value) => value,
       async runGh() { throw new Error('not used'); },
     };
-    const { operations, records, steps } = operationsFor(f, { exec: fake });
+    const { operations, records, steps, parked, settled, attentionMarks } = operationsFor(f, { exec: fake });
     const result = await operations.raw(context(f.work), { argv: ['gc'] });
     assert.equal(result.kind, 'infrastructure');
     assert.deepEqual(steps, ['git.raw.child']);
     const outcome = records.find((record) => record.form === 'hatch-outcome');
     assert.equal(outcome?.form === 'hatch-outcome' ? outcome.changedPaths : [], null);
+    // The child ran and completed, but its post-state could not be observed
+    // — `changedPaths: null` means genuinely unknown, not empty, and an
+    // unknown post-state is parked for a human even though this was not a
+    // timeout.
+    assert.equal(parked.length, 1);
+    assert.equal(parked[0]?.reason, result.summary);
+    assert.equal(settled.length, 0);
+    assert.equal(attentionMarks.length, 1);
   } finally { f.cleanup(); }
 });

@@ -445,7 +445,11 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
           // to invalidate them.
           if (capabilityGrantChanged) {
             const bumped = bumpGrantEpochImpl(id, now, tx);
-            if (!bumped.ok) throw bumped.error;
+            // A real `Error`, not the bare `DeclarationError` object — `withDb`'s
+            // catch below does `cause instanceof Error ? cause.message :
+            // String(cause)`, and a plain object stringifies to the useless
+            // `"[object Object]"`, discarding the specific reason the bump failed.
+            if (!bumped.ok) throw new Error(bumped.error.summary);
           }
           const row = latestRowFor(db, id);
           if (!row) throw new Error('unreachable: row existed a moment ago');

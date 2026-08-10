@@ -229,7 +229,7 @@ async function main(): Promise<void> {
   // pipeline. `PRODUCTION_TOOL_DECLARATIONS` is plain data (no compiler
   // call), which is what keeps invariant B8 (the compiler absent from the
   // runtime image) intact here.
-  const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit, journal, declarations, credentials, credentialEnv });
+  const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit, journal, declarations, credentials, credentialEnv, cloneStore });
   const notifier = createNotifier({ volumeRoot, clock: systemClock, webhookUrl: resolveNotifierWebhook() });
   const moduleAdapter = createModuleAdapter();
   moduleAdapter.register('git.status' as ModuleTargetName, toModuleHandler(gitOperations.status));
