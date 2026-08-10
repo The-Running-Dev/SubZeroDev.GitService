@@ -508,7 +508,8 @@ interface JournalBeginInput {
 ```
 
 `JournalStepState` admits only `applied`, because that is the only step state the design names and
-the only one recovery reads. Whether a second state exists is open — see `## Unresolved`.
+the only one recovery reads. A step's name, rather than a second state, records how far an
+operation progressed.
 
 `input` is scrubbed by `Exec.scrubJson` before it reaches this type.
 
@@ -571,10 +572,43 @@ interface CreateJobInput {
   readonly notBefore: IsoUtcTimestamp;
   readonly onMissed: OnMissedPolicy;
 }
+
+interface ScheduledJobCreateInput {
+  readonly tool: RegistryToolName;
+  readonly input: JsonValue;
+  readonly notBefore: IsoUtcTimestamp;
+  readonly onMissed: OnMissedPolicy;
+}
+
+interface ScheduledJobCreateData {
+  readonly job: ScheduledJob;
+}
+
+interface ScheduledJobListInput {
+  readonly status: ScheduledJobStatus | null;
+}
+
+interface ScheduledJobListData {
+  readonly jobs: readonly ScheduledJob[];
+}
+
+interface ScheduledJobCancelInput {
+  readonly id: ScheduledJobId;
+  readonly reason: string;
+}
+
+interface ScheduledJobCancelData {
+  readonly job: ScheduledJob;
+}
 ```
 
 `onMissed` has no default and is required at creation. `ScheduledJob` carries no `operationId`; the
 correlation runs the other way, through `OperationJournalEntry.scheduledJobId`.
+`ScheduledJobCreateInput` carries no `declarationId`: the declaration-scoped dispatch context is the
+only source of that binding, so the caller cannot name a different declaration in the payload.
+`ScheduledJobListInput.status` is null to list every status. `ScheduledJobCancelInput.reason` must
+contain at least one non-whitespace character. `ScheduledJob.reason` is set for `skipped`,
+`cancelled` and `needs-attention`; it is null for the other states.
 
 ### Audit
 
@@ -2335,6 +2369,16 @@ interface HostAdapter {
   readDeployStatus(ctx: CallContext, workflow: string, ref: GitSha): Promise<Outcome<DeployStatus, HostError>>;
   remainingBudget(ref: CredentialRef): RequestBudget;
 }
+
+interface HostOperations {
+  readonly createPullRequest: DomainOperation<CreatePullRequestInput, PrOpenData>;
+  readonly readPullRequest: DomainOperation<PrStatusInput, PrStatusData>;
+  readonly listPullRequests: DomainOperation<PrListInput, PrListData>;
+  readonly readPullRequestComments: DomainOperation<PrCommentsInput, PrCommentsData>;
+  readonly enableAutoMerge: DomainOperation<PrEnableAutoMergeInput, PrEnableAutoMergeData>;
+  readonly readChecks: DomainOperation<ChecksStatusInput, ChecksStatusData>;
+  readonly awaitChecks: DomainOperation<ChecksAwaitInput, ChecksAwaitData>;
+}
 ```
 
 `HostComment.body` is author-controlled text carried as data; the tool returning it is annotated
@@ -2433,7 +2477,7 @@ The seven registry entries S10 ships:
 | `pr_status` | `{ kind: 'module', target: 'host.readPullRequest' }` | `['host.pr.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 60, maxResultBytes: 65536 }` |
 | `pr_list` | `{ kind: 'module', target: 'host.listPullRequests' }` | `['host.pr.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 60, maxResultBytes: 65536 }` |
 | `pr_comments` | `{ kind: 'module', target: 'host.readPullRequestComments' }` | `['host.pr.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: true }` | `{ timeoutSeconds: 60, maxResultBytes: 131072 }` |
-| `pr_enable_auto_merge` | `{ kind: 'module', target: 'host.enableAutoMerge' }` | `['host.pr.write']` | `['write']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 120, maxResultBytes: 65536 }` |
+| `pr_enable_auto_merge` | `{ kind: 'module', target: 'host.enableAutoMerge' }` | `['host.pr.write']` | `['write']` | `mutating` | `{ schedulable: true, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 120, maxResultBytes: 65536 }` |
 | `checks_status` | `{ kind: 'module', target: 'host.readChecks' }` | `['host.checks.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 60, maxResultBytes: 65536 }` |
 | `checks_await` | `{ kind: 'module', target: 'host.awaitChecks' }` | `['host.checks.read']` | `['read']` | `monitoring-wait` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 1800, maxResultBytes: 65536 }` |
 
@@ -2444,6 +2488,10 @@ other six return host-controlled structure (numbers, states, shas, check names) 
 and annotating those would dilute what the annotation means. Its `maxResultBytes` is doubled because
 comment threads are the one host response that grows without bound, and the size limit rather than
 truncation is what bounds it.
+
+`pr_enable_auto_merge` is the initial registry's only schedulable production operation. It carries
+the prior art's unattended auto-merge capability through the generic one-operation scheduler while
+leaving bare git mutations and scheduler-management operations unavailable to recursive scheduling.
 
 `checks_await` is the registry's first `monitoring-wait`. Its `timeoutSeconds` equals
 `monitoringWaitCapSeconds`, which is the compiler-enforced ceiling (`limit-exceeds-cap`) rather than
@@ -2473,6 +2521,12 @@ interface TickReport {
   readonly cancelled: readonly SkippedJob[];
 }
 
+interface SchedulerOperations {
+  readonly create: DomainOperation<ScheduledJobCreateInput, ScheduledJobCreateData>;
+  readonly list: DomainOperation<ScheduledJobListInput, ScheduledJobListData>;
+  readonly cancel: DomainOperation<ScheduledJobCancelInput, ScheduledJobCancelData>;
+}
+
 interface Scheduler {
   create(input: CreateJobInput, ctx: CallContext): Promise<Outcome<ScheduledJob, SchedulerError>>;
   list(declarationId: DeclarationId | null, status: ScheduledJobStatus | null): Promise<readonly ScheduledJob[]>;
@@ -2487,6 +2541,27 @@ interface Scheduler {
 
 Constructed with `Dispatch` injected; it never imports the pipeline. `resolveRunningAtBoot`
 classifies from the journal alone and runs no resume step and no git or host I/O.
+
+**S16 resolves U1 for the three scheduler tools.** Their registry entries are:
+
+| `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
+|---|---|---|---|---|---|---|
+| `scheduled_job_create` | `{ kind: 'module', target: 'scheduler.create' }` | `['scheduler.manage']` | `['schedule']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 4194304 }` |
+| `scheduled_job_list` | `{ kind: 'module', target: 'scheduler.list' }` | `['scheduler.manage']` | `['schedule']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 4194304 }` |
+| `scheduled_job_cancel` | `{ kind: 'module', target: 'scheduler.cancel' }` | `['scheduler.manage']` | `['schedule']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 4194304 }` |
+
+Every entry carries `capabilityScope: 'declaration'`. `SchedulerOperations` supplies the current
+declaration id from `CallContext` to `Scheduler.create` and `Scheduler.list`; a caller cannot create,
+list or cancel a job for another declaration. A cancellation naming another declaration's job is
+reported as `job-not-found`, so the operation does not disclose that job's existence.
+
+All three results are `untrustedOutput` because each returns caller-authored `ScheduledJob.input`
+as inert data. The 4 MiB result cap matches the largest existing caller-selected-data precedent and
+comfortably round-trips the initial schedulable operation's input; the list operation fails with the
+ordinary result-size envelope rather than truncating jobs. A later contract amendment making a
+larger-input operation schedulable must check this management cap at the same time.
+Scheduler-management tools are not themselves schedulable, so holding one operation cannot be
+turned into caller-authored sequencing.
 
 ### L2 — watcher
 
@@ -2812,7 +2887,7 @@ interface AuthorizationServerMetadata {
 | `/oauth/register` | `POST` | none | Dynamic Client Registration (RFC 7591) — wraps `registerClient` |
 | `/oauth/authorize` | `GET`, `POST` | operator console cookie | The approval step; issues a short-lived, process-local authorization code bound to a PKCE `code_challenge` (S256) and the `resource` being granted. Ephemeral — a restart mid-flow means starting over, not a re-authorization of an already-connected client |
 | `/oauth/token` | `POST` | none (PKCE substitutes for a client secret) | `authorization_code` grant (with `code_verifier`) calls `issueMcpGrant`; `refresh_token` grant calls `refresh` |
-| `/oauth/revoke` | `POST` | bearer | Revokes the presented token via `revokeToken` (RFC 7009) |
+| `/oauth/revoke` | `POST` | bearer | Revokes the presented token via `revokeBearerToken` (RFC 7009) |
 | `/mcp/{declarationId}` | `POST` | bearer, audience-checked against the path | The MCP JSON-RPC transport: `initialize`, `tools/list`, `tools/call` |
 
 A `401` from `/mcp/{declarationId}` — audience mismatch, unknown/expired/revoked token or grant —
@@ -3475,16 +3550,23 @@ ship them.
 *Narrowed further 2026-08-08:* S10 resolves U1 for the host tools — `pr_open`, `pr_status`,
 `pr_list`, `pr_comments`, `pr_enable_auto_merge`, `checks_status`, `checks_await` — their input and
 output types and registry entries, `CreatePullRequestInput` included. See `### L2 — host adapter`
-above. U1 otherwise stands: `raw` and the two composites remain open for the slices that ship them,
-and `readDeployStatus` carries no tool until S12 declares one.
+above. U1 otherwise stands: `raw` and the two composites remain open for the slices that ship them.
+`readDeployStatus` remains an adapter method with no registry tool; S12 registers published-URL
+verification through the HTTP adapter instead.
 
 *Narrowed further 2026-08-09:* S12 resolves U1 for `prepare_branch`, `reconcile_after_merge` and
 `verify_published_url` — their input and output types and registry entries. See `### L2 — composites`
 and `### L3 — http adapter` above. U1 otherwise stands: only `raw` remains open, for the slice that
 ships it.
 
-**Resolved 2026-08-10 by the S15 contract amendment:** `git_raw` now has complete input and output
-types and a registry entry under `### L2 — git operations`. U1 is closed.
+*Narrowed further 2026-08-10 by the S15 contract amendment:* `git_raw` now has complete input and
+output types and a registry entry under `### L2 — git operations`. This closed the inventory known
+at S15, but S16 still named three scheduler tools without fixing their public declarations.
+
+**Resolved 2026-08-10 by the S16 contract amendment:** `scheduled_job_create`,
+`scheduled_job_list` and `scheduled_job_cancel` now have complete input and output types and registry
+entries under `### L2 — scheduler`; `pr_enable_auto_merge` is the initial schedulable production
+operation. U1 is closed.
 
 **U2 — The `OperatorScope` vocabulary, resolved 2026-08-09 by S13.** `OperatorScope` is the same
 four values as `McpScope`. See `### Scopes` above and `design/90-decisions.md`, 2026-08-09.
