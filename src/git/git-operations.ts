@@ -21,7 +21,7 @@ import type { Audit } from '../audit/audit.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import type { CredentialResolver } from '../credentials/credentials.ts';
 import { prepareDeclarationCredential } from '../credentials/declaration-credential.ts';
-import { success, validation, authorization, infrastructure, precondition, upstream, type ToolResult, type ReadStamp } from '../result/envelope.ts';
+import { success, validation, authorization, infrastructure, precondition, upstream, timeout as timeoutResult, conflict, type ToolResult, type ReadStamp } from '../result/envelope.ts';
 import { diagnosticsFor } from '../shared/diagnostics.ts';
 import type { ModuleErrorBase } from '../shared/result-kind.ts';
 import { REPOSITORY_CONFIG_DEFAULTS, type RepositoryConfig } from '../declarations/types.ts';
@@ -42,6 +42,8 @@ import type {
   GitLogInput,
   GitPushData,
   GitPushInput,
+  GitRawData,
+  GitRawInput,
   GitStageData,
   GitStageInput,
   PathRejection,
@@ -60,6 +62,7 @@ import type {
 const GIT_COMMAND_TIMEOUT_SECONDS = 30;
 /** Matches the three remote tools' registry `timeoutSeconds` — these cross a network, the local ones do not. */
 const GIT_REMOTE_COMMAND_TIMEOUT_SECONDS = 300;
+const GIT_RAW_COMMAND_TIMEOUT_SECONDS = 60;
 const DEFAULT_LOG_LIMIT = 200;
 const STALE_BRANCH_DAYS = 30;
 const FIELD_SEP = '\x1f';
@@ -75,7 +78,7 @@ const CONFIG_RELATIVE_PATH = path.join('.config', 'subzerodev-git.json');
 
 export interface GitOperationsDependencies {
   readonly clock: Clock;
-  readonly exec: Pick<Exec, 'runGit'>;
+  readonly exec: Pick<Exec, 'runGit'> & Partial<Pick<Exec, 'scrub'>>;
   readonly locks: Pick<Locks, 'currentMutationHolder'>;
   /** Optional so every pre-S7 call site (read-only, never rejects a path) keeps compiling unchanged; a caller of `stage`/`restorePaths` that omits it simply gets no audit trail for a rejected path. */
   readonly audit?: Pick<Audit, 'append'>;
@@ -94,6 +97,8 @@ export interface GitOperationsDependencies {
    * in between ever holds the value.
    */
   readonly credentialEnv?: MutableEnv;
+  /** Test seam only; production omits it and therefore uses the frozen 60-second hatch budget. */
+  readonly rawTimeoutSeconds?: number;
 }
 
 export interface GitOperations {
@@ -108,6 +113,7 @@ export interface GitOperations {
   readonly push: DomainOperation<GitPushInput, GitPushData>;
   readonly fetch: DomainOperation<GitFetchInput, GitFetchData>;
   readonly syncBase: DomainOperation<SyncBaseInput, SyncBaseData>;
+  readonly raw: DomainOperation<GitRawInput, GitRawData>;
   loadRepositoryConfig(ctx: CallContext): Promise<Outcome<RepositoryConfig, GitOperationsError>>;
   validateWritePath(ctx: CallContext, rawPath: string): Outcome<RepoRelativePath, PathRejection>;
 }
@@ -164,6 +170,7 @@ function daysSince(iso: IsoUtcTimestamp | null, clock: Clock): number | null {
 
 export function createGitOperations(deps: GitOperationsDependencies): GitOperations {
   const { clock, exec, locks } = deps;
+  const rawTimeoutSeconds = deps.rawTimeoutSeconds ?? GIT_RAW_COMMAND_TIMEOUT_SECONDS;
   const audit: Pick<Audit, 'append'> = deps.audit ?? { append: async () => ({ appended: true, sequence: 0 }) };
 
   /**
@@ -246,6 +253,175 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
    */
   async function remoteGit(cwd: ClonePath, args: readonly string[], signal: AbortSignal, credential: CredentialBinding | null) {
     return exec.runGit({ argv: args, cwd, timeoutSeconds: GIT_REMOTE_COMMAND_TIMEOUT_SECONDS, credential, signal });
+  }
+
+  function normaliseRemote(raw: string): string | null {
+    const possibleScp = raw.match(/^(?:([^@\s]+)@)?([^:/\s]+):(.+)$/);
+    // A refspec such as `main:main` has the same punctuation as an scp-style
+    // remote. Treat the form as remote-shaped only when it has the host signal
+    // scp remotes conventionally carry; the actual remote operand position is
+    // checked separately below, so an opaque remote name still fails closed.
+    const scp = possibleScp && (possibleScp[1] !== undefined || possibleScp[2]!.includes('.')) ? possibleScp : null;
+    const candidate = scp ? `ssh://${scp[1] ? `${scp[1]}@` : ''}${scp[2]}/${scp[3]}` : raw;
+    try {
+      const parsed = new URL(candidate);
+      if (!['http:', 'https:', 'ssh:', 'git:', 'file:'].includes(parsed.protocol.toLowerCase())) return null;
+      const pathName = parsed.pathname.replace(/\/+$/, '').replace(/\.git$/i, '');
+      return `${parsed.protocol.toLowerCase()}//${parsed.username ? `${parsed.username}@` : ''}${parsed.hostname.toLowerCase()}${parsed.port ? `:${parsed.port}` : ''}${pathName}`;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Git's remote-helper syntax is `<transport>::<address>`, and `ext::` runs
+   * the address as a command outright. None of it parses as a URL, so
+   * `normaliseRemote` returns null for it and the operand rules below would
+   * wave it through as "not remote-shaped".
+   */
+  const REMOTE_HELPER = /^[a-z][a-z0-9+.-]*::/i;
+
+  /**
+   * The options whose value is a repository. A remote reaches the network
+   * through these as well as through a bare operand — `git archive
+   * --remote=<repo>` is a transfer, and `archive` is not one of the
+   * subcommands the network rule below looks at.
+   */
+  const REMOTE_VALUED_OPTIONS = new Set(['--remote', '--reference', '--reference-if-able', '--upload-pack', '--receive-pack']);
+
+  /** Every position a caller could put a repository in: the bare operands, plus the values of the options that take one, in either `--opt=value` or `--opt value` form. */
+  function remoteCandidates(operands: readonly string[]): readonly string[] {
+    const values: string[] = [];
+    for (let index = 0; index < operands.length; index += 1) {
+      const arg = operands[index]!;
+      if (!arg.startsWith('-')) {
+        values.push(arg);
+        continue;
+      }
+      const equals = arg.indexOf('=');
+      if (equals > 0 && REMOTE_VALUED_OPTIONS.has(arg.slice(0, equals))) {
+        values.push(arg.slice(equals + 1));
+        continue;
+      }
+      if (REMOTE_VALUED_OPTIONS.has(arg) && operands[index + 1] !== undefined) {
+        values.push(operands[index + 1]!);
+        index += 1;
+      }
+    }
+    return values;
+  }
+
+  function rawArgvRejection(argv: readonly string[], cloneUrl: CloneUrl): string | null {
+    if (argv.length === 0 || argv[0]?.trim() === '') return 'argv must name a git subcommand';
+    if (argv[0]!.startsWith('-')) return `global option '${argv[0]}' cannot precede the fixed git subcommand`;
+    const forbiddenOption = argv.slice(1).find((arg) =>
+      arg.startsWith('--upload-pack') || arg.startsWith('--receive-pack') || arg.startsWith('--extcmd') ||
+      arg.startsWith('--tool=') || arg === '--tool' || arg.startsWith('--open-files-in-pager') ||
+      arg.startsWith('--exec=') || arg === '--exec' || arg === '-x',
+    );
+    if (forbiddenOption) return `option '${forbiddenOption}' selects configuration, an executable, or a different repository`;
+
+    const subcommand = argv[0]!.toLowerCase();
+    const operands = argv.slice(1);
+    if (subcommand === 'remote' && ['add', 'set-url'].includes((operands.find((arg) => !arg.startsWith('-')) ?? '').toLowerCase())) {
+      return `'git remote ${operands[0] ?? ''}' persists a caller-supplied remote`;
+    }
+    const firstPositional = operands.find((arg) => !arg.startsWith('-'))?.toLowerCase() ?? '';
+    if (subcommand === 'submodule' && ['add', 'set-url'].includes(firstPositional)) {
+      return `'git submodule ${firstPositional}' persists a caller-supplied remote`;
+    }
+    if ((subcommand === 'submodule' && firstPositional === 'foreach') || (subcommand === 'bisect' && firstPositional === 'run')) {
+      return `'git ${subcommand} ${firstPositional}' selects an executable`;
+    }
+    if (subcommand === 'filter-branch' && operands.some((arg) => /^(--setup|--env-filter|--tree-filter|--index-filter|--parent-filter|--msg-filter|--commit-filter|--tag-name-filter)(=|$)/.test(arg))) {
+      return "'git filter-branch' filter arguments select executable shell text";
+    }
+    if (subcommand === 'config') {
+      // `--file`/`--blob` redirect the read *or* the write at an arbitrary
+      // path, so they escape this clone in both directions — a write lands in
+      // another declaration's `.git/config`, and a read dumps whatever file is
+      // named. Refused before the read/write split below, which only decides
+      // *what* is being asked of the config, not *whose* config it is.
+      if (operands.some((arg) => arg === '--file' || arg === '-f' || arg.startsWith('--file=') || arg === '--blob' || arg.startsWith('--blob='))) {
+        return "'git config --file'/'--blob' reads or writes configuration outside this clone";
+      }
+      if (operands.some((arg) => ['--global', '--system', '--edit', '-e'].includes(arg))) {
+        return "this 'git config' form edits configuration outside this clone's own config or launches an editor";
+      }
+      // **Every config write is refused, not an enumerated subset.** Git's
+      // configuration selects executables (`core.sshCommand`, `alias.*`,
+      // `filter.*.process`), credential helpers (`credential.helper` *and*
+      // the URL-scoped `credential.<url>.helper`), remotes (`remote.*`,
+      // `url.*.insteadOf`) and transports (`http.proxy`, `protocol.ext.allow`)
+      // across a key surface that grows with every git release. A blocklist
+      // has to enumerate that surface correctly forever; this rule does not,
+      // and reading configuration — which is what a caller diagnosing a
+      // repository actually needs — stays available.
+      const writeFlags = ['--add', '--replace-all', '--unset', '--unset-all', '--remove-section', '--rename-section', '--set-all'];
+      const positional = operands.filter((arg) => !arg.startsWith('-'));
+      if (operands.some((arg) => writeFlags.includes(arg)) || positional.length >= 2) {
+        return "'git config' writes are refused through the hatch: configuration selects executables, credential helpers, remotes and transports, so the hatch reads configuration but never persists it";
+      }
+    }
+    if (subcommand === 'clone' && operands.some((arg) => arg === '-c' || arg === '--config' || arg.startsWith('--config='))) {
+      return "'git clone --config' injects repository configuration";
+    }
+
+    if (operands.some((arg) => arg === '--template' || arg.startsWith('--template='))) {
+      return "'--template' selects a template directory, which can carry hooks";
+    }
+
+    const declared = normaliseRemote(cloneUrl as unknown as string);
+    // Scanned over every position a repository can occupy, not only the bare
+    // operands: `git archive --remote=<repo>` reaches a transport through an
+    // option, and `archive` is not one of the subcommands the network rule
+    // below inspects.
+    for (const operand of remoteCandidates(operands)) {
+      if (REMOTE_HELPER.test(operand)) {
+        return `remote operand '${operand}' uses git's remote-helper transport syntax, which selects a helper program`;
+      }
+      if (/^https?:\/\/[^/\s]*@/i.test(operand)) return `remote operand '${operand}' carries caller-supplied credentials`;
+      if (operand === (cloneUrl as unknown as string)) continue;
+      const remote = normaliseRemote(operand);
+      if (remote !== null && remote !== declared) return `remote operand '${operand}' does not match this declaration's cloneUrl`;
+    }
+    if (['push', 'fetch', 'pull', 'ls-remote', 'clone'].includes(subcommand)) {
+      const optionsWithValues = new Set([
+        '--depth', '--deepen', '--shallow-since', '--shallow-exclude', '--jobs', '-j', '--server-option',
+        '--negotiation-tip', '--filter', '--refmap', '--submodule-prefix', '--origin', '-o', '--branch', '-b',
+        '--upload-pack', '-u', '--config', '-c', '--reference', '--reference-if-able', '--separate-git-dir',
+      ]);
+      let firstOperand: string | undefined;
+      for (let index = 0; index < operands.length; index += 1) {
+        const operand = operands[index]!;
+        if (optionsWithValues.has(operand)) { index += 1; continue; }
+        if (operand.startsWith('-')) continue;
+        firstOperand = operand;
+        break;
+      }
+      if (firstOperand && firstOperand !== 'origin') {
+        if (firstOperand === (cloneUrl as unknown as string)) return null;
+        const remote = normaliseRemote(firstOperand);
+        if (remote === null || remote !== declared) return `remote operand '${firstOperand}' is neither origin nor this declaration's cloneUrl`;
+      }
+    }
+    return null;
+  }
+
+  async function rawStatus(cwd: ClonePath, signal: AbortSignal): Promise<ReadonlyMap<string, string>> {
+    const observed = await git(cwd, ['status', '--porcelain=v1', '-z'], signal);
+    const result = new Map<string, string>();
+    if (!observed.ok) return result;
+    for (const entry of observed.value.stdout.split('\0').filter(Boolean)) {
+      const pathName = entry.slice(3).trim();
+      if (pathName) result.set(pathName, entry.slice(0, 2));
+    }
+    return result;
+  }
+
+  function changedRawPaths(before: ReadonlyMap<string, string>, after: ReadonlyMap<string, string>): readonly RepoRelativePath[] {
+    const all = new Set([...before.keys(), ...after.keys()]);
+    return [...all].filter((pathName) => before.get(pathName) !== after.get(pathName)).sort() as RepoRelativePath[];
   }
 
   /**
@@ -510,17 +686,10 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       const checkResult = await git(cwd, ['diff', '--check', ...stagedArgs, ...pathArgs], signal);
 
       const diffText = diffResult.ok ? diffResult.value.stdout : '';
-      // `git diff --check` legitimately exits non-zero when it finds an issue,
-      // and its findings are on stdout — but `Exec`'s `nonzero-exit` variant
-      // (`exec/errors.ts`) carries only `stderr`, not `stdout`, so that
-      // output is unrecoverable here. A real gap in `Exec`'s error shape for
-      // any command whose nonzero exit is informational rather than a
-      // failure; flagged for whoever owns `Exec` next rather than fixed here
-      // (out of this slice's `Touches`).
       const data: GitDiffData = {
         diff: diffText,
         checkClean: checkResult.ok,
-        checkOutput: checkResult.ok ? checkResult.value.stdout : '',
+        checkOutput: checkResult.ok ? checkResult.value.stdout : checkResult.error.code === 'nonzero-exit' ? checkResult.error.stdout : '',
         readStamp: readStampFor(ctx, locks),
       };
       return success(diffText.trim() === '' ? 'no changes' : `${diffText.split('\n').length} diff line(s)`, data, diagnosticsFor(ctx, startedAtMs, clock));
@@ -774,6 +943,79 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
 
       const data: SyncBaseData = { baseBranch, headSha: upstreamSha, upstreamSha, fastForwarded: true };
       return success(`fast-forwarded '${baseBranch}' to ${upstreamSha}`, data, diagnosticsFor(ctx, startedAtMs, clock));
+    },
+
+    async raw(ctx, input: GitRawInput): Promise<ToolResult<GitRawData>> {
+      const startedAtMs = Date.now();
+      if (ctx.cloneRoot === null || ctx.declarationId === null) return infrastructure('no clone or declaration materialised for this operation');
+      if (!deps.declarations) return infrastructure('declaration lookup is unavailable for git.raw');
+      const declaration = await deps.declarations.get(ctx.declarationId);
+      if (!declaration) return infrastructure(`declaration '${ctx.declarationId}' disappeared before git.raw ran`);
+
+      // **The intent line is written before the argv is judged, not after.**
+      // A refused vector is the single most attributable thing the hatch ever
+      // sees — an attempt at one of the six operations the default path exists
+      // to withhold — and writing the pair only for vectors that pass left
+      // exactly that attempt invisible, while the registry entry promises
+      // "every use is separately audited". Both records still carry the
+      // scrubbed argv and the actor, so a refusal is attributable to the same
+      // standard as an execution.
+      const scrub = deps.exec.scrub ?? ((value: string) => value);
+      const intent = await audit.append({
+        at: clock.now(), operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation,
+        tool: 'git_raw' as never, actorRef: ctx.actorRef, context: 'hatch', form: 'hatch-intent', argv: input.argv.map(scrub),
+      });
+      if (!intent.appended) return infrastructure(`git.raw refused to start because its intent audit line could not be written (${intent.reason})`);
+
+      const rejection = rawArgvRejection(input.argv, declaration.cloneUrl);
+      if (rejection) {
+        const refused = validation(rejection, [{ path: 'argv', rule: 'argv-rejected', message: rejection }]);
+        await audit.append({
+          at: clock.now(), operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation,
+          tool: 'git_raw' as never, actorRef: ctx.actorRef, context: 'hatch', form: 'hatch-outcome', resultKind: refused.kind, changedPaths: [],
+        });
+        return refused;
+      }
+
+      const cwd = ctx.cloneRoot;
+      const before = await rawStatus(cwd, ctx.signal);
+      const prepared = await prepareRemote(ctx);
+      let result: ToolResult<GitRawData>;
+      let changedPaths: readonly RepoRelativePath[] = [];
+      if (!prepared.ok) {
+        result = prepared.error;
+      } else {
+        const executed = await exec.runGit({ argv: input.argv, cwd, timeoutSeconds: rawTimeoutSeconds, credential: prepared.value.credential, signal: ctx.signal });
+        const after = await rawStatus(cwd, new AbortController().signal);
+        changedPaths = changedRawPaths(before, after);
+        if (executed.ok) {
+          result = success(
+            `git ${input.argv[0]} completed`,
+            {
+              exitCode: executed.value.exitCode,
+              stdout: executed.value.stdout,
+              stderr: executed.value.stderr,
+              durationMs: executed.value.durationMs,
+              changedPaths,
+            },
+            diagnosticsFor(ctx, startedAtMs, clock),
+          );
+        } else if (executed.error.code === 'timed-out') {
+          result = timeoutResult(executed.error.summary, executed.error.limitSeconds);
+        } else if (executed.error.code === 'cancelled') {
+          result = conflict(executed.error.summary, null);
+        } else if (executed.error.code === 'nonzero-exit') {
+          result = infrastructure(`${executed.error.summary}: ${executed.error.stderr || executed.error.stdout}`);
+        } else {
+          result = infrastructure(executed.error.summary);
+        }
+      }
+
+      await audit.append({
+        at: clock.now(), operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation,
+        tool: 'git_raw' as never, actorRef: ctx.actorRef, context: 'hatch', form: 'hatch-outcome', resultKind: result.kind, changedPaths,
+      });
+      return result;
     },
 
     loadRepositoryConfig,

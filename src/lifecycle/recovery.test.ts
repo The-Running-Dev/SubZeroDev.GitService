@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { read } from '../journal/testing/read.ts';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
@@ -156,7 +157,7 @@ test('S8.2 — an entry written but never acted on classifies nothing-happened a
     const verdicts = await recoverDeclaration(deps, 'repo-a' as never);
 
     assert.deepEqual(verdicts, [{ verdict: 'nothing-happened' }]);
-    assert.deepEqual(await journal.unsettled('repo-a' as never, 1 as never), [], 'the entry must be settled, not left unsettled');
+    assert.deepEqual(read(await journal.unsettled('repo-a' as never, 1 as never)), [], 'the entry must be settled, not left unsettled');
     assert.deepEqual(marked, [], 'nothing-happened must not put the clone into needs-attention');
   });
 });
@@ -175,7 +176,7 @@ test('S8.3 — an entry whose effect is already on disk classifies completed and
     const verdicts = await recoverDeclaration(deps, 'repo-a' as never);
 
     assert.deepEqual(verdicts, [{ verdict: 'completed', terminal: null }]);
-    assert.deepEqual(await journal.unsettled('repo-a' as never, 1 as never), []);
+    assert.deepEqual(read(await journal.unsettled('repo-a' as never, 1 as never)), []);
     assert.deepEqual(marked, []);
   });
 });
@@ -192,7 +193,7 @@ test('S8.5 — an entry whose tool has no descriptor in the catalogue parks as a
     assert.equal(verdicts.length, 1);
     assert.equal(verdicts[0]!.verdict, 'park');
 
-    const parked = await journal.parked();
+    const parked = read(await journal.parked());
     assert.equal(parked.length, 1);
     assert.equal(parked[0]!.operationId, 'op-3');
     assert.match(parked[0]!.attentionReason ?? '', /no recovery descriptor is registered/);
@@ -215,7 +216,7 @@ test('an entry the ladder cannot observe parks rather than guessing', async () =
     const verdicts = await recoverDeclaration(deps, 'repo-a' as never);
 
     assert.equal(verdicts[0]!.verdict, 'park');
-    assert.equal((await journal.parked()).length, 1);
+    assert.equal((read(await journal.parked())).length, 1);
     assert.equal(marked.length, 1);
   });
 });
@@ -229,7 +230,7 @@ test('an already-parked entry stays parked — a later pass observing a matching
     const verdicts = await recoverDeclaration(deps, 'repo-a' as never);
 
     assert.deepEqual(verdicts, [{ verdict: 'park', reason: 'a human was asked to look at this' }]);
-    assert.equal((await journal.parked()).length, 1, 'the entry must still be parked');
+    assert.equal((read(await journal.parked())).length, 1, 'the entry must still be parked');
   });
 });
 
@@ -261,7 +262,7 @@ test('S8.7 — a resume runs through dispatch and takes the mutation lock in its
 
     assert.equal(verdicts[0]!.verdict, 'resume');
     assert.deepEqual(order, ['recovery-start', 'resume-dispatch:recovery', 'recovery-end']);
-    assert.deepEqual(await journal.unsettled('repo-a' as never, 1 as never), [], 'a successful resume settles the entry');
+    assert.deepEqual(read(await journal.unsettled('repo-a' as never, 1 as never)), [], 'a successful resume settles the entry');
   });
 });
 
@@ -283,7 +284,7 @@ test('a resume whose dispatch fails parks the entry rather than settling it', as
     const verdicts = await recoverDeclaration(deps, 'repo-a' as never);
 
     assert.equal(verdicts[0]!.verdict, 'resume');
-    assert.equal((await journal.parked()).length, 1);
+    assert.equal((read(await journal.parked())).length, 1);
     assert.match(marked[0]!, /precondition/);
   });
 });
@@ -304,7 +305,7 @@ test('a resume verdict with no dispatch wired parks rather than dropping the ent
 
     await recoverDeclaration(deps, 'repo-a' as never);
 
-    assert.equal((await journal.parked()).length, 1);
+    assert.equal((read(await journal.parked())).length, 1);
   });
 });
 

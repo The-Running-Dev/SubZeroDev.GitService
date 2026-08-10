@@ -158,6 +158,33 @@ This repository is itself a bet on that distinction: a service that makes git op
 - **Ask instead of assuming.** If two readings of the spec are both defensible, stop and present both. Do not pick one and proceed.
 - **Every slice ends runnable.** No half-wired states committed.
 
+## The design freeze
+
+The pipeline's normal loop keeps `design/` live: a slice lands, `/reconcile` writes reality back, `/track` resyncs the tracker. That is right while the design is still being settled and **wrong once implementation is the bottleneck**, because each pass is generative rather than merely checking — landing slice N rewrites slice N+1's specification, which desyncs the tracker, which needs `/track`, which finds drift, which needs `/reconcile`. The loop has no fixed point. Freezing is how it is escaped.
+
+**`design/FROZEN.md` is the marker, and its existence is the whole mechanism.** It is tracked, not ignored — a freeze is a statement to everyone working in the repository, not local state. While it exists:
+
+- **`/reconcile` and `/track` do not run.** The tracker is deliberately allowed to go stale.
+- **`/design`, `/contract` and `/slices` refuse.** Authoring is gated too, so the docs cannot drift forward while the implementation is being checked against them.
+- **Slices implement against `20-contract.md` as a fixed artifact**, at the SHA the marker names.
+- **A contradiction found while implementing is stated in that slice's pull request and left in the document.** Do not fix it in `design/`. The staleness is the point; recording it in the PR is what makes the eventual reconciliation cheap.
+
+**Lifting it is deliberate and manual: delete the file, then run one reconciliation pass** — `/reconcile`, then `/track`. There is no command that lifts a freeze, because a freeze that something can lift on your behalf is one that gets lifted by habit. A slice that turns out to need a contract amendment stops and says so; that escalation is the user's to answer, and answering it may well be "thaw, amend, re-freeze."
+
+The marker's format, which the five gated commands read and must not restate:
+
+```markdown
+# design/ is frozen
+
+Frozen at: <sha>, <YYYY-MM-DD>
+Frozen because: <what the freeze is escaping>
+Lifts when: <the checkable condition — "tier one is code-complete", not "when we are ready">
+
+To lift: delete this file, then run `/reconcile`, then `/track`.
+```
+
+A command that refuses reports `Frozen because` and `Lifts when` **verbatim** rather than paraphrasing them — the point of a stated condition is that it can be checked against, and a paraphrase is where it stops being checkable.
+
 ## Single ownership
 
 - **Reference, never restate.** A rule that lives in another document is linked, not copied. Two copies of a rule is a promise they will diverge and a guarantee nobody notices which is stale.
@@ -192,6 +219,7 @@ This repository is itself a bet on that distinction: a service that makes git op
 - **Push every commit before announcing a PR is ready.** Announcing invites an immediate merge, and a commit pushed after that lands on a branch nobody merges.
 - External writes need my authorization: creating a remote repository, changing visibility, pushing, opening or merging pull requests, changing a domain, deploying. **Discussing a decision does not authorize it.** One carve-out — see *Tracking work*.
 - Do not delete files, branches, or history without explicit authorization.
+- **Deleting a *local* branch that `git branch --merged` independently confirms is carved out**, and `/done` may do it without asking. `-d` only, never `-D`; never a remote branch; a `-d` refusal is reported and asked about separately. The confirmation is what makes this safe to automate — the commits are already on the default branch, so the branch is a label rather than work. Nothing else about deletion is carved out.
 - Check review **threads**, not just requested reviewers — an automated reviewer can leave blocking conversation threads that do not appear in a reviewer listing. Resolve a thread only when a validated fix satisfies it; leave ambiguous findings open and report them. `/resolve` does this; the query it needs is written out there.
 - **Resolving or replying to a review thread is not carved out.** The exception in *Tracking work* covers opening issues and nothing else. Where a repository delegates resolution explicitly, follow its wording; where it is silent, ask.
 
@@ -209,7 +237,7 @@ This repository is itself a bet on that distinction: a service that makes git op
 - **The agent block is fenced** by `<!-- agent:start -->` and `<!-- agent:end -->`. Inside the fence is regenerable; **outside it is never touched** — a ticked checkbox is progress someone recorded, an edited narrative is someone's deliberate wording.
 - **Where a document already governs, the block points; where none does, it carries.** A slice names `design/30-slices.md § S<n> @ <sha>` and leaves procedure to `.claude/commands/slice.md` — copying stop conditions into an issue freezes a stale copy that nothing can go back and fix. A bug or a story has no upstream document, so its block legitimately holds the constraints. That asymmetry is the rule, not an inconsistency.
 - **Criteria carry stable ids** (`S3.1`), and drift is compared on ids, never prose. Reworded criteria are not drift; an added, removed, or renumbered id is.
-- **This repository's 22 existing slices carry unnumbered criteria**, so `/track` has no ids to compare for them and falls back to prose — which reports reworded criteria as drift. Worse, the test suite already cites ids (`S3.4`, `S4.7`, `S4.8`) that `design/30-slices.md` does not define, so the mapping from a test name to a criterion exists nowhere checkable. Whether to number the criteria is an open decision, recorded in `design/90-decisions.md`; until it is taken, treat drift reported against S1–S22 as unreliable and check it by hand. **S1 to S5 are merged and are not retrofitted or reopened** either way.
+- **This repository's legacy S1–S22 issues predate the positional criterion ids now fixed in `design/30-slices.md`.** When an existing issue has no ids in its checkboxes, `/track` maps them positionally only if its checkbox count equals the document's criterion count; a count difference is real drift. Preserve the checkbox text and state rather than rewriting them to add ids. New slice issues include ids from the start. **S1 to S5 are merged and are never retrofitted or reopened.**
 - **Report drift, change neither side.** Which is wrong is my call.
 - **Ticking a checkbox is mine, not yours.** An agent reporting "S3.1 met" and a ticked box are different claims by different parties, and collapsing them removes the only human gate between "the tests pass" and "this is done". `/slice` ends by listing the ids it believes are met so ticking is mechanical.
 - **Bugs and stories are filed by hand** from `.github/ISSUE_TEMPLATE/`. `/track` does not open them.

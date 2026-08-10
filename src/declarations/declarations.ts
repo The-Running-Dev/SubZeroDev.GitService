@@ -52,7 +52,7 @@ export interface Declarations {
 
   effectiveWritablePrefixes(declaration: Declaration, profile: ActorProfile): readonly PathPrefix[];
 
-  bumpGrantEpoch(id: DeclarationId, tx: StoreTransaction): GrantEpoch;
+  bumpGrantEpoch(id: DeclarationId, tx: StoreTransaction): Outcome<GrantEpoch, DeclarationError>;
   remoteHostAllowlist(): readonly RemoteHost[];
 }
 
@@ -134,11 +134,23 @@ function toDeclaration(row: DeclarationRow): Declaration {
 }
 
 /** The core of `bumpGrantEpoch`, extracted so `amend`/`orphan` below can raise the epoch inside the same `BEGIN`/`COMMIT` as their own write, through a `StoreTransaction` wrapping that same connection — not a second one. */
-function bumpGrantEpochImpl(id: DeclarationId, now: IsoUtcTimestamp, tx: StoreTransaction): GrantEpoch {
+function bumpGrantEpochImpl(id: DeclarationId, now: IsoUtcTimestamp, tx: StoreTransaction): Outcome<GrantEpoch, DeclarationError> {
   tx.run("UPDATE declaration SET grant_epoch = grant_epoch + 1, updated_at = ? WHERE id = ? AND state = 'active'", now, id);
   const rows = tx.all('SELECT grant_epoch FROM declaration WHERE id = ? AND state = ?', id, 'active') as { grant_epoch: number }[];
-  const epoch = validateGrantEpoch(rows[0]?.grant_epoch ?? 0);
-  return epoch.ok ? epoch.value : (0 as GrantEpoch);
+  // **No `?? 0` fallback.** Epoch zero is a real value — the epoch a
+  // declaration is created with — so returning it for a row that was not
+  // there, or a value that did not validate, reports "grants are current"
+  // for a bump that never landed. That is the one answer a caller invalidating
+  // outstanding grants cannot act on safely.
+  const row = rows[0];
+  if (!row) {
+    return err(declarationError({ code: 'not-found' }, `no active declaration '${id}' to bump the grant epoch of`));
+  }
+  const epoch = validateGrantEpoch(row.grant_epoch);
+  if (!epoch.ok) {
+    return err(declarationError({ code: 'store-failed', cause: storeError({ code: 'io-failed' }, `grant epoch ${row.grant_epoch} is not a valid epoch`) }, `declaration '${id}' read back an invalid grant epoch`));
+  }
+  return ok(epoch.value);
 }
 
 /** A `StoreTransaction` wrapping a single already-open connection with an explicit `BEGIN`/`COMMIT` around it — for a caller (`amend`, `orphan`) that needs its own write and an epoch bump to commit or roll back together, without depending on the shared `StructuredStore` instance no `DeclarationsDependencies` carries a reference to. */
@@ -427,7 +439,14 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
           // a live MCP session on its next call (S14.4) — in the same
           // transaction as the write it is bumping for, so a rolled-back
           // amend never invalidates a grant for a change that never landed.
-          if (capabilityGrantChanged) bumpGrantEpochImpl(id, now, tx);
+          // A failed bump throws rather than being ignored, so the amend rolls
+          // back with it: committing the narrowed grant while its epoch stayed
+          // put would leave live sessions holding the wider grant with nothing
+          // to invalidate them.
+          if (capabilityGrantChanged) {
+            const bumped = bumpGrantEpochImpl(id, now, tx);
+            if (!bumped.ok) throw bumped.error;
+          }
           const row = latestRowFor(db, id);
           if (!row) throw new Error('unreachable: row existed a moment ago');
           return row;
@@ -546,9 +565,10 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
      * a declaration's outstanding grants are invalidated, so it has to commit
      * with whatever the caller is committing — an epoch raised outside the
      * caller's transaction survives its rollback, leaving every grant revoked
-     * for a change that never happened, and this member returns `GrantEpoch`
-     * rather than an `Outcome`, so a write refused as busy has no channel to
-     * report itself.
+     * for a change that never happened. It returns an `Outcome` so that a
+     * refused write, a missing row or a value that fails validation has a
+     * channel of its own — a bare `GrantEpoch` could only report those as
+     * epoch zero, which is indistinguishable from a real, current epoch.
      *
      * The read-back goes through `tx.all` for the same reason, and it is why
      * `run` alone was not enough: a second connection cannot see the caller's
@@ -560,7 +580,7 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
      * `capabilityGrant` actually changes, which is what lets a narrowing
      * reach a live MCP session on its next call.
      */
-    bumpGrantEpoch(id: DeclarationId, tx: StoreTransaction): GrantEpoch {
+    bumpGrantEpoch(id: DeclarationId, tx: StoreTransaction): Outcome<GrantEpoch, DeclarationError> {
       return bumpGrantEpochImpl(id, clock.now(), tx);
     },
 

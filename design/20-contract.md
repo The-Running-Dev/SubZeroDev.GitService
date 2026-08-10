@@ -1467,6 +1467,7 @@ interface CredentialBinding {
   readonly ref: CredentialRef;
   readonly declarationId: DeclarationId;
   readonly variableName: EnvVarName;
+  readonly username: string | null;
 }
 
 interface ExecRequest {
@@ -1495,7 +1496,8 @@ interface Exec {
 
 `argv` is a vector, never a string, and there is no shell. The executable is fixed by which runner
 is called, never by an element of `argv`. `credential` names an environment variable; the value is
-placed in the child's environment by the resolver and never returned to a caller. Exec supplies the
+placed in the child's environment by the resolver and never returned to a caller. Its optional
+username is placed in the child environment too and never in `argv`. Exec supplies the
 credential-helper configuration itself, ahead of every element of `argv`, and disables system and
 global configuration with a neutral home directory.
 
@@ -1574,7 +1576,7 @@ interface Declarations {
 
   effectiveWritablePrefixes(declaration: Declaration, profile: ActorProfile): readonly PathPrefix[];
 
-  bumpGrantEpoch(id: DeclarationId, tx: StoreTransaction): GrantEpoch;
+  bumpGrantEpoch(id: DeclarationId, tx: StoreTransaction): Outcome<GrantEpoch, DeclarationError>;
   remoteHostAllowlist(): readonly RemoteHost[];
 }
 ```
@@ -1615,14 +1617,19 @@ allowed-host constraint the design gives each reference lives in one manifest at
 
 ```
 <mount>/_allowed-hosts.json     { "<ref>": ["github.com", ...], ... }
+<mount>/_<ref>.username         optional username, UTF-8 text with one trailing newline trimmed
 <mount>/<ref>                   the secret
 ```
 
-The manifest's name begins with `_`, which `CredentialRef`'s own pattern forbids as a first
-character, so it can never collide with a reference — the same device the TOTP sealing key already
-uses. **A reference absent from the manifest permits no host**, and `allowedHosts` returns the
-empty list rather than every host: the design calls this a second guard independent of the
-deployment's `remoteHostAllowlist`, and a guard that defaults open is not one.
+The manifest and optional username file begin with `_`, which `CredentialRef`'s own pattern forbids
+as a first character, so neither can collide with a reference — the same device the TOTP sealing
+key already uses. A missing username file means `username: null`, and Exec retains its existing
+`x-access-token` fallback; a host that requires a particular account or deploy-token username must
+supply the file. After the one trailing newline is removed, a username must be non-empty and contain
+no CR, LF or NUL; otherwise resolution returns `reference-unreadable`. **A reference absent from the
+manifest permits no host**, and `allowedHosts` returns the empty list rather than every host: the
+design calls this a second guard independent of the deployment's `remoteHostAllowlist`, and a guard
+that defaults open is not one.
 
 `EnvVarName` for a resolved binding is derived from the reference, uppercased with every character
 outside `[A-Z0-9]` replaced by `_`, under a fixed `SZG_CREDENTIAL_` prefix. It is an internal
@@ -1669,8 +1676,9 @@ members take one — `Notifier.enqueue`, `Declarations.bumpGrantEpoch`, `Schedul
 and `Authorization.revokeGrantsForResource` — and each promises its write commits with the caller's.
 An opaque `{ id }` token cannot deliver that: a participant holding only an identifier has no way to
 reach the open transaction, so it opens its own connection instead and the write lands outside. It
-then either survives the caller's rollback, or is refused as busy and lost silently, since three of
-the four return no error channel. Participants therefore write through `run`.
+then either survives the caller's rollback, or is refused as busy and lost silently. Participants
+therefore write through `run`; `bumpGrantEpoch` additionally returns an `Outcome` so a missing row
+or failed read cannot masquerade as epoch zero.
 
 **`all` is there because writing is only half of participating.** Three of the four members have to
 read inside the transaction to produce what they return: `bumpGrantEpoch` returns the epoch it just
@@ -1729,10 +1737,10 @@ interface Journal {
     descriptor: RecoveryDescriptor | null,
   ): RecoveryClassification;
 
-  unsettled(declarationId: DeclarationId, generation: Generation): Promise<readonly OperationJournalEntry[]>;
-  allUnsettled(): Promise<readonly OperationJournalEntry[]>;
-  findByScheduledJob(jobId: ScheduledJobId): Promise<OperationJournalEntry | null>;
-  parked(): Promise<readonly OperationJournalEntry[]>;
+  unsettled(declarationId: DeclarationId, generation: Generation): Promise<Outcome<readonly OperationJournalEntry[], JournalError>>;
+  allUnsettled(): Promise<Outcome<readonly OperationJournalEntry[], JournalError>>;
+  findByScheduledJob(jobId: ScheduledJobId): Promise<Outcome<OperationJournalEntry | null, JournalError>>;
+  parked(): Promise<Outcome<readonly OperationJournalEntry[], JournalError>>;
   runRetention(): Promise<RetentionReport>;
 }
 ```
@@ -1912,11 +1920,9 @@ because that refusal is the signal of an unattended actor probing its unlock pat
 
 `loadRepositoryConfig` reads from the working tree on every call and caches nothing.
 
-The twelve operations' input and output types are **named above but not defined here**, because the
-design does not determine them. `RepoStatusInput`, `BranchesInput`, `RepoHealthInput`,
-`GitDiffInput`, `GitPushInput`, `GitFetchInput`, `SyncBaseInput` and every `*Data` are placeholders
-that U1 must define; declaring them here with guessed fields would be inventing the product
-surface. What the design and the brief do fix:
+The twelve operations' input and output types were initially **named above but not defined here**,
+because the design did not determine them. The slice-specific U1 resolutions below are their
+complete declarations. What the design and the brief fixed before those resolutions:
 
 ```ts
 interface GitStageInput { readonly paths: readonly RepoRelativePath[] }
@@ -1931,8 +1937,7 @@ is rejected before the process starts when it selects an executable, injects con
 a remote operand that does not normalise to this declaration's own `cloneUrl`, or invokes a
 subcommand that persists a remote — `remote add`, `remote set-url`, `submodule add`, or a `config`
 write matching `remote.*`. There is no force flag anywhere in `GitPushInput`, and there is no
-reset, clean, rebase or branch-delete operation on this interface. The remaining fields of all
-twelve are **not determined** — see `## Unresolved`.
+reset, clean, rebase or branch-delete operation on this interface.
 
 **S6 resolves U1 for the five read operations.** Their input and output types, fixed here:
 
@@ -2151,35 +2156,50 @@ transfer, not a local `git add`. None is `schedulable`: a scheduled bare push wi
 own has no declared consumer, and S16's held operations are where that question is actually
 answered.
 
-### L2 — composites
+**S15 resolves U1 for `git_raw`.** Its input was fixed above; its output is:
 
 ```ts
-interface Composite<TInput, TData> {
-  readonly tool: RegistryToolName;
-  readonly run: DomainOperation<TInput, TData>;
-  readonly recovery: RecoveryDescriptor;
-}
-
-interface Composites {
-  readonly prepareBranch: Composite<PrepareBranchInput, PrepareBranchData>;
-  readonly reconcileAfterMerge: Composite<ReconcileAfterMergeInput, ReconcileAfterMergeData>;
+interface GitRawData {
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly durationMs: number;
+  readonly changedPaths: readonly RepoRelativePath[];
 }
 ```
 
-Each composite ships its own `RecoveryDescriptor`, which the composition root registers into the
-catalogue. Every sub-step that mutates outside the local clone calls `Journal.appendStep` before
-making the call. Input and output types are subject to the same `## Unresolved` item as the git
-operations.
+`stdout` and `stderr` are scrubbed before they enter the result. A successful `GitRawData` carries
+`exitCode: 0`; a non-zero child exit maps to an error envelope rather than successful data.
+`changedPaths` is the sorted, duplicate-free set of repository-relative paths whose index or
+worktree status differs between the journaled pre-state and the observation after the child exits.
+It is the same list written into the `hatch-outcome` audit record.
 
-**Implementation note (S12):** the shipped `GitOperations`, `HostOperations` and now `Composites`
-modules all expose plain `DomainOperation`s, with each operation's `RecoveryDescriptor` held in a
-sibling `recovery-descriptors.ts` file and registered into the catalogue by the composition root at
-startup (`git/recovery-descriptors.ts`, `host/recovery-descriptors.ts`,
-`composites/recovery-descriptors.ts`) — never bundled with the operation itself. This is a documented
-drift from the `Composite<TInput, TData>` wrapper above, which this slice does not build: the
-`{ tool, run, recovery }` bundle was written before S6–S11 established the actual pattern every other
-L2 module now follows, and building a second, different shape for composites alone would be the
-inconsistency, not the fix. Flagged for `/reconcile` rather than resolved here.
+The registry entry S15 ships:
+
+| `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
+|---|---|---|---|---|---|---|
+| `git_raw` | `{ kind: 'module', target: 'git.raw' }` | `['git.raw']` | `['raw']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: true }` | `{ timeoutSeconds: 60, maxResultBytes: 4194304 }` |
+
+It carries `capabilityScope: 'declaration'`. It is neither schedulable nor a content-drop target:
+the hatch is deliberately invoked, never an unattended execution surface. Its output is untrusted
+because the caller chooses an operation whose output may contain repository-authored text. The
+60-second limit is `TimeoutBudget.hatchSeconds`; it is shorter than the 300-second transfer caps
+because caller-authored work holds the estate-wide mutation lock. The 4 MiB result limit matches
+`git_diff`, the existing local operation whose caller-selected output can likewise contain
+repository-authored content.
+
+### L2 — composites
+
+```ts
+interface Composites {
+  readonly prepareBranch: DomainOperation<PrepareBranchInput, PrepareBranchData>;
+  readonly reconcileAfterMerge: DomainOperation<ReconcileAfterMergeInput, ReconcileAfterMergeData>;
+}
+```
+
+Each operation's `RecoveryDescriptor` is held separately and registered into the recovery catalogue
+by the composition root, matching `GitOperations` and `HostOperations`. Every sub-step that mutates
+outside the local clone calls `Journal.appendStep` before making the call.
 
 **S12 resolves U1 for the two composites.** Their input and output types, fixed here:
 
@@ -2822,7 +2842,7 @@ interface ModuleErrorBase {
 ```ts
 type ExecError = ModuleErrorBase & (
   | { readonly code: 'spawn-failed' }
-  | { readonly code: 'nonzero-exit'; readonly exitCode: number; readonly stderr: string }
+  | { readonly code: 'nonzero-exit'; readonly exitCode: number; readonly stdout: string; readonly stderr: string }
   | { readonly code: 'timed-out'; readonly limitSeconds: number }
   | { readonly code: 'argv-rejected'; readonly rule: string }
   | { readonly code: 'cancelled' }
@@ -2832,7 +2852,7 @@ type ExecError = ModuleErrorBase & (
 | Variant | Raised when | Retryable | Caller does |
 |---|---|---|---|
 | `spawn-failed` | The fixed executable could not be started | no | `infrastructure` — the environment is wrong, not the request |
-| `nonzero-exit` | The child exited non-zero; `stderr` is already scrubbed | no | Classify by domain: auth rejection to `upstream`, a refused push to `precondition` |
+| `nonzero-exit` | The child exited non-zero; `stdout` and `stderr` are already scrubbed | no | Classify by domain: auth rejection to `upstream`, a refused push to `precondition`; informational commands retain both streams for diagnosis |
 | `timed-out` | The declared cap elapsed and the child was killed | no | `timeout`, and park the journal entry — what the command achieved is not knowable |
 | `argv-rejected` | The vector selects an executable, injects configuration, carries a foreign remote operand, or persists a remote | no | `validation`; no authority could ever permit it |
 | `cancelled` | The caller's signal aborted | no | `conflict`, releasing locks in reverse acquisition order |
@@ -2902,7 +2922,7 @@ type CredentialError = ModuleErrorBase & (
 | Variant | Raised when | Retryable | Caller does |
 |---|---|---|---|
 | `reference-not-found` | No file in the mount matches the reference name | no | `precondition` naming the reference and the declaration, never a value |
-| `reference-unreadable` | The file exists and cannot be read | no | `infrastructure` |
+| `reference-unreadable` | A secret or username file exists and cannot be read, or the username is empty or contains CR, LF or NUL | no | `infrastructure` |
 | `host-not-permitted` | The reference's own allowed-host constraint excludes the remote | no | `authorization` |
 | `marked-failing` | The reference is marked failing for this declaration | no | `upstream`. The mark clears when the resolver observes a changed secret, or by hand from the health view |
 
@@ -2964,6 +2984,7 @@ type CloneStoreError = ModuleErrorBase & (
 type JournalError = ModuleErrorBase & (
   | { readonly code: 'intent-write-failed'; readonly cause: StoreError }
   | { readonly code: 'prestate-capture-failed'; readonly cause: CloneStoreError }
+  | { readonly code: 'read-failed'; readonly cause: StoreError }
   | { readonly code: 'entry-not-found'; readonly operationId: OperationId }
   | { readonly code: 'invalid-transition'; readonly from: JournalEntryState; readonly to: JournalEntryState }
 );
@@ -2973,6 +2994,7 @@ type JournalError = ModuleErrorBase & (
 |---|---|---|---|
 | `intent-write-failed` | The intent record could not be written | no | **Abort the operation before acting.** Return `infrastructure` with no side effects — an unrecoverable mutation is worse than a refused one |
 | `prestate-capture-failed` | Git state could not be observed under the lock | no | Abort, as above |
+| `read-failed` | An unsettled, parked or scheduled-job lookup could not read the store | only if the cause is | Fail closed: boot reports `store-failed`, and recovery or scheduling must not treat the result as an empty set |
 | `entry-not-found` | A step, settle or park names an unknown operation | no | `infrastructure`. A defect |
 | `invalid-transition` | `settled` to anything, or `attention` to `applied` | no | `infrastructure`. A defect |
 
@@ -3069,7 +3091,7 @@ type HostError = ModuleErrorBase & (
   | { readonly code: 'server-error'; readonly status: number; readonly attempts: number }
   | { readonly code: 'auth-rejected'; readonly ref: CredentialRef; readonly declarationId: DeclarationId }
   | { readonly code: 'merge-conflict'; readonly pullRequest: PullRequestRef; readonly headSha: GitSha; readonly baseSha: GitSha }
-  | { readonly code: 'required-check-failed'; readonly check: string }
+  | { readonly code: 'required-check-failed'; readonly check: string; readonly pullRequest: PullRequestRef }
   | { readonly code: 'not-found'; readonly resource: string }
   | { readonly code: 'timed-out'; readonly limitSeconds: number }
 );
@@ -3082,7 +3104,7 @@ type HostError = ModuleErrorBase & (
 | `server-error` | 5xx after up to three retries, **read operations only** | already retried | `upstream` |
 | `auth-rejected` | The credential was refused | no | `upstream`, and mark the reference failing for **this declaration only** |
 | `merge-conflict` | The pull request cannot merge | no — **terminal** | `precondition` naming the branch and both heads; the notifier fires. There is no rebase tool |
-| `required-check-failed` | A declared required check concluded failure | no — terminal | `precondition`; the notifier fires |
+| `required-check-failed` | A declared required check concluded failure | no — terminal | `precondition` naming the check and pull request; the notifier fires |
 | `not-found` | The pull request, check or workflow does not exist | no | `precondition` |
 | `timed-out` | A bounded wait reached its cap | no | `timeout`; the notifier fires |
 
@@ -3452,6 +3474,9 @@ and `readDeployStatus` carries no tool until S12 declares one.
 and `### L3 — http adapter` above. U1 otherwise stands: only `raw` remains open, for the slice that
 ships it.
 
+**Resolved 2026-08-10 by the S15 contract amendment:** `git_raw` now has complete input and output
+types and a registry entry under `### L2 — git operations`. U1 is closed.
+
 **U2 — The `OperatorScope` vocabulary, resolved 2026-08-09 by S13.** `OperatorScope` is the same
 four values as `McpScope`. See `### Scopes` above and `design/90-decisions.md`, 2026-08-09.
 
@@ -3488,6 +3513,9 @@ above; the values are not.
 (3600 and 43200, above), because S4's console session cannot exist without a number. U6 still owns
 what a deployment ought to choose — a default is what the service falls back to, not an answer to
 the question.
+
+*Narrowed further 2026-08-10:* S15 fixes `hatchSeconds` at 60 seconds, reflected in the `git_raw`
+registry entry above. U6 otherwise stands for the remaining operational numbers.
 
 **U7 — The console package's element type and build entry.** `ConsoleViewRegistration` is generic
 over the element type because the design fixes what a view receives and what it declares, but not

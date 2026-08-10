@@ -120,7 +120,13 @@ export function hostErrorToToolResult(error: HostError): ToolResult<never> {
         { path: 'baseSha', rule: 'merge-conflict', message: error.baseSha as string },
       ]);
     case 'required-check-failed':
-      return precondition(error.summary, [{ path: 'check', rule: 'required-check-failed', message: error.check }]);
+      // Both fields, because `TerminalState.required-check-failed` needs both:
+      // a check name with no pull request tells an operator that something
+      // failed but not where to go and look.
+      return precondition(error.summary, [
+        { path: 'check', rule: 'required-check-failed', message: error.check },
+        { path: 'pullRequest', rule: 'required-check-failed', message: String(error.pullRequest.number) },
+      ]);
     case 'not-found':
       return precondition(error.summary, [{ path: 'resource', rule: 'not-found', message: error.resource }]);
     case 'timed-out':

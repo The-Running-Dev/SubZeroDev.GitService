@@ -35,6 +35,16 @@
     Branch names to delete with `git branch -d` (never `-D`) after everything else has run.
     Only ever the branches named here - never inferred, never "everything --merged found."
 
+.PARAMETER AutoStash
+    Instead of stopping on a dirty tree, run `git stash push -u` and continue. The stash is
+    never popped by this script - it is left on the stash list and reported back
+    (StashRef), so the caller can restore it explicitly rather than having it silently
+    reappear on whatever branch happens to be checked out next.
+
+    StashBranch reports the branch the work was stashed from. The script checks out the
+    default branch afterwards, so restoring means switching back to StashBranch first -
+    popping where this script leaves you applies the diff to the wrong tree.
+
 .EXAMPLE
     ./tools/Invoke-DoneHousekeeping.ps1
     Switch, prune, and report candidates. Deletes nothing.
@@ -48,7 +58,8 @@ param(
     [string] $RepoRoot = (Get-Location).Path,
     [string] $DefaultBranch,
     [switch] $SkipPull,
-    [string[]] $DeleteBranches = @()
+    [string[]] $DeleteBranches = @(),
+    [switch] $AutoStash
 )
 
 Set-StrictMode -Version Latest
@@ -65,20 +76,41 @@ function Invoke-Git {
     return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($out -join "`n") }
 }
 
+$stashed = $false
+$stashRef = $null
+$stashBranch = $null
+
 $statusResult = Invoke-Git -GitArgs @('status', '--short') -WorkingDir $repoRootResolved
 if ($statusResult.Output.Trim()) {
-    [pscustomobject]@{
-        Stopped        = $true
-        Reason         = 'DirtyTree'
-        Detail         = $statusResult.Output
-        DefaultBranch  = $null
-        Pulled         = $false
-        PrunedCount    = 0
-        Candidates     = @()
-        Deleted        = @()
-        Refused        = @()
+    if (-not $AutoStash) {
+        [pscustomobject]@{
+            Stopped        = $true
+            Reason         = 'DirtyTree'
+            Detail         = $statusResult.Output
+            DefaultBranch  = $null
+            Pulled         = $false
+            PrunedCount    = 0
+            Candidates     = @()
+            Deleted        = @()
+            Refused        = @()
+            Stashed        = $false
+            StashRef       = $null
+            StashBranch    = $null
+        }
+        return
     }
-    return
+    # Captured before the stash, because the branch the work belongs to is the
+    # one thing the caller cannot recover afterwards: this script checks out the
+    # default branch next, and `git stash pop` there would apply the diff to the
+    # wrong tree. Reported as StashBranch so the restore can name it.
+    $stashBranch = (Invoke-Git -GitArgs @('branch', '--show-current') -WorkingDir $repoRootResolved).Output.Trim()
+    if (-not $stashBranch) { $stashBranch = (Invoke-Git -GitArgs @('rev-parse', 'HEAD') -WorkingDir $repoRootResolved).Output.Trim() }
+    $stashResult = Invoke-Git -GitArgs @('stash', 'push', '-u', '-m', "Invoke-DoneHousekeeping auto-stash from $stashBranch") -WorkingDir $repoRootResolved
+    if ($stashResult.ExitCode -ne 0) {
+        throw "AutoStash was requested but 'git stash push -u' failed: $($stashResult.Output)"
+    }
+    $stashed = $true
+    $stashRef = 'stash@{0}'
 }
 
 if (-not $DefaultBranch) {
@@ -119,6 +151,9 @@ if ($currentBranch -and $currentBranch -ne $DefaultBranch) {
                 Candidates     = @()
                 Deleted        = @()
                 Refused        = @()
+                Stashed        = $stashed
+                StashRef       = $stashRef
+                StashBranch    = $stashBranch
             }
             return
         }
@@ -176,4 +211,7 @@ foreach ($branch in $DeleteBranches) {
     Candidates     = $candidates
     Deleted        = @($deleted)
     Refused        = @($refused)
+    Stashed        = $stashed
+    StashRef       = $stashRef
+    StashBranch    = $stashBranch
 }

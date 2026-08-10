@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { read } from '../journal/testing/read.ts';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
@@ -24,7 +25,7 @@ import { createModuleAdapter, toModuleHandler } from '../module-adapter/module-a
 import { createGitOperations } from '../git/git-operations.ts';
 import { createCredentialResolver } from '../credentials/credentials.ts';
 import type { EnvVarName } from '../shared/brands.ts';
-import { success } from '../result/envelope.ts';
+import { success, timeout as timeoutResult } from '../result/envelope.ts';
 import { err, ok, type Outcome } from '../shared/outcome.ts';
 import type { Session } from '../shared/session.ts';
 import { createRecoveryCatalogue } from '../recovery/catalogue.ts';
@@ -34,6 +35,7 @@ import type { HttpAdapter } from '../http/http-adapter.ts';
 
 const CAPABILITY_SET = new Set(['repo.read']) as unknown as DeploymentCeiling;
 const MUTATION_CAPABILITY_SET = new Set(['repo.read', 'git.local.write']) as unknown as DeploymentCeiling;
+const RAW_CAPABILITY_SET = new Set(['git.raw']) as unknown as DeploymentCeiling;
 
 function sessionWith(grant: readonly DeclarationScopedCapability[]): Session {
   return {
@@ -163,6 +165,30 @@ test('visibleTools returns the tool for a declaration granting repo.read, and no
     const declarationNoGrant = await declarations.get('repo-a' as never);
     const emptyVisible = pipeline.visibleTools(sessionWith(['repo.read']), declarationNoGrant);
     assert.equal(emptyVisible.length, 0, 'the tool is absent once the declaration no longer grants repo.read — not merely refused');
+  });
+});
+
+test('S15.1 — git_raw is absent until the declaration explicitly grants git.raw', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, fixture }) => {
+    const entry = fixtureTool({
+      name: 'git_raw', capabilities: ['git.raw'], scopes: ['raw'], executionClass: 'mutating',
+      target: { kind: 'module', target: 'git.raw' as never }, limits: { timeoutSeconds: 60, maxResultBytes: 4_194_304 },
+    });
+    const registry: CompiledRegistry = {
+      fingerprint: 'a'.repeat(64) as never, compiledAt: systemClock.now(), entries: [entry],
+      contractCapabilitySet: RAW_CAPABILITY_SET as unknown as CompiledRegistry['contractCapabilitySet'],
+    };
+    const pipeline = createDispatchPipeline({
+      registry, ceiling: RAW_CAPABILITY_SET, moduleAdapter: createModuleAdapter(), declarations, cloneStore, locks: createLocks(),
+      audit: createAudit({ volumeRoot: '/dev/null-unused-raw', clock: systemClock }), clock: systemClock,
+    });
+
+    const initially = await declarations.get('repo-a' as never);
+    assert.deepEqual(pipeline.visibleTools(sessionWith(['git.raw']), initially), []);
+
+    fixture.current = fixtureDeclaration('repo-a', fixture.current!.cloneUrl, ['git.raw']);
+    const granted = await declarations.get('repo-a' as never);
+    assert.deepEqual(pipeline.visibleTools(sessionWith(['git.raw']), granted).map((tool) => tool.name), ['git_raw']);
   });
 });
 
@@ -536,9 +562,9 @@ test('a real git_stage + git_commit mutation runs end to end: journal settles, a
     assert.equal(commitResult.kind, 'success');
 
     // The journal entry for the commit settled.
-    const parked = await journal.parked();
+    const parked = read(await journal.parked());
     assert.equal(parked.length, 0);
-    const unsettled = await journal.allUnsettled();
+    const unsettled = read(await journal.allUnsettled());
     assert.equal(unsettled.length, 0, 'both mutations settled — nothing left unsettled');
 
     // A `call` audit record exists for the commit.
@@ -1340,7 +1366,7 @@ test('S8.9 — resolving a parked entry returns the clone to ready and the decla
     const described = await cloneStore.describe('repo-a' as never);
     assert.equal(described.ok && described.value.state, 'ready');
     assert.equal(described.ok && described.value.attentionReason, null);
-    assert.equal((await journal.parked()).length, 0);
+    assert.equal((read(await journal.parked())).length, 0);
 
     assert.equal((await mutate()).kind, 'success', 'ordinary service resumes');
   });
@@ -1543,8 +1569,8 @@ test('a resume dispatched from inside the lazy pass is not refused by the pass i
     // The resume succeeded, so the entry settled. If the resume had been
     // refused as `recovery-pending` by the very pass that issued it, the
     // ladder would have read that as a failed resume and parked it instead.
-    assert.equal((await journal.parked()).length, 0, 'the resumed entry must not be parked');
-    assert.equal((await journal.allUnsettled()).length, 0, 'both the resumed entry and the triggering call settled');
+    assert.equal((read(await journal.parked())).length, 0, 'the resumed entry must not be parked');
+    assert.equal((read(await journal.allUnsettled())).length, 0, 'both the resumed entry and the triggering call settled');
 
     const repairAudit = await audit.query({ declarationId: 'repo-a' as never, tool: 'git_stage' as never, actorSubject: null, form: 'call', from: null, to: null, limit: 10, cursor: null });
     assert.equal(repairAudit.ok, true);
@@ -2156,5 +2182,35 @@ test('an http-targeted read tool never materialises a clone — no credential de
 
     assert.equal(result.ok, true);
     assert.equal(ensureCalls, 0, 'an http-targeted entry must never materialise a clone the adapter never touches');
+  });
+});
+
+test('S15.7 — a timed-out git_raw call parks its journal entry and marks the clone for attention', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec, locks, fixture, volume }) => {
+    fixture.current = fixtureDeclaration('repo-a', fixture.current!.cloneUrl, ['git.local.write']);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const moduleAdapter = createModuleAdapter();
+    moduleAdapter.register('git.raw' as never, async () => timeoutResult('raw command exceeded 60 seconds', 60));
+    const entry = fixtureTool({
+      name: 'git_raw', capabilities: ['git.local.write'], scopes: ['write'], executionClass: 'mutating',
+      target: { kind: 'module', target: 'git.raw' as never }, limits: { timeoutSeconds: 60, maxResultBytes: 4_194_304 },
+    });
+    const pipeline = createDispatchPipeline({
+      registry: mutatingRegistryOf([entry]), ceiling: MUTATION_CAPABILITY_SET, moduleAdapter, declarations, cloneStore, locks, audit, journal, exec, clock: systemClock,
+    });
+
+    const result = await pipeline.dispatch({
+      toolName: 'git_raw' as never, input: { argv: ['gc'] }, session: sessionWith(['git.local.write']), declarationId: 'repo-a' as never,
+      scheduledJobId: null, context: 'normal', signal: new AbortController().signal,
+    });
+
+    assert.equal(result.kind, 'timeout');
+    const parked = read(await journal.parked());
+    assert.equal(parked.length, 1);
+    assert.equal(parked[0]?.tool, 'git_raw');
+    assert.equal(parked[0]?.context, 'hatch');
+    const clone = await cloneStore.describe('repo-a' as never);
+    assert.equal(clone.ok && clone.value.state, 'needs-attention');
   });
 });

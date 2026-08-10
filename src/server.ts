@@ -20,7 +20,7 @@ import { createGitOperations } from './git/git-operations.ts';
 import { createJournal } from './journal/journal.ts';
 import { createNotifier } from './notifier/notifier.ts';
 import { createRecoveryCatalogue } from './recovery/catalogue.ts';
-import { LOCAL_MUTATION_RECOVERY_DESCRIPTORS, REMOTE_OPERATION_RECOVERY_DESCRIPTORS } from './git/recovery-descriptors.ts';
+import { GIT_RAW_RECOVERY, LOCAL_MUTATION_RECOVERY_DESCRIPTORS, REMOTE_OPERATION_RECOVERY_DESCRIPTORS } from './git/recovery-descriptors.ts';
 import { createCredentialResolver } from './credentials/credentials.ts';
 import { prepareDeclarationCredential } from './credentials/declaration-credential.ts';
 import { ok, err } from './shared/outcome.ts';
@@ -243,6 +243,7 @@ async function main(): Promise<void> {
   moduleAdapter.register('git.push' as ModuleTargetName, toModuleHandler(gitOperations.push));
   moduleAdapter.register('git.fetch' as ModuleTargetName, toModuleHandler(gitOperations.fetch));
   moduleAdapter.register('git.syncBase' as ModuleTargetName, toModuleHandler(gitOperations.syncBase));
+  moduleAdapter.register('git.raw' as ModuleTargetName, toModuleHandler(gitOperations.raw));
 
   // S10 — the host surface behind the adapter. The credential goes through
   // the same three-step preparation the remote git operations use, so the
@@ -324,6 +325,7 @@ async function main(): Promise<void> {
   for (const descriptor of [
     ...LOCAL_MUTATION_RECOVERY_DESCRIPTORS,
     ...REMOTE_OPERATION_RECOVERY_DESCRIPTORS,
+    GIT_RAW_RECOVERY,
     PR_OPEN_RECOVERY,
     PR_ENABLE_AUTO_MERGE_RECOVERY,
     ...COMPOSITE_RECOVERY_DESCRIPTORS,
@@ -454,8 +456,20 @@ async function main(): Promise<void> {
     provisioningPending: () => operatorIdentity.provisioningState().then((state) => state === 'pending'),
     auditChain: () => audit.chainState(),
     authorization,
-    declarationsAwaitingRecovery: async () => new Set((await journal.allUnsettled()).map((entry) => entry.declarationId as string)),
-    parkedOperations: () => journal.parked(),
+    // Both of these feed the operator's health view, and both fail closed on
+    // an unreadable journal rather than rendering "nothing awaiting recovery"
+    // and "no parked operations" — the two readings an operator would act on
+    // by doing nothing.
+    declarationsAwaitingRecovery: async () => {
+      const unsettled = await journal.allUnsettled();
+      if (!unsettled.ok) throw new Error(`the operation journal could not be read: ${unsettled.error.summary}`);
+      return new Set(unsettled.value.map((entry) => entry.declarationId as string));
+    },
+    parkedOperations: async () => {
+      const parked = await journal.parked();
+      if (!parked.ok) throw new Error(`the operation journal could not be read: ${parked.error.summary}`);
+      return parked.value;
+    },
     observeGitState: async (declarationId) => {
       const observed = await cloneStore.observeGitState(declarationId);
       return observed.ok ? observed.value : null;
@@ -469,7 +483,9 @@ async function main(): Promise<void> {
       // The entry is located before anything is written: settling an
       // operation that is not parked would be a state change nobody asked
       // for, and `settle` alone cannot tell the difference.
-      const parkedBefore = await journal.parked();
+      const parkedRead = await journal.parked();
+      if (!parkedRead.ok) return { ok: false, summary: parkedRead.error.summary };
+      const parkedBefore = parkedRead.value;
       const entry = parkedBefore.find((candidate) => candidate.operationId === operationId);
       if (!entry) return { ok: false, summary: `no parked operation '${operationId}'` };
 

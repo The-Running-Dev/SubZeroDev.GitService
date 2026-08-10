@@ -312,7 +312,25 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       // recovered inline would hold the whole service down behind one
       // repository's unfinished work, and — worse — would run resume steps
       // that touch a host before anything was ready to supervise them.
-      const recoveryPending = deps.recovery ? declarationsWithUnsettledEntries(await deps.recovery.journal.allUnsettled()) : [];
+      //
+      // A journal that cannot be read fails the boot rather than reporting an
+      // empty `recoveryPending`: an unreadable store and a store holding no
+      // unsettled work are indistinguishable in an empty list, and coming up
+      // ready on the first while believing the second admits ordinary traffic
+      // to repositories whose unfinished work was never classified.
+      let recoveryPending: readonly DeclarationId[] = [];
+      if (deps.recovery) {
+        const unsettled = await deps.recovery.journal.allUnsettled();
+        if (!unsettled.ok) {
+          return err(
+            bootError(
+              { code: 'store-failed', cause: storeError({ code: 'io-failed' }, unsettled.error.summary) },
+              `the operation journal could not be read, so no declaration's recovery state is known: ${unsettled.error.summary}`,
+            ),
+          );
+        }
+        recoveryPending = declarationsWithUnsettledEntries(unsettled.value);
+      }
 
       // "Boot re-drives every undelivered row" (`10-design.md` § control flow
       // #1, step 11) — a row left `pending` by the previous process is

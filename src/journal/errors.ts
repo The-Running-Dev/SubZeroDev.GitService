@@ -9,6 +9,7 @@ export type JournalError = ModuleErrorBase &
   (
     | { readonly code: 'intent-write-failed'; readonly cause: StoreError }
     | { readonly code: 'prestate-capture-failed'; readonly cause: CloneStoreError }
+    | { readonly code: 'read-failed'; readonly cause: StoreError }
     | { readonly code: 'entry-not-found'; readonly operationId: OperationId }
     | { readonly code: 'invalid-transition'; readonly from: JournalEntryState; readonly to: JournalEntryState }
   );

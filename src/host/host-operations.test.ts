@@ -497,7 +497,7 @@ test('review: an exhausted per-credential budget raises rate-limited before the 
     exec: gh.exec,
     sleep: async () => {},
     requestBudget: 2,
-    credentialFor: () => ({ ref: 'token' as never, declarationId: DECLARATION, variableName: 'V' as never }),
+    credentialFor: () => ({ ref: 'token' as never, declarationId: DECLARATION, variableName: 'V' as never, username: null }),
   });
   const ops = createHostOperations({ clock: systemClock, adapter, journal: recordingJournal().journal, headShaFor: async () => HEAD, sleep: async () => {} });
 

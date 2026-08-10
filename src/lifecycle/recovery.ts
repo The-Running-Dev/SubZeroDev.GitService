@@ -53,7 +53,18 @@ export async function recoverDeclaration(deps: RecoveryDependencies, declaration
   const declaration = await deps.declarations.get(declarationId);
   if (declaration === null) return [];
 
-  const entries = await deps.journal.unsettled(declarationId, declaration.generation);
+  // A store that cannot be read is not a declaration with nothing to recover.
+  // Parking on the read failure keeps the distinction the `read-failed`
+  // variant exists to make: recovery states plainly that it does not know,
+  // rather than reporting the clean sweep an empty list used to imply.
+  const read = await deps.journal.unsettled(declarationId, declaration.generation);
+  if (!read.ok) {
+    const reason = `the journal could not be read, so this declaration's unsettled work is unknown: ${read.error.summary}`;
+    await deps.cloneStore.markAttention(declarationId, reason);
+    return [{ verdict: 'park', reason }];
+  }
+
+  const entries = read.value;
   const verdicts: RecoveryClassification[] = [];
   let enqueuedNotification = false;
 

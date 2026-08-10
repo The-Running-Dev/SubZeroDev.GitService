@@ -10,6 +10,7 @@ export interface CredentialBinding {
   readonly ref: CredentialRef;
   readonly declarationId: DeclarationId;
   readonly variableName: EnvVarName;
+  readonly username: string | null;
 }
 
 export interface ExecRequest {
@@ -210,6 +211,7 @@ export function createExec(options: ExecOptions): Exec {
         // git with an empty password, turning a resolution failure into an
         // authentication rejection and marking a reference that never resolved.
         env.SZG_CREDENTIAL_VAR = request.credential.variableName;
+        if (request.credential.username !== null) env.SZG_CREDENTIAL_USERNAME = request.credential.username;
         if (configuresGitCredentialHelper) argv = [...credentialConfigArgs(), ...request.argv];
         // `gh` has no credential-helper protocol; it reads a token from
         // `GH_TOKEN` in its own environment. Same channel as git's helper and
@@ -290,7 +292,7 @@ export function createExec(options: ExecOptions): Exec {
         }
 
         if (code !== 0) {
-          finish(err(execError({ code: 'nonzero-exit', exitCode: code, stderr }, `'${executable}' exited ${code}`)));
+          finish(err(execError({ code: 'nonzero-exit', exitCode: code, stdout, stderr }, `'${executable}' exited ${code}`)));
           return;
         }
 

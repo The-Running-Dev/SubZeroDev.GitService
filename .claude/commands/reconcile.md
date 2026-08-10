@@ -2,6 +2,12 @@
 description: Write implementation reality back into the design docs
 ---
 
+## Stop if `design/` is frozen
+
+If `design/FROZEN.md` exists, **stop before doing anything else.** Report its `Frozen because` and `Lifts when` lines verbatim and take no other action. The rule and the marker's format live in `AGENTS.md`, *The design freeze* — not restated here.
+
+This command is the one the freeze ends *with*, which is exactly why it does not end the freeze itself: the marker is deleted by hand first, and then this runs as the single reconciliation pass. **Never delete `design/FROZEN.md` yourself**, and never treat "the freeze looks finished" as authorization to proceed — `Lifts when` names a checkable condition, and confirming it is the user's call, not this command's.
+
 Compare the working tree against `design/10-design.md` and `design/20-contract.md`.
 
 This is the step that stops the docs becoming fiction. A stale design doc is worse than none, because every future agent session gets confidently briefed on a system that does not exist.

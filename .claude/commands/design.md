@@ -2,6 +2,10 @@
 description: Produce or revise the design doc from the brief
 ---
 
+## Stop if `design/` is frozen
+
+If `design/FROZEN.md` exists, **stop before doing anything else.** Report its `Frozen because` and `Lifts when` lines verbatim and write nothing. The rule and the marker's format live in `AGENTS.md`, *The design freeze* — not restated here.
+
 Read `design/00-brief.md`. Write `design/10-design.md`.
 
 This is the stage where irreversible decisions get made. Data model, module boundaries and error semantics are expensive to change later; code is not. Spend the reasoning here.
