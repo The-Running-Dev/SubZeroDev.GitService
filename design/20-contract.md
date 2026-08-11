@@ -61,7 +61,7 @@ type BranchName         = Brand<string, 'BranchName'>;
 type RepoRelativePath   = Brand<string, 'RepoRelativePath'>;
 type PathPrefix         = Brand<string, 'PathPrefix'>;
 type ClonePath          = Brand<string, 'ClonePath'>;
-type DropFileName       = Brand<string, 'DropFileName'>;
+type WatchedFileName    = Brand<string, 'WatchedFileName'>;
 type RemoteHost         = Brand<string, 'RemoteHost'>;
 type CloneUrl           = Brand<string, 'CloneUrl'>;
 type HttpsUrl           = Brand<string, 'HttpsUrl'>;
@@ -188,7 +188,7 @@ interface RepositoryIdentity {
   readonly gitUserEmail: string;
 }
 
-interface ContentDropConfig {
+interface FileWatcherConfig {
   readonly planTool: RegistryToolName;
   readonly applyTool: RegistryToolName;
   readonly autoMerge: boolean;
@@ -203,7 +203,7 @@ interface Declaration {
   readonly capabilityGrant: DeclarationGrant;
   readonly writablePathPrefixes: readonly PathPrefix[];
   readonly pinned: boolean;
-  readonly contentDrop: ContentDropConfig | null;
+  readonly fileWatcher: FileWatcherConfig | null;
   readonly identity: RepositoryIdentity;
   readonly state: DeclarationState;
   readonly grantEpoch: GrantEpoch;
@@ -219,7 +219,7 @@ interface DeclareInput {
   readonly capabilityGrant: readonly DeclarationScopedCapability[];
   readonly writablePathPrefixes: readonly PathPrefix[];
   readonly pinned: boolean;
-  readonly contentDrop: ContentDropConfig | null;
+  readonly fileWatcher: FileWatcherConfig | null;
   readonly identity: RepositoryIdentity;
 }
 
@@ -229,12 +229,12 @@ interface AmendInput {
   readonly capabilityGrant: readonly DeclarationScopedCapability[] | null;
   readonly writablePathPrefixes: readonly PathPrefix[] | null;
   readonly pinned: boolean | null;
-  readonly contentDrop: ContentDropConfig | null | undefined;
+  readonly fileWatcher: FileWatcherConfig | null | undefined;
   readonly identity: RepositoryIdentity | null;
 }
 ```
 
-`AmendInput.contentDrop` is three-valued on purpose: `undefined` leaves it alone, `null` removes
+`AmendInput.fileWatcher` is three-valued on purpose: `undefined` leaves it alone, `null` removes
 it, a value sets it. `id`, `generation`, `host` and `state` are absent from `AmendInput` because
 the design makes each immutable for the life of a generation.
 
@@ -246,7 +246,7 @@ interface OrphanReport {
   readonly revokedGrants: readonly GrantId[];
   readonly retainedJournalEntries: readonly OperationId[];
   readonly cloneLeftOnDisk: boolean;
-  readonly dropWatchStopped: boolean;
+  readonly fileWatcherStopped: boolean;
 }
 ```
 
@@ -619,7 +619,7 @@ type AuditRecordForm =
   | 'authorization-rejection'
   | 'hatch-intent'
   | 'hatch-outcome'
-  | 'content-drop'
+  | 'file-watcher'
   | 'identity-event'
   | 'lease-takeover';
 
@@ -652,7 +652,7 @@ type AuditRecordBody =
   | { readonly form: 'authorization-rejection'; readonly missing: readonly CapabilityName[]; readonly rejectedPath: RepoRelativePath | null }
   | { readonly form: 'hatch-intent'; readonly argv: readonly string[] }
   | { readonly form: 'hatch-outcome'; readonly resultKind: ResultKind; readonly changedPaths: readonly RepoRelativePath[] | null }
-  | { readonly form: 'content-drop'; readonly file: DropFileName; readonly outcome: DropOutcome }
+  | { readonly form: 'file-watcher'; readonly file: WatchedFileName; readonly outcome: WatchedFileOutcome }
   | { readonly form: 'identity-event'; readonly event: IdentityEvent }
   | { readonly form: 'lease-takeover'; readonly previousHolder: InstanceLease };
 
@@ -745,47 +745,47 @@ whatever key order, compact and one record per line, so segment-byte accounting 
 re-hashes — the on-disk encoding never has to match the hashed encoding, only round-trip through
 the same parser.
 
-### Content drops
+### File watcher
 
 ```ts
-type DropStage = 'inbox' | 'processing' | 'processed' | 'failed';
+type WatchedFileStage = 'inbox' | 'processing' | 'processed' | 'failed';
 
-interface ContentDropPlanInput {
-  readonly sourceFile: DropFileName;
+interface FileWatcherPlanInput {
+  readonly sourceFile: WatchedFileName;
   readonly content: string;
 }
 
-interface ContentDropPullRequestPlan {
+interface FileWatcherPullRequestPlan {
   readonly title: string;
   readonly body: string;
 }
 
-interface ContentDropPlanData<TPlan extends JsonValue = JsonValue> {
+interface FileWatcherPlanData<TPlan extends JsonValue = JsonValue> {
   readonly branch: BranchName;
   readonly commitMessage: string;
-  readonly pullRequest: ContentDropPullRequestPlan;
+  readonly pullRequest: FileWatcherPullRequestPlan;
   readonly permittedPaths: readonly RepoRelativePath[];
   readonly plan: TPlan;
 }
 
-interface ContentDropApplyInput<TPlan extends JsonValue = JsonValue> {
+interface FileWatcherApplyInput<TPlan extends JsonValue = JsonValue> {
   readonly permittedPaths: readonly RepoRelativePath[];
   readonly plan: TPlan;
 }
 
-interface ContentDropApplyData {
+interface FileWatcherApplyData {
   readonly changedPaths: readonly RepoRelativePath[];
 }
 
-type DropOutcome =
+type WatchedFileOutcome =
   | { readonly kind: 'succeeded'; readonly pullRequest: PullRequestRef }
   | { readonly kind: 'rejected'; readonly step: string; readonly result: ResultKind; readonly reason: string }
   | { readonly kind: 'interrupted-claim'; readonly reason: string };
 
-interface DropCandidate {
+interface WatchedFileCandidate {
   readonly declarationId: DeclarationId;
-  readonly file: DropFileName;
-  readonly stage: DropStage;
+  readonly file: WatchedFileName;
+  readonly stage: WatchedFileStage;
   readonly sizeBytes: number;
   readonly isSymlink: boolean;
 }
@@ -795,7 +795,7 @@ interface PendingPullRequest {
   readonly number: number;
   readonly branch: BranchName;
   readonly openedAt: IsoUtcTimestamp;
-  readonly sourceFile: DropFileName;
+  readonly sourceFile: WatchedFileName;
 }
 
 interface PendingPullRequestList {
@@ -805,14 +805,14 @@ interface PendingPullRequestList {
 interface WatchTickReport {
   readonly declarationId: DeclarationId;
   readonly skipped: 'clone-not-clean' | 'clone-needs-attention' | null;
-  readonly claimed: DropFileName | null;
-  readonly outcome: DropOutcome | null;
+  readonly claimed: WatchedFileName | null;
+  readonly outcome: WatchedFileOutcome | null;
   readonly reconciled: readonly PendingPullRequest[];
   readonly stillPending: readonly PendingPullRequest[];
 }
 ```
 
-`ContentDropConfig.planTool` and `applyTool` are two registry entries that together form the one
+`FileWatcherConfig.planTool` and `applyTool` are two registry entries that together form the one
 logical target described by the design. The plan tool consumes the claimed file after strict UTF-8
 decoding and returns all consumer-selected branch, commit, pull-request and path data plus an opaque
 JSON plan. Its handler is pure: dispatch supplies `CallContext.cloneRoot: null`, does not materialise
@@ -841,7 +841,7 @@ the watcher is not a bound, and the allowlist is what keeps a write out of `.git
 The watcher independently dispatches `repo_status` after apply: its complete changed path set must
 equal `changedPaths`, and that set must be a subset of `permittedPaths`, before the watcher
 dispatches `git_stage`. After staging, a second `repo_status` must report exactly the same path set
-and every entry staged before commit may begin. A mismatch is a failed drop, never a partial
+and every entry staged before commit may begin. A mismatch is a failed watched file, never a partial
 success; no later git or host step is dispatched.
 
 ### Instance lease
@@ -930,7 +930,7 @@ type TerminalState =
   | { readonly kind: 'required-check-failed'; readonly check: string; readonly pullRequest: PullRequestRef }
   | { readonly kind: 'wait-timeout'; readonly waitedSeconds: number; readonly tool: RegistryToolName }
   | { readonly kind: 'operation-parked'; readonly operationId: OperationId; readonly reason: string }
-  | { readonly kind: 'content-drop-failed'; readonly file: DropFileName; readonly reason: string };
+  | { readonly kind: 'file-watcher-failed'; readonly file: WatchedFileName; readonly reason: string };
 
 interface MaintenanceSummary {
   readonly kind: 'maintenance-pass';
@@ -1015,7 +1015,7 @@ type VolumeConsumer =
   | 'audit-log'
   | 'structured-store'
   | 'backups-and-snapshots'
-  | 'drop-directories';
+  | 'watcher-files';
 
 type StoreTableName =
   | 'schema_migration'
@@ -1074,7 +1074,7 @@ interface RetentionWindows {
   readonly preMigrationBackupsRetained: number;
   readonly storeSnapshotsRetained: number;
   readonly operatorSessionDays: number;
-  readonly processedDropDays: number;
+  readonly processedFileDays: number;
   readonly tokenDays: number;
   readonly revokedGrantDays: number;
   readonly terminalJobDays: number;
@@ -1125,7 +1125,7 @@ interface DeploymentConfig {
 
 Defaults the design fixes: `auditSegmentBytes` 67108864, `auditDays` 90, `journalSettledDays` 30,
 `outboxDeliveredDays` 14, `preMigrationBackupsRetained` 3, `storeSnapshotsRetained` 7,
-`operatorSessionDays` 7, `processedDropDays` 14, `tokenDays` 7, `revokedGrantDays` 180,
+`operatorSessionDays` 7, `processedFileDays` 14, `tokenDays` 7, `revokedGrantDays` 180,
 `terminalJobDays` 30, `maintenanceAtPercent` 85, `refuseAtPercent` 95, `cloneSeconds` 300,
 `fetchSeconds` 300, `pushSeconds` 300, `hatchSeconds` 60, `monitoringWaitCapSeconds` 1800,
 `mutationLockAcquireMs` 30000, `materialisationLockAcquireMs` 30000, `mutationQueueDepth` 32,
@@ -1145,11 +1145,11 @@ limit, so adding a tool can never silently inherit a result-size budget.
 
 ```ts
 type ToolExecutionClass = 'read' | 'mutating' | 'monitoring-wait';
-type DropTargetPhase = false | 'plan' | 'apply';
+type FileWatcherPhase = false | 'plan' | 'apply';
 
 interface ToolAnnotations {
   readonly schedulable: boolean;
-  readonly dropTarget: DropTargetPhase;
+  readonly fileWatcher: FileWatcherPhase;
   readonly untrustedOutput: boolean;
 }
 
@@ -1207,16 +1207,16 @@ interface CompilerArtifact {
 }
 ```
 
-A drop-target plan entry has a `module` target, `executionClass: 'read'`, no capabilities,
+A file-watcher plan entry has a `module` target, `executionClass: 'read'`, no capabilities,
 `scopes: ['write']`, `capabilityScope: 'declaration'`, and annotations `{ schedulable: false,
-dropTarget: 'plan', untrustedOutput: true }`. An apply entry has a `module` target,
+fileWatcher: 'plan', untrustedOutput: true }`. An apply entry has a `module` target,
 `executionClass: 'mutating'`, includes `git.local.write`, has `scopes: ['write']`,
-`capabilityScope: 'declaration'`, and annotations `{ schedulable: false, dropTarget: 'apply',
+`capabilityScope: 'declaration'`, and annotations `{ schedulable: false, fileWatcher: 'apply',
 untrustedOutput: true }`. `false` preserves the ordinary-tool annotation used by the base registry.
 The compiler rejects every other combination; a plan entry's special no-clone dispatch behaviour
 follows from the phase annotation rather than from its target name.
 
-Both entries are `capabilityScope: 'declaration'` because a content drop is always a drop into one
+Both entries are `capabilityScope: 'declaration'` because a watched file always belongs to one
 declared repository. The plan entry states it explicitly rather than deriving it, since it carries
 no capabilities for `capability-scope-mismatch` to check it against. That empty capability array is
 deliberate — a pure parse of an already-claimed file reaches nothing a capability guards — and it
@@ -1274,8 +1274,9 @@ CREATE TABLE declaration (
   capability_grant        TEXT    NOT NULL,
   writable_path_prefixes  TEXT    NOT NULL,
   pinned                  INTEGER NOT NULL CHECK (pinned IN (0,1)),
-  content_drop_tool       TEXT,
-  content_drop_auto_merge INTEGER CHECK (content_drop_auto_merge IN (0,1)),
+  file_watcher_plan_tool  TEXT,
+  file_watcher_apply_tool TEXT,
+  file_watcher_auto_merge INTEGER CHECK (file_watcher_auto_merge IN (0,1)),
   git_user_name           TEXT    NOT NULL,
   git_user_email          TEXT    NOT NULL,
   state                   TEXT    NOT NULL CHECK (state IN ('active','orphaned')),
@@ -1284,12 +1285,15 @@ CREATE TABLE declaration (
   updated_at              TEXT    NOT NULL,
   PRIMARY KEY (id, generation),
   CHECK (generation >= 1),
-  CHECK ((content_drop_tool IS NULL) = (content_drop_auto_merge IS NULL))
+  CHECK (
+    (file_watcher_plan_tool IS NULL) = (file_watcher_apply_tool IS NULL)
+    AND (file_watcher_plan_tool IS NULL) = (file_watcher_auto_merge IS NULL)
+  )
 ) STRICT;
 
 CREATE UNIQUE INDEX declaration_active_id ON declaration (id) WHERE state = 'active';
 CREATE INDEX declaration_by_state ON declaration (state);
-CREATE INDEX declaration_with_drop ON declaration (id) WHERE content_drop_tool IS NOT NULL;
+CREATE INDEX declaration_with_file_watcher ON declaration (id) WHERE file_watcher_plan_tool IS NOT NULL;
 ```
 
 `(id, generation)` is the primary key because the id alone is not an identity. The partial unique
@@ -1669,7 +1673,7 @@ counters live beside
 ```ts
 interface DeclarationFilter {
   readonly state: DeclarationState | null;
-  readonly hasContentDrop: boolean | null;
+  readonly hasFileWatcher: boolean | null;
 }
 
 interface Declarations {
@@ -2152,11 +2156,11 @@ The five registry entries S6 ships, naming the tools by the brief's own conventi
 
 | `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
 |---|---|---|---|---|---|---|
-| `repo_status` | `{ kind: 'module', target: 'git.status' }` | `['repo.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 65536 }` |
-| `git_log` | `{ kind: 'module', target: 'git.log' }` | `['repo.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 1048576 }` |
-| `git_branches` | `{ kind: 'module', target: 'git.branches' }` | `['repo.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 262144 }` |
-| `repo_health` | `{ kind: 'module', target: 'git.health' }` | `['repo.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 65536 }` |
-| `git_diff` | `{ kind: 'module', target: 'git.diff' }` | `['repo.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 4194304 }` |
+| `repo_status` | `{ kind: 'module', target: 'git.status' }` | `['repo.read']` | `['read']` | `read` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 65536 }` |
+| `git_log` | `{ kind: 'module', target: 'git.log' }` | `['repo.read']` | `['read']` | `read` | `{ schedulable: false, fileWatcher: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 1048576 }` |
+| `git_branches` | `{ kind: 'module', target: 'git.branches' }` | `['repo.read']` | `['read']` | `read` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 262144 }` |
+| `repo_health` | `{ kind: 'module', target: 'git.health' }` | `['repo.read']` | `['read']` | `read` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 65536 }` |
+| `git_diff` | `{ kind: 'module', target: 'git.diff' }` | `['repo.read']` | `['read']` | `read` | `{ schedulable: false, fileWatcher: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 4194304 }` |
 
 Every entry has `capabilityScope: 'declaration'`. `git_log` and `git_diff` carry
 `untrustedOutput: true`: commit subjects and diff bodies are written by repository contributors,
@@ -2199,13 +2203,13 @@ The three registry entries S7 ships:
 
 | `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
 |---|---|---|---|---|---|---|
-| `git_stage` | `{ kind: 'module', target: 'git.stage' }` | `['git.local.write']` | `['write']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 65536 }` |
-| `git_commit` | `{ kind: 'module', target: 'git.commit' }` | `['git.local.write']` | `['write']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 65536 }` |
-| `git_restore_paths` | `{ kind: 'module', target: 'git.restorePaths' }` | `['git.local.write']` | `['write']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 65536 }` |
+| `git_stage` | `{ kind: 'module', target: 'git.stage' }` | `['git.local.write']` | `['write']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 65536 }` |
+| `git_commit` | `{ kind: 'module', target: 'git.commit' }` | `['git.local.write']` | `['write']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 65536 }` |
+| `git_restore_paths` | `{ kind: 'module', target: 'git.restorePaths' }` | `['git.local.write']` | `['write']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 65536 }` |
 
 Every entry carries `capabilityScope: 'declaration'`, the same as every S6 entry. None is
 `schedulable` — a scheduled job naming a bare local mutation with no commit message or path input
-of its own has no declared consumer yet — and none is `dropTarget`, which S17's watcher tools claim
+of its own has no declared consumer yet — and none is `fileWatcher`, which S17's watcher tools claim
 for themselves. `timeoutSeconds` matches the five read tools': all three run against the local
 clone only, with no network call, and the design's per-declaration path-allowlist and two-lock
 machinery is what bounds their cost, not a longer cap.
@@ -2262,9 +2266,9 @@ The three registry entries S9 ships:
 
 | `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
 |---|---|---|---|---|---|---|
-| `git_push` | `{ kind: 'module', target: 'git.push' }` | `['git.remote.write']` | `['write']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 300, maxResultBytes: 65536 }` |
-| `git_fetch` | `{ kind: 'module', target: 'git.fetch' }` | `['git.remote.write']` | `['write']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 300, maxResultBytes: 65536 }` |
-| `sync_base` | `{ kind: 'module', target: 'git.syncBase' }` | `['git.remote.write']` | `['write']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 300, maxResultBytes: 65536 }` |
+| `git_push` | `{ kind: 'module', target: 'git.push' }` | `['git.remote.write']` | `['write']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 300, maxResultBytes: 65536 }` |
+| `git_fetch` | `{ kind: 'module', target: 'git.fetch' }` | `['git.remote.write']` | `['write']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 300, maxResultBytes: 65536 }` |
+| `sync_base` | `{ kind: 'module', target: 'git.syncBase' }` | `['git.remote.write']` | `['write']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 300, maxResultBytes: 65536 }` |
 
 Every entry carries `capabilityScope: 'declaration'`. All three are `mutating` rather than `read`,
 `git_fetch` included: it moves remote-tracking refs, and the global mutation lock is what keeps a
@@ -2302,9 +2306,9 @@ The registry entry S15 ships:
 
 | `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
 |---|---|---|---|---|---|---|
-| `git_raw` | `{ kind: 'module', target: 'git.raw' }` | `['git.raw']` | `['raw']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: true }` | `{ timeoutSeconds: 60, maxResultBytes: 4194304 }` |
+| `git_raw` | `{ kind: 'module', target: 'git.raw' }` | `['git.raw']` | `['raw']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: true }` | `{ timeoutSeconds: 60, maxResultBytes: 4194304 }` |
 
-It carries `capabilityScope: 'declaration'`. It is neither schedulable nor a content-drop target:
+It carries `capabilityScope: 'declaration'`. It is neither schedulable nor a file-watcher target:
 the hatch is deliberately invoked, never an unattended execution surface. Its output is untrusted
 because the caller chooses an operation whose output may contain repository-authored text. The
 60-second limit is `TimeoutBudget.hatchSeconds`; it is shorter than the 300-second transfer caps
@@ -2382,8 +2386,8 @@ The two registry entries S12 ships:
 
 | `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
 |---|---|---|---|---|---|---|
-| `prepare_branch` | `{ kind: 'module', target: 'composites.prepareBranch' }` | `['git.local.write', 'git.remote.write']` | `['write']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 300, maxResultBytes: 65536 }` |
-| `reconcile_after_merge` | `{ kind: 'module', target: 'composites.reconcileAfterMerge' }` | `['git.local.write', 'git.remote.write', 'host.pr.read']` | `['write']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 300, maxResultBytes: 65536 }` |
+| `prepare_branch` | `{ kind: 'module', target: 'composites.prepareBranch' }` | `['git.local.write', 'git.remote.write']` | `['write']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 300, maxResultBytes: 65536 }` |
+| `reconcile_after_merge` | `{ kind: 'module', target: 'composites.reconcileAfterMerge' }` | `['git.local.write', 'git.remote.write', 'host.pr.read']` | `['write']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 300, maxResultBytes: 65536 }` |
 
 Both carry `capabilityScope: 'declaration'`, matching every other L2 tool.
 
@@ -2554,13 +2558,13 @@ The seven registry entries S10 ships:
 
 | `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
 |---|---|---|---|---|---|---|
-| `pr_open` | `{ kind: 'module', target: 'host.createPullRequest' }` | `['host.pr.write']` | `['write']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 120, maxResultBytes: 65536 }` |
-| `pr_status` | `{ kind: 'module', target: 'host.readPullRequest' }` | `['host.pr.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 60, maxResultBytes: 65536 }` |
-| `pr_list` | `{ kind: 'module', target: 'host.listPullRequests' }` | `['host.pr.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 60, maxResultBytes: 65536 }` |
-| `pr_comments` | `{ kind: 'module', target: 'host.readPullRequestComments' }` | `['host.pr.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: true }` | `{ timeoutSeconds: 60, maxResultBytes: 131072 }` |
-| `pr_enable_auto_merge` | `{ kind: 'module', target: 'host.enableAutoMerge' }` | `['host.pr.write']` | `['write']` | `mutating` | `{ schedulable: true, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 120, maxResultBytes: 65536 }` |
-| `checks_status` | `{ kind: 'module', target: 'host.readChecks' }` | `['host.checks.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 60, maxResultBytes: 65536 }` |
-| `checks_await` | `{ kind: 'module', target: 'host.awaitChecks' }` | `['host.checks.read']` | `['read']` | `monitoring-wait` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 1800, maxResultBytes: 65536 }` |
+| `pr_open` | `{ kind: 'module', target: 'host.createPullRequest' }` | `['host.pr.write']` | `['write']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 120, maxResultBytes: 65536 }` |
+| `pr_status` | `{ kind: 'module', target: 'host.readPullRequest' }` | `['host.pr.read']` | `['read']` | `read` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 60, maxResultBytes: 65536 }` |
+| `pr_list` | `{ kind: 'module', target: 'host.listPullRequests' }` | `['host.pr.read']` | `['read']` | `read` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 60, maxResultBytes: 65536 }` |
+| `pr_comments` | `{ kind: 'module', target: 'host.readPullRequestComments' }` | `['host.pr.read']` | `['read']` | `read` | `{ schedulable: false, fileWatcher: false, untrustedOutput: true }` | `{ timeoutSeconds: 60, maxResultBytes: 131072 }` |
+| `pr_enable_auto_merge` | `{ kind: 'module', target: 'host.enableAutoMerge' }` | `['host.pr.write']` | `['write']` | `mutating` | `{ schedulable: true, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 120, maxResultBytes: 65536 }` |
+| `checks_status` | `{ kind: 'module', target: 'host.readChecks' }` | `['host.checks.read']` | `['read']` | `read` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 60, maxResultBytes: 65536 }` |
+| `checks_await` | `{ kind: 'module', target: 'host.awaitChecks' }` | `['host.checks.read']` | `['read']` | `monitoring-wait` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 1800, maxResultBytes: 65536 }` |
 
 Every entry carries `capabilityScope: 'declaration'`. `pr_comments` is annotated `untrustedOutput`
 for the reason `git_log` and `git_diff` already are: `HostComment.body` is author-controlled text,
@@ -2627,9 +2631,9 @@ classifies from the journal alone and runs no resume step and no git or host I/O
 
 | `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
 |---|---|---|---|---|---|---|
-| `scheduled_job_create` | `{ kind: 'module', target: 'scheduler.create' }` | `['scheduler.manage']` | `['schedule']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 4194304 }` |
-| `scheduled_job_list` | `{ kind: 'module', target: 'scheduler.list' }` | `['scheduler.manage']` | `['schedule']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 4194304 }` |
-| `scheduled_job_cancel` | `{ kind: 'module', target: 'scheduler.cancel' }` | `['scheduler.manage']` | `['schedule']` | `mutating` | `{ schedulable: false, dropTarget: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 4194304 }` |
+| `scheduled_job_create` | `{ kind: 'module', target: 'scheduler.create' }` | `['scheduler.manage']` | `['schedule']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 4194304 }` |
+| `scheduled_job_list` | `{ kind: 'module', target: 'scheduler.list' }` | `['scheduler.manage']` | `['schedule']` | `read` | `{ schedulable: false, fileWatcher: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 4194304 }` |
+| `scheduled_job_cancel` | `{ kind: 'module', target: 'scheduler.cancel' }` | `['scheduler.manage']` | `['schedule']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 4194304 }` |
 
 Every entry carries `capabilityScope: 'declaration'`. `SchedulerOperations` supplies the current
 declaration id from `CallContext` to `Scheduler.create` and `Scheduler.list`; a caller cannot create,
@@ -2659,14 +2663,14 @@ interface Watcher {
 Constructed with `Dispatch` injected, exactly as the scheduler is. Every git and host step goes
 through that dispatch, so the watcher depends on neither `GitOperations` nor `HostAdapter`.
 `start` fails unless both deployment switches are on: remote operations permitted and watcher
-enabled. No active declaration naming a drop is a healthy idle state, not a startup error. Every
+enabled. No active declaration with a file watcher is a healthy idle state, not a startup error. Every
 `tick` resolves the current active declarations before selecting work, so a declaration added or
 amended at runtime becomes eligible on the next tick without restarting the watcher. A declaration's
-`contentDrop` remains the third, per-drop authority condition: no file is claimed or processed for a
+`fileWatcher` remains the third, per-file authority condition: no file is claimed or processed for a
 declaration that does not currently name one.
 
 For a claimed file, the declaration-selected protocol is `planTool`, `prepare_branch`, `applyTool`,
-the two post-apply observations and `git_stage` described under `### Content drops`, `git_commit`,
+the two post-apply observations and `git_stage` described under `### File watcher`, `git_commit`,
 `git_push`, `pr_open`, then `pr_enable_auto_merge` when configured. The initial clean-tree
 `repo_status` gate remains before claim, and the plan phase must succeed before the first mutating
 repository step. Each name in that sequence is dispatched independently with no outer lock. Branch,
@@ -2726,7 +2730,7 @@ in `90-decisions.md` alongside the other slices' own U1 lower-bound choices.
 
 | `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
 |---|---|---|---|---|---|---|
-| `verify_published_url` | `{ kind: 'http', operation: 'verify-published-url' }` | `['host.checks.read']` | `['read']` | `read` | `{ schedulable: false, dropTarget: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 4096 }` |
+| `verify_published_url` | `{ kind: 'http', operation: 'verify-published-url' }` | `['host.checks.read']` | `['read']` | `read` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 4096 }` |
 
 `host.checks.read` is the capability `10-design.md`'s own capability table already maps to "check
 status, bounded waits, deploy status, **published-URL verification**" — no new capability was needed.
@@ -3059,12 +3063,12 @@ type DeclarationError = ModuleErrorBase & (
   | { readonly code: 'remote-host-not-allowed'; readonly host: RemoteHost }
   | { readonly code: 'capability-outside-ceiling'; readonly capabilities: readonly CapabilityName[] }
   | { readonly code: 'capability-unsupported-by-host'; readonly capabilities: readonly CapabilityName[] }
-  | { readonly code: 'drop-tool-not-annotated'; readonly tool: RegistryToolName; readonly expected: Exclude<DropTargetPhase, false> }
-  | { readonly code: 'drop-plan-schema-mismatch'; readonly planTool: RegistryToolName; readonly applyTool: RegistryToolName }
+  | { readonly code: 'watcher-tool-not-annotated'; readonly tool: RegistryToolName; readonly expected: Exclude<FileWatcherPhase, false> }
+  | { readonly code: 'watcher-plan-schema-mismatch'; readonly planTool: RegistryToolName; readonly applyTool: RegistryToolName }
   | { readonly code: 'adoption-refused'; readonly blockers: readonly EvictionBlocker[] }
   | { readonly code: 'remote-mismatch'; readonly declared: CloneUrl; readonly observed: CloneUrl }
   | { readonly code: 'clone-still-present' }
-  | { readonly code: 'drop-directory-not-empty'; readonly files: number }
+  | { readonly code: 'watcher-directory-not-empty'; readonly files: number }
   | { readonly code: 'not-orphaned' }
   | { readonly code: 'store-failed'; readonly cause: StoreError }
 );
@@ -3078,12 +3082,12 @@ type DeclarationError = ModuleErrorBase & (
 | `remote-host-not-allowed` | `cloneUrl`'s host is off the deployment allowlist | no | `validation`. This is the second, independent guard against credential redirection |
 | `capability-outside-ceiling` | A grant names a capability the ceiling lacks | no | `validation` |
 | `capability-unsupported-by-host` | A `generic` declaration is granted a `host.*` capability | no | `validation` |
-| `drop-tool-not-annotated` | A configured plan or apply tool is absent or does not carry the expected phase annotation | no | `validation` |
-| `drop-plan-schema-mismatch` | The configured plan output and apply input use different canonical schemas for `plan` | no | `validation` |
+| `watcher-tool-not-annotated` | A configured plan or apply tool is absent or does not carry the expected phase annotation | no | `validation` |
+| `watcher-plan-schema-mismatch` | The configured plan output and apply input use different canonical schemas for `plan` | no | `validation` |
 | `adoption-refused` | Re-declaring an id whose orphaned clone is not clean, across every generation | no | `precondition` naming the blockers. The exit is to push the work, then `clone.remove` |
 | `remote-mismatch` | The orphaned clone points at a different remote | no | `precondition`. Never repoint an existing checkout |
 | `clone-still-present` | `declaration.remove` while a clone remains | no | `precondition` naming `clone.remove` |
-| `drop-directory-not-empty` | `declaration.remove` while the inbox holds files | no | `precondition` |
+| `watcher-directory-not-empty` | `declaration.remove` while the inbox holds files | no | `precondition` |
 | `not-orphaned` | `declaration.remove` on an `active` declaration | no | `precondition` |
 | `store-failed` | The underlying write failed | only if the cause is | `infrastructure`, after the store's own bounded retry |
 
@@ -3256,7 +3260,7 @@ type GitOperationsError = ModuleErrorBase & (
 |---|---|---|---|
 | `config-unparseable` | The repository's config file exists and is not valid against its format | no | `precondition` with findings. **A missing file is not an error** — every field defaults |
 | `config-unreadable` | The file exists and the read failed | no | `infrastructure` |
-| `no-clone` | `ctx.cloneRoot` is null for a declaration-scoped operation that needs a clone | no | `infrastructure`. A defect: the pipeline materialises before invoking. A `dropTarget: 'plan'` handler is pure and never reaches this — a null `cloneRoot` is what it is given |
+| `no-clone` | `ctx.cloneRoot` is null for a declaration-scoped operation that needs a clone | no | `infrastructure`. A defect: the pipeline materialises before invoking. A `fileWatcher: 'plan'` handler is pure and never reaches this — a null `cloneRoot` is what it is given |
 
 `validateWritePath` returns `PathRejection`, not this type, because its three cases split across two
 envelope kinds — see the boundary rules under `### L2 — git operations`.
@@ -3315,17 +3319,17 @@ type SchedulerError = ModuleErrorBase & (
 ```ts
 type WatcherError = ModuleErrorBase & (
   | { readonly code: 'not-permitted'; readonly missingSwitch: 'remote-operations' | 'watcher-enabled' }
-  | { readonly code: 'drop-unreadable'; readonly file: DropFileName }
-  | { readonly code: 'claim-failed'; readonly file: DropFileName }
+  | { readonly code: 'watched-file-unreadable'; readonly file: WatchedFileName }
+  | { readonly code: 'claim-failed'; readonly file: WatchedFileName }
   | { readonly code: 'step-failed'; readonly step: string; readonly result: ResultKind; readonly reason: string }
-  | { readonly code: 'interrupted-claim'; readonly file: DropFileName }
+  | { readonly code: 'interrupted-claim'; readonly file: WatchedFileName }
 );
 ```
 
 | Variant | Raised when | Retryable | Caller does |
 |---|---|---|---|
 | `not-permitted` | Either deployment switch is off | no | Do not start. Both default off |
-| `drop-unreadable` | A candidate cannot be read | no | Move it to `failed/`. A symlink is never a candidate in the first place |
+| `watched-file-unreadable` | A candidate cannot be read | no | Move it to `failed/`. A symlink is never a candidate in the first place |
 | `claim-failed` | The rename into `processing/` failed | next tick | Leave the file in the inbox |
 | `step-failed` | Any dispatched step returned a non-success envelope | no | Move to `failed/` with a sibling error file naming the step and its result. Never delete |
 | `interrupted-claim` | A file sits in `processing/` at startup | **never reprocessed** | Move to `failed/` with an explanation — it may already have an open pull request |
@@ -3463,11 +3467,11 @@ Every variant **fails the build**. A warning is never sufficient — that is def
 2, and the rejection counts it asks for are the counts of these.
 
 `annotation-contradiction` covers a `read` execution class declaring a write capability, a
-`monitoring-wait` declaring a mutating capability, and either drop-target phase departing from the
+`monitoring-wait` declaring a mutating capability, and either file-watcher phase departing from the
 target kind, execution class, capabilities, scopes or other annotations fixed under `ToolAnnotations`.
-`schema-invalid` also covers a drop plan or apply entry whose outer input or output schema does not
-project the corresponding `ContentDrop*` type; pairing the two consumer-specific `plan` schemas is a
-declaration check because the compiler receives registry entries but no `ContentDropConfig`.
+`schema-invalid` also covers a watcher plan or apply entry whose outer input or output schema does not
+project the corresponding `FileWatcher*` type; pairing the two consumer-specific `plan` schemas is a
+declaration check because the compiler receives registry entries but no `FileWatcherConfig`.
 `limit-exceeds-cap` covers a `monitoring-wait` whose `timeoutSeconds` exceeds
 `monitoringWaitCapSeconds`, and any entry whose `maxResultBytes` or `timeoutSeconds` is not a
 positive integer. There being no global `maxResultBytes` default is only a guarantee if a nonsense
@@ -3553,7 +3557,7 @@ responsible for maintaining it.
 |---|---|---|
 | C1 | At most one mutation lock is held process-wide at any instant. | Locks |
 | C2 | Whenever both are held, the materialisation lock was acquired before the mutation lock, and they are released in reverse order. | Dispatch pipeline |
-| C3 | A mutating operation holds the materialisation lock for its whole duration; a read or a monitoring wait releases it once the clone is `ready`. A `dropTarget: 'plan'` entry is the one exception: it needs no clone, so it acquires neither lock — see D11. | Dispatch pipeline |
+| C3 | A mutating operation holds the materialisation lock for its whole duration; a read or a monitoring wait releases it once the clone is `ready`. A `fileWatcher: 'plan'` entry is the one exception: it needs no clone, so it acquires neither lock — see D11. | Dispatch pipeline |
 | C4 | Eviction never runs while the mutation lock is held, and never for a declaration whose `activeOperationCount` is non-zero. | Clone store |
 | C5 | `pinActiveOperation` never awaits and never fails. | Locks |
 | C6 | Every monitoring wait's effective timeout is at most `monitoringWaitCapSeconds`, regardless of what was requested. | Dispatch pipeline, Compiler |
@@ -3571,7 +3575,7 @@ responsible for maintaining it.
 | S5 | No secret value appears in a return type, a persisted row, a log line, an audit record, a `ToolResult`, or a process argument vector. A credential reaches only a child process's environment, by name. | Credentials, Exec |
 | S6 | `Token` rows hold `verifierHash` and never a token value. `IssuedToken` is the only value-bearing type and is returned once. | Authorization |
 | S7 | Revocation writes a timestamp. No revocation deletes a row, and no cascade is written as a batch — `grantIsLive` walks upward at check time. | Authorization |
-| S8 | Every mutating call, every authorization rejection, every `git.raw` intent and outcome, every drop-file outcome, every identity event and every lease takeover produces an audit record. | Dispatch pipeline, Watcher, Operator identity, Lifecycle |
+| S8 | Every mutating call, every authorization rejection, every `git.raw` intent and outcome, every watched-file outcome, every identity event and every lease takeover produces an audit record. | Dispatch pipeline, Watcher, Operator identity, Lifecycle |
 | S9 | `git.raw` appends its intent line, carrying the argument vector, before the child process starts. | Git operations |
 
 ### Envelope and surfaces
@@ -3596,7 +3600,7 @@ responsible for maintaining it.
 | B3 | Boot verifies the registry fingerprint and the console asset manifest, and refuses to start on a mismatch. | Lifecycle |
 | B4 | The deployment ceiling is a subset of the contract capability set. Startup is fatal otherwise. | Lifecycle |
 | B5 | Every registry entry has exactly one executor registered for its `ExecutionTarget`, verified at boot. | Lifecycle |
-| B6 | `ScheduledJob.tool` names a registry entry annotated `schedulable`; `ContentDropConfig.planTool` and `applyTool` name entries annotated for their respective phases, whose canonical `plan` schemas match. Checked at creation, at fire time, and at boot re-validation. | Scheduler, Declarations |
+| B6 | `ScheduledJob.tool` names a registry entry annotated `schedulable`; `FileWatcherConfig.planTool` and `applyTool` name entries annotated for their respective phases, whose canonical `plan` schemas match. Checked at creation, at fire time, and at boot re-validation. | Scheduler, Declarations |
 | B7 | No base tool name carries a `blog_` prefix, and no tool ships under a name intended for removal. | Compiler |
 | B8 | The compiler is absent from the runtime image. | Build |
 
@@ -3609,16 +3613,16 @@ responsible for maintaining it.
 | D3 | `RepositoryConfig` is read from the working tree on every operation that needs it. Nothing caches it. | Git operations |
 | D4 | Store retention ends in an incremental vacuum, and the maintenance pass reports bytes returned to the filesystem rather than rows deleted. | Structured store |
 | D5 | Every retention window that prunes automatically has exactly one owning module, and the lifecycle module calls `runRetention` on each with no mutation lock held. | Lifecycle |
-| D6 | During delivery and interrupted-claim recovery, a dropped file is never deleted; every terminal path moves it to `processed/` or `failed/`. `Watcher.runRetention` may delete only files in `processed/` older than `processedDropDays`; it never deletes `failed/` files automatically. | Watcher |
-| D7 | A candidate drop file is stat-ed link-preservingly, so a symlink is never a candidate. | Watcher |
+| D6 | During delivery and interrupted-claim recovery, a watched file is never deleted; every terminal path moves it to `processed/` or `failed/`. `Watcher.runRetention` may delete only files in `processed/` older than `processedFileDays`; it never deletes `failed/` files automatically. | Watcher |
+| D7 | A candidate watched file is stat-ed link-preservingly, so a symlink is never a candidate. | Watcher |
 | D8 | A file found in `processing/` at startup is moved to `failed/` and never reprocessed. | Watcher |
 | D9 | The pre-migration copy is taken before any migration runs, and the three most recent are retained. | Structured store |
 | D10 | At most one `declaration` row per id has `state = 'active'`. | Structured store |
-| D11 | A content-drop plan handler runs with no clone, no repository lock and no mutation journal, and no mutating repository step starts unless its output validates. | Dispatch pipeline, Watcher |
-| D12 | A content-drop apply result advances to staging only when an independent status observation reports exactly its declared changed paths and every path is inside both its plan and the effective watcher allowlist. | Watcher |
-| D13 | Content-drop staging names exactly the independently observed changed paths; commit starts only after a second observation reports that exact set fully staged. | Watcher |
-| D14 | A content-drop apply handler validates every path it writes against the declaration's path allowlist before any side effect, whoever dispatched it. `permittedPaths` narrows that bound and never widens it. | Git operations, Watcher |
-| D15 | Every watcher tick resolves the current active declarations. Zero active content-drop declarations is healthy and idle; adding or amending one makes it eligible on the next tick without a watcher restart. | Watcher |
+| D11 | A file-watcher plan handler runs with no clone, no repository lock and no mutation journal, and no mutating repository step starts unless its output validates. | Dispatch pipeline, Watcher |
+| D12 | A file-watcher apply result advances to staging only when an independent status observation reports exactly its declared changed paths and every path is inside both its plan and the effective watcher allowlist. | Watcher |
+| D13 | File-watcher staging names exactly the independently observed changed paths; commit starts only after a second observation reports that exact set fully staged. | Watcher |
+| D14 | A file-watcher apply handler validates every path it writes against the declaration's path allowlist before any side effect, whoever dispatched it. `permittedPaths` narrows that bound and never widens it. | Git operations, Watcher |
+| D15 | Every watcher tick resolves the current active declarations. Zero active file-watcher declarations is healthy and idle; adding or amending one makes it eligible on the next tick without a watcher restart. | Watcher |
 
 ---
 
@@ -3710,10 +3714,10 @@ over the element type because the design fixes what a view receives and what it 
 the UI framework binding, the package's exported build entry, or how the asset manifest is hashed
 into the console fingerprint.
 
-**U10 — The content-drop target protocol, resolved 2026-08-11.** One logical target is an explicit
-pair of ordinary compiled registry entries named by `ContentDropConfig.planTool` and `applyTool`.
+**U10 — The file-watcher target protocol, resolved 2026-08-11.** One logical target is an explicit
+pair of ordinary compiled registry entries named by `FileWatcherConfig.planTool` and `applyTool`.
 Their phase annotations, generic outer schemas, consumer-specific plan-schema equality and dispatch
-semantics are fixed under `### Declaration`, `### Content drops`, `### Contract types (L0)` and
+semantics are fixed under `### Declaration`, `### File watcher`, `### Contract types (L0)` and
 `### L2 — watcher` above. See `design/90-decisions.md`, 2026-08-11.
 
 ~~**U8 — The pre-state digest algorithms.**~~ — **resolved 2026-08-08.** `SHA256_hex(canonical(...))`

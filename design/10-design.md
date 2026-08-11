@@ -37,7 +37,7 @@ knows how to evict clones and would otherwise name innocent declarations as the 
 growth that is not theirs.
 
 This list is not the same list as the **five consumers of the volume** the disk-full path reports
-— clones, the audit log, the structured store, backups and snapshots, and drop directories.
+— clones, the audit log, the structured store, backups and snapshots, and watcher inboxes.
 Retention windows are about unbounded growth; the consumer list is about which *files* hold the
 bytes. Most windows live inside one consumer: journal entries, outbox rows, tokens, grants,
 operator sessions and terminal jobs are all rows in the structured store, so the store is reported
@@ -57,8 +57,8 @@ disk-full path.
 | Pre-migration store backups | The most recent **3** retained, older ones removed after a successful boot on the new schema — the rollback target item 18 needs is the latest one, not all of them. |
 | Periodic store snapshots | Taken on the maintenance pass, **daily**, the most recent **7** retained. Distinct in purpose from the pre-migration copy: that one is the rollback target for a bad image, this one is the recovery point for a corrupt store. A store that has not migrated in months would otherwise have no restore point newer than the last upgrade. |
 | Operator sessions | Deleted **7 days** after expiry or revocation, on the same window as `Token`s and for the same reason. |
-| `failed/` content drops | Retained until the operator clears them, like failed outbox rows. A failed drop is a file someone expected to land and the only copy the service holds; discarding it on a timer would lose it. Surfaced in the health view so it is not retained invisibly. |
-| `processed/` content drops | Deleted after **14 days**. The published commit is the durable record by then, so the copy is only useful for tracing a recent delivery. |
+| `failed/` watcher files | Retained until the operator clears them, like failed outbox rows. A failed watched file is one someone expected to land and the only copy the service holds; discarding it on a timer would lose it. Surfaced in the health view so it is not retained invisibly. |
+| `processed/` watcher files | Deleted after **14 days**. The published commit is the durable record by then, so the copy is only useful for tracing a recent delivery. |
 | Expired and revoked `Token`s | Deleted **7 days** after expiry or revocation. This is the fastest-growing table in the store and the easiest to miss: a hundred clients refreshing hourly issue on the order of 900,000 rows a year if every issuance persists one. |
 | Revoked `Grant`s and `OAuthClient`s | Retained **180 days** after revocation, then deleted. Long enough to answer "what did that client have", short enough not to accumulate for the service's whole life. |
 | Terminal `ScheduledJob`s | `done`, `skipped` and `cancelled` deleted after **30 days**; `needs-attention` never. |
@@ -100,7 +100,7 @@ tables, would put an L1 module in charge of deleting L4's authorization records,
 dependency direction the CI check exists to catch.
 
 Every window that prunes automatically has an owner that does the pruning. Two do not prune at
-all — orphaned declarations and `failed/` drops are cleared by the operator, deliberately, because
+all — orphaned declarations and `failed/` watcher files are cleared by the operator, deliberately, because
 both are the only copy of something someone expected to keep:
 
 | Owner | Prunes |
@@ -112,7 +112,7 @@ both are the only copy of something someone expected to keep:
 | Operator identity | Expired and revoked operator sessions |
 | Scheduler | Terminal jobs |
 | Structured store | Its own pre-migration copies and daily snapshots |
-| Watcher | `processed/` drops |
+| Watcher | `processed/` files |
 | Clone store | Evicts clones, and only if the above was not enough |
 
 **Store retention ends with a compaction step, because deleting rows does not free disk.** SQLite
@@ -165,7 +165,7 @@ Operator-owned authority. Persisted. Identity is `id`, chosen by the operator, i
 | `capabilityGrant` | set of capability names | The per-repository layer of the lattice. Must be a subset of the deployment ceiling at write time. |
 | `writablePathPrefixes` | string[] | Path allowlist for every write against this repository. Operator-side, because this is authority and not a repository fact. **The ceiling, not the effective set** — see the actor intersection below. |
 | `pinned` | boolean | When true the clone is never evictable. |
-| `contentDrop` | `{ tool, autoMerge }`? | Absent by default. When present, the watcher observes this declaration's drop directory and dispatches `tool`, which **must name a registry tool annotated as a drop target** — see `ContentDrop`. |
+| `fileWatcher` | `{ planTool, applyTool, autoMerge }`? | Absent by default. When present, the watcher observes this declaration's inbox and dispatches the named two-phase protocol. Both names must resolve to registry tools annotated for their respective file-watcher phases — see `FileWatcher`. |
 | `identity` | `{ gitUserName, gitUserEmail }` | Commit author for operations this service performs. |
 | `state` | `active` \| `orphaned` | Deleting a declaration marks it `orphaned` and leaves the clone alone. |
 | `createdAt`, `updatedAt` | ISO 8601 UTC | |
@@ -233,7 +233,7 @@ on in four different ways.
 | Pending `ScheduledJob`s | Moved to `cancelled` with a reason naming the orphaning. Not fired, and not silently dropped. |
 | `Grant`s and `Token`s whose resource is `/mcp/{id}` | Revoked, and the declaration's `grantEpoch` bumped, so live sessions bound to it close on their next call rather than continuing against a repository the operator has retired. |
 | Unsettled journal entries | Retained and reported. They are the record of work that may still be in the clone. |
-| Content drop directory | Watching stops immediately; the directory is left on disk untouched. Files still in the inbox are neither applied nor moved, because there is no longer a declaration to apply them to. `declaration.remove` refuses while the directory holds anything, on the same principle as `clone.remove` — a dropped file the service accepted is a copy nobody else may hold. |
+| File watcher directory | Watching stops immediately; the directory is left on disk untouched. Files still in the inbox are neither applied nor moved, because there is no longer a declaration to apply them to. `declaration.remove` refuses while the directory holds anything, on the same principle as `clone.remove` — a watched file the service accepted is a copy nobody else may hold. |
 
 **Re-declaring the same `id` does not inherit any of it, and `generation` is what makes that
 enforceable rather than asserted.** The new declaration takes the next generation, starts with a
@@ -659,16 +659,16 @@ outcome append leaves the use recorded and its result unknown, which is a gap in
 than an unlogged execution, and the state left behind is whatever the command did — not the
 "none" a pre-execution refusal leaves.
 
-#### `ContentDrop` — headless file delivery into a declared repository
+#### `FileWatcher` — headless file delivery into a declared repository
 
-A bind-mounted directory per declaration, watched when `Declaration.contentDrop` is present and
+A bind-mounted inbox per declaration, watched when `Declaration.fileWatcher` is present and
 ignored entirely when it is not. It is how a producer with no git client and no MCP session gets a
-file into a repository: write it into the drop, and the service carries it through to a pull
+file into a repository: write it into the inbox, and the service carries it through to a pull
 request.
 
 **This is a generalisation of `blog-mcp`'s directory watcher, which is proven and running**
 (`src/watcher/engine.ts`, ~450 lines, with its own test file). Every mechanism below is inherited
-from it rather than invented here, and the differences are exactly two: the drop is per
+from it rather than invented here, and the differences are exactly two: the inbox is per
 declaration rather than per container, and the operation it dispatches is named by the
 declaration rather than hardcoded to `blog_create_post`.
 
@@ -677,24 +677,23 @@ service's own writes and needs a suppression rule to tell its own commits from a
 the prior art solved for one repository and which does not generalise to many. Watching an
 inbound directory the service only ever reads has no such problem.
 
-##### What the drop dispatches
+##### What the watcher dispatches
 
-`Declaration.contentDrop` names a **tool in the compiled registry annotated as a drop target**,
-the same constraint `ScheduledJob.tool` carries — so an undeclared name does not exist, and the
-watcher gains no ability to write paths of its own choosing. The base ships the mechanism; the
-consumer ships the operation. The blog consumer points its drop at its own authoring tool, which
-is what decides the repository path from the file's front matter. This is the reason the watcher
-needs no path policy of its own beyond the allowlist every write already passes: **it never
-copies a file to a caller-chosen path.**
+`Declaration.fileWatcher` names a **plan/apply pair in the compiled registry, each annotated for
+its file-watcher phase**. An undeclared name does not exist, and the watcher gains no ability to
+write paths of its own choosing. The base ships the mechanism; the consumer ships the pair. The
+blog consumer's plan tool decides the repository path from the file's front matter, and its apply
+tool performs only the validated writes. This is the reason the watcher needs no content policy of
+its own: **it never copies a file to a caller-chosen path.**
 
-The prior art's own rule carries over unchanged: a dropped file must be **complete**. Its
+The prior art's own rule carries over unchanged: a watched file must be **complete**. Its
 front matter — or whatever the target tool's input schema requires — is validated before anything
 git touches, and an incomplete file is rejected outright rather than best-effort filled in.
 There is no human here to catch a bad guess.
 
 ##### The directory is the state machine
 
-Four directories. **The delivery state machine never deletes a dropped file; it only moves it.**
+Four directories. **The delivery state machine never deletes a watched file; it only moves it.**
 Scheduled retention is a separate lifecycle: a file in `processed/` may be deleted after the
 configured 14-day window because its published commit is then the durable record, while a file in
 `failed/` is never deleted automatically and remains until the operator clears it.
@@ -710,7 +709,7 @@ configured 14-day window because its published commit is then the durable record
 missing.** A file still sitting in `processing/` when the watcher starts means a prior run died
 mid-file. It is moved straight to `failed/` with an explanation and **never silently
 reprocessed** — by the time it was claimed it may already have an open pull request, and
-re-running the pipeline against it is how one dropped file becomes two published ones. That is
+re-running the pipeline against it is how one watched file becomes two published ones. That is
 the same refusal the operation journal makes for the same reason, reached independently by the
 prior art and inherited here rather than re-derived.
 
@@ -737,9 +736,9 @@ tick's problem and no other's, which is the property actually needed.
 - **One audit line per file**, carrying the outcome, in addition to the per-operation lines each
   dispatched step already writes.
 
-##### Symlinks are refused, because the drop is an untrusted boundary
+##### Symlinks are refused, because the inbox is an untrusted boundary
 
-The drop is a bind mount from the host — the one deliberate exception to this container not being
+The inbox is a bind mount from the host — the one deliberate exception to this container not being
 bind-mounted. Candidate files are therefore checked with a **link-preserving stat, never a
 following one**. A following stat reports a symlink as a regular file, so a symlink dropped into
 the directory would have its *target's* content read and published — with auto-merge on by
@@ -753,7 +752,7 @@ invoke the target tool, stage, commit, push, open a pull request, and enable aut
 that is explicitly disabled — because a local commit nobody is told about is not delivery. It is
 also the state the volume-loss table names as the one genuinely unrecoverable case, and the
 safe-to-evict predicate refuses to release a clone holding it, so a watcher that stopped there
-would make every drop-enabled declaration a permanent eviction blocker.
+would make every file-watcher declaration a permanent eviction blocker.
 
 **Every pull request the watcher opens is recorded and checked on each later tick**, so an
 unattended publish still gets reconciled once it actually merges. The state is re-derived from
@@ -770,9 +769,9 @@ tick.
 ##### Authority
 
 Starting the watcher takes **two independent deployment switches**, both off by default: the
-deployment must permit remote operations and must permit the watcher at all. A declaration naming
-a drop is the third authority condition for processing that declaration, not for starting the
-watcher process. With no active drop-enabled declaration the watcher is healthy and idle; each tick
+deployment must permit remote operations and must permit the watcher at all. A declaration with
+`fileWatcher` configured is the third authority condition for processing that declaration, not for
+starting the watcher process. With no active file-watcher declaration the watcher is healthy and idle; each tick
 resolves the current active declarations, so a runtime declaration addition or amendment takes
 effect without a restart. The prior art requires the same three authorities, and the reason is that
 this is the one actor that acts with no caller present.
@@ -857,7 +856,7 @@ L0  Contract        contract types  |  compiler  |  generated registry
 | **Composites** (L2) | Handwritten, fixed-sequence transactional operations — branch preparation, reconcile-after-merge. Each declares its journal steps and its recovery descriptor. | Git operations, host adapter, journal. | Domain functions, and a recovery descriptor per operation. |
 | **Host adapter** (L2) | Pull requests, checks, merges, deploy monitoring; the per-credential request budget and backoff. One implementation, GitHub via `gh`. | Exec, credentials. | A host-shaped interface a second implementation could satisfy. |
 | **Scheduler** (L2) | Due-job selection, missed-tick policy, grant re-intersection. | Declarations, journal, notifier — and the dispatch pipeline **by injection**, never by import. | A tick engine. |
-| **Watcher** (L2) | Per-declaration content drop directories: the poll loop, the claim-and-move directory state machine, interrupted-claim recovery, and the pending-pull-request follow-up list. | Declarations, clone store — and the dispatch pipeline **by injection**, never by import, exactly as the scheduler takes it. Every git and host step goes through that injected pipeline, so it depends on neither git operations nor the host adapter directly. | A watch engine. `runRetention` for `processed/`. |
+| **Watcher** (L2) | Per-declaration file watcher directories: the poll loop, the claim-and-move directory state machine, interrupted-claim recovery, and the pending-pull-request follow-up list. | Declarations, clone store — and the dispatch pipeline **by injection**, never by import, exactly as the scheduler takes it. Every git and host step goes through that injected pipeline, so it depends on neither git operations nor the host adapter directly. | A watch engine. `runRetention` for `processed/`. |
 | **Module adapter** (L3) | Invoking a registry entry whose execution target is in-process. Holds a handler catalogue keyed by target name, **populated by registration at composition time, never by importing a handler.** | L1, contract types. | Register, and an invoke the pipeline calls. |
 | **Http adapter** (L3) | Invoking a registry entry whose execution target is a declared HTTP endpoint: request shaping, the declared timeout, response mapping into the envelope. Its consumer is published-URL verification — see below. | L1, contract types. | Invoke. |
 | **Dispatch pipeline** (L4) | The one canonical call path: identify, authenticate, enforce scopes, enforce capabilities, validate input, apply limits and cancellation, invoke adapter, validate output, scrub, audit, envelope. | L3, L1, the registry artifact. **Not L2** — see the acyclicity argument. | Dispatch. |
@@ -1038,7 +1037,7 @@ assumption that some views belong to one repository.
 
 **The scheduler tick and the watcher are this path with a different actor.** The scheduler selects
 due jobs, re-intersects the frozen grant with the declaration grant, the ceiling and the creating
-grant, and calls the same pipeline. The watcher claims a file from a declaration's drop directory
+grant, and calls the same pipeline. The watcher claims a file from a declaration's inbox
 and calls the same pipeline once per step of its sequence — branch, write, stage, commit, push,
 pull request — each step taking the global mutation lock for itself, exactly as a console click
 would. Neither has a privileged route, a credential of its own, or a second implementation of any
@@ -1338,13 +1337,13 @@ its lifecycle is part of the security design rather than a framework default.
 | | 200, but serving a commit other than the expected merge commit | Explicit check of the served commit against the expected SHA | Polls to the 1800 s cap | `precondition` naming both SHAs | Unchanged. **No code path returns a URL in a success position without a confirmed successful deploy for that exact commit.** |
 | **This service's own deployment** (definition-of-done item 15) | Stale or mixed runtime, wrong catalogue, verification credential rejected | The companion check: poll `/healthz` until the commit SHA is stable, then run a real `initialize → tools/list → repo_status` session | Classifies rather than reporting a bare pass | `stale-runtime`, `mixed-runtime`, `verification-credential`, `unexpected-profile-or-catalog`, or `verified`. **Not a registry tool** — an executable check shipped alongside the service, as the brief describes | Unchanged |
 | **Notifier endpoint** | Unreachable, non-2xx | HTTP status | Outbox retries with backoff, bounded, then stops retrying and **surfaces the row in the health view and the status endpoint**. It is not dropped: an endpoint down overnight is exactly when the 03:00 merge conflict lands, and a notification that fails silently recreates the unwatched-means-unnoticed failure one level up | Nothing — it never blocks the operation it describes | Outbox row marked failed, retained until the operator clears it |
-| **Content drop** (watcher) | Incomplete input — the target tool's schema is not satisfied | Validation before any git action | Moves the file to `failed/` with a sibling `.error.txt`, audits, notifies at `attention` | Nothing — there is no caller | File preserved in `failed/` until the operator clears it. Automatic retention never deletes it |
+| **File watcher** (watcher) | Incomplete input — the target tool's schema is not satisfied | Validation before any git action | Moves the file to `failed/` with a sibling `.error.txt`, audits, notifies at `attention` | Nothing — there is no caller | File preserved in `failed/` until the operator clears it. Automatic retention never deletes it |
 | | Any later step fails — branch, write, stage, commit, push, PR, auto-merge | The step's own envelope | Same: `failed/` plus the reason, naming which step and what it returned | Nothing | Whatever the completed steps did. A commit may exist and be unpushed, or a PR may be open with auto-merge not enabled — the `.error.txt` says which |
 | | A file is still in `processing/` at startup | Directory scan before the first tick | Moves it to `failed/` and **never reprocesses it**, because it may already have an open pull request | Nothing | Untouched; the operator is told to check the host before dropping it again |
 | | Symlink dropped into the directory | Link-preserving stat | Ignored — never treated as a candidate file | Nothing | Untouched |
 | | Clone is not clean at tick time | Clean check | Skips the whole tick. Fail-safe, not an error | Nothing | Untouched; the drop is picked up on a later tick |
 | | Declaration's grant lacks a capability the target tool needs | `authorization` from the dispatch pipeline, like any caller | Moves the file to `failed/` naming the missing capability — a misconfigured declaration, not a transient fault, so it is not retried forever | Nothing | File preserved in `failed/` |
-| | Drop lands for a declaration whose clone is `needs-attention` | Clone state | Leaves the file in the inbox and retries on the next tick | Nothing | Inbox grows until the parked entry is resolved, which is visible in the health view |
+| | A file arrives for a declaration whose clone is `needs-attention` | Clone state | Leaves the file in the inbox and retries on the next tick | Nothing | Inbox grows until the parked entry is resolved, which is visible in the health view |
 
 ### Boundaries
 
@@ -1819,17 +1818,17 @@ adapter entirely* — nothing unexercised inside the fingerprint, and it departs
 shape `MCP-NEXT.md` specifies. Rejected: *move deploy-status polling off `gh`* — exercises it
 hardest, and it puts credentials at L3 during the parity migration.
 
-**The watcher observes per-declaration content drops, generalising `blog-mcp`'s directory
+**The watcher observes per-declaration file watchers, generalising `blog-mcp`'s directory
 watcher.** Rejected: *no watcher at all* — the smallest design, and it leaves headless file
 delivery with no route that does not involve an MCP client. Rejected: *watch the managed clone
 working trees* — it observes the service's own writes, needing a suppression rule that does not
-generalise from one repository to many. Rejected: *watch a declaration drop directory for
+generalise from one repository to many. Rejected: *watch a declaration inbox for
 onboarding* — GitOps-shaped and appealing, and declaration management is deliberately console-only
 and structurally so. Rejected, and this one was briefly the design: *deliver to a local commit and
 stop there, so the watcher needs no host capability or credential* — it looks like the
 conservative choice and is the opposite. An unpushed commit is invisible to the producer, is the
 one case the volume-loss table calls genuinely unrecoverable, and permanently fails the
-safe-to-evict predicate, so every drop-enabled declaration would become a standing eviction
+safe-to-evict predicate, so every file-watcher declaration would become a standing eviction
 blocker. The prior art carries the sequence through to a pull request with auto-merge on by
 default, and following it to a terminal state the producer can see is the whole point.
 
@@ -1892,11 +1891,11 @@ denies the scheduler. Rejected: *two-phase, where dispatch returns the id and th
 after* — no privileged input, and it reintroduces the crash window the write-before-dispatch rule
 exists to close.
 
-**The drop dispatches a declaration-named registry tool, not a file copy.** Rejected: *the
+**The watcher dispatches a declaration-named registry tool, not a file copy.** Rejected: *the
 watcher copies dropped files to repository paths under the write allowlist* — the obvious reading
 of "file delivery", and it makes the watcher the one actor that chooses repository paths, with the
-allowlist as the only thing standing between a drop and any path it permits. Naming a tool
-annotated as a drop target reuses `ScheduledJob.tool`'s existing constraint, keeps path policy
+allowlist as the only thing standing between a watched file and any path it permits. Naming a tool
+annotated as a file-watcher phase reuses `ScheduledJob.tool`'s existing constraint, keeps path policy
 inside the domain operation where the prior art already puts it, and leaves the base shipping a
 mechanism rather than a content policy.
 
@@ -1905,7 +1904,7 @@ file is considered ready* — what this design said before the prior art was rea
 file looks finished and never answers whose tick it belongs to, so a crash between commit and
 clear re-runs the pipeline against a file that may already have an open pull request. Rejected:
 *reprocess anything found in `processing/` at startup* — the intuitive recovery, and it is exactly
-how one dropped file becomes two published ones.
+how one watched file becomes two published ones.
 
 **`RepositoryConfig` is read at point of use, never cached.** Rejected: *key the cache on the
 config file's content hash* — keeps the cache and makes it correct, and the key computation is
@@ -1935,7 +1934,7 @@ default-deny; see The escape hatch's residual risk for what that places on a sin
 
 The fourth `/redteam` pass raised twenty-nine findings and the fifth raised twenty-one against the
 fourth's repair; every one is resolved in the text above rather than deferred here. Two
-resolutions add scope the earlier drafts did not carry — a content-drop watcher, generalised from
+resolutions add scope the earlier drafts did not carry — a file-watcher watcher, generalised from
 `blog-mcp`'s running one, and published-URL verification moving onto the http adapter — and both
 need sizing when `/slices` runs, rather than being assumed free because they arrived as review
 outcomes.
