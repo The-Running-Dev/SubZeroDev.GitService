@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { repoRelativePath, type DeclarationId, type OperationId, type RegistryToolName, type RepoRelativePath, type ScheduledJobId } from '../shared/brands.ts';
+import { repoRelativePath, type DeclarationId, type OperationId, type PathPrefix, type RegistryToolName, type RepoRelativePath, type ScheduledJobId } from '../shared/brands.ts';
 import type { ActorRef, OperationContextKind } from '../shared/actor.ts';
 import type { Session } from '../shared/session.ts';
 import type { CallContext } from '../shared/call-context.ts';
@@ -204,35 +204,39 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
     });
   }
 
-  async function validateWatcherApplyInput(request: DispatchRequest, entry: ToolDeclaration, declaration: Declaration): Promise<ToolResult<never> | null> {
-    if (entry.annotations.fileWatcher !== 'apply') return null;
+  function isSortedUnique(values: readonly string[]): boolean {
+    const sorted = [...values].sort();
+    return new Set(values).size === values.length && values.every((value, index) => value === sorted[index]);
+  }
+
+  async function validateWatcherApplyInput(request: DispatchRequest, entry: ToolDeclaration, declaration: Declaration): Promise<{ readonly failure: ToolResult<never> | null; readonly writablePathPrefixes: readonly PathPrefix[] | null }> {
+    if (entry.annotations.fileWatcher !== 'apply') return { failure: null, writablePathPrefixes: null };
     const rawPaths = request.input !== null && typeof request.input === 'object' && !Array.isArray(request.input)
       ? (request.input as Record<string, JsonValue>).permittedPaths
       : undefined;
     if (!Array.isArray(rawPaths) || !rawPaths.every((path) => typeof path === 'string')) {
-      return validation(`input for '${entry.name}' has malformed permittedPaths`, [{ path: 'permittedPaths', rule: 'array-of-paths', message: 'expected strings' }]);
+      return { failure: validation(`input for '${entry.name}' has malformed permittedPaths`, [{ path: 'permittedPaths', rule: 'array-of-paths', message: 'expected strings' }]), writablePathPrefixes: null };
     }
-    const sorted = [...rawPaths].sort();
-    if (new Set(rawPaths).size !== rawPaths.length || rawPaths.some((path, index) => path !== sorted[index])) {
-      return validation(`input for '${entry.name}' requires sorted, duplicate-free permittedPaths`, [{ path: 'permittedPaths', rule: 'sorted-unique', message: 'paths must be canonical' }]);
+    if (!isSortedUnique(rawPaths)) {
+      return { failure: validation(`input for '${entry.name}' requires sorted, duplicate-free permittedPaths`, [{ path: 'permittedPaths', rule: 'sorted-unique', message: 'paths must be canonical' }]), writablePathPrefixes: null };
     }
     const prefixes = declarations.effectiveWritablePrefixes(declaration, PROFILE_BY_KIND[request.session.kind]);
     for (const rawPath of rawPaths) {
       const parsed = repoRelativePath(rawPath);
-      if (!parsed.ok) return validation(`'${rawPath}' is not a valid repository-relative path`, [{ path: 'permittedPaths', rule: parsed.error.rule, message: rawPath }]);
+      if (!parsed.ok) return { failure: validation(`'${rawPath}' is not a valid repository-relative path`, [{ path: 'permittedPaths', rule: parsed.error.rule, message: rawPath }]), writablePathPrefixes: null };
       const allowed = prefixes.some((prefix) => (prefix as string).endsWith('/') ? rawPath.startsWith(prefix as string) : rawPath === prefix as string);
       if (!allowed) {
         await audit.append({ at: clock.now(), operationId: null, declarationId: declaration.id, generation: declaration.generation, tool: entry.name, actorRef: request.session.actorRef, context: request.context, form: 'authorization-rejection', missing: [], rejectedPath: parsed.value });
-        return authorization(`'${rawPath}' is outside this declaration's effective writable paths`, []);
+        return { failure: authorization(`'${rawPath}' is outside this declaration's effective writable paths`, []), writablePathPrefixes: null };
       }
     }
-    return null;
+    return { failure: null, writablePathPrefixes: prefixes };
   }
 
-  function buildContext(request: DispatchRequest, entry: ToolDeclaration, declaration: Declaration | null, operationId: OperationId, actorRef: ActorRef, cloneRoot: CallContext['cloneRoot']): CallContext {
+  function buildContext(request: DispatchRequest, entry: ToolDeclaration, declaration: Declaration | null, operationId: OperationId, actorRef: ActorRef, cloneRoot: CallContext['cloneRoot'], precomputedWritablePathPrefixes: readonly PathPrefix[] | null = null): CallContext {
     const effectiveGrant = declarations.effectiveGrant(registry.contractCapabilitySet, ceiling, declaration, request.session.grant);
     const profile = PROFILE_BY_KIND[request.session.kind];
-    const writablePathPrefixes = declaration !== null ? declarations.effectiveWritablePrefixes(declaration, profile) : [];
+    const writablePathPrefixes = precomputedWritablePathPrefixes ?? (declaration !== null ? declarations.effectiveWritablePrefixes(declaration, profile) : []);
     return {
       operationId,
       declarationId: declaration?.id ?? null,
@@ -271,8 +275,7 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
         if (!Array.isArray(paths) || !paths.every((value) => typeof value === 'string' && repoRelativePath(value).ok)) {
           return infrastructure(`'${entry.name}' returned malformed ${field}`);
         }
-        const sorted = [...paths].sort();
-        if (new Set(paths).size !== paths.length || paths.some((value, index) => value !== sorted[index])) {
+        if (!isSortedUnique(paths as readonly string[])) {
           return infrastructure(`'${entry.name}' returned ${field} that is not sorted and duplicate-free`);
         }
       }
@@ -409,7 +412,7 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
     return grant.has('attention.resolve');
   }
 
-  async function dispatchMutating(request: DispatchRequest, entry: ToolDeclaration, declaration: Declaration, operationId: OperationId, actorRef: ActorRef): Promise<ToolResult<JsonValue>> {
+  async function dispatchMutating(request: DispatchRequest, entry: ToolDeclaration, declaration: Declaration, operationId: OperationId, actorRef: ActorRef, precomputedWritablePathPrefixes: readonly PathPrefix[] | null = null): Promise<ToolResult<JsonValue>> {
     if (!journal) {
       return infrastructure(`mutating tool '${entry.name}' has no journal configured`);
     }
@@ -554,7 +557,7 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
       // runs, would leave a crash between here and the handler indistinguishable
       // from one after it, which is exactly the `nothing-happened` case
       // `classify()` exists to detect.
-      const ctx = buildContext(effective, entry, declaration, operationId, actorRef, cloneRoot);
+      const ctx = buildContext(effective, entry, declaration, operationId, actorRef, cloneRoot, precomputedWritablePathPrefixes);
       const result = await invokeAndEnvelope(entry, ctx, effective.input);
 
       // git_raw completes its own journal entry (settled or parked) inside
@@ -637,11 +640,6 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
         return validation(`input for '${entry.name}' does not satisfy its schema`, inputFindings);
       }
 
-      if (declaration !== null) {
-        const watcherInputFailure = await validateWatcherApplyInput(request, entry, declaration);
-        if (watcherInputFailure) return watcherInputFailure;
-      }
-
       const operationId = randomUUID() as OperationId;
       const actorRef: ActorRef = request.session.actorRef;
 
@@ -659,7 +657,17 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
       if (declaration === null) {
         return infrastructure(`mutating tool '${entry.name}' requires a declaration, and capabilityScope: 'instance' mutating tools do not exist yet`);
       }
-      return dispatchMutating(request, entry, declaration, operationId, actorRef);
+
+      // File-watcher apply validation only ever applies to mutating tools
+      // (the compiler's file-watcher shape check requires `executionClass:
+      // 'mutating'` for `fileWatcher: 'apply'`), so it belongs on this branch
+      // rather than running unconditionally ahead of the read/monitoring-wait
+      // split above, mirroring how monitoring-wait's own specialization stays
+      // out of the shared path until its branch is chosen.
+      const watcherCheck = await validateWatcherApplyInput(request, entry, declaration);
+      if (watcherCheck.failure) return watcherCheck.failure;
+
+      return dispatchMutating(request, entry, declaration, operationId, actorRef, watcherCheck.writablePathPrefixes);
     },
   };
 }

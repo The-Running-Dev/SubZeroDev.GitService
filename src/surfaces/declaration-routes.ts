@@ -104,7 +104,13 @@ function actorFor(session: OperatorSession): ActorRef {
  * id violating the pattern returns `validation`") true without `declare()`
  * re-parsing raw strings itself.
  */
-function parseDeclareInput(body: Record<string, unknown>): { readonly ok: true; readonly value: DeclareInput } | { readonly ok: false; readonly findings: readonly string[] } {
+function validateFileWatcherShape(raw: unknown): { readonly planTool: RegistryToolName; readonly applyTool: RegistryToolName; readonly autoMerge: boolean } | null {
+  const watcher = raw as { readonly planTool?: unknown; readonly applyTool?: unknown; readonly autoMerge?: unknown };
+  if (typeof watcher?.planTool !== 'string' || typeof watcher.applyTool !== 'string' || typeof watcher.autoMerge !== 'boolean') return null;
+  return { planTool: watcher.planTool as RegistryToolName, applyTool: watcher.applyTool as RegistryToolName, autoMerge: watcher.autoMerge };
+}
+
+export function parseDeclareInput(body: Record<string, unknown>): { readonly ok: true; readonly value: DeclareInput } | { readonly ok: false; readonly findings: readonly string[] } {
   const findings: string[] = [];
 
   const idResult = typeof body.id === 'string' ? declarationId(body.id) : null;
@@ -133,11 +139,11 @@ function parseDeclareInput(body: Record<string, unknown>): { readonly ok: true; 
 
   let fileWatcher: DeclareInput['fileWatcher'] = null;
   if (body.fileWatcher !== null && body.fileWatcher !== undefined) {
-    const watcher = body.fileWatcher as { readonly planTool?: unknown; readonly applyTool?: unknown; readonly autoMerge?: unknown };
-    if (typeof watcher.planTool !== 'string' || typeof watcher.applyTool !== 'string' || typeof watcher.autoMerge !== 'boolean') {
+    const validated = validateFileWatcherShape(body.fileWatcher);
+    if (!validated) {
       findings.push('fileWatcher: planTool and applyTool must be strings and autoMerge must be boolean');
     } else {
-      fileWatcher = { planTool: watcher.planTool as RegistryToolName, applyTool: watcher.applyTool as RegistryToolName, autoMerge: watcher.autoMerge };
+      fileWatcher = validated;
     }
   }
 
@@ -167,7 +173,7 @@ function parseDeclareInput(body: Record<string, unknown>): { readonly ok: true; 
   };
 }
 
-function toAmendInput(body: Record<string, unknown>): { readonly ok: true; readonly value: AmendInput } | { readonly ok: false; readonly findings: readonly string[] } {
+export function toAmendInput(body: Record<string, unknown>): { readonly ok: true; readonly value: AmendInput } | { readonly ok: false; readonly findings: readonly string[] } {
   const rawGrant = Array.isArray(body.capabilityGrant) ? (body.capabilityGrant as readonly DeclarationScopedCapability[]) : null;
   const rawPrefixes = Array.isArray(body.writablePathPrefixes) ? (body.writablePathPrefixes as string[]).map((p) => pathPrefix(p)).filter((r) => r.ok).map((r) => r.value) : null;
   const identity = body.identity as { readonly gitUserName?: unknown; readonly gitUserEmail?: unknown } | undefined;
@@ -183,11 +189,11 @@ function toAmendInput(body: Record<string, unknown>): { readonly ok: true; reado
     if (fileWatcherRaw === null) {
       fileWatcher = null;
     } else {
-      const obj = fileWatcherRaw as { readonly planTool?: unknown; readonly applyTool?: unknown; readonly autoMerge?: unknown };
-      if (typeof obj?.planTool !== 'string' || typeof obj.applyTool !== 'string' || typeof obj.autoMerge !== 'boolean') {
+      const validated = validateFileWatcherShape(fileWatcherRaw);
+      if (!validated) {
         return { ok: false, findings: ['fileWatcher: planTool and applyTool must be strings and autoMerge must be boolean'] };
       }
-      fileWatcher = { planTool: obj.planTool as RegistryToolName, applyTool: obj.applyTool as RegistryToolName, autoMerge: obj.autoMerge };
+      fileWatcher = validated;
     }
   }
 
