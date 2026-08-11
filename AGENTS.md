@@ -55,41 +55,59 @@ rg --files
 
 ## Model, effort, and review budget
 
-Model choice follows task complexity. The command being invoked does not determine the model.
+**Model choice follows task complexity. The command being invoked does not determine the model.** Budget scales with **complexity, not size** — a one-line change to an invariant is architectural; a 500-line transcription against a settled contract is not.
 
-Budget scales with **complexity, not size** — a one-line change to an invariant is architectural; a 500-line transcription against a settled contract is not.
+Name model *families*, never pinned versions. Version identifiers churn; family aliases do not.
 
-Use Claude Code's current model-family aliases rather than pinning an older version:
+| Tier | Work | Effort | Claude | Codex |
+|---|---|---|---|---|
+| **Deep reasoning** | Brief interrogation, architecture, contracts, slice planning, security, concurrency, recovery, root-cause analysis, adjudicating design findings | `high` | `opus` | `architect` |
+| **Exceptional fork** | One specific architectural or security question that stayed ambiguous at `high` | `xhigh` | `opus` | `architect` |
+| **Implementation** | Code against a settled contract, tests, refactors, bug fixes, CI, infrastructure, implementation-coupled documentation | `medium`, `high` when difficult | `sonnet` | `builder` |
+| **High volume** | Summaries, formatting, changelogs, commit messages, PR descriptions, mechanical triage | `low` | `haiku` | `quick` |
 
-| Tier | Model | Effort | Work |
-|---|---|---|---|
-| Deep reasoning | `opus` | `high` | Brief interrogation, architecture, contracts, slice planning, security, concurrency, recovery, root-cause analysis, and adjudicating design findings |
-| Exceptional fork | `opus` | `xhigh` | One specific unresolved architectural or security question that remained ambiguous at `high` |
-| Implementation | `sonnet` | `medium` by default; `high` when difficult | Code against a settled contract, tests, refactors, bug fixes, CI, infrastructure, and implementation-coupled documentation |
-| High volume | `haiku` | `low` | Summaries, formatting, changelogs, commit messages, PR descriptions, and mechanical triage |
+- **Never use `max` effort unless I ask for it by name.**
+- **`xhigh` is for one question, not one pipeline.** Running a whole design phase at `xhigh` is not rigour, it is a substitute for asking a precise question.
+- **Escalate rather than guess.** A high-volume task that raises an implementation question becomes implementation tier; an implementation task that raises an architectural question becomes deep reasoning. **Do not keep implementing while that uncertainty is unresolved.**
+- **Open substantive work with a banner, then gate on it.** Before starting anything beyond a trivial lookup, state what the work is (task or command, plus slice id if applicable) and the tier it requires per *Command routing* or the table above. **It is a heading, not a sentence** — three plain lines fenced above and below by a rule of `=`, labels and tier names in Title Case, never folded into a paragraph. For example:
 
-Do not use `max` effort unless I explicitly request it. Do not use `xhigh` for an entire design pipeline or as a substitute for a precise question.
+  ```
+  ===============================
+  Work: /design — write design/10-design.md
+  Tier: Deep Reasoning → opus/high
+  Session: opus
+  ===============================
+  ```
 
-If the current session is weaker than the required tier, say which model and effort the task warrants before doing expensive work. If the current session is stronger than required, proceed without interruption.
+  Then check the session's actual model against the required family. If it matches exactly, proceed without further comment. Any mismatch gates the same way, in either direction: **stop before doing any expensive work**, name the tier the task actually needs, and wait — do not proceed on the wrong tier unless the user explicitly overrides after seeing the mismatch. Under-powered, name the stronger model needed. Over-powered, name the lighter tier that fits — running deep reasoning against implementation-tier work is the same unbudgeted cost as running implementation-tier reasoning against a task that needed more of it, just paid in the other direction. Where the model itself can't be changed mid-session (*Division of control*, next), the override this gate waits for can also be "cap your own reasoning effort to the lighter tier and proceed" rather than a model swap.
 
-**Escalate rather than guess.** A high-volume task that raises an implementation question becomes implementation tier; an implementation task that raises an architectural question becomes deep reasoning. **Do not keep implementing while that uncertainty is unresolved** — that is stage 6 spending the savings stages 2–4 bought.
-
-**Division of control.** I set the session model. You set subagent models and scale your own reasoning depth. You cannot change your own session model — if a task warrants a different tier, say so rather than silently over- or under-spending.
+**Division of control.** I set the session model. You set subagent models and scale your own reasoning depth. You cannot change your own session model.
 
 ### Command routing
 
-- `/brief-check`, `/design`, `/contract`, and `/slices`: `opus`, `high`.
-- `/redteam`: preferably a strongest model from a different vendor than the design author. If Claude must be used, use a fresh `opus`, `high` session.
-- `/slice`: `sonnet`, normally `medium`; use `high` for a large or difficult slice.
-- `/reconcile`: `opus`, `high` while deciding which side of drift is correct; `sonnet`, `medium` for mechanical edits after I decide.
-- `/make-human-docs`: `sonnet`, `medium`. Escalate only if the design turns out to be ambiguous — then stop, do not resolve it in prose.
-- `/track`: `sonnet`, `medium`. Mechanical sync; escalate only to judge whether a drifted slice is a design change.
-- `/verify`: `sonnet`, `medium`. Escalate to deep reasoning only to diagnose a failure, never to run the gates.
-- `/pr`: `sonnet`, `medium`.
-- `/resolve`: `sonnet`, `medium`. Escalate to judge a contested finding, not to triage the obvious ones.
-- `/refine`: `sonnet`, `medium`. Never escalates — an architectural ask is routed to the command that owns it, not refined.
-- `/install`: `sonnet`, `medium`.
-- `/kit-help`: `haiku`, `low`. Orientation from file existence and a tracker listing; escalate only where the repository's state matches no stage.
+| Command | Tier | Notes |
+|---|---|---|
+| `/brief-check`, `/design`, `/contract`, `/slices` | `opus`, `high` | — |
+| `/redteam` | strongest model, **different vendor from the design author** | If it must be Claude, a fresh `opus`, `high` session |
+| `/slice` | `sonnet`, `medium` | `high` for a large or difficult slice |
+| `/reconcile` | `opus`, `high` to decide which side of a drift is correct | `sonnet`, `medium` for the mechanical edits once I have decided |
+| `/make-human-docs` | `sonnet`, `medium` | Escalate only if the design turns out to be ambiguous — then stop, do not resolve it in prose |
+| `/track` | `sonnet`, `medium` | Mechanical sync; escalate only to judge whether a drifted slice is a design change |
+| `/verify` | `sonnet`, `medium` | Escalate to deep reasoning only to diagnose a failure, never to run the gates |
+| `/code-review` | review agents run at the effort passed (e.g. `high`); adjudicating findings is deep-reasoning tier, `opus`/`high` | The effort argument sets how hard the review agents think, not the session model, which stays mine to set. A contract contradiction it surfaces goes in the slice's PR description, not a `design/` edit, while `design/FROZEN.md` exists |
+| `/pr` | `sonnet`, `medium` | Runs `/verify` and `/resolve` as its own phases — the same tier, and the same escalation rules, apply inside them |
+| `/resolve` | `sonnet`, `medium` | Escalate to judge a contested finding, not to triage the obvious ones |
+| `/fix` | `sonnet`, `medium` | Escalate only where the fix turns out to need a contract, schema, or public-interface change — that is `/contract`'s or `/design`'s, and this command stops rather than absorbing it |
+| `/refine` | `sonnet`, `medium` | Never escalates — an architectural ask is routed to the command that owns it, not refined |
+| `/install` | `sonnet`, `medium` | — |
+| `/install-all` | `sonnet`, `medium` | Escalate only to judge whether a per-repo hard stop is actually safe to resolve — never to resolve it unattended |
+| `/kit-sync` | `sonnet`, `medium` | Escalate only to judge whether a refused fast-forward in `~/.agent-kit` is safe to resolve — never to force past it unattended |
+| `/kit-help` | `haiku`, `low` | Orientation from file existence and a tracker listing. Escalate only where the repository's state matches no stage |
+| `/done` | `haiku`, `low` | Mechanical git housekeeping — branch switch, `--merged` check, prune. Escalate only to judge whether an unmerged-looking branch is actually safe to delete |
+| `/freeze` | `sonnet`, `medium` | `Frozen because`/`Lifts when` come from the user, never invented — ask rather than draft them |
+| `/unfreeze` | `sonnet`, `medium` for the sequencing; runs `/reconcile` (`opus`, `high`) and `/track` (`sonnet`, `medium`) as its own phases | Runs unattended, no confirmation prompt — that is this repository's policy, not a gap |
+
+**Never recommend re-running a phase gate.** I decide when a phase repeats. This holds outside `/redteam` too — see that command for its own stopping rule.
 
 ### Session boundaries
 
@@ -100,35 +118,32 @@ Routing says which model runs a command. This says **when a session must end.** 
 | `/design` → `/redteam` | **Fresh session, and a different vendor.** | A model recognises its own output distribution and defends it. Fresh context on the same model is already the weak form; the same session is not a review at all. |
 | Any stage that writes an artifact → the next | Fresh. | The next stage's input is the committed file. A session that also remembers the arguments behind it will design against the arguments. |
 | `/slices` → `/slice` | Fresh, and **one slice per session**. | A slice that does not fit one session without compaction is too large — that is a `/slices` defect, so say so rather than pressing on. |
-| `/slice` → `/verify` → `/pr` → `/resolve` | **Same session.** | These act on the branch and worktree the slice just produced, and `/pr` must carry `/verify`'s did-not-run list into the description **verbatim**. A fresh session would restate it from a summary, which is the fabricated gate result *Verification* exists to prevent. |
+| `/slice` → `/pr` | **Same session.** | `/pr` acts on the branch and worktree the slice just produced, and runs the gates and the review threads as its own phases (`.claude/commands/pr.md`). The gate report goes into the PR description's `Verified` section **verbatim**; a fresh session would restate it from a summary, which is the fabricated gate result *Verification* exists to prevent. |
+| `/fix` → `/pr` | **Same session.** | Same reason as the slice loop above: `/pr` acts on the branch and worktree `/fix` just produced, and the did-not-run list must be carried verbatim into the PR rather than restated from a summary. |
 | merge → `/track` | Fresh. | `/track` reads the tracker and `design/` as they now stand. The session that just implemented the slice holds an opinion about whether it is done, and doneness is my mark, not an agent's. |
 | implementation → `/reconcile` | Fresh. | It compares the tree against the docs. The session that wrote the code carries what it *intended* to write, which is the one thing the comparison must not be given. |
 
 **Compaction is a boundary you did not choose.** If a session compacts mid-slice, report it — the slice was mis-sized, and the work after the compaction was done against a summary of the contract rather than the contract.
 
-The red-team stopping rule below is a boundary of a different kind — it bounds how many passes a phase gets, not where a session ends. Both apply to `/redteam`.
+**End a response that lands on a fresh-session boundary with a banner, not a footnote.** A boundary buried in the last sentence of a report gets carried into the next reply of the same session out of habit, which is the exact failure the boundary exists to prevent. Set it off as a heading in the same form as the [work-start banner](#model-effort-and-review-budget) — `=` rules, Title Case, plain lines — naming: the boundary just crossed, the next command, and its tier from *Command routing*. For example:
 
-### Red-team stopping rule
+```
+===============================
+Session Boundary — Do Not Carry Into /track
+Next: /track, Fresh Session, sonnet/medium
+===============================
+```
 
-A red-team pass is an independent phase gate, not an iterative design loop.
-
-- One invocation authorizes exactly one complete pass.
-- Run at most one full red-team pass per materially changed design revision.
-- **Do recommend** another pass when you judge one is warranted, and say why. Never *start* one automatically — running it waits on my explicit request.
-- After a pass, stop and present findings one at a time for adjudication.
-- Classify each finding as a defect, an accepted risk, a brief conflict, or not sustained.
-- A known-and-retained decision is not a new defect unless new evidence shows that it contradicts a higher-precedence source or creates a consequence not already recorded. Name that new evidence or consequence.
-- Repeat `/redteam` only when I explicitly request it and the design has materially changed since the previous pass.
-- Use targeted verification for local corrections; do not reread and red-team the entire design for wording-only changes.
+Do not run the next command yourself. Ending a session may be the next step, and a command that starts work cannot also tell the user to start a new one for it — that restriction is unchanged, only how visibly the handoff is stated.
 
 ### Budget discipline
 
 - Full-document reads are for phase boundaries and explicitly requested drift passes.
 - Use targeted searches and section reads for routine verification.
 - Do not invoke a skill or command merely because it is available.
-- Do not spend additional reasoning to manufacture findings, alternatives, or open questions.
-- Once a policy decision is signed off and recorded, do not relitigate it without new evidence.
-- Spend frontier-model reasoning on decisions that are expensive to reverse, not on producing more prose.
+- **Do not spend reasoning to manufacture findings, alternatives, or open questions.** A short honest answer beats a padded one; "none at this level" is a valid result.
+- **Once a policy decision is signed off and recorded, do not relitigate it** without new evidence. Name the evidence if you think there is some.
+- **Spend frontier-model reasoning on decisions that are expensive to reverse**, not on producing more prose.
 
 ### What should stop being model work
 
@@ -145,7 +160,7 @@ Routing decides *which* model does a job. This decides whether a model should be
 Two distinctions that are easy to get wrong:
 
 - **The mechanical half of a task is red; the judgement half is not.** Opening an issue is an API call, but deciding what warrants one is not. Writing a PR description is a template, but which merge convention governs is not — `/pr` exists because that half is real. Do not classify a whole command by its cheapest step.
-- **Do not report a cost you did not measure.** A model is not given its own token counts or elapsed time, so any figure it states about its own run is an estimate presented as a measurement. `tools/Measure-Session.ps1` reads the real per-call usage from the session transcript, and runs as a `SessionEnd` hook. Use it, or say nothing.
+- **Do not report a cost you did not measure.** A model is not given its own token counts or elapsed time, so any figure it states about its own run is an estimate presented as a measurement. `tools/Measure-Session.ps1` reads the real per-call usage from the session transcript, and runs as both a `SessionEnd` hook (the log) and a `UserPromptSubmit` hook (`-Watch`, a silent-until-threshold context-size warning). Use it, or say nothing. It measures **Claude Code sessions only** — Codex writes a different schema this has no reader for, and Copilot records no token usage at all. Under either, *say nothing* is the whole instruction.
 
 This repository is itself a bet on that distinction: a service that makes git operations reachable without a model driving a terminal is red work leaving the model, at estate scale.
 
@@ -169,7 +184,7 @@ The pipeline's normal loop keeps `design/` live: a slice lands, `/reconcile` wri
 - **Slices implement against `20-contract.md` as a fixed artifact**, at the SHA the marker names.
 - **A contradiction found while implementing is stated in that slice's pull request and left in the document.** Do not fix it in `design/`. The staleness is the point; recording it in the PR is what makes the eventual reconciliation cheap.
 
-**Lifting it is deliberate and manual: delete the file, then run one reconciliation pass** — `/reconcile`, then `/track`. There is no command that lifts a freeze, because a freeze that something can lift on your behalf is one that gets lifted by habit. A slice that turns out to need a contract amendment stops and says so; that escalation is the user's to answer, and answering it may well be "thaw, amend, re-freeze."
+**`/freeze` writes the marker; `/unfreeze` lifts it** — deletes the file, then runs one reconciliation pass, `/reconcile` then `/track`, in the same session. `/unfreeze` runs unattended, without a confirmation prompt; the freeze itself is still the user's decision, made when `/freeze` is invoked, and lifting it early is one command call away rather than gated a second time. A slice that turns out to need a contract amendment still stops and says so; that escalation is the user's to answer, and answering it may well be "thaw, amend, re-freeze."
 
 The marker's format, which the five gated commands read and must not restate:
 
@@ -180,7 +195,7 @@ Frozen at: <sha>, <YYYY-MM-DD>
 Frozen because: <what the freeze is escaping>
 Lifts when: <the checkable condition — "tier one is code-complete", not "when we are ready">
 
-To lift: delete this file, then run `/reconcile`, then `/track`.
+To lift: run `/unfreeze`, or delete this file by hand and run `/reconcile`, then `/track`.
 ```
 
 A command that refuses reports `Frozen because` and `Lifts when` **verbatim** rather than paraphrasing them — the point of a stated condition is that it can be checked against, and a paraphrase is where it stops being checkable.
@@ -206,10 +221,11 @@ A command that refuses reports `Frozen because` and `Lifts when` **verbatim** ra
 - Surface real forks as a question with a recommendation, recommended option first. I routinely pick the more rigorous non-recommended option — so ask, do not assume.
 - **A reconciliation ends in a decision, not a report.** Any time you compare two things and find they disagree — `/reconcile`, `/install`, `/track` drift, or any time I say "reconcile" — the work is not finished at the findings. Close by asking, one divergence at a time, each with a recommendation and what the alternatives cost. **A report I have to turn into questions myself is half the job.** If a comparison genuinely found nothing, say that plainly rather than manufacturing a fork.
   - Recommend the **resolution**, not merely which side you prefer: name what changes, in which file, and what it costs to reverse.
-  - `/redteam` is the one exception, and only partly — it must not propose fixes, since naming a fix frames the problem. It still recommends a classification, per the **Red-team stopping rule** above.
+  - `/redteam` is the one exception, and only partly — it must not propose fixes, since naming a fix frames the problem. It still recommends a **classification** for each finding: defect, accepted risk, brief conflict, or not sustained.
 - When I decline a suggestion, record it in the affected document as known-and-retained rather than dropping it silently. Otherwise it is rediscovered later as a bug.
 - Ask before any choice that sets policy or a public contract: licensing, compatibility promises, a major information-architecture change.
 - Call out assumptions, unverified claims, and known risks plainly. Explain the concrete evidence behind a recommendation.
+- **Never tell me to go edit `design/` or the brief myself.** State what needs to change and why, give a recommendation, ask me to decide — then make the edit. Handing me a diff to type in by hand is not a lighter-weight version of doing the work, it is the same work with an extra round trip. Where the change belongs to a different command's tier (a contract amendment is `/contract`'s, a redesign is `/design`'s), name that command and its tier and say the edit happens there — still not as homework for me to do by hand.
 
 ## Git and delivery
 
@@ -217,30 +233,31 @@ A command that refuses reports `Frozen because` and `Lifts when` **verbatim** ra
 - Run `git diff --check` before committing. Never use trailing double-spaces for a line break; it rejects them.
 - **Never force-push or rewrite published history.** If a pushed commit needs changing, add a follow-up commit.
 - **Push every commit before announcing a PR is ready.** Announcing invites an immediate merge, and a commit pushed after that lands on a branch nobody merges.
-- External writes need my authorization: creating a remote repository, changing visibility, pushing, opening or merging pull requests, changing a domain, deploying. **Discussing a decision does not authorize it.** One carve-out — see *Tracking work*.
+- **Committing and pushing to a non-default branch are delegated in this repository.** Whenever a change is made on a branch other than the default, commit it (staged by named path, per above) and push immediately — no separate ask, and no waiting for the user to request the commit. This is narrower than it sounds: it covers landing work on the branch it was made on, nothing more.
+- External writes still need my authorization beyond that: creating a remote repository, changing visibility, pushing **to the default branch**, merging pull requests, changing a domain, deploying. **Discussing a decision does not authorize it.** Carve-outs: GitHub issue, milestone, and project writes (*Tracking work*), commit-and-push to a non-default branch (above), and **opening a pull request** — `/slice`, `/fix`, and `/pr` all open theirs without asking (`.claude/commands/slice.md`, `.claude/commands/fix.md`, `.claude/commands/pr.md`). **Never as a draft.** A draft is invisible to reviewers and to CI gates that ignore drafts, which splits "opened" from "actually in review" and leaves someone to reconcile the two by hand; an open PR is reverted by closing it, which is as cheap as closing an issue. **Merging is not carved out and stays mine.**
 - Do not delete files, branches, or history without explicit authorization.
-- **Deleting a *local* branch that `git branch --merged` independently confirms is carved out**, and `/done` may do it without asking. `-d` only, never `-D`; never a remote branch; a `-d` refusal is reported and asked about separately. The confirmation is what makes this safe to automate — the commits are already on the default branch, so the branch is a label rather than work. Nothing else about deletion is carved out.
-- Check review **threads**, not just requested reviewers — an automated reviewer can leave blocking conversation threads that do not appear in a reviewer listing. Resolve a thread only when a validated fix satisfies it; leave ambiguous findings open and report them. `/resolve` does this; the query it needs is written out there.
-- **Resolving or replying to a review thread is not carved out.** The exception in *Tracking work* covers opening issues and nothing else. Where a repository delegates resolution explicitly, follow its wording; where it is silent, ask.
+- **Deleting a local branch `/done` independently confirms via `git branch --merged` is delegated in this repository.** `/done` (`.claude/commands/done.md`) runs proactively — as soon as a merge is on the table, not only when asked — and deletes every branch on that confirmed list without a chat confirmation first; the `--merged` check is the authorization. It also may stash (never discard) a dirty tree to unblock its own branch switch, and always reports the stash back rather than popping it silently. This delegation stops exactly where `--merged` stops: a branch it did not confirm, or a `-d` refusal on one it did, still needs a separate ask before anything stronger (`-D`) is even considered.
+- Check review **threads**, not just requested reviewers — an automated reviewer can leave blocking conversation threads that do not appear in a reviewer listing. Resolve a thread only when a validated fix satisfies it; leave ambiguous findings open and report them. `/resolve` does this — as `/pr`'s final phase, or invoked on its own; the query it needs is written out there.
+- **Resolving or replying to a review thread is delegated in this repository.** `/resolve` (`.claude/commands/resolve.md`) pushes the fix, updates the pull request, and resolves every `Defect`-class thread it satisfies **without asking first** — this repository's own convention overrides the general external-write rule for this one action. This delegation is unavailable in a repository I do not own — every action there is requested individually, the same boundary every carve-out in *Tracking work* stops at (**I9**). `Ambiguous`-class threads are still brought to me one at a time; delegation covers execution of a classification already made, not the classification itself. The five classes, and what happens to each, stay owned by `resolve.md`.
 
 ## Tracking work
 
 **Defer work to the tracker rather than processing it inline.** A finding, a follow-up, or a defect noticed in passing goes to a GitHub issue — not into a running list in the conversation, and not into a section of a document that will rot. Prose is where work goes to be forgotten.
 
-- **Opening and labelling issues is carved out of the authorization rule.** You may open them in a repository I own, without asking. Issues are cheap and reversible, which is the entire justification; the exception is narrow and does not generalise.
-- **Closing an issue is not carved out.** Nor is commenting on, editing, or labelling anyone else's, nor writing to a repository I do not own.
-- **Milestones and projects still need approval.** They are structural and few, and a wrong one is visible on a public repository.
-- **`/track` owns every GitHub write.** No other command creates issues, milestones, or projects. It is idempotent, so run it often rather than batching.
+- **Opening, labelling, closing, commenting on, and editing an issue is carved out of the authorization rule**, in a repository I own — including one opened by someone else. Issues are cheap and reversible, which is the entire justification.
+- **Milestones and projects are carved out too**, in a repository I own. Creating one no longer needs approval; deleting one still does, since that direction is not cheaply reversible.
+- **Writing to a repository I do not own is never carved out.** That boundary is the one this section does not relax.
+- **`/track` owns every GitHub write it can make idempotent.** No other command creates issues, milestones, or projects. It is idempotent, so run it often rather than batching. Closing an issue and ticking a checkbox are the exceptions — the command that observes the work done does those directly, in the same run, rather than waiting for a sync pass.
 - `design/30-slices.md` stays authoritative for what a slice *is*; its issue tracks whether it is *done*. If the two come to describe the work differently, say so rather than editing either.
 - The `## Open` section of `design/90-decisions.md` is a staging area, not a home. Once an item becomes an issue, remove it from there. **This repository's `## Open` is already large and partly struck through** — `/track`'s first run against it is a migration, not a routine sync, and the resolved bullets should leave rather than become issues.
-- **Every issue reads human-first.** A narrative anyone can follow, then `### Done when` checkboxes, then the agent detail in a collapsed `<details>` block.
-- **The agent block is fenced** by `<!-- agent:start -->` and `<!-- agent:end -->`. Inside the fence is regenerable; **outside it is never touched** — a ticked checkbox is progress someone recorded, an edited narrative is someone's deliberate wording.
+- **Every issue reads human-first, as a user story** — who this is for and what changes for them, in plain sentences. No pixel values, breakpoints, thresholds, file paths, or investigative notes about the tracker's own state ("the doc still says X but PR #Y already merged") in that narrative — those are ADR-style detail and belong in the agent block, however tempting it is to leave a note where it will be seen first. Then `### Done when` checkboxes — these are allowed to be precise and technical, since they exist to be checked, not read as prose — then the agent detail in a collapsed `<details>` block.
+- **The agent block is fenced** by `<!-- agent:start -->` and `<!-- agent:end -->`. Inside the fence is regenerable; **outside it, a regenerating command never rewrites anything** — an edited narrative is someone's deliberate wording, and a stale copy gets fixed by hand, not overwritten. The one narrow exception is a `Done when` checkbox, which the command that confirms a criterion ticks directly, in place, outside the fence.
 - **Where a document already governs, the block points; where none does, it carries.** A slice names `design/30-slices.md § S<n> @ <sha>` and leaves procedure to `.claude/commands/slice.md` — copying stop conditions into an issue freezes a stale copy that nothing can go back and fix. A bug or a story has no upstream document, so its block legitimately holds the constraints. That asymmetry is the rule, not an inconsistency.
 - **Criteria carry stable ids** (`S3.1`), and drift is compared on ids, never prose. Reworded criteria are not drift; an added, removed, or renumbered id is.
 - **This repository's legacy S1–S22 issues predate the positional criterion ids now fixed in `design/30-slices.md`.** When an existing issue has no ids in its checkboxes, `/track` maps them positionally only if its checkbox count equals the document's criterion count; a count difference is real drift. Preserve the checkbox text and state rather than rewriting them to add ids. New slice issues include ids from the start. **S1 to S5 are merged and are never retrofitted or reopened.**
 - **Report drift, change neither side.** Which is wrong is my call.
-- **Ticking a checkbox is mine, not yours.** An agent reporting "S3.1 met" and a ticked box are different claims by different parties, and collapsing them removes the only human gate between "the tests pass" and "this is done". `/slice` ends by listing the ids it believes are met so ticking is mechanical.
-- **Bugs and stories are filed by hand** from `.github/ISSUE_TEMPLATE/`. `/track` does not open them.
+- **Ticking a checkbox is carved out of the authorization rule, the same as opening an issue.** `/slice` ticks a `Done when` box in the same run it reports the criterion met, by id, so the tick is traceable to the report that justified it rather than a separate confirmation.
+- **Bugs and stories are filed by hand** from `.github/ISSUE_TEMPLATE/`. `/track` does not open them — with one narrowing: `/fix` (`.claude/commands/fix.md`), on its description path, files one bug issue itself, and only after reproducing the defect. It never files one for a defect it could not reproduce.
 - **This does not suspend one-at-a-time sign-off.** Findings are still presented for adjudication; the tracker is where the ones you accept go, not a way to skip the conversation.
 
 ## Decision logging

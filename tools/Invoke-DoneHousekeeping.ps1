@@ -41,10 +41,6 @@
     (StashRef), so the caller can restore it explicitly rather than having it silently
     reappear on whatever branch happens to be checked out next.
 
-    StashBranch reports the branch the work was stashed from. The script checks out the
-    default branch afterwards, so restoring means switching back to StashBranch first -
-    popping where this script leaves you applies the diff to the wrong tree.
-
 .EXAMPLE
     ./tools/Invoke-DoneHousekeeping.ps1
     Switch, prune, and report candidates. Deletes nothing.
@@ -78,7 +74,6 @@ function Invoke-Git {
 
 $stashed = $false
 $stashRef = $null
-$stashBranch = $null
 
 $statusResult = Invoke-Git -GitArgs @('status', '--short') -WorkingDir $repoRootResolved
 if ($statusResult.Output.Trim()) {
@@ -95,17 +90,10 @@ if ($statusResult.Output.Trim()) {
             Refused        = @()
             Stashed        = $false
             StashRef       = $null
-            StashBranch    = $null
         }
         return
     }
-    # Captured before the stash, because the branch the work belongs to is the
-    # one thing the caller cannot recover afterwards: this script checks out the
-    # default branch next, and `git stash pop` there would apply the diff to the
-    # wrong tree. Reported as StashBranch so the restore can name it.
-    $stashBranch = (Invoke-Git -GitArgs @('branch', '--show-current') -WorkingDir $repoRootResolved).Output.Trim()
-    if (-not $stashBranch) { $stashBranch = (Invoke-Git -GitArgs @('rev-parse', 'HEAD') -WorkingDir $repoRootResolved).Output.Trim() }
-    $stashResult = Invoke-Git -GitArgs @('stash', 'push', '-u', '-m', "Invoke-DoneHousekeeping auto-stash from $stashBranch") -WorkingDir $repoRootResolved
+    $stashResult = Invoke-Git -GitArgs @('stash', 'push', '-u', '-m', 'Invoke-DoneHousekeeping auto-stash') -WorkingDir $repoRootResolved
     if ($stashResult.ExitCode -ne 0) {
         throw "AutoStash was requested but 'git stash push -u' failed: $($stashResult.Output)"
     }
@@ -153,7 +141,6 @@ if ($currentBranch -and $currentBranch -ne $DefaultBranch) {
                 Refused        = @()
                 Stashed        = $stashed
                 StashRef       = $stashRef
-                StashBranch    = $stashBranch
             }
             return
         }
@@ -213,5 +200,4 @@ foreach ($branch in $DeleteBranches) {
     Refused        = @($refused)
     Stashed        = $stashed
     StashRef       = $stashRef
-    StashBranch    = $stashBranch
 }

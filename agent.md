@@ -95,6 +95,9 @@ and preferences belong in `AGENTS.md`.
 
 ## Git, CI, and delivery
 
+- **A broad `git add` has already nearly cost real work.** An ignore pattern would have made
+  installer-generated scripts invisible to `git add -A` — present locally, green locally,
+  missing in CI, with nothing saying why.
 - **`prettier --check` reports false failures on a Windows working tree.** `core.autocrlf=true`
   gives CRLF locally while the committed blob is LF, which is what CI checks out. Check the
   blob before "fixing" formatting CI never complained about.
@@ -107,6 +110,12 @@ and preferences belong in `AGENTS.md`.
 - **A CI job can never be granted more permission than its workflow declares.** Splitting a
   read-only gate from a deploy that needs write credentials is what keeps the gate from
   holding credentials it never uses.
+- **A fix that only changed the odds is not a fix.** An intermittent failure went away when
+  test parallelism was disabled — three consecutive clean runs — and came back on the fourth.
+  The real cause was connection pooling handing out a stale schema snapshot, found by a tight
+  single-threaded loop that reproduced it on iteration zero. **Cost: a wrong diagnosis that
+  looked right, plus the repro loop to overturn it.** When a fix is "it stopped failing",
+  suspect the odds moved rather than the cause, and say over how many runs.
 
 ## Rendering and encoding
 
