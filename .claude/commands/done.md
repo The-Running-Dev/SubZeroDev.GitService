@@ -19,7 +19,7 @@ tools/Invoke-DoneHousekeeping.ps1 -RepoRoot <repo> -AutoStash
 ```
 
 - **`Stopped: true`** means it refused to switch at all — the only remaining `Reason` is `UnmergedCurrentBranch` (the current branch has commits not on the default branch and no merged PR accounts for them, checked via `gh pr list --state merged --head <branch>`). Report `Detail` and stop; this is real unaccounted-for work and stays a hard stop, not something to guess past.
-- **`-AutoStash`** means a dirty tree no longer stops the run: the script runs `git stash push -u` first (never a discard) and reports `Stashed: true`, `StashRef` and `StashBranch`. **Always report the stash** so it doesn't get silently lost on whatever branch is checked out next — tell the user a stash was made and how to get it back. **The restore names `StashBranch`**: this command checks out the default branch after stashing, so `git switch <StashBranch>` comes first and `git stash pop` second. Popping where this command leaves you applies a feature branch's diff to the default branch's tree, which is the one outcome stashing was supposed to prevent. Use `git stash apply stash@{0}` instead of `pop` if something else has since been stashed on top.
+- **`-AutoStash`** means a dirty tree no longer stops the run: the script runs `git stash push -u` first (never a discard) and reports `Stashed: true` / `StashRef`. **Always report the stash** so it doesn't get silently lost on whatever branch is checked out next — tell the user a stash was made and how to get it back (`git stash pop`, or `git stash apply stash@{0}` if something else has since been stashed on top).
 - **Otherwise** it has already checked out `DefaultBranch`, pulled (unless it failed), pruned remote-tracking refs (`PrunedCount`), and built `Candidates` — every branch `--merged <default>` confirms, each with its `MergedPr` where `gh` found one. **`--merged` is a genuine merge check**, so a squash-merged branch (GitHub's squash produces a new commit `--merged` cannot see as "the same") will not appear here even though `gh` shows it merged — if you know of one, name it when deleting anyway, with the PR link, same as any other candidate.
 
 ## Delete the confirmed candidates — don't block on a prompt
@@ -38,7 +38,7 @@ Report after acting, not before — this is a summary of what happened, not a re
 
 - Default branch confirmed and checked out
 - Remote-tracking refs pruned, and how many (`PrunedCount`)
-- A stash made and how to restore it, if `Stashed: true` — naming `StashBranch` and the switch-back-first order
+- A stash made and how to restore it, if `Stashed: true`
 - Branches deleted, and the PR each merged through where known (`Deleted`)
 - Any branch left alone, and why — unmerged work, or a `-d` refusal not separately authorized (`Refused`)
 

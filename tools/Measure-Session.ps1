@@ -18,6 +18,21 @@
     fabricated number this script exists to replace. Multiply the columns by
     current published rates yourself.
 
+    Claude Code only, and it says so rather than guessing. Every transcript is
+    shape-checked before it is summed, and anything else is a hard error: a
+    foreign transcript parsed for 'message.usage' yields zero, and a zero is
+    indistinguishable from a session that cost nothing.
+
+    The other two agents in this repository's routing table:
+
+      Codex     Stores ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl and records
+                usage as 'token_count' events under payload.info. Readable in
+                principle, unimplemented here, and its counts are per turn
+                rather than per call.
+      Copilot   Stores globalStorage/github.copilot-chat/session-store.db, whose
+                'turns' table has no usage column. Copilot meters premium
+                requests, not tokens. Nothing to read, at any effort.
+
 .PARAMETER Project
     Repository root to report on. Defaults to the current directory.
 
@@ -31,11 +46,18 @@
 .PARAMETER Detail
     Break each session down by slash-command segment.
 
+.PARAMETER Human
+    Print the aligned text table instead of JSON. Default output is JSON so
+    the report can be piped into other tools without a parser written against
+    a table meant for a terminal; pass -Human for the table a person reads.
+
 .PARAMETER Hook
     Run as a SessionEnd hook. Reads the hook's JSON from stdin, measures the
     session it names, and writes one row to .claude/session-costs.tsv beside
-    this script's repository. Prints nothing: SessionEnd output is shown to the
-    user only on a non-zero exit, so the log is the deliverable.
+    this script's repository. Prints nothing by choice rather than by
+    limitation: SessionEnd stdout is shown to the user on exit 0, but a total
+    arriving as the session closes is a number nobody can act on. The log is
+    the deliverable because it accumulates a trend.
 
     Idempotent. SessionEnd also fires on clear and resume, so a session can be
     reported more than once; an existing row for the same id is replaced rather
@@ -44,6 +66,28 @@
     The log is a convenience, not the record. Transcripts are durable, so a
     session killed before the hook fires is recovered by re-running this script
     without -Hook.
+
+.PARAMETER Watch
+    Run as a UserPromptSubmit hook. Reports the session's current context size
+    once it crosses -WarnAtTokens, and stays silent below it.
+
+    UserPromptSubmit is the event that fits: it fires before the turn is
+    processed, so the warning arrives while the session can still be ended
+    rather than after the expensive turn, and its stdout is injected as context
+    so the model reads it too. It always exits 0. Exit 2 on this event blocks
+    the prompt and erases what the user typed, which is never worth a cost
+    warning.
+
+    Silence below the threshold is the design, not an optimisation. An
+    unconditional per-turn metrics block was rejected on 2026-08-04 for
+    injecting noise on every turn while claiming to save tokens; a gated
+    warning is a different proposal rather than that one again.
+
+.PARAMETER WarnAtTokens
+    Context size that triggers the advisory warning. Default 150000, measured:
+    it is where sessions in this repository began climbing towards the 300-450K
+    per call that the largest ones sustained. Twice this value reads as a
+    firmer warning.
 
 .PARAMETER IdleThresholdMinutes
     Gaps longer than this are treated as idle and excluded from active time.
@@ -61,7 +105,10 @@ param(
     [string]$TranscriptPath,
     [string]$SessionId,
     [switch]$Detail,
+    [switch]$Human,
     [switch]$Hook,
+    [switch]$Watch,
+    [int]$WarnAtTokens = 150000,
     [int]$IdleThresholdMinutes = 5
 )
 
@@ -98,6 +145,72 @@ function Resolve-TranscriptDirectory {
         throw "Ambiguous: $($candidates.Count) transcript directories match '$leaf'. Pass -Project explicitly."
     }
     throw "No transcript directory for $full. Expected $derived."
+}
+
+function Get-TranscriptVendor {
+    <#
+      Which agent wrote this transcript, decided by record shape rather than by
+      path. A path check would be wrong exactly where it matters most - an
+      exported or relocated store - and -TranscriptPath exists to point at
+      those.
+
+      Two discriminators, both verified against every transcript on the machine
+      this was written on (18 Claude, 4 Codex): no Claude record carries a
+      top-level 'payload', and no Codex record carries a top-level
+      'message.usage'.
+
+      Returns 'claude' for a Claude-shaped file even when it holds no usage
+      yet. An empty session is a legitimate thing to skip; another vendor's
+      file is not, and the caller treats the two differently.
+    #>
+    param([System.IO.FileInfo]$File, [int]$MaxLines = 50)
+
+    # Get-Content -TotalCount, not [System.IO.File]::ReadLines: this function
+    # returns from inside the loop as soon as it is sure, and abandoning that
+    # lazy enumerator leaves the file handle open until GC collects it. The
+    # next write to the same path then fails with a sharing violation.
+    $shape = 'unknown'
+    foreach ($line in @(Get-Content -LiteralPath $File.FullName -TotalCount $MaxLines)) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        try { $record = $line | ConvertFrom-Json } catch { continue }
+        $names = $record.PSObject.Properties.Name
+
+        # Codex wraps everything in a 'payload' and opens with 'session_meta'.
+        # Checked first: it is the definitive shape, and cheaper to be sure
+        # about than the absence of one.
+        if ($names -contains 'payload' -or ($names -contains 'type' -and $record.type -eq 'session_meta')) {
+            return 'codex'
+        }
+
+        if ($names -contains 'message' -and $record.message) {
+            if ($record.message.PSObject.Properties.Name -contains 'usage') { return 'claude' }
+            $shape = 'claude'
+        }
+    }
+
+    return $shape
+}
+
+function Assert-NotCopilotStore {
+    <#
+      Copilot is named explicitly rather than falling through to 'unrecognised'
+      because the reason is different in kind and the user cannot act on it.
+      Copilot Chat persists to SQLite (globalStorage/github.copilot-chat/
+      session-store.db) whose 'turns' table is (id, session_id, turn_index,
+      user_message, assistant_response, timestamp) - there is no usage column
+      anywhere in the schema. It meters premium requests, not tokens, so there
+      is nothing here to read and no reader that could be written.
+    #>
+    param([string]$Path)
+
+    $copilot = @(
+        (Test-Path (Join-Path $Path 'session-store.db')),
+        ($Path -match 'github\.copilot-chat'),
+        ((Split-Path $Path -Leaf) -in 'chatSessions', 'chatEditingSessions')
+    )
+    if ($copilot -contains $true) {
+        throw "$Path is a GitHub Copilot store. Copilot records no token usage - its 'turns' table has no usage column, and it meters premium requests rather than tokens. There is nothing here to measure; see the VS Code quota indicator instead."
+    }
 }
 
 function Read-Session {
@@ -174,7 +287,7 @@ function Read-Session {
         }
     }
 
-    $ordered = $stamps | Sort-Object
+    $ordered = @($stamps | Sort-Object)
     $span = if ($ordered.Count -ge 2) { $ordered[-1] - $ordered[0] } else { [timespan]::Zero }
 
     $active = [timespan]::Zero
@@ -200,12 +313,6 @@ function Format-Row {
         $Label, $S.Calls, $S.Input, $S.CacheCreate, $S.CacheRead, $S.Output
 }
 
-function Format-Duration {
-    param([timespan]$Value)
-
-    '{0}:{1:mm\:ss}' -f [math]::Floor($Value.TotalHours), $Value
-}
-
 if ($Hook) {
     # SessionEnd delivers its JSON on stdin. Failing loudly here would put an
     # error in front of the user at the moment they are closing the session, so
@@ -213,6 +320,14 @@ if ($Hook) {
     try {
         $payload = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
         $file = Get-Item -LiteralPath $payload.transcript_path
+
+        # SessionEnd only fires under Claude Code, so this should be
+        # unreachable. It is checked anyway: the alternative to erroring is a
+        # row of zeros in the log, and the log's whole value is that its
+        # numbers were measured.
+        $vendor = Get-TranscriptVendor -File $file
+        if ($vendor -ne 'claude') { throw "$($file.Name) is not a Claude Code transcript (detected: $vendor)." }
+
         $session = Read-Session -File $file
 
         $sum = [pscustomobject]@{ Calls = 0; Input = 0L; CacheCreate = 0L; CacheRead = 0L; Output = 0L }
@@ -231,12 +346,9 @@ if ($Hook) {
             $session.Id
             $session.Models
             $sum.Calls
-            (Format-Duration $session.Span)
-            (Format-Duration $session.Active)
-            $sum.Input
-            $sum.CacheCreate
-            $sum.CacheRead
-            $sum.Output
+            ('{0:hh\:mm\:ss}' -f $session.Span)
+            ('{0:hh\:mm\:ss}' -f $session.Active)
+            $sum.Input, $sum.CacheCreate, $sum.CacheRead, $sum.Output
         ) -join "`t"
 
         # Rewrite rather than append: SessionEnd fires on clear and resume too,
@@ -260,19 +372,93 @@ if ($Hook) {
     }
 }
 
+if ($Watch) {
+    # This runs on every prompt, so it never disturbs the session: every failure
+    # path exits 0 in silence. A cost warning that breaks a turn costs more than
+    # the tokens it saves, and exit 2 here would erase the user's prompt.
+    try {
+        $payload = ([Console]::In.ReadToEnd() | ConvertFrom-Json)
+        $path = if ($payload.PSObject.Properties.Name -contains 'transcript_path') { $payload.transcript_path } else { $null }
+        if (-not $path -or -not (Test-Path -LiteralPath $path)) { exit 0 }
+
+        # Only the newest usage record matters: its three input classes sum to
+        # the context every later call will pay again. Parsing every line is
+        # what the report does and it is too slow to repeat per prompt, so lines
+        # are filtered as text and parsed at the end. Several are kept rather
+        # than one because '"usage"' can appear inside tool output, and a false
+        # positive must not shadow the real record.
+        $recent = [System.Collections.Generic.Queue[string]]::new()
+        foreach ($line in [System.IO.File]::ReadLines($path)) {
+            if (-not $line.Contains('"usage"')) { continue }
+            $recent.Enqueue($line)
+            while ($recent.Count -gt 8) { [void]$recent.Dequeue() }
+        }
+        if (-not $recent.Count) { exit 0 }
+
+        $context = 0L
+        $candidates = $recent.ToArray()
+        for ($i = $candidates.Count - 1; $i -ge 0; $i--) {
+            try { $record = $candidates[$i] | ConvertFrom-Json } catch { continue }
+            if ($record.PSObject.Properties.Name -notcontains 'message') { continue }
+            $message = $record.message
+            if (-not $message -or $message.PSObject.Properties.Name -notcontains 'usage') { continue }
+            $usage = $message.usage
+            if (-not $usage) { continue }
+
+            foreach ($field in 'input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens') {
+                if ($usage.PSObject.Properties.Name -contains $field) { $context += [long]$usage.$field }
+            }
+            break
+        }
+
+        if ($context -lt $WarnAtTokens) { exit 0 }
+
+        # Emitted on every turn above the threshold rather than once on crossing.
+        # The number growing is itself the signal, a one-shot warning is read
+        # once and forgotten, and the alternative is a state file whose failure
+        # modes cost more than the repetition does.
+        $severity = if ($context -ge ($WarnAtTokens * 2L)) { 'well past' } else { 'past' }
+        '[session-watch] Context is {0:N0} tokens and every further turn pays it again ({1} the {2:N0} threshold). AGENTS.md puts a session boundary at each artifact handoff - consider finishing this step and starting fresh.' -f $context, $severity, $WarnAtTokens
+        exit 0
+    }
+    catch { exit 0 }
+}
+
 $directory = if ($TranscriptPath) {
     if (-not (Test-Path $TranscriptPath)) { throw "No such transcript directory: $TranscriptPath" }
     (Resolve-Path $TranscriptPath).Path
 }
 else { Resolve-TranscriptDirectory -ProjectPath $Project }
+
+# Checked before the *.jsonl listing: a Copilot store holds no .jsonl at all,
+# so the generic "no transcripts matched" would name the wrong problem.
+Assert-NotCopilotStore -Path $directory
+
 $files = @(Get-ChildItem $directory -Filter *.jsonl -File)
 if ($SessionId) { $files = @($files | Where-Object BaseName -like "$SessionId*") }
 if (-not $files.Count) { throw "No transcripts matched in $directory." }
 
-$header = '{0,-28} {1,6} {2,10} {3,12} {4,13} {5,10}' -f 'Segment', 'calls', 'input', 'cache_new', 'cache_read', 'output'
 $totals = [pscustomobject]@{ Calls = 0; Input = 0L; CacheCreate = 0L; CacheRead = 0L; Output = 0L }
+$reportSessions = [System.Collections.Generic.List[object]]::new()
 
 foreach ($file in ($files | Sort-Object LastWriteTime)) {
+    # A foreign transcript is a hard stop, not a skip. Parsing one for
+    # 'message.usage' finds nothing and sums to zero, and a zero here is
+    # indistinguishable from a session that genuinely cost nothing - which is
+    # the fabricated measurement this script exists to replace.
+    $vendor = Get-TranscriptVendor -File $file
+    if ($vendor -ne 'claude') {
+        # Not $detail: PowerShell variable names are case-insensitive, so that
+        # would assign to the -Detail switch parameter and fail on the cast.
+        $reason = if ($vendor -eq 'codex') {
+            "Codex records usage as 'token_count' events under payload.info, not as 'message.usage'. No Codex reader is implemented, and its per-turn counts are not the same unit as Claude's per-call ones."
+        }
+        else {
+            'No known agent writes this shape.'
+        }
+        throw "$($file.Name) is not a Claude Code transcript (detected: $vendor). $reason"
+    }
+
     $session = Read-Session -File $file
     if (-not $session.Segments.Count) { continue }
 
@@ -285,27 +471,87 @@ foreach ($file in ($files | Sort-Object LastWriteTime)) {
     }
 
     $shortId = if ($session.Id.Length -gt 8) { $session.Id.Substring(0, 8) } else { $session.Id }
-    ''
-    "Session {0}   {1}" -f $shortId, $session.Models
-    "  started {0:yyyy-MM-dd HH:mm}   span {1}   active {2} (gaps over {3} min excluded)" -f
-        $session.Started, (Format-Duration $session.Span), (Format-Duration $session.Active), $IdleThresholdMinutes
-    ''
-    $header
-    ('-' * $header.Length)
-    if ($Detail) {
-        foreach ($segment in $session.Segments) { Format-Row -Label $segment.Label -S $segment }
+    $reportSessions.Add([pscustomobject]@{
+        Id      = $shortId
+        Started = $session.Started
+        Span    = $session.Span
+        Active  = $session.Active
+        Models  = $session.Models
+        Total   = $sum
+        Segments = $session.Segments
+    })
+}
+
+# Every file was Claude-shaped and every one was empty. Skipping a single
+# empty session is right; reporting a table of zeros for all of them is not.
+if (-not $reportSessions.Count) {
+    throw "Matched $($files.Count) Claude transcript(s) in $directory, none of which recorded any usage. Refusing to report zero, which would read as a session that cost nothing."
+}
+
+if ($Human) {
+    $header = '{0,-28} {1,6} {2,10} {3,12} {4,13} {5,10}' -f 'Segment', 'calls', 'input', 'cache_new', 'cache_read', 'output'
+
+    foreach ($session in $reportSessions) {
+        ''
+        "Session {0}   {1}" -f $session.Id, $session.Models
+        "  started {0:yyyy-MM-dd HH:mm}   span {1:hh\:mm\:ss}   active {2:hh\:mm\:ss} (gaps over {3} min excluded)" -f
+            $session.Started, $session.Span, $session.Active, $IdleThresholdMinutes
+        ''
+        $header
         ('-' * $header.Length)
+        if ($Detail) {
+            foreach ($segment in $session.Segments) { Format-Row -Label $segment.Label -S $segment }
+            ('-' * $header.Length)
+        }
+        Format-Row -Label 'session total' -S $session.Total
     }
-    Format-Row -Label 'session total' -S $sum
-}
 
-if ($files.Count -gt 1) {
+    if ($files.Count -gt 1) {
+        ''
+        ('=' * $header.Length)
+        Format-Row -Label "all sessions ($($files.Count))" -S $totals
+    }
+
     ''
-    ('=' * $header.Length)
-    Format-Row -Label "all sessions ($($files.Count))" -S $totals
+    'cache_read is the term that grows with conversation length. If it dominates,'
+    'the lever is session boundaries, not per-command waste.'
+    ''
 }
+else {
+    function ConvertTo-UsageObject { param($S)
+        [ordered]@{
+            calls       = $S.Calls
+            input       = $S.Input
+            cacheCreate = $S.CacheCreate
+            cacheRead   = $S.CacheRead
+            output      = $S.Output
+        }
+    }
 
-''
-'cache_read is the term that grows with conversation length. If it dominates,'
-'the lever is session boundaries, not per-command waste.'
-''
+    $payload = [ordered]@{
+        idleThresholdMinutes = $IdleThresholdMinutes
+        sessions = @($reportSessions | ForEach-Object {
+            $entry = [ordered]@{
+                id      = $_.Id
+                started = if ($_.Started) { ('{0:yyyy-MM-ddTHH:mm:ss}' -f $_.Started) } else { $null }
+                spanSeconds   = [math]::Round($_.Span.TotalSeconds)
+                activeSeconds = [math]::Round($_.Active.TotalSeconds)
+                models  = @($_.Models -split ',\s*' | Where-Object { $_ })
+                total   = ConvertTo-UsageObject $_.Total
+            }
+            if ($Detail) {
+                $entry.segments = @($_.Segments | ForEach-Object {
+                    $seg = ConvertTo-UsageObject $_
+                    $seg.Insert(0, 'label', $_.Label)
+                    $seg
+                })
+            }
+            $entry
+        })
+    }
+    if ($files.Count -gt 1) {
+        $payload.allSessions = ConvertTo-UsageObject $totals
+    }
+
+    $payload | ConvertTo-Json -Depth 6
+}
