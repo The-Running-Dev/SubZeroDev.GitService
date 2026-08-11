@@ -825,10 +825,23 @@ Schemas at their respective `plan` properties must be byte-for-byte equal after 
 serialisation. Declaration creation, amendment and boot re-validation reject a pair that does not
 match. `permittedPaths` is sorted and duplicate-free, every member must pass the watcher's effective
 write allowlist before `applyTool` is dispatched, and `applyTool.changedPaths` is also sorted and
-duplicate-free. The watcher independently dispatches `repo_status` after apply: its complete changed
-path set must equal `changedPaths`, and that set must be a subset of `permittedPaths`, before the
-watcher dispatches `git_stage`. After staging, a second `repo_status` must report exactly the same
-path set and every entry staged before commit may begin. A mismatch is a failed drop, never a partial
+duplicate-free.
+
+`permittedPaths` narrows what the apply tool may write; it never establishes it. The bound is the
+declaration's own path allowlist, enforced inside the apply handler: every path the handler is about
+to write passes `validateWritePath` before any side effect, exactly as `git_stage` and
+`git_restore_paths` do, with `malformed` mapping to `validation` and `outside-allowlist` and
+`stripped-by-profile` mapping to `authorization` and writing an audit record naming the rejected
+path. A path that survives that check and is absent from `permittedPaths` is refused the same way.
+Both checks are the handler's, because `applyTool` is an ordinary registry entry that any session
+holding `git.local.write` and the `write` scope may dispatch directly — a bound that lives only in
+the watcher is not a bound, and the allowlist is what keeps a write out of `.git/`, which
+`RepoRelativePath` alone permits.
+
+The watcher independently dispatches `repo_status` after apply: its complete changed path set must
+equal `changedPaths`, and that set must be a subset of `permittedPaths`, before the watcher
+dispatches `git_stage`. After staging, a second `repo_status` must report exactly the same path set
+and every entry staged before commit may begin. A mismatch is a failed drop, never a partial
 success; no later git or host step is dispatched.
 
 ### Instance lease
@@ -1195,12 +1208,20 @@ interface CompilerArtifact {
 ```
 
 A drop-target plan entry has a `module` target, `executionClass: 'read'`, no capabilities,
-`scopes: ['write']`, and annotations `{ schedulable: false, dropTarget: 'plan',
-untrustedOutput: true }`. An apply entry has a `module` target, `executionClass: 'mutating'`, includes
-`git.local.write`, has `scopes: ['write']`, and annotations `{ schedulable: false,
-dropTarget: 'apply', untrustedOutput: true }`. `false` preserves the ordinary-tool annotation used
-by the base registry. The compiler rejects every other combination; a plan entry's special
-no-clone dispatch behaviour follows from the phase annotation rather than from its target name.
+`scopes: ['write']`, `capabilityScope: 'declaration'`, and annotations `{ schedulable: false,
+dropTarget: 'plan', untrustedOutput: true }`. An apply entry has a `module` target,
+`executionClass: 'mutating'`, includes `git.local.write`, has `scopes: ['write']`,
+`capabilityScope: 'declaration'`, and annotations `{ schedulable: false, dropTarget: 'apply',
+untrustedOutput: true }`. `false` preserves the ordinary-tool annotation used by the base registry.
+The compiler rejects every other combination; a plan entry's special no-clone dispatch behaviour
+follows from the phase annotation rather than from its target name.
+
+Both entries are `capabilityScope: 'declaration'` because a content drop is always a drop into one
+declared repository. The plan entry states it explicitly rather than deriving it, since it carries
+no capabilities for `capability-scope-mismatch` to check it against. That empty capability array is
+deliberate — a pure parse of an already-claimed file reaches nothing a capability guards — and it
+means the `write` scope is the plan tool's only gate. The apply tool is where the repository bound
+sits, and it enforces its own, per D14.
 
 `untrustedOutput` is the annotation the prior art puts on a tool returning author-controlled text.
 
@@ -3231,7 +3252,7 @@ type GitOperationsError = ModuleErrorBase & (
 |---|---|---|---|
 | `config-unparseable` | The repository's config file exists and is not valid against its format | no | `precondition` with findings. **A missing file is not an error** — every field defaults |
 | `config-unreadable` | The file exists and the read failed | no | `infrastructure` |
-| `no-clone` | `ctx.cloneRoot` is null for a declaration-scoped operation | no | `infrastructure`. A defect: the pipeline materialises before invoking |
+| `no-clone` | `ctx.cloneRoot` is null for a declaration-scoped operation that needs a clone | no | `infrastructure`. A defect: the pipeline materialises before invoking. A `dropTarget: 'plan'` handler is pure and never reaches this — a null `cloneRoot` is what it is given |
 
 `validateWritePath` returns `PathRejection`, not this type, because its three cases split across two
 envelope kinds — see the boundary rules under `### L2 — git operations`.
@@ -3444,7 +3465,9 @@ target kind, execution class, capabilities, scopes or other annotations fixed un
 project the corresponding `ContentDrop*` type; pairing the two consumer-specific `plan` schemas is a
 declaration check because the compiler receives registry entries but no `ContentDropConfig`.
 `limit-exceeds-cap` covers a `monitoring-wait` whose `timeoutSeconds` exceeds
-`monitoringWaitCapSeconds`.
+`monitoringWaitCapSeconds`, and any entry whose `maxResultBytes` or `timeoutSeconds` is not a
+positive integer. There being no global `maxResultBytes` default is only a guarantee if a nonsense
+limit fails the build rather than passing as an explicit choice; `cap` carries the violated bound.
 
 `no-executor` and `multiple-executors` are decided **within the declaration array alone**, because
 `compile` receives nothing else and invariant B1 forbids L0 from importing the layer that
@@ -3526,7 +3549,7 @@ responsible for maintaining it.
 |---|---|---|
 | C1 | At most one mutation lock is held process-wide at any instant. | Locks |
 | C2 | Whenever both are held, the materialisation lock was acquired before the mutation lock, and they are released in reverse order. | Dispatch pipeline |
-| C3 | A mutating operation holds the materialisation lock for its whole duration; a read or a monitoring wait releases it once the clone is `ready`. | Dispatch pipeline |
+| C3 | A mutating operation holds the materialisation lock for its whole duration; a read or a monitoring wait releases it once the clone is `ready`. A `dropTarget: 'plan'` entry is the one exception: it needs no clone, so it acquires neither lock — see D11. | Dispatch pipeline |
 | C4 | Eviction never runs while the mutation lock is held, and never for a declaration whose `activeOperationCount` is non-zero. | Clone store |
 | C5 | `pinActiveOperation` never awaits and never fails. | Locks |
 | C6 | Every monitoring wait's effective timeout is at most `monitoringWaitCapSeconds`, regardless of what was requested. | Dispatch pipeline, Compiler |
@@ -3590,6 +3613,7 @@ responsible for maintaining it.
 | D11 | A content-drop plan handler runs with no clone, no repository lock and no mutation journal, and no mutating repository step starts unless its output validates. | Dispatch pipeline, Watcher |
 | D12 | A content-drop apply result advances to staging only when an independent status observation reports exactly its declared changed paths and every path is inside both its plan and the effective watcher allowlist. | Watcher |
 | D13 | Content-drop staging names exactly the independently observed changed paths; commit starts only after a second observation reports that exact set fully staged. | Watcher |
+| D14 | A content-drop apply handler validates every path it writes against the declaration's path allowlist before any side effect, whoever dispatched it. `permittedPaths` narrows that bound and never widens it. | Git operations, Watcher |
 
 ---
 

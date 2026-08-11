@@ -11,6 +11,27 @@ Append-only. Newest at the top. The rejected alternatives are the point — with
 - **Repository config must stay descriptive.** Settled for now (see the decision below), and it holds only while the format carries no permission-shaped field. Worth a check at `/contract` rather than trusting anyone to remember. **The design states the test in checkable form** (`10-design.md` § `RepositoryConfig`): any field a caller could set that widens what the service will do lives in the declaration instead. **Checked at `/contract` 2026-08-03 and clean:** `RepositoryConfig` declares `baseBranch`, `requiredChecks`, `deployWorkflow` and `branchPrefixes` and nothing else; no capability, scope, path prefix, credential reference, remote, host, timeout or limit has drifted into it. The test is now invariant A8 in `20-contract.md`, so the next check is a re-read of one table row rather than a re-derivation.
 ---
 
+### 2026-08-11 — The content-drop apply handler owns its path bound, not the watcher
+Context: Validating the content-drop amendment found that the apply tool's path check lived only in
+the watcher, while `permittedPaths` arrives as caller input and `applyTool` is an ordinary registry
+entry any session holding `git.local.write` and the `write` scope can dispatch directly. A caller
+supplying its own `permittedPaths` therefore chose its own bound. `RepoRelativePath` rejects `..`
+but permits `.git/hooks/pre-commit`, so the declaration path allowlist is the only thing keeping an
+apply write out of `.git/` — and S17.9's requirement that a workflow-path drop return `authorization`
+held on the watcher path alone. Every other write in the contract validates inside its handler.
+Chosen: the apply handler validates every path it writes with `validateWritePath` before any side
+effect, mapping `malformed` to `validation` and `outside-allowlist` and `stripped-by-profile` to
+`authorization` with an audit record, exactly as `git_stage` and `git_restore_paths` do.
+`permittedPaths` narrows that bound and never establishes it; a path passing the allowlist but
+absent from the plan is refused the same way. Recorded as invariant D14.
+Rejected: **Hide drop-phase entries from non-watcher sessions** — puts a compiled registry entry
+outside the tool surface and adds a second visibility rule, contradicting the inherited property
+that the tool surface itself is the boundary. **Accept the risk and trust the compiled handler** —
+the handler may well be well-behaved, but it is handed its bound by its caller, so trusting it does
+not bound anything. **Leave enforcement in the watcher only** — correct for the watcher's own path
+and silent for every other dispatcher of the same tool.
+Reversibility: cheap now; expensive once consumer apply handlers ship against the looser contract.
+
 ### 2026-08-11 — Deferred operational numbers adopt the exercised finite defaults
 Context: U6 deliberately withheld the queue, concurrency, lock-wait, session and notification
 numbers, and S17 was gated on resolving them. The implementation already carried finite fallback

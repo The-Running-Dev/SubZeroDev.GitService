@@ -662,9 +662,9 @@ Acceptance:
   stays in the inbox.
 - S17.6 Nothing is ever deleted: every terminal path leaves the file in `processed/` or `failed/`,
   with a sibling error file naming the failing step and its result kind.
-- S17.7 The sequence runs to a pull request with auto-merge, each step taking the mutation lock for
-  itself. **No outer lock wraps the composite** — asserted, because wrapping it deadlocks against a
-  non-reentrant mutex.
+- S17.7 The sequence runs to a pull request with auto-merge, each mutating step taking the mutation
+  lock for itself; the plan step takes no lock and needs no clone. **No outer lock wraps the
+  composite** — asserted, because wrapping it deadlocks against a non-reentrant mutex.
 - S17.8 Opened pull requests are re-checked each tick and reconciled once merged. The list is
   written temp-then-rename, and a corrupt list is treated as empty rather than crashing the tick.
 - S17.9 The watcher's allowlist strips `.github/workflows/`, `.config/`, `tools/` and `build/`: a
