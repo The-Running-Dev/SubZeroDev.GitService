@@ -11,6 +11,71 @@ Append-only. Newest at the top. The rejected alternatives are the point — with
 - **Repository config must stay descriptive.** Settled for now (see the decision below), and it holds only while the format carries no permission-shaped field. Worth a check at `/contract` rather than trusting anyone to remember. **The design states the test in checkable form** (`10-design.md` § `RepositoryConfig`): any field a caller could set that widens what the service will do lives in the declaration instead. **Checked at `/contract` 2026-08-03 and clean:** `RepositoryConfig` declares `baseBranch`, `requiredChecks`, `deployWorkflow` and `branchPrefixes` and nothing else; no capability, scope, path prefix, credential reference, remote, host, timeout or limit has drifted into it. The test is now invariant A8 in `20-contract.md`, so the next check is a re-read of one table row rather than a re-derivation.
 ---
 
+### 2026-08-11 — The content-drop apply handler owns its path bound, not the watcher
+Context: Validating the content-drop amendment found that the apply tool's path check lived only in
+the watcher, while `permittedPaths` arrives as caller input and `applyTool` is an ordinary registry
+entry any session holding `git.local.write` and the `write` scope can dispatch directly. A caller
+supplying its own `permittedPaths` therefore chose its own bound. `RepoRelativePath` rejects `..`
+but permits `.git/hooks/pre-commit`, so the declaration path allowlist is the only thing keeping an
+apply write out of `.git/` — and S17.9's requirement that a workflow-path drop return `authorization`
+held on the watcher path alone. Every other write in the contract validates inside its handler.
+Chosen: the apply handler validates every path it writes with `validateWritePath` before any side
+effect, mapping `malformed` to `validation` and `outside-allowlist` and `stripped-by-profile` to
+`authorization` with an audit record, exactly as `git_stage` and `git_restore_paths` do.
+`permittedPaths` narrows that bound and never establishes it; a path passing the allowlist but
+absent from the plan is refused the same way. Recorded as invariant D14.
+Rejected: **Hide drop-phase entries from non-watcher sessions** — puts a compiled registry entry
+outside the tool surface and adds a second visibility rule, contradicting the inherited property
+that the tool surface itself is the boundary. **Accept the risk and trust the compiled handler** —
+the handler may well be well-behaved, but it is handed its bound by its caller, so trusting it does
+not bound anything. **Leave enforcement in the watcher only** — correct for the watcher's own path
+and silent for every other dispatcher of the same tool.
+Reversibility: cheap now; expensive once consumer apply handlers ship against the looser contract.
+
+### 2026-08-11 — Deferred operational numbers adopt the exercised finite defaults
+Context: U6 deliberately withheld the queue, concurrency, lock-wait, session and notification
+numbers, and S17 was gated on resolving them. The implementation already carried finite fallback
+values and tests exercised their refusal and retry behaviour, so leaving U6 open no longer preserved
+design freedom; it made the documented contract disagree with the only deployed behaviour in
+evidence. The user approved the recommended defaults.
+Chosen: mutation admission defaults to a queue depth of 32, four concurrent monitoring waits per
+session and 16 process-wide lock-free operations. Mutation and materialisation lock acquisition each
+wait at most 30000 ms. Operator sessions retain the existing 3600-second idle and 43200-second
+absolute defaults, and the raw hatch retains 60 seconds. Notification delivery makes at most five
+10-second attempts, with delays after failures of 2000, 4000, 8000 and 16000 ms under the formula
+`min(1000 * 2 ** attemptNumber, 30000)`. There is no global `maxResultBytes` default: each registry
+entry must state its own positive limit.
+Rejected: **Choose tighter or looser bounds now** — no workload evidence supports replacing values
+already exercised by the implementation and tests. **Leave the values code-only** — keeps S17
+formally blocked and makes runtime behaviour an undocumented policy. **Give result size a global
+fallback** — a newly added tool could silently receive a budget chosen for unrelated output; the
+required `ToolLimits` field already makes an explicit per-tool choice cheap. **Unbounded queues,
+waits, delivery or result size** — turns resource exhaustion into normal operation rather than an
+admission refusal or terminal notification outcome.
+Reversibility: cheap for deployment-overridable defaults and notification timing; expensive if
+clients or operators come to depend on an implicit result-size fallback, which is why none is added.
+
+### 2026-08-11 — A content-drop target is an explicit plan/apply registry pair
+Context: The design named one declaration-selected drop target and required complete input
+validation before repository mutation, but did not define the typed seam that lets a generic watcher
+delegate consumer-specific parsing, destination selection and writes. The prior-art watcher kept all
+three inside its engine, so carrying that shape forward would hardcode the first consumer into S17.
+The user selected the recommended two-tool contract.
+Chosen: `ContentDropConfig` names `planTool` and `applyTool`, two ordinary compiled registry entries
+that form one logical target. The pure plan phase runs without a clone or repository locks and returns
+branch, commit, pull-request and permitted-path data plus a consumer-specific JSON plan. The mutating
+apply phase receives that plan unchanged. Phase annotations fix their execution constraints, and the
+declaration validator requires the two `plan` property schemas to match after canonical compiler
+serialisation. The watcher validates paths before apply, independently observes the complete changed
+path set afterward, stages exactly that set, and observes it again before commit.
+Rejected: **One registry tool with nested plan and apply phases** — keeps one configured name, but
+introduces a second execution protocol inside one registry entry and makes authorization, limits and
+dispatch phase-dependent. **A naming convention that derives one phase from the other** — avoids one
+declaration field, but makes pairing implicit and brittle under renames. **Watcher-owned consumer
+schemas** — duplicates the compiled registry's source of truth. **One mutating consumer call** —
+cannot validate consumer-selected branch, metadata and path bounds before repository mutation.
+Reversibility: expensive once declarations and consumer tool schemas ship.
+
 ### 2026-08-10 — S16 closes the scheduler inventory with three declaration-scoped management tools
 Context: S16 was explicitly gated on U1 for three scheduler tools, but U1 had been marked closed after S15 without naming those tools, fixing their schemas or identifying any production operation the generic scheduler could actually hold. The design fixes a one-operation hold-and-act mechanism, declaration binding through dispatch, caller-authored stored JSON and an internal cancellation signature that already takes a reason; the remaining public names, limits and initial schedulable inventory needed contract choices. Presented as four decisions; the user chose each recommended option.
 Chosen: `scheduled_job_create`, `scheduled_job_list` and `scheduled_job_cancel` are declaration-scoped module tools requiring `scheduler.manage` and the `schedule` scope. Create takes a registry tool, its JSON input, `notBefore` and the required `onMissed`; list takes a nullable status; cancel takes a job id and a required non-empty caller-supplied reason. Declaration id comes only from `CallContext`, never from public input, and each result returns the stored job. All three carry `untrustedOutput: true`, a 30-second timeout and a 4 MiB result cap, matching the largest existing caller-selected-data result cap and comfortably carrying the initial schedulable operation's input; none is itself schedulable. `pr_enable_auto_merge` is the initial registry's only schedulable production operation.
