@@ -1,6 +1,6 @@
 # Slices — SubZeroDev.Git
 
-Derived from `10-design.md` and `20-contract.md`. Twenty-two vertical slices. Each one ends
+Derived from `10-design.md` and `20-contract.md`. Twenty-seven vertical slices. Each one ends
 runnable: it goes from an entry point to persistence and leaves nothing half-wired.
 
 ## Criterion ids
@@ -21,6 +21,12 @@ the next free number. A criterion added later is **appended, even when it has to
 `S12.8` and `S18.8` are both of that kind, and each says so in its own text. Renumbering to put them
 in logical order would rewrite what an existing issue's checkbox refers to, which is the single
 failure this scheme exists to prevent.
+
+The same rule applies to slice ids. Splitting the original S17 created S23–S27, placed where their
+dependencies run rather than after S22; S18–S22 keep their established identities. Extracted
+criteria S17.8 and S17.10–S17.14 are retired, not reassigned. Their requirements now have new ids in
+the new slices, so `/track` can report the removal and addition rather than silently treating one
+checkbox as another.
 
 ## Why this order
 
@@ -58,7 +64,8 @@ first acceptance criterion, not an implementation detail.
 | **U2** — the operator scope vocabulary | S13 | S13 |
 | **U4** — the HTTP route table | S18 | S18 |
 | **U5** — OAuth endpoint paths and metadata document | S14 | S14 |
-| **U6** — the deferred operational numbers | S15, S17 | S15 for `hatchSeconds`, S17 for the rest |
+| **U6** — the deferred operational numbers | S15, S17 | Resolved in the contract before S17: `hatchSeconds` in S15, every remaining value on 2026-08-11 |
+| **U10** — the content-drop target protocol | S23, S17 | Resolved in the contract on 2026-08-11; S23 implements the fixed two-phase protocol |
 | **U7** — the console element type and build entry | S19 | S19 |
 
 ## A contradiction found while slicing, since resolved
@@ -638,20 +645,52 @@ and the workflow-engine non-goal is binding.
 
 ---
 
-## S17 — Files dropped into a directory become pull requests, and the volume stays bounded
+## S23 — A consumer can declare a safe content-drop protocol
 
-Delivers: the content-drop watcher, generalised from `blog-mcp`'s running one, carrying a file
-through to a pull request — plus the maintenance pass, because an unattended drop that stops at a
-local commit makes every drop-enabled declaration a permanent eviction blocker.
+Delivers: a consumer can register a two-phase drop target and an operator can attach that pair to a
+repository, while malformed or authority-widening pairs are rejected before any file is watched.
 
-Touches: Watcher (L2), Clone store (L1 — eviction), Lifecycle (L1 — the maintenance pass), every
-module's `runRetention`.
+Touches: Contract types and Compiler (L0), Declarations (L1), Git operations (L2 — path validation),
+Dispatch pipeline (L4), composition root.
 
-Depends on: S16. **Gated on U6.**
+Depends on: S16.
 
 Acceptance:
-- S17.1 All three switches default off. With any one off, `start` returns `not-permitted` naming
-  which.
+- S23.1 The compiler accepts a plan entry and an apply entry only with the target kind, execution
+  class, scopes, capabilities and annotations fixed for their respective phases. Every other
+  combination returns `annotation-contradiction`; accepted and rejected fixture counts are stated.
+- S23.2 Declaration creation, amendment and boot re-validation reject an absent or wrongly
+  annotated phase with `drop-tool-not-annotated`, and reject unequal canonical `plan` schemas with
+  `drop-plan-schema-mismatch`. A valid pair persists and survives a restart.
+- S23.3 Dispatching the plan phase supplies `cloneRoot: null`, takes neither repository lock, creates
+  no mutation journal entry and does not materialise an absent clone. Invalid plan output returns
+  `infrastructure` before any mutating repository step can start.
+- S23.4 Whoever dispatches the apply phase, every path it writes is checked before the first side
+  effect against the declaration allowlist and the plan's `permittedPaths`. Malformed paths return
+  `validation`; paths outside either bound return `authorization`, are audited and leave the tree
+  byte-identical.
+
+Out of scope: polling a drop directory, claiming or delivering a file, and choosing any consumer's
+repository path or content policy.
+
+---
+
+## S17 — A dropped file becomes a pull request without widening authority
+
+Delivers: a producer with no git client or MCP session can place a complete file in a declared
+repository's drop and have it carried safely to a pull request, with failures preserved for an
+operator instead of retried or discarded.
+
+Touches: Watcher (L2), Dispatch pipeline (L4 — plan dispatch), Declarations (L1 — current drop
+configuration), Audit and Notifier (L1), composition root.
+
+Depends on: S23.
+
+Acceptance:
+- S17.1 `remoteOperationsPermitted` and `watcher.enabled` both default off. With either off,
+  `start` returns `not-permitted` naming that switch; with both on and no active drop declarations,
+  it starts healthy and idle. A declaration added or amended at runtime is eligible on the next
+  tick without a restart.
 - S17.2 A dropped file is claimed by rename into `processing/` **before any git or host action**, so
   a second tick cannot pick it up.
 - S17.3 A file found in `processing/` at startup is moved to `failed/` with an explanation and
@@ -660,31 +699,143 @@ Acceptance:
   pointing at a readable file outside the drop.
 - S17.5 A tick is a no-op when the clone is not clean; when the clone is `needs-attention` the file
   stays in the inbox.
-- S17.6 Nothing is ever deleted: every terminal path leaves the file in `processed/` or `failed/`,
-  with a sibling error file naming the failing step and its result kind.
-- S17.7 The sequence runs to a pull request with auto-merge, each mutating step taking the mutation
-  lock for itself; the plan step takes no lock and needs no clone. **No outer lock wraps the
-  composite** — asserted, because wrapping it deadlocks against a non-reentrant mutex.
-- S17.8 Opened pull requests are re-checked each tick and reconciled once merged. The list is
-  written temp-then-rename, and a corrupt list is treated as empty rather than crashing the tick.
-- S17.9 The watcher's allowlist strips `.github/workflows/`, `.config/`, `tools/` and `build/`: a
-  drop resolving to a workflow path returns `authorization` and is audited.
-- S17.10 The maintenance pass calls `runRetention` on each owning module **with no mutation lock
-  held**, then evicts only if that was not enough, and emits **one `info` summary per pass** rather
-  than one notification per clone.
-- S17.11 Store retention ends in an incremental vacuum, and the pass reports **bytes returned to the
-  filesystem**, not rows deleted. A pass deleting a year of expired tokens reports a non-zero
-  figure.
-- S17.12 At the refuse watermark, an operation needing space returns `precondition` naming which of
-  the five consumers holds the volume, the store broken down by table, and the declarations blocking
-  eviction.
-- S17.13 Eviction refuses while a declaration's active-operation count is non-zero, and never runs
-  under the mutation lock.
-- S17.14 **No clone holding uncommitted or unpushed work is evicted at any pressure**, asserted with
-  the volume at 100 %.
+- S17.6 Delivery and interrupted-claim recovery never delete a file: after a successful claim,
+  success moves it to `processed/` and every terminal delivery failure moves it to `failed/` with a
+  sibling error file naming the failing step and result kind. A failed claim stays in the inbox;
+  automatic deletion is confined to the later retention slice.
+- S17.7 The watcher dispatches the validated plan, `prepare_branch`, the apply phase, independent
+  status observations, `git_stage`, `git_commit`, `git_push`, `pr_open` and, when configured,
+  `pr_enable_auto_merge`. The first observation must equal the apply result and be a subset of the
+  plan; the second must report exactly that set fully staged. Each mutating step takes the mutation
+  lock for itself, the plan takes neither repository lock, and **no outer lock wraps the sequence**.
+- S17.9 The watcher profile strips `.github/workflows/`, `.config/`, `tools/` and `build/`. A drop
+  whose plan names a stripped path returns `authorization`, is audited, dispatches no apply step and
+  leaves the tree byte-identical.
+- S17.15 Each claimed file produces exactly one `content-drop` audit record. A failed file also
+  enqueues one `content-drop-failed` notification at `attention`, without blocking the tick.
 
-Out of scope: a declaration-drop directory for onboarding — declaration management is console-only
-and structurally so; a second notification transport.
+Out of scope: following an opened pull request after this tick (S24); deleting processed drops or
+any other retention (S25–S26); a declaration-drop directory for onboarding; a second notification
+transport.
+
+---
+
+## S24 — An unattended pull request is followed to its terminal state
+
+Delivers: an operator can leave a watcher-opened pull request unattended and have the service
+reconcile its clone after merge, while open or temporarily unreadable pull requests remain visible
+for a later tick.
+
+Touches: Watcher (L2 — pending pull-request list), Composites (L2 — reconcile dispatch), Host adapter
+(L2 — status), Declarations (L1 — orphaning).
+
+Depends on: S17.
+
+Acceptance:
+- S24.1 Every opened pull request is recorded with its declaration, branch, source file and opening
+  time. The per-declaration list is written temp-then-rename; a missing or unparseable list is
+  treated as empty and never crashes a tick.
+- S24.2 Each tick re-reads host state. An open pull request and a transient status-read failure stay
+  pending; a closed pull request is removed without reconciliation; a merged pull request dispatches
+  `reconcile_after_merge` once and is then removed whether reconciliation succeeds or fails.
+- S24.3 Reconciliation is an ordinary independent dispatch and takes its own mutation lock. No
+  watcher lock spans either the status read or the composite.
+- S24.4 Orphaning stops new watcher work immediately and leaves the drop directory untouched.
+  `declaration.remove` returns `drop-directory-not-empty` while the inbox holds files.
+
+Out of scope: retrying a failed reconciliation forever; retention of processed files; changing the
+host's merge policy.
+
+---
+
+## S25 — Expired structured records release real disk space
+
+Delivers: routine maintenance removes expired database-backed history while preserving every row
+that still represents unresolved work, and reports bytes actually returned to the volume.
+
+Touches: Lifecycle (L1 — maintenance pass), Journal, Authorization, Notifier, Operator identity and
+Structured store (L1), Scheduler (L2), composition root.
+
+Depends on: S16.
+
+Acceptance:
+- S25.1 A maintenance pass calls every currently registered owner's `runRetention` with no mutation
+  lock held and returns one `RetentionReport` per owner.
+- S25.2 Journal entries in `settled` older than 30 days are deleted; entries in `attention` are
+  retained regardless of age.
+- S25.3 Delivered outbox rows older than 14 days and expired or revoked operator sessions older than
+  7 days are deleted. Failed outbox rows are retained until the operator clears them.
+- S25.4 Expired or revoked tokens older than 7 days and revoked grants and clients older than 180
+  days are deleted. Live rows and rows inside their window remain.
+- S25.5 Terminal scheduled jobs in `done`, `skipped` or `cancelled` older than 30 days are deleted;
+  `needs-attention` jobs are retained regardless of age.
+- S25.6 Store retention ends in `incrementalVacuum` and reports bytes returned to the filesystem,
+  not rows deleted. A fixture with enough expired rows to release pages reports a non-zero
+  `freedBytes` value.
+- S25.7 The pass enqueues exactly one `info` maintenance summary containing the per-module reports,
+  rather than one notification per row or module.
+
+Out of scope: audit segments, store backup files, snapshots and content-drop files (S26); clone
+eviction and watermark refusal (S27).
+
+---
+
+## S26 — Filesystem history ages out without losing the only copy
+
+Delivers: routine maintenance bounds audit, backup, snapshot and processed-drop files while keeping
+the anchors and unresolved files an operator still needs.
+
+Touches: Audit, Structured store and Lifecycle (L1), Watcher (L2 — drop retention).
+
+Depends on: S24, S25.
+
+Acceptance:
+- S26.1 An audit segment older than 90 days is deleted only after its terminal sequence and hash are
+  committed as a `RetainedAnchor`; verification starts from the oldest surviving anchor and still
+  detects a later break.
+- S26.2 After a successful boot on the new schema, the three newest pre-migration backups remain and
+  every older one is removed. A failed migration removes none.
+- S26.3 The maintenance cadence takes at most one store snapshot per day and retains the seven most
+  recent snapshots. A store with no migration for months still receives a current recovery point.
+- S26.4 `Watcher.runRetention` deletes only files in `processed/` older than
+  `processedDropDays` — 14 days by default. It never deletes `failed/`, `processing/` or inbox files,
+  regardless of age.
+- S26.5 The maintenance report and its single `info` summary include every filesystem owner and the
+  bytes each released.
+
+Out of scope: deleting failed drops, orphaned declarations or failed outbox rows automatically;
+off-volume backup; clone eviction (S27).
+
+---
+
+## S27 — Disk pressure releases only disposable clones, or refuses clearly
+
+Delivers: an operator can let the service manage a bounded volume: routine pressure first runs
+retention, then releases only disposable clones, and refuses new space-consuming work with a clear
+account when nothing safe can be freed.
+
+Touches: Clone store, Locks and Lifecycle (L1), Dispatch pipeline (L4 — space admission), Notifier
+(L1 — maintenance summary).
+
+Depends on: S25, S26.
+
+Acceptance:
+- S27.1 Crossing 85 % requests a maintenance pass and never evicts inline on the post-mutation path.
+  The pass completes every retention owner before it attempts any clone eviction, with no mutation
+  lock held.
+- S27.2 At 95 %, an operation needing space returns `precondition` with all five volume consumers,
+  a structured-store breakdown by all sixteen tables, and every declaration whose clone blockers
+  prevented release.
+- S27.3 Eviction takes the declaration's materialisation lock, refuses while its active-operation
+  count is non-zero, and never runs while the mutation lock is held.
+- S27.4 At 100 % usage, clones with an uncommitted or untracked file, a stash, a branch ahead of its
+  upstream, a commit unreachable from `origin/<base>`, an open journal entry or `pinned: true` all
+  remain byte-identical and are reported as blocked.
+- S27.5 A safe clone is evicted, its measured bytes appear in both `EvictionOutcome` and the one
+  `info` maintenance summary, and its next operation rematerialises it from the declared remote.
+
+Out of scope: deleting repository work under any override; per-declaration size quotas; priority or
+fairness between declarations.
 
 ---
 
@@ -695,7 +846,7 @@ against a real issuer.
 
 Touches: Surfaces (L5), Operator identity (L4 — OIDC), Audit (L1 — query), Journal (L1 — parked).
 
-Depends on: S17. **Gated on U4.**
+Depends on: S27. **Gated on U4.**
 
 Acceptance:
 - S18.1 The route table is written into `20-contract.md` before any route is implemented.
@@ -769,8 +920,8 @@ Acceptance:
   every other declaration's grant.
 - S20.5 The blog's authoring views render for the blog declaration and are absent for every other
   one.
-- S20.6 The blog's content drop dispatches its own authoring tool, which decides the repository path
-  from the file's front matter. The watcher chooses no path.
+- S20.6 The blog's content drop names its own plan/apply authoring pair. The plan decides the
+  repository path from the file's front matter, and the watcher chooses no path.
 
 Out of scope: changing blog domain behaviour. This is a migration, and any behaviour change makes
 the parity comparison meaningless.
