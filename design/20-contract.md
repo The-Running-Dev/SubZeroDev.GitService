@@ -3609,7 +3609,7 @@ responsible for maintaining it.
 | D3 | `RepositoryConfig` is read from the working tree on every operation that needs it. Nothing caches it. | Git operations |
 | D4 | Store retention ends in an incremental vacuum, and the maintenance pass reports bytes returned to the filesystem rather than rows deleted. | Structured store |
 | D5 | Every retention window that prunes automatically has exactly one owning module, and the lifecycle module calls `runRetention` on each with no mutation lock held. | Lifecycle |
-| D6 | Nothing dropped into a content-drop directory is ever deleted by the service. Files move between the four stages only. | Watcher |
+| D6 | During delivery and interrupted-claim recovery, a dropped file is never deleted; every terminal path moves it to `processed/` or `failed/`. `Watcher.runRetention` may delete only files in `processed/` older than `processedDropDays`; it never deletes `failed/` files automatically. | Watcher |
 | D7 | A candidate drop file is stat-ed link-preservingly, so a symlink is never a candidate. | Watcher |
 | D8 | A file found in `processing/` at startup is moved to `failed/` and never reprocessed. | Watcher |
 | D9 | The pre-migration copy is taken before any migration runs, and the three most recent are retained. | Structured store |
