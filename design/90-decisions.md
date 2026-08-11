@@ -11,6 +11,31 @@ Append-only. Newest at the top. The rejected alternatives are the point — with
 - **Repository config must stay descriptive.** Settled for now (see the decision below), and it holds only while the format carries no permission-shaped field. Worth a check at `/contract` rather than trusting anyone to remember. **The design states the test in checkable form** (`10-design.md` § `RepositoryConfig`): any field a caller could set that widens what the service will do lives in the declaration instead. **Checked at `/contract` 2026-08-03 and clean:** `RepositoryConfig` declares `baseBranch`, `requiredChecks`, `deployWorkflow` and `branchPrefixes` and nothing else; no capability, scope, path prefix, credential reference, remote, host, timeout or limit has drifted into it. The test is now invariant A8 in `20-contract.md`, so the next check is a re-read of one table row rather than a re-derivation.
 ---
 
+### 2026-08-12 — S23 reconciliation restores the contract as the runtime boundary
+Context: The first post-S23 reconciliation found four implementation drifts from the ratified
+contract and design: the compiler checked file-watcher annotations but not the fixed outer schema
+projections; it accepted zero, negative and fractional tool limits; runtime public types retained
+the superseded content-drop vocabulary; and the composition root performed watcher boot
+revalidation after `Lifecycle.boot()` despite Lifecycle owning boot ordering. The user approved
+the recommended contract-first resolution for each divergence, one at a time.
+Chosen: Make the compiler reject malformed file-watcher projections as `schema-invalid` and every
+non-positive or fractional `timeoutSeconds` or `maxResultBytes` as `limit-exceeds-cap`. Remove the
+remaining runtime `content-drop`/`Drop*` names in favour of the contract's `file-watcher` and
+`WatchedFile*` vocabulary. Inject declaration-owned watcher validation into Lifecycle, run it after
+the store migration and before clone derivation or readiness, and return
+`watcher-revalidation-failed` with the originating `DeclarationError` while closing the store and
+releasing the lease. The composition root wires that operation and owns none of its ordering.
+Rejected: **Document the compiler's looser acceptance** — makes required watcher fields and finite
+positive limits advisory, so malformed deployed registry entries reach runtime. **Restore the
+content-drop names in the contract** — reverses the already-recorded generic file-watcher decision
+and leaves consumer-specific vocabulary in public runtime types. **Bless a second boot gate in the
+composition root** — preserves working behaviour but weakens the checked Lifecycle boundary and
+lets later gates accrete in the one path exempt from dependency-direction checks. **Drop the stored
+watcher on registry drift and continue booting** — silently mutates operator-owned declaration
+authority without a disabled state or an explicit operator decision.
+Reversibility: compiler validation and internal boot wiring are cheap to change mechanically; the
+public terminology and `BootError` variant become expensive once consumers branch on them.
+
 ### 2026-08-11 — File watcher replaces content-drop terminology
 Context: The name `contentDrop` made the generic mechanism sound like consumer-specific content
 handling, which obscured the boundary the plan/apply pair exists to enforce. The same review also
