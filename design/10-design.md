@@ -766,10 +766,13 @@ tick.
 
 ##### Authority
 
-Enabling the watcher takes **three independent switches**, all off by default: the deployment
-must permit remote operations, must permit the watcher at all, and the declaration must name a
-drop. The prior art requires the same three, and the reason is that this is the one actor that
-acts with no caller present.
+Starting the watcher takes **two independent deployment switches**, both off by default: the
+deployment must permit remote operations and must permit the watcher at all. A declaration naming
+a drop is the third authority condition for processing that declaration, not for starting the
+watcher process. With no active drop-enabled declaration the watcher is healthy and idle; each tick
+resolves the current active declarations, so a runtime declaration addition or amendment takes
+effect without a restart. The prior art requires the same three authorities, and the reason is that
+this is the one actor that acts with no caller present.
 
 Its effective write allowlist is the declaration's intersected with the `watcher` profile's,
 which strips `.github/workflows/`, `.config/`, `tools/` and `build/` — the inherited rule that

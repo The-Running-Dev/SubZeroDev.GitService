@@ -2658,8 +2658,12 @@ interface Watcher {
 
 Constructed with `Dispatch` injected, exactly as the scheduler is. Every git and host step goes
 through that dispatch, so the watcher depends on neither `GitOperations` nor `HostAdapter`.
-`start` fails unless all three switches are on: remote operations permitted, watcher enabled, and
-at least one declaration naming a drop.
+`start` fails unless both deployment switches are on: remote operations permitted and watcher
+enabled. No active declaration naming a drop is a healthy idle state, not a startup error. Every
+`tick` resolves the current active declarations before selecting work, so a declaration added or
+amended at runtime becomes eligible on the next tick without restarting the watcher. A declaration's
+`contentDrop` remains the third, per-drop authority condition: no file is claimed or processed for a
+declaration that does not currently name one.
 
 For a claimed file, the declaration-selected protocol is `planTool`, `prepare_branch`, `applyTool`,
 the two post-apply observations and `git_stage` described under `### Content drops`, `git_commit`,
@@ -3310,7 +3314,7 @@ type SchedulerError = ModuleErrorBase & (
 
 ```ts
 type WatcherError = ModuleErrorBase & (
-  | { readonly code: 'not-permitted'; readonly missingSwitch: 'remote-operations' | 'watcher-enabled' | 'no-declaration-declares-a-drop' }
+  | { readonly code: 'not-permitted'; readonly missingSwitch: 'remote-operations' | 'watcher-enabled' }
   | { readonly code: 'drop-unreadable'; readonly file: DropFileName }
   | { readonly code: 'claim-failed'; readonly file: DropFileName }
   | { readonly code: 'step-failed'; readonly step: string; readonly result: ResultKind; readonly reason: string }
@@ -3320,7 +3324,7 @@ type WatcherError = ModuleErrorBase & (
 
 | Variant | Raised when | Retryable | Caller does |
 |---|---|---|---|
-| `not-permitted` | Any of the three switches is off | no | Do not start. All three default off |
+| `not-permitted` | Either deployment switch is off | no | Do not start. Both default off |
 | `drop-unreadable` | A candidate cannot be read | no | Move it to `failed/`. A symlink is never a candidate in the first place |
 | `claim-failed` | The rename into `processing/` failed | next tick | Leave the file in the inbox |
 | `step-failed` | Any dispatched step returned a non-success envelope | no | Move to `failed/` with a sibling error file naming the step and its result. Never delete |
@@ -3614,6 +3618,7 @@ responsible for maintaining it.
 | D12 | A content-drop apply result advances to staging only when an independent status observation reports exactly its declared changed paths and every path is inside both its plan and the effective watcher allowlist. | Watcher |
 | D13 | Content-drop staging names exactly the independently observed changed paths; commit starts only after a second observation reports that exact set fully staged. | Watcher |
 | D14 | A content-drop apply handler validates every path it writes against the declaration's path allowlist before any side effect, whoever dispatched it. `permittedPaths` narrows that bound and never widens it. | Git operations, Watcher |
+| D15 | Every watcher tick resolves the current active declarations. Zero active content-drop declarations is healthy and idle; adding or amending one makes it eligible on the next tick without a watcher restart. | Watcher |
 
 ---
 
