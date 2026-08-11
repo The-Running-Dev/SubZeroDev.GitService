@@ -12,7 +12,7 @@ import { createExec } from './exec/exec.ts';
 import type { CredentialBinding } from './exec/exec.ts';
 import { createLocks } from './locks/locks.ts';
 import type { AdmissionLimits } from './locks/types.ts';
-import { createDeclarations, type Declarations } from './declarations/declarations.ts';
+import { createDeclarations } from './declarations/declarations.ts';
 import { createCloneStore, type CloneStore } from './clone/clone-store.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './surfaces/http-server.ts';
 import { createMcpRoutesState } from './surfaces/mcp-routes.ts';
@@ -194,11 +194,12 @@ async function main(): Promise<void> {
   // mutable forward reference breaks the cycle without either module
   // depending on the other's factory function.
   let cloneStoreRef: CloneStore | null = null;
-  const declarations: Declarations = createDeclarations({
+  const declarations = createDeclarations({
     volumeRoot,
     clock: systemClock,
     remoteHostAllowlist,
     ceiling,
+    registryEntry: (tool) => PRODUCTION_TOOL_DECLARATIONS.find((entry) => entry.name === tool) ?? null,
     cloneAdoptionCheck: () => {
       const store = cloneStoreRef;
       if (!store) throw new Error('cloneStore accessed before composition finished');
@@ -411,6 +412,14 @@ async function main(): Promise<void> {
   const booted = await lifecycle.boot();
   if (!booted.ok) {
     console.error(`server: boot failed (${booted.error.code}) — ${booted.error.summary}`);
+    console.error('server: refusing to start; no transport starts.');
+    await lifecycle.shutdown('fatal');
+    process.exit(1);
+    return;
+  }
+  const watcherRevalidation = await declarations.revalidateFileWatchers();
+  if (!watcherRevalidation.ok) {
+    console.error(`server: boot failed (${watcherRevalidation.error.code}) — ${watcherRevalidation.error.summary}`);
     console.error('server: refusing to start; no transport starts.');
     await lifecycle.shutdown('fatal');
     process.exit(1);

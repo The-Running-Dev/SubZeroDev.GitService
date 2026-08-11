@@ -32,6 +32,9 @@ import type { StoreTransaction } from '../store/structured-store.ts';
 import type { EvictionBlocker, SafeToEvictVerdict } from '../clone/types.ts';
 import { declarationError, type DeclarationError } from './errors.ts';
 import type { ActorProfile, AmendInput, Declaration, DeclareInput, DeclarationFilter, OrphanReport } from './types.ts';
+import type { ToolDeclaration } from '../contract/tool-declaration.ts';
+import type { SchemaObject } from '../contract/json-schema.ts';
+import { canonicalize } from '../shared/canonical-json.ts';
 
 export interface Declarations {
   get(id: DeclarationId): Promise<Declaration | null>;
@@ -54,6 +57,8 @@ export interface Declarations {
 
   bumpGrantEpoch(id: DeclarationId, tx: StoreTransaction): Outcome<GrantEpoch, DeclarationError>;
   remoteHostAllowlist(): readonly RemoteHost[];
+
+  revalidateFileWatchers(): Promise<Outcome<void, DeclarationError>>;
 }
 
 /**
@@ -88,8 +93,8 @@ export interface DeclarationsDependencies {
   readonly clock: { now(): IsoUtcTimestamp };
   readonly remoteHostAllowlist: readonly RemoteHost[];
   readonly ceiling: DeploymentCeiling;
-  /** Defaults to "nothing is a drop target" — honest until a tool registry exists (S6+) to ask. */
-  readonly isDropTarget?: (tool: string) => boolean;
+  /** Plain runtime-registry lookup; the compiler remains absent from the runtime image. */
+  readonly registryEntry?: (tool: RegistryToolName) => ToolDeclaration | null;
   /** Set once by the composition root after `CloneStore` exists; see `CloneAdoptionCheck` above. */
   readonly cloneAdoptionCheck: () => CloneAdoptionCheck;
 }
@@ -103,8 +108,9 @@ interface DeclarationRow {
   readonly capability_grant: string;
   readonly writable_path_prefixes: string;
   readonly pinned: number;
-  readonly content_drop_tool: string | null;
-  readonly content_drop_auto_merge: number | null;
+  readonly file_watcher_plan_tool: string | null;
+  readonly file_watcher_apply_tool: string | null;
+  readonly file_watcher_auto_merge: number | null;
   readonly git_user_name: string;
   readonly git_user_email: string;
   readonly state: string;
@@ -123,8 +129,10 @@ function toDeclaration(row: DeclarationRow): Declaration {
     capabilityGrant: new Set(JSON.parse(row.capability_grant) as CapabilityName[]) as unknown as DeclarationGrant,
     writablePathPrefixes: JSON.parse(row.writable_path_prefixes) as PathPrefix[],
     pinned: row.pinned === 1,
-    contentDrop:
-      row.content_drop_tool === null ? null : { tool: row.content_drop_tool as RegistryToolName, autoMerge: row.content_drop_auto_merge === 1 },
+    fileWatcher:
+      row.file_watcher_plan_tool === null
+        ? null
+        : { planTool: row.file_watcher_plan_tool as RegistryToolName, applyTool: row.file_watcher_apply_tool as RegistryToolName, autoMerge: row.file_watcher_auto_merge === 1 },
     identity: { gitUserName: row.git_user_name, gitUserEmail: row.git_user_email },
     state: row.state as Declaration['state'],
     grantEpoch: row.grant_epoch as GrantEpoch,
@@ -214,7 +222,24 @@ function latestRowFor(db: DatabaseSync, id: string): DeclarationRow | null {
 
 export function createDeclarations(deps: DeclarationsDependencies): Declarations {
   const { volumeRoot, clock } = deps;
-  const isDropTarget = deps.isDropTarget ?? (() => false);
+  const registryEntry = deps.registryEntry ?? (() => null);
+
+  function watcherValidation(config: NonNullable<Declaration['fileWatcher']>): Outcome<true, DeclarationError> {
+    const plan = registryEntry(config.planTool);
+    if (!plan || plan.annotations.fileWatcher !== 'plan') {
+      return err(declarationError({ code: 'watcher-tool-not-annotated', tool: config.planTool, expected: 'plan' }, `tool '${config.planTool}' is absent or is not a file-watcher plan`));
+    }
+    const apply = registryEntry(config.applyTool);
+    if (!apply || apply.annotations.fileWatcher !== 'apply') {
+      return err(declarationError({ code: 'watcher-tool-not-annotated', tool: config.applyTool, expected: 'apply' }, `tool '${config.applyTool}' is absent or is not a file-watcher apply`));
+    }
+    const outputPlan = (plan.outputSchema as SchemaObject).properties?.plan;
+    const inputPlan = (apply.inputSchema as SchemaObject).properties?.plan;
+    if (outputPlan === undefined || inputPlan === undefined || canonicalize(outputPlan) !== canonicalize(inputPlan)) {
+      return err(declarationError({ code: 'watcher-plan-schema-mismatch', planTool: config.planTool, applyTool: config.applyTool }, `file-watcher tools '${config.planTool}' and '${config.applyTool}' have unequal canonical plan schemas`));
+    }
+    return ok(true);
+  }
 
   function capabilitiesOutsideCeiling(grant: readonly CapabilityName[]): CapabilityName[] {
     return grant.filter((c) => !deps.ceiling.has(c));
@@ -249,24 +274,36 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
     return result.ok && result.value ? toDeclaration(result.value) : null;
   }
 
+  async function list(filter: DeclarationFilter): Promise<readonly Declaration[]> {
+    const result = withDb(volumeRoot, (db) => db.prepare('SELECT * FROM declaration ORDER BY id, generation DESC').all() as unknown as DeclarationRow[]);
+    if (!result.ok) return [];
+    // Highest generation per id wins — see `latestRowFor`'s comment for why
+    // that is always the current era, active or orphaned.
+    const latestPerId = new Map<string, DeclarationRow>();
+    for (const row of result.value) {
+      const existing = latestPerId.get(row.id);
+      if (!existing || row.generation > existing.generation) latestPerId.set(row.id, row);
+    }
+    let declarations = [...latestPerId.values()].map(toDeclaration);
+    if (filter.state !== null) declarations = declarations.filter((d) => d.state === filter.state);
+    if (filter.hasFileWatcher !== null) declarations = declarations.filter((d) => (d.fileWatcher !== null) === filter.hasFileWatcher);
+    return declarations;
+  }
+
   return {
     get,
     getGeneration,
+    list,
 
-    async list(filter: DeclarationFilter): Promise<readonly Declaration[]> {
-      const result = withDb(volumeRoot, (db) => db.prepare('SELECT * FROM declaration ORDER BY id, generation DESC').all() as unknown as DeclarationRow[]);
-      if (!result.ok) return [];
-      // Highest generation per id wins — see `latestRowFor`'s comment for why
-      // that is always the current era, active or orphaned.
-      const latestPerId = new Map<string, DeclarationRow>();
-      for (const row of result.value) {
-        const existing = latestPerId.get(row.id);
-        if (!existing || row.generation > existing.generation) latestPerId.set(row.id, row);
+    async revalidateFileWatchers(): Promise<Outcome<void, DeclarationError>> {
+      const declarations = await list({ state: 'active', hasFileWatcher: true });
+      for (const declaration of declarations) {
+        if (declaration.fileWatcher) {
+          const checked = watcherValidation(declaration.fileWatcher);
+          if (!checked.ok) return checked;
+        }
       }
-      let declarations = [...latestPerId.values()].map(toDeclaration);
-      if (filter.state !== null) declarations = declarations.filter((d) => d.state === filter.state);
-      if (filter.hasContentDrop !== null) declarations = declarations.filter((d) => (d.contentDrop !== null) === filter.hasContentDrop);
-      return declarations;
+      return ok(undefined);
     },
 
     async declare(input: DeclareInput, _actor: ActorRef): Promise<Outcome<Declaration, DeclarationError>> {
@@ -282,9 +319,7 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
       if (!hostCheck.ok) {
         return err(declarationError({ code: 'remote-host-not-allowed', host: hostCheck.error }, `host '${hostCheck.error}' is off the deployment remote-host allowlist`));
       }
-      if (input.contentDrop !== null && !isDropTarget(input.contentDrop.tool)) {
-        return err(declarationError({ code: 'drop-tool-not-annotated', tool: input.contentDrop.tool }, `tool '${input.contentDrop.tool}' is not annotated a drop target`));
-      }
+      if (input.fileWatcher !== null) { const checked = watcherValidation(input.fileWatcher); if (!checked.ok) return checked; }
 
       const existing = await get(input.id);
       let nextGeneration: Generation;
@@ -339,9 +374,9 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
         db.prepare(
           `INSERT INTO declaration
              (id, generation, clone_url, host, credential_ref, capability_grant, writable_path_prefixes,
-              pinned, content_drop_tool, content_drop_auto_merge, git_user_name, git_user_email,
+              pinned, file_watcher_plan_tool, file_watcher_apply_tool, file_watcher_auto_merge, git_user_name, git_user_email,
               state, grant_epoch, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
         ).run(
           input.id,
           nextGeneration,
@@ -351,8 +386,9 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
           JSON.stringify(input.capabilityGrant),
           JSON.stringify(input.writablePathPrefixes),
           input.pinned ? 1 : 0,
-          input.contentDrop?.tool ?? null,
-          input.contentDrop ? (input.contentDrop.autoMerge ? 1 : 0) : null,
+          input.fileWatcher?.planTool ?? null,
+          input.fileWatcher?.applyTool ?? null,
+          input.fileWatcher ? (input.fileWatcher.autoMerge ? 1 : 0) : null,
           input.identity.gitUserName,
           input.identity.gitUserEmail,
           epoch.value,
@@ -400,10 +436,8 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
         }
       }
 
-      const nextContentDrop = patch.contentDrop === undefined ? existing.contentDrop : patch.contentDrop;
-      if (nextContentDrop !== null && patch.contentDrop !== undefined && !isDropTarget(nextContentDrop.tool)) {
-        return err(declarationError({ code: 'drop-tool-not-annotated', tool: nextContentDrop.tool }, `tool '${nextContentDrop.tool}' is not annotated a drop target`));
-      }
+      const nextFileWatcher = patch.fileWatcher === undefined ? existing.fileWatcher : patch.fileWatcher;
+      if (nextFileWatcher !== null && patch.fileWatcher !== undefined) { const checked = watcherValidation(nextFileWatcher); if (!checked.ok) return checked; }
 
       // Order-independent: a patch naming the same set back is not a change,
       // and does not narrow anything a live MCP session is holding — bumping
@@ -418,7 +452,7 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
           tx.run(
             `UPDATE declaration SET
                clone_url = ?, credential_ref = ?, capability_grant = ?, writable_path_prefixes = ?,
-               pinned = ?, content_drop_tool = ?, content_drop_auto_merge = ?,
+               pinned = ?, file_watcher_plan_tool = ?, file_watcher_apply_tool = ?, file_watcher_auto_merge = ?,
                git_user_name = ?, git_user_email = ?, updated_at = ?
              WHERE id = ? AND generation = ?`,
             nextCloneUrl,
@@ -426,8 +460,9 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
             JSON.stringify(nextCapabilityGrant),
             JSON.stringify(patch.writablePathPrefixes ?? existing.writablePathPrefixes),
             (patch.pinned ?? existing.pinned) ? 1 : 0,
-            nextContentDrop?.tool ?? null,
-            nextContentDrop ? (nextContentDrop.autoMerge ? 1 : 0) : null,
+            nextFileWatcher?.planTool ?? null,
+            nextFileWatcher?.applyTool ?? null,
+            nextFileWatcher ? (nextFileWatcher.autoMerge ? 1 : 0) : null,
             patch.identity?.gitUserName ?? existing.identity.gitUserName,
             patch.identity?.gitUserEmail ?? existing.identity.gitUserEmail,
             now,
@@ -486,7 +521,7 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
         revokedGrants: [],
         retainedJournalEntries: [],
         cloneLeftOnDisk: true,
-        dropWatchStopped: false,
+        fileWatcherStopped: false,
       });
     },
 

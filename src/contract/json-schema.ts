@@ -15,7 +15,7 @@ import type { JsonValue } from './json.ts';
  * for a need this narrow.
  */
 
-type SchemaObject = {
+export type SchemaObject = {
   readonly type?: string | readonly string[];
   readonly properties?: Readonly<Record<string, JsonSchema | SchemaObject>>;
   readonly required?: readonly string[];

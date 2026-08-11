@@ -15,7 +15,7 @@ export function fixtureTool(overrides: Omit<Partial<ToolDeclaration>, 'name'> & 
     capabilities: overrides.capabilities ?? ['repo.read'],
     capabilityScope: overrides.capabilityScope ?? 'declaration',
     executionClass: overrides.executionClass ?? 'read',
-    annotations: overrides.annotations ?? { schedulable: false, dropTarget: false, untrustedOutput: false },
+    annotations: overrides.annotations ?? { schedulable: false, fileWatcher: false, untrustedOutput: false },
     limits: overrides.limits ?? { timeoutSeconds: 30, maxResultBytes: 1_000_000 },
     target: overrides.target ?? { kind: 'module', target: overrides.name as ModuleTargetName },
   };

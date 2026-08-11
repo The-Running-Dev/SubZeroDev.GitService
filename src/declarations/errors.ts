@@ -12,11 +12,12 @@ export type DeclarationError = ModuleErrorBase &
     | { readonly code: 'remote-host-not-allowed'; readonly host: RemoteHost }
     | { readonly code: 'capability-outside-ceiling'; readonly capabilities: readonly CapabilityName[] }
     | { readonly code: 'capability-unsupported-by-host'; readonly capabilities: readonly CapabilityName[] }
-    | { readonly code: 'drop-tool-not-annotated'; readonly tool: RegistryToolName }
+    | { readonly code: 'watcher-tool-not-annotated'; readonly tool: RegistryToolName; readonly expected: 'plan' | 'apply' }
+    | { readonly code: 'watcher-plan-schema-mismatch'; readonly planTool: RegistryToolName; readonly applyTool: RegistryToolName }
     | { readonly code: 'adoption-refused'; readonly blockers: readonly EvictionBlocker[] }
     | { readonly code: 'remote-mismatch'; readonly declared: CloneUrl; readonly observed: CloneUrl }
     | { readonly code: 'clone-still-present' }
-    | { readonly code: 'drop-directory-not-empty'; readonly files: number }
+    | { readonly code: 'watcher-directory-not-empty'; readonly files: number }
     | { readonly code: 'not-orphaned' }
     | { readonly code: 'store-failed'; readonly cause: StoreError }
   );
@@ -30,7 +31,8 @@ export function declarationError<T extends { readonly code: DeclarationError['co
           variant.code === 'remote-host-not-allowed' ||
           variant.code === 'capability-outside-ceiling' ||
           variant.code === 'capability-unsupported-by-host' ||
-          variant.code === 'drop-tool-not-annotated'
+          variant.code === 'watcher-tool-not-annotated' ||
+          variant.code === 'watcher-plan-schema-mismatch'
         ? 'validation'
         : 'precondition';
   return { resultKind, retryable: false, summary, ...variant } as unknown as DeclarationError;

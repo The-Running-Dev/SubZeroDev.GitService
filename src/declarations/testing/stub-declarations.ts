@@ -43,5 +43,8 @@ export function createStubDeclarations(): Declarations {
     remoteHostAllowlist() {
       return [];
     },
+    async revalidateFileWatchers() {
+      return ok(undefined);
+    },
   };
 }

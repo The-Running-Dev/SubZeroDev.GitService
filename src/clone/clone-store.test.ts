@@ -30,7 +30,7 @@ function fixtureDeclaration(id: string, cloneUrl: string): Declaration {
     capabilityGrant: new Set() as unknown as Declaration['capabilityGrant'],
     writablePathPrefixes: [],
     pinned: false,
-    contentDrop: null,
+    fileWatcher: null,
     identity: { gitUserName: 'fixture', gitUserEmail: 'fixture@example.com' },
     state: 'active',
     grantEpoch: 0 as Declaration['grantEpoch'],
@@ -307,9 +307,9 @@ function insertActiveDeclarationRow(volume: string, id: string, cloneUrl: string
   db.prepare(
     `INSERT INTO declaration
        (id, generation, clone_url, host, credential_ref, capability_grant, writable_path_prefixes,
-        pinned, content_drop_tool, content_drop_auto_merge, git_user_name, git_user_email,
+        pinned, file_watcher_plan_tool, file_watcher_apply_tool, file_watcher_auto_merge, git_user_name, git_user_email,
         state, grant_epoch, created_at, updated_at)
-     VALUES (?, 1, ?, 'generic', 'unused', '[]', '[]', 0, NULL, NULL, 'fixture', 'fixture@example.com', 'active', 0, ?, ?)`,
+     VALUES (?, 1, ?, 'generic', 'unused', '[]', '[]', 0, NULL, NULL, NULL, 'fixture', 'fixture@example.com', 'active', 0, ?, ?)`,
   ).run(id, cloneUrl, now, now);
   db.close();
 }

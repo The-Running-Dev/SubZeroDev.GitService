@@ -3,10 +3,11 @@ import type { CapabilityName, CapabilityScope, ContractCapabilitySet, Scope } fr
 import type { JsonSchema } from './json.ts';
 
 export type ToolExecutionClass = 'read' | 'mutating' | 'monitoring-wait';
+export type FileWatcherPhase = false | 'plan' | 'apply';
 
 export interface ToolAnnotations {
   readonly schedulable: boolean;
-  readonly dropTarget: boolean;
+  readonly fileWatcher: FileWatcherPhase;
   readonly untrustedOutput: boolean;
 }
 

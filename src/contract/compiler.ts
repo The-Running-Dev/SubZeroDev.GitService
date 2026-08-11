@@ -85,13 +85,26 @@ function validateOne(declaration: ToolDeclaration): CompilerError[] {
       ),
     );
   }
-  if (declaration.annotations.dropTarget && declaration.executionClass !== 'mutating') {
-    errors.push(
-      moduleError(
-        { code: 'annotation-contradiction', name, rule: 'dropTarget tool that is not mutating' },
-        `tool '${name}' is a drop target but is not 'mutating'`,
-      ),
-    );
+  const watcherPhase = declaration.annotations.fileWatcher;
+  if (watcherPhase !== false) {
+    const isPlan = watcherPhase === 'plan';
+    const capabilitiesValid = isPlan
+      ? declaration.capabilities.length === 0
+      : declaration.capabilities.length === 1 && declaration.capabilities[0] === 'git.local.write';
+    const watcherChecks: readonly (readonly [boolean, string])[] = [
+      [declaration.target.kind === 'module', 'target must be a module tool'],
+      [declaration.executionClass === (isPlan ? 'read' : 'mutating'), `executionClass must be '${isPlan ? 'read' : 'mutating'}'`],
+      [declaration.capabilityScope === 'declaration', "capabilityScope must be 'declaration'"],
+      [declaration.scopes.length === 1 && declaration.scopes[0] === 'write', "scopes must be exactly ['write']"],
+      [capabilitiesValid, isPlan ? 'capabilities must be empty' : "capabilities must be exactly ['git.local.write']"],
+      [declaration.annotations.schedulable === false, 'schedulable must be false'],
+      [declaration.annotations.untrustedOutput === true, 'untrustedOutput must be true'],
+    ];
+    for (const [valid, reason] of watcherChecks) {
+      if (!valid) {
+        errors.push(moduleError({ code: 'annotation-contradiction', name, rule: `file-watcher ${watcherPhase} shape: ${reason}` }, `tool '${name}' does not satisfy the fixed file-watcher ${watcherPhase} shape: ${reason}`));
+      }
+    }
   }
 
   if (declaration.executionClass === 'monitoring-wait' && declaration.limits.timeoutSeconds > MONITORING_WAIT_CAP_SECONDS) {

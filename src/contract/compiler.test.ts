@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { compiler } from './compiler.ts';
-import { fixtureTool, moduleTarget } from './fixtures.ts';
+import { fixtureTool, httpTarget, moduleTarget } from './fixtures.ts';
 import { SELF_TEST_FIXTURES } from './self-test-fixtures.ts';
+import type { ToolDeclaration } from './tool-declaration.ts';
 
 test('compile([]) returns an empty, fingerprinted registry', () => {
   const result = compiler.compile([]);
@@ -96,4 +97,25 @@ test('every CompilerError variant is exercised by the self-test fixtures (defini
   for (const code of allCodes) {
     assert.ok(covered.has(code as never), `no self-test fixture covers '${code}'`);
   }
+});
+
+test('S23.1 — file-watcher entry shapes state 2 accepted and 8 rejected fixtures', () => {
+  const plan = fixtureTool({ name: 'watch_plan', target: moduleTarget('watch.plan'), scopes: ['write'], capabilities: [], capabilityScope: 'declaration', executionClass: 'read', annotations: { schedulable: false, fileWatcher: 'plan', untrustedOutput: true } as never });
+  const apply = fixtureTool({ name: 'watch_apply', target: moduleTarget('watch.apply'), scopes: ['write'], capabilities: ['git.local.write'], capabilityScope: 'declaration', executionClass: 'mutating', annotations: { schedulable: false, fileWatcher: 'apply', untrustedOutput: true } as never });
+  const accepted = [plan, apply];
+  const rejected: ToolDeclaration[] = [
+    { ...plan, target: httpTarget('watch.plan') },
+    { ...plan, executionClass: 'mutating' },
+    { ...plan, scopes: ['read'] },
+    { ...plan, capabilities: ['repo.read'] },
+    { ...apply, target: httpTarget('watch.apply') },
+    { ...apply, executionClass: 'read' },
+    { ...apply, capabilities: [] },
+    { ...apply, annotations: { schedulable: true, fileWatcher: 'apply', untrustedOutput: true } as never },
+  ];
+  assert.equal(accepted.filter((entry) => compiler.compile([entry]).ok).length, 2);
+  assert.equal(rejected.filter((entry) => {
+    const result = compiler.compile([entry]);
+    return !result.ok && result.error.some((error) => error.code === 'annotation-contradiction');
+  }).length, 8);
 });

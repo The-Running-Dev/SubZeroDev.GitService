@@ -279,7 +279,7 @@ async function declareRepo(declarations: Declarations, id: string, capabilityGra
       capabilityGrant: capabilityGrant as never,
       writablePathPrefixes: [],
       pinned: false,
-      contentDrop: null,
+      fileWatcher: null,
       identity: { gitUserName: 'fixture', gitUserEmail: 'fixture@example.com' },
     },
     { kind: 'operator', subject: 'ben' as never, clientId: null, grantId: null },
@@ -355,14 +355,14 @@ test('S14.4 / S14.5 — narrowing a live declaration reaches the session on its 
       assert.equal(init.status, 200);
 
       // Widen the declaration after the session was already established.
-      const widened = await declarations.amend('repo-d' as never, { cloneUrl: null, credentialRef: null, capabilityGrant: ['repo.read', 'git.raw'], writablePathPrefixes: null, pinned: null, contentDrop: undefined, identity: null }, { kind: 'operator', subject: 'ben' as never, clientId: null, grantId: null });
+      const widened = await declarations.amend('repo-d' as never, { cloneUrl: null, credentialRef: null, capabilityGrant: ['repo.read', 'git.raw'], writablePathPrefixes: null, pinned: null, fileWatcher: undefined, identity: null }, { kind: 'operator', subject: 'ben' as never, clientId: null, grantId: null });
       assert.equal(widened.ok, true);
 
       const stillNarrow = await mcpCall(baseUrl, 'repo-d', init.sessionId!, 'tools/call', { name: 'git_raw', arguments: {} });
       assert.equal(stillNarrow.status, 403, 'S14.5: the frozen session never had git.raw to begin with, and widening the declaration must not hand it one');
 
       // Now narrow repo.read away too.
-      const narrowed = await declarations.amend('repo-d' as never, { cloneUrl: null, credentialRef: null, capabilityGrant: [], writablePathPrefixes: null, pinned: null, contentDrop: undefined, identity: null }, { kind: 'operator', subject: 'ben' as never, clientId: null, grantId: null });
+      const narrowed = await declarations.amend('repo-d' as never, { cloneUrl: null, credentialRef: null, capabilityGrant: [], writablePathPrefixes: null, pinned: null, fileWatcher: undefined, identity: null }, { kind: 'operator', subject: 'ben' as never, clientId: null, grantId: null });
       assert.equal(narrowed.ok, true);
 
       const nowRefused = await mcpCall(baseUrl, 'repo-d', init.sessionId!, 'tools/call', { name: 'repo_status', arguments: {} });

@@ -22,8 +22,9 @@ CREATE TABLE declaration (
   capability_grant        TEXT    NOT NULL,
   writable_path_prefixes  TEXT    NOT NULL,
   pinned                  INTEGER NOT NULL CHECK (pinned IN (0,1)),
-  content_drop_tool       TEXT,
-  content_drop_auto_merge INTEGER CHECK (content_drop_auto_merge IN (0,1)),
+  file_watcher_plan_tool  TEXT,
+  file_watcher_apply_tool TEXT,
+  file_watcher_auto_merge INTEGER CHECK (file_watcher_auto_merge IN (0,1)),
   git_user_name           TEXT    NOT NULL,
   git_user_email          TEXT    NOT NULL,
   state                   TEXT    NOT NULL CHECK (state IN ('active','orphaned')),
@@ -32,12 +33,15 @@ CREATE TABLE declaration (
   updated_at              TEXT    NOT NULL,
   PRIMARY KEY (id, generation),
   CHECK (generation >= 1),
-  CHECK ((content_drop_tool IS NULL) = (content_drop_auto_merge IS NULL))
+  CHECK (
+    (file_watcher_plan_tool IS NULL) = (file_watcher_apply_tool IS NULL)
+    AND (file_watcher_plan_tool IS NULL) = (file_watcher_auto_merge IS NULL)
+  )
 ) STRICT;
 
 CREATE UNIQUE INDEX declaration_active_id ON declaration (id) WHERE state = 'active';
 CREATE INDEX declaration_by_state ON declaration (state);
-CREATE INDEX declaration_with_drop ON declaration (id) WHERE content_drop_tool IS NOT NULL;
+CREATE INDEX declaration_with_file_watcher ON declaration (id) WHERE file_watcher_plan_tool IS NOT NULL;
 
 CREATE TABLE clone (
   declaration_id    TEXT    PRIMARY KEY,

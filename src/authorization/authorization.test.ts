@@ -435,7 +435,7 @@ async function declaredRepo(declarations: Declarations, id: string, capabilityGr
       capabilityGrant: capabilityGrant as never,
       writablePathPrefixes: [],
       pinned: false,
-      contentDrop: null,
+      fileWatcher: null,
       identity: { gitUserName: 'fixture', gitUserEmail: 'fixture@example.com' },
     },
     ACTOR,
@@ -555,7 +555,7 @@ test('recomputeSessionGrant only ever narrows a live MCP session, never widens i
     assert.equal(originalGrant.has('git.raw'), false, 'the declaration never carried git.raw, so the session never could either');
 
     // Narrow: repo.read is removed from the declaration.
-    const narrowed = await declarations.amend(repo.id, { cloneUrl: null, credentialRef: null, capabilityGrant: [], writablePathPrefixes: null, pinned: null, contentDrop: undefined, identity: null }, ACTOR);
+    const narrowed = await declarations.amend(repo.id, { cloneUrl: null, credentialRef: null, capabilityGrant: [], writablePathPrefixes: null, pinned: null, fileWatcher: undefined, identity: null }, ACTOR);
     assert.equal(narrowed.ok, true);
     if (!narrowed.ok) return;
     const afterNarrow = auth.recomputeSessionGrant(established.value, narrowed.value);
@@ -564,7 +564,7 @@ test('recomputeSessionGrant only ever narrows a live MCP session, never widens i
     assert.equal((afterNarrow.value.grant as unknown as ReadonlySet<string>).has('repo.read'), false, 'S14.4: narrowing the declaration reaches the live session');
 
     // Widen: repo.read *and* git.raw are both granted back.
-    const widened = await declarations.amend(repo.id, { cloneUrl: null, credentialRef: null, capabilityGrant: ['repo.read', 'git.raw'], writablePathPrefixes: null, pinned: null, contentDrop: undefined, identity: null }, ACTOR);
+    const widened = await declarations.amend(repo.id, { cloneUrl: null, credentialRef: null, capabilityGrant: ['repo.read', 'git.raw'], writablePathPrefixes: null, pinned: null, fileWatcher: undefined, identity: null }, ACTOR);
     assert.equal(widened.ok, true);
     if (!widened.ok) return;
     const afterWiden = auth.recomputeSessionGrant(established.value, widened.value);

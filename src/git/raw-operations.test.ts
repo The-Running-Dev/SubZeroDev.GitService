@@ -45,7 +45,7 @@ function declaration(remoteUrl: string): Declaration {
   return {
     id: 'repo-a' as Declaration['id'], generation: 1 as Declaration['generation'], cloneUrl: remoteUrl as Declaration['cloneUrl'], host: 'generic',
     credentialRef: 'fixture' as Declaration['credentialRef'], capabilityGrant: new Set(['git.raw']) as never, writablePathPrefixes: [], pinned: false,
-    contentDrop: null, identity: { gitUserName: 'fixture', gitUserEmail: 'fixture@example.com' }, state: 'active', grantEpoch: 0 as never,
+    fileWatcher: null, identity: { gitUserName: 'fixture', gitUserEmail: 'fixture@example.com' }, state: 'active', grantEpoch: 0 as never,
     createdAt: systemClock.now(), updatedAt: systemClock.now(),
   };
 }
@@ -141,7 +141,7 @@ test('S15.1 — git_raw is declaration-scoped, raw-scoped, mutating, and default
   assert.deepEqual(entry.scopes, ['raw']);
   assert.equal(entry.capabilityScope, 'declaration');
   assert.equal(entry.executionClass, 'mutating');
-  assert.deepEqual(entry.annotations, { schedulable: false, dropTarget: false, untrustedOutput: true });
+  assert.deepEqual(entry.annotations, { schedulable: false, fileWatcher: false, untrustedOutput: true });
   assert.deepEqual(entry.limits, { timeoutSeconds: 60, maxResultBytes: 4_194_304 });
 });
 
