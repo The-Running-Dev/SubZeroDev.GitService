@@ -65,7 +65,7 @@ first acceptance criterion, not an implementation detail.
 | **U4** — the HTTP route table | S18 | S18 |
 | **U5** — OAuth endpoint paths and metadata document | S14 | S14 |
 | **U6** — the deferred operational numbers | S15, S17 | Resolved in the contract before S17: `hatchSeconds` in S15, every remaining value on 2026-08-11 |
-| **U10** — the content-drop target protocol | S23, S17 | Resolved in the contract on 2026-08-11; S23 implements the fixed two-phase protocol |
+| **U10** — the file-watcher target protocol | S23, S17 | Resolved in the contract on 2026-08-11; S23 implements the fixed two-phase protocol |
 | **U7** — the console element type and build entry | S19 | S19 |
 
 ## A contradiction found while slicing, since resolved
@@ -253,7 +253,7 @@ Acceptance:
   commits unreachable from `origin/<base>`, override or not — the override permits only a tree git
   cannot read.
 
-Out of scope: the rest of the orphaning cascade — grants, jobs and drop directories do not exist
+Out of scope: the rest of the orphaning cascade — grants, jobs and watcher inboxes do not exist
 yet, and each is added by the slice that creates them; any registry tool (S6); mutations (S7);
 eviction (S17).
 
@@ -645,9 +645,9 @@ and the workflow-engine non-goal is binding.
 
 ---
 
-## S23 — A consumer can declare a safe content-drop protocol
+## S23 — A consumer can declare a safe file-watcher protocol
 
-Delivers: a consumer can register a two-phase drop target and an operator can attach that pair to a
+Delivers: a consumer can register a two-phase file-watcher protocol and an operator can attach that pair to a
 repository, while malformed or authority-widening pairs are rejected before any file is watched.
 
 Touches: Contract types and Compiler (L0), Declarations (L1), Git operations (L2 — path validation),
@@ -660,8 +660,8 @@ Acceptance:
   class, scopes, capabilities and annotations fixed for their respective phases. Every other
   combination returns `annotation-contradiction`; accepted and rejected fixture counts are stated.
 - S23.2 Declaration creation, amendment and boot re-validation reject an absent or wrongly
-  annotated phase with `drop-tool-not-annotated`, and reject unequal canonical `plan` schemas with
-  `drop-plan-schema-mismatch`. A valid pair persists and survives a restart.
+  annotated phase with `watcher-tool-not-annotated`, and reject unequal canonical `plan` schemas with
+  `watcher-plan-schema-mismatch`. A valid pair persists and survives a restart.
 - S23.3 Dispatching the plan phase supplies `cloneRoot: null`, takes neither repository lock, creates
   no mutation journal entry and does not materialise an absent clone. Invalid plan output returns
   `infrastructure` before any mutating repository step can start.
@@ -670,33 +670,33 @@ Acceptance:
   `validation`; paths outside either bound return `authorization`, are audited and leave the tree
   byte-identical.
 
-Out of scope: polling a drop directory, claiming or delivering a file, and choosing any consumer's
+Out of scope: polling an inbox, claiming or delivering a file, and choosing any consumer's
 repository path or content policy.
 
 ---
 
-## S17 — A dropped file becomes a pull request without widening authority
+## S17 — A watched file becomes a pull request without widening authority
 
 Delivers: a producer with no git client or MCP session can place a complete file in a declared
-repository's drop and have it carried safely to a pull request, with failures preserved for an
+repository's inbox and have it carried safely to a pull request, with failures preserved for an
 operator instead of retried or discarded.
 
-Touches: Watcher (L2), Dispatch pipeline (L4 — plan dispatch), Declarations (L1 — current drop
+Touches: Watcher (L2), Dispatch pipeline (L4 — plan dispatch), Declarations (L1 — current watcher
 configuration), Audit and Notifier (L1), composition root.
 
 Depends on: S23.
 
 Acceptance:
 - S17.1 `remoteOperationsPermitted` and `watcher.enabled` both default off. With either off,
-  `start` returns `not-permitted` naming that switch; with both on and no active drop declarations,
+  `start` returns `not-permitted` naming that switch; with both on and no active file-watcher declarations,
   it starts healthy and idle. A declaration added or amended at runtime is eligible on the next
   tick without a restart.
-- S17.2 A dropped file is claimed by rename into `processing/` **before any git or host action**, so
+- S17.2 A watched file is claimed by rename into `processing/` **before any git or host action**, so
   a second tick cannot pick it up.
 - S17.3 A file found in `processing/` at startup is moved to `failed/` with an explanation and
-  **never reprocessed** — the case that turns one dropped file into two published ones.
+  **never reprocessed** — the case that turns one watched file into two published ones.
 - S17.4 A symlink is never a candidate, asserted with a link-preserving stat against a symlink
-  pointing at a readable file outside the drop.
+  pointing at a readable file outside the inbox.
 - S17.5 A tick is a no-op when the clone is not clean; when the clone is `needs-attention` the file
   stays in the inbox.
 - S17.6 Delivery and interrupted-claim recovery never delete a file: after a successful claim,
@@ -708,14 +708,14 @@ Acceptance:
   `pr_enable_auto_merge`. The first observation must equal the apply result and be a subset of the
   plan; the second must report exactly that set fully staged. Each mutating step takes the mutation
   lock for itself, the plan takes neither repository lock, and **no outer lock wraps the sequence**.
-- S17.9 The watcher profile strips `.github/workflows/`, `.config/`, `tools/` and `build/`. A drop
+- S17.9 The watcher profile strips `.github/workflows/`, `.config/`, `tools/` and `build/`. A watched file
   whose plan names a stripped path returns `authorization`, is audited, dispatches no apply step and
   leaves the tree byte-identical.
-- S17.15 Each claimed file produces exactly one `content-drop` audit record. A failed file also
-  enqueues one `content-drop-failed` notification at `attention`, without blocking the tick.
+- S17.15 Each claimed file produces exactly one `file-watcher` audit record. A failed file also
+  enqueues one `file-watcher-failed` notification at `attention`, without blocking the tick.
 
-Out of scope: following an opened pull request after this tick (S24); deleting processed drops or
-any other retention (S25–S26); a declaration-drop directory for onboarding; a second notification
+Out of scope: following an opened pull request after this tick (S24); deleting processed files or
+any other retention (S25–S26); a declaration inbox for onboarding; a second notification
 transport.
 
 ---
@@ -740,8 +740,8 @@ Acceptance:
   `reconcile_after_merge` once and is then removed whether reconciliation succeeds or fails.
 - S24.3 Reconciliation is an ordinary independent dispatch and takes its own mutation lock. No
   watcher lock spans either the status read or the composite.
-- S24.4 Orphaning stops new watcher work immediately and leaves the drop directory untouched.
-  `declaration.remove` returns `drop-directory-not-empty` while the inbox holds files.
+- S24.4 Orphaning stops new watcher work immediately and leaves the watcher directory untouched.
+  `declaration.remove` returns `watcher-directory-not-empty` while the inbox holds files.
 
 Out of scope: retrying a failed reconciliation forever; retention of processed files; changing the
 host's merge policy.
@@ -775,17 +775,17 @@ Acceptance:
 - S25.7 The pass enqueues exactly one `info` maintenance summary containing the per-module reports,
   rather than one notification per row or module.
 
-Out of scope: audit segments, store backup files, snapshots and content-drop files (S26); clone
+Out of scope: audit segments, store backup files, snapshots and file-watcher files (S26); clone
 eviction and watermark refusal (S27).
 
 ---
 
 ## S26 — Filesystem history ages out without losing the only copy
 
-Delivers: routine maintenance bounds audit, backup, snapshot and processed-drop files while keeping
+Delivers: routine maintenance bounds audit, backup, snapshot and processed watcher files while keeping
 the anchors and unresolved files an operator still needs.
 
-Touches: Audit, Structured store and Lifecycle (L1), Watcher (L2 — drop retention).
+Touches: Audit, Structured store and Lifecycle (L1), Watcher (L2 — watched-file retention).
 
 Depends on: S24, S25.
 
@@ -798,12 +798,12 @@ Acceptance:
 - S26.3 The maintenance cadence takes at most one store snapshot per day and retains the seven most
   recent snapshots. A store with no migration for months still receives a current recovery point.
 - S26.4 `Watcher.runRetention` deletes only files in `processed/` older than
-  `processedDropDays` — 14 days by default. It never deletes `failed/`, `processing/` or inbox files,
+  `processedFileDays` — 14 days by default. It never deletes `failed/`, `processing/` or inbox files,
   regardless of age.
 - S26.5 The maintenance report and its single `info` summary include every filesystem owner and the
   bytes each released.
 
-Out of scope: deleting failed drops, orphaned declarations or failed outbox rows automatically;
+Out of scope: deleting failed watcher files, orphaned declarations or failed outbox rows automatically;
 off-volume backup; clone eviction (S27).
 
 ---
@@ -920,7 +920,7 @@ Acceptance:
   every other declaration's grant.
 - S20.5 The blog's authoring views render for the blog declaration and are absent for every other
   one.
-- S20.6 The blog's content drop names its own plan/apply authoring pair. The plan decides the
+- S20.6 The blog's file watcher names its own plan/apply authoring pair. The plan decides the
   repository path from the file's front matter, and the watcher chooses no path.
 
 Out of scope: changing blog domain behaviour. This is a migration, and any behaviour change makes

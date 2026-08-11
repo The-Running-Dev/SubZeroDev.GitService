@@ -11,6 +11,24 @@ Append-only. Newest at the top. The rejected alternatives are the point — with
 - **Repository config must stay descriptive.** Settled for now (see the decision below), and it holds only while the format carries no permission-shaped field. Worth a check at `/contract` rather than trusting anyone to remember. **The design states the test in checkable form** (`10-design.md` § `RepositoryConfig`): any field a caller could set that widens what the service will do lives in the declaration instead. **Checked at `/contract` 2026-08-03 and clean:** `RepositoryConfig` declares `baseBranch`, `requiredChecks`, `deployWorkflow` and `branchPrefixes` and nothing else; no capability, scope, path prefix, credential reference, remote, host, timeout or limit has drifted into it. The test is now invariant A8 in `20-contract.md`, so the next check is a re-read of one table row rather than a re-derivation.
 ---
 
+### 2026-08-11 — File watcher replaces content-drop terminology
+Context: The name `contentDrop` made the generic mechanism sound like consumer-specific content
+handling, which obscured the boundary the plan/apply pair exists to enforce. The same review also
+found that `FileWatcherConfig`'s predecessor had been amended to name two tools while the persisted
+schema still carried one `content_drop_tool`, so the approved pair could not be stored.
+Chosen: Name the declaration feature `fileWatcher`, its type `FileWatcherConfig`, and its registry
+phase annotation `fileWatcher: false | 'plan' | 'apply'`. Persist the pair explicitly as
+`file_watcher_plan_tool` and `file_watcher_apply_tool`, with `file_watcher_auto_merge`, and require
+all three columns to be null or all three present. The watcher remains a concrete UTF-8-file-to-PR
+mechanism; only the consumer-selected plan and apply handlers vary by repository. Historical
+decision entries retain their original terms and are superseded in terminology only.
+Rejected: **Keep `contentDrop`** — it caused the feature/consumer confusion directly. **Use one
+`watcherTool`** — clearer about the actor, but collapses the pure planning and constrained mutation
+phases into one reference. **General trigger or workflow bindings** — more abstract, but would turn
+the declaration into the general workflow engine the brief excludes.
+Reversibility: expensive once consumers publish declarations or registry entries under these
+names; cheap before S23 implements them.
+
 ### 2026-08-11 — Processed content drops expire; delivery itself never deletes
 Context: The retention policy deleted `processed/` content drops after 14 days, while the watcher
 state machine and contract invariant D6 said the service never deletes any dropped file. Both could
