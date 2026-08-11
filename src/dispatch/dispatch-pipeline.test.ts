@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import { read } from '../journal/testing/read.ts';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { systemClock } from '../clock/clock.ts';
@@ -18,14 +18,14 @@ import { createCloneStore, type CloneStore } from '../clone/clone-store.ts';
 import { createBareGitRemote } from '../clone/testing/git-fixture.ts';
 import type { Declaration } from '../declarations/types.ts';
 import type { DeploymentCeiling, DeclarationScopedCapability } from '../contract/capabilities.ts';
-import { fixtureTool, httpTarget } from '../contract/fixtures.ts';
+import { fixtureTool, httpTarget, moduleTarget } from '../contract/fixtures.ts';
 import type { CompiledRegistry, ToolDeclaration } from '../contract/tool-declaration.ts';
 import type { JsonSchema } from '../contract/json.ts';
 import { createModuleAdapter, toModuleHandler } from '../module-adapter/module-adapter.ts';
 import { createGitOperations } from '../git/git-operations.ts';
 import { createCredentialResolver } from '../credentials/credentials.ts';
 import type { EnvVarName } from '../shared/brands.ts';
-import { success, timeout as timeoutResult } from '../result/envelope.ts';
+import { authorization, success, timeout as timeoutResult, validation } from '../result/envelope.ts';
 import { err, ok, type Outcome } from '../shared/outcome.ts';
 import type { Session } from '../shared/session.ts';
 import { createRecoveryCatalogue } from '../recovery/catalogue.ts';
@@ -70,7 +70,7 @@ function fixtureDeclaration(id: string, cloneUrl: string, capabilityGrant: reado
     capabilityGrant: new Set(capabilityGrant) as unknown as Declaration['capabilityGrant'],
     writablePathPrefixes: [],
     pinned: false,
-    contentDrop: null,
+    fileWatcher: null,
     identity: { gitUserName: 'fixture', gitUserEmail: 'fixture@example.com' },
     state: 'active',
     grantEpoch: 0 as Declaration['grantEpoch'],
@@ -2219,5 +2219,96 @@ test('S15.7 (generalized) — any mutating tool that times out parks its journal
     assert.equal(parked[0]?.tool, 'git_slow_mutation');
     const clone = await cloneStore.describe('repo-a' as never);
     assert.equal(clone.ok && clone.value.state, 'needs-attention');
+  });
+});
+
+test('S23.3 — a file-watcher plan receives cloneRoot null and takes no clone, lock, or journal path', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore }) => {
+    let ensureCalls = 0;
+    let mutationCalls = 0;
+    let journalCalls = 0;
+    let observedCloneRoot: unknown = 'unset';
+    const moduleAdapter = createModuleAdapter();
+    moduleAdapter.register('watch.plan' as never, async (ctx) => {
+      observedCloneRoot = ctx.cloneRoot;
+      return success('planned', { branch: 'watch/item', commitMessage: 'watch', pullRequest: { title: 'watch', body: '' }, permittedPaths: ['content/item.md'], plan: { target: 'content/item.md' } }, { operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation, durationMs: 0 });
+    });
+    const entry = fixtureTool({ name: 'watch_plan', target: moduleTarget('watch.plan'), scopes: ['write'], capabilities: [], executionClass: 'read', annotations: { schedulable: false, fileWatcher: 'plan', untrustedOutput: true }, outputSchema: { type: 'object', properties: { branch: { type: 'string' }, commitMessage: { type: 'string' }, pullRequest: { type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' } }, required: ['title', 'body'] }, permittedPaths: { type: 'array', items: { type: 'string' } }, plan: { type: 'object', properties: { target: { type: 'string' } }, required: ['target'] } }, required: ['branch', 'commitMessage', 'pullRequest', 'permittedPaths', 'plan'] } as never });
+    const pipeline = createDispatchPipeline({
+      registry: registryOf([entry]), ceiling: CAPABILITY_SET, moduleAdapter, declarations,
+      cloneStore: { ...cloneStore, ensure: (...args) => { ensureCalls += 1; return cloneStore.ensure(...args); } },
+      locks: { pinActiveOperation: () => ({ release() {} }), acquireMutation: async () => { mutationCalls += 1; return { ok: false, error: { resultKind: 'conflict', retryable: false, summary: 'unexpected', code: 'acquire-timeout', holder: null } } as never; } },
+      journal: { begin: async () => { journalCalls += 1; return { ok: false } as never; }, markApplied: async () => ({ ok: true, value: undefined }) as never, settle: async () => ({ ok: true, value: undefined }) as never },
+      audit: createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock }), clock: systemClock,
+    });
+    const result = await pipeline.dispatch({ toolName: entry.name, input: { sourceFile: 'item.md', content: 'body' }, session: sessionWith([]), declarationId: 'repo-a' as never, scheduledJobId: null, context: 'normal', signal: new AbortController().signal });
+    assert.equal(result.ok, true);
+    assert.equal(observedCloneRoot, null);
+    assert.deepEqual({ ensureCalls, mutationCalls, journalCalls }, { ensureCalls: 0, mutationCalls: 0, journalCalls: 0 });
+  });
+});
+
+test('S23.3 — invalid file-watcher plan output returns infrastructure', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore }) => {
+    const moduleAdapter = createModuleAdapter();
+    moduleAdapter.register('watch.bad-plan' as never, async (ctx) => success('bad', { permittedPaths: ['z.md', 'a.md'], plan: {} }, { operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation, durationMs: 0 }));
+    const entry = fixtureTool({ name: 'watch_bad_plan', target: moduleTarget('watch.bad-plan'), scopes: ['write'], capabilities: [], executionClass: 'read', annotations: { schedulable: false, fileWatcher: 'plan', untrustedOutput: true }, outputSchema: { type: 'object', properties: { permittedPaths: { type: 'array', items: { type: 'string' } }, plan: { type: 'object' } }, required: ['permittedPaths', 'plan'] } as never });
+    const pipeline = createDispatchPipeline({ registry: registryOf([entry]), ceiling: CAPABILITY_SET, moduleAdapter, declarations, cloneStore, locks: createLocks(), audit: createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock }), clock: systemClock });
+    const result = await pipeline.dispatch({ toolName: entry.name, input: {}, session: sessionWith([]), declarationId: 'repo-a' as never, scheduledJobId: null, context: 'normal', signal: new AbortController().signal });
+    assert.equal(result.kind, 'infrastructure');
+    assert.match(result.summary, /sorted and duplicate-free/);
+  });
+});
+
+test('S23.4 — file-watcher apply checks malformed, declaration, and plan path bounds before writing', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec, locks, fixture, volume }) => {
+    grantWrite(fixture, ['content/']);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit });
+    const moduleAdapter = createModuleAdapter();
+    let handlerCalls = 0;
+    moduleAdapter.register('watch.apply' as never, async (ctx, rawInput) => {
+      handlerCalls += 1;
+      const input = rawInput as { permittedPaths: string[]; plan: { writes: { path: string; content: string }[] } };
+      for (const write of input.plan.writes) {
+        const allowed = gitOperations.validateWritePath(ctx, write.path);
+        if (!allowed.ok) {
+          return allowed.error.kind === 'malformed' ? validation('malformed watcher path', []) : authorization('watcher path outside declaration allowlist', []);
+        }
+        if (!input.permittedPaths.includes(allowed.value)) {
+          await audit.append({ at: systemClock.now(), operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation, tool: 'watch_apply' as never, actorRef: ctx.actorRef, context: ctx.context, form: 'authorization-rejection', missing: [], rejectedPath: allowed.value });
+          return authorization('watcher path outside its plan', []);
+        }
+      }
+      for (const write of input.plan.writes) {
+        const target = path.join(ctx.cloneRoot!, write.path);
+        mkdirSync(path.dirname(target), { recursive: true });
+        writeFileSync(target, write.content, 'utf8');
+      }
+      const changedPaths = input.plan.writes.map((write) => write.path).sort();
+      return success('applied', { changedPaths }, { operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation, durationMs: 0 });
+    });
+    const planSchema = { type: 'object', properties: { writes: { type: 'array', items: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } } }, required: ['writes'] } as never;
+    const entry = fixtureTool({ name: 'watch_apply', target: moduleTarget('watch.apply'), scopes: ['write'], capabilities: ['git.local.write'], executionClass: 'mutating', annotations: { schedulable: false, fileWatcher: 'apply', untrustedOutput: true }, inputSchema: { type: 'object', properties: { permittedPaths: { type: 'array', items: { type: 'string' } }, plan: planSchema }, required: ['permittedPaths', 'plan'] } as never, outputSchema: { type: 'object', properties: { changedPaths: { type: 'array', items: { type: 'string' } } }, required: ['changedPaths'] } as never });
+    const pipeline = createDispatchPipeline({ registry: mutatingRegistryOf([entry]), ceiling: MUTATION_CAPABILITY_SET, moduleAdapter, declarations, cloneStore, locks, audit, journal, exec, clock: systemClock });
+    const dispatch = (input: object) => pipeline.dispatch({ toolName: entry.name, input: input as never, session: sessionWith(['git.local.write']), declarationId: 'repo-a' as never, scheduledJobId: null, context: 'normal', signal: new AbortController().signal });
+
+    assert.equal((await dispatch({ permittedPaths: ['../bad.md'], plan: { writes: [] } })).kind, 'validation');
+    assert.equal((await dispatch({ permittedPaths: ['outside/bad.md'], plan: { writes: [] } })).kind, 'authorization');
+    const outsidePlan = await dispatch({ permittedPaths: ['content/allowed.md'], plan: { writes: [{ path: 'content/other.md', content: 'no' }] } });
+    assert.equal(outsidePlan.kind, 'authorization');
+    assert.equal(handlerCalls, 1, 'preflight refusals never reached the mutating handler');
+
+    const described = await cloneStore.describe('repo-a' as never);
+    assert.equal(described.ok, true);
+    if (!described.ok) return;
+    assert.equal(existsSync(path.join(described.value.path, 'content', 'other.md')), false, 'all rejected paths leave the tree byte-identical');
+    const valid = await dispatch({ permittedPaths: ['content/allowed.md'], plan: { writes: [{ path: 'content/allowed.md', content: 'yes' }] } });
+    assert.equal(valid.ok, true);
+    assert.equal(readFileSync(path.join(described.value.path, 'content', 'allowed.md'), 'utf8'), 'yes');
+    const rejectionRecords = await audit.query({ declarationId: null, tool: null, actorSubject: null, form: 'authorization-rejection', from: null, to: null, cursor: null, limit: 100 });
+    assert.equal(rejectionRecords.ok, true);
+    if (rejectionRecords.ok) assert.ok(rejectionRecords.value.records.length >= 2, 'both declaration-bound and plan-bound authorization refusals were audited');
   });
 });

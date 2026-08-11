@@ -10,7 +10,7 @@ import { withVolumeAsync } from './volume-fixture.ts';
 const EXPECTED_INDEXES = [
   'declaration_active_id',
   'declaration_by_state',
-  'declaration_with_drop',
+      'declaration_with_file_watcher',
   'clone_eviction_order',
   'grant_by_resource',
   'grant_by_client',

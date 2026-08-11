@@ -10,7 +10,10 @@ import type { RemoteHost } from '../shared/brands.ts';
 import type { DeploymentCeiling } from '../contract/capabilities.ts';
 import type { SafeToEvictVerdict } from '../clone/types.ts';
 import { createDeclarations, type CloneAdoptionCheck } from './declarations.ts';
-import type { DeclareInput } from './types.ts';
+import type { AmendInput, DeclareInput } from './types.ts';
+import { fixtureTool, moduleTarget } from '../contract/fixtures.ts';
+import type { ToolDeclaration } from '../contract/tool-declaration.ts';
+import type { JsonSchema } from '../contract/json.ts';
 
 const OPERATOR = { kind: 'operator' as const, subject: 'op' as never, clientId: null, grantId: null };
 const GITHUB_ALLOWLIST = ['github.com'] as unknown as readonly RemoteHost[];
@@ -40,7 +43,7 @@ async function withMigratedVolume<T>(fn: (volume: string) => Promise<T>): Promis
  */
 function declarationsFor(
   volume: string,
-  opts: { readonly remoteHostAllowlist?: readonly RemoteHost[]; readonly ceiling?: DeploymentCeiling; readonly adoptionCheck?: CloneAdoptionCheck } = {},
+  opts: { readonly remoteHostAllowlist?: readonly RemoteHost[]; readonly ceiling?: DeploymentCeiling; readonly adoptionCheck?: CloneAdoptionCheck; readonly registryEntries?: readonly ToolDeclaration[] } = {},
 ) {
   const adoptionCheck: CloneAdoptionCheck = opts.adoptionCheck ?? {
     observedRemote: async () => ({ cloneExists: false }),
@@ -51,9 +54,14 @@ function declarationsFor(
     clock: systemClock,
     remoteHostAllowlist: opts.remoteHostAllowlist ?? GITHUB_ALLOWLIST,
     ceiling: opts.ceiling ?? ceilingOf('repo.read', 'git.local.write', 'git.remote.write'),
+    registryEntry: (name) => opts.registryEntries?.find((entry) => entry.name === name) ?? null,
     cloneAdoptionCheck: () => adoptionCheck,
   });
 }
+
+const PLAN_SCHEMA = { type: 'object', properties: { target: { type: 'string' } }, required: ['target'], additionalProperties: false } as unknown as JsonSchema;
+const WATCH_PLAN = fixtureTool({ name: 'watch_plan', target: moduleTarget('watch.plan'), scopes: ['write'], capabilities: [], executionClass: 'read', annotations: { schedulable: false, fileWatcher: 'plan', untrustedOutput: true }, outputSchema: { type: 'object', properties: { plan: PLAN_SCHEMA, permittedPaths: { type: 'array', items: { type: 'string' } } }, required: ['plan', 'permittedPaths'] } as unknown as JsonSchema });
+const WATCH_APPLY = fixtureTool({ name: 'watch_apply', target: moduleTarget('watch.apply'), scopes: ['write'], capabilities: ['git.local.write'], executionClass: 'mutating', annotations: { schedulable: false, fileWatcher: 'apply', untrustedOutput: true }, inputSchema: { type: 'object', properties: { plan: PLAN_SCHEMA, permittedPaths: { type: 'array', items: { type: 'string' } } }, required: ['plan', 'permittedPaths'] } as unknown as JsonSchema });
 
 function declareInputFor(id: string, overrides: Partial<DeclareInput> = {}): DeclareInput {
   return {
@@ -64,11 +72,55 @@ function declareInputFor(id: string, overrides: Partial<DeclareInput> = {}): Dec
     capabilityGrant: ['repo.read'],
     writablePathPrefixes: [],
     pinned: false,
-    contentDrop: null,
+    fileWatcher: null,
     identity: { gitUserName: 'fixture', gitUserEmail: 'fixture@example.com' },
     ...overrides,
   };
 }
+
+function watcherAmend(fileWatcher: AmendInput['fileWatcher']): AmendInput {
+  return { cloneUrl: null, credentialRef: null, capabilityGrant: null, writablePathPrefixes: null, pinned: null, fileWatcher, identity: null };
+}
+
+test('S23.2 — declaration creation states 1 valid pair persisted and 2 invalid pairs rejected', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declarations = declarationsFor(volume, { registryEntries: [WATCH_PLAN, WATCH_APPLY] });
+    const valid = await declarations.declare(declareInputFor('watch-valid', { fileWatcher: { planTool: WATCH_PLAN.name, applyTool: WATCH_APPLY.name, autoMerge: true } }), OPERATOR);
+    assert.equal(valid.ok, true);
+    assert.deepEqual((await declarations.get('watch-valid' as never))?.fileWatcher, { planTool: WATCH_PLAN.name, applyTool: WATCH_APPLY.name, autoMerge: true });
+
+    const absent = await declarations.declare(declareInputFor('watch-absent', { fileWatcher: { planTool: 'missing' as never, applyTool: WATCH_APPLY.name, autoMerge: false } }), OPERATOR);
+    assert.equal(absent.ok, false);
+    if (!absent.ok) assert.equal(absent.error.code, 'watcher-tool-not-annotated');
+
+    const mismatchedApply = { ...WATCH_APPLY, inputSchema: { type: 'object', properties: { plan: { type: 'number' }, permittedPaths: { type: 'array', items: { type: 'string' } } }, required: ['plan', 'permittedPaths'] } as unknown as JsonSchema };
+    const mismatched = declarationsFor(volume, { registryEntries: [WATCH_PLAN, mismatchedApply] });
+    const mismatch = await mismatched.declare(declareInputFor('watch-mismatch', { fileWatcher: { planTool: WATCH_PLAN.name, applyTool: WATCH_APPLY.name, autoMerge: false } }), OPERATOR);
+    assert.equal(mismatch.ok, false);
+    if (!mismatch.ok) assert.equal(mismatch.error.code, 'watcher-plan-schema-mismatch');
+
+    const amended = await declarations.amend('watch-valid' as never, watcherAmend({ planTool: WATCH_PLAN.name, applyTool: WATCH_APPLY.name, autoMerge: false }), OPERATOR);
+    assert.equal(amended.ok, true);
+    if (amended.ok) assert.equal(amended.value.fileWatcher?.autoMerge, false);
+    const invalidAmend = await declarations.amend('watch-valid' as never, watcherAmend({ planTool: WATCH_PLAN.name, applyTool: 'missing' as never, autoMerge: false }), OPERATOR);
+    assert.equal(invalidAmend.ok, false);
+    if (!invalidAmend.ok) assert.equal(invalidAmend.error.code, 'watcher-tool-not-annotated');
+  });
+});
+
+test('S23.2 — a valid watcher survives restart and boot re-validation rejects registry drift', async () => {
+  await withMigratedVolume(async (volume) => {
+    const first = declarationsFor(volume, { registryEntries: [WATCH_PLAN, WATCH_APPLY] });
+    assert.equal((await first.declare(declareInputFor('watch-restart', { fileWatcher: { planTool: WATCH_PLAN.name, applyTool: WATCH_APPLY.name, autoMerge: false } }), OPERATOR)).ok, true);
+    const restarted = declarationsFor(volume, { registryEntries: [WATCH_PLAN, WATCH_APPLY] });
+    assert.equal((await restarted.revalidateFileWatchers()).ok, true);
+    assert.equal((await restarted.get('watch-restart' as never))?.fileWatcher?.applyTool, WATCH_APPLY.name);
+    const drifted = declarationsFor(volume, { registryEntries: [WATCH_PLAN] });
+    const rejected = await drifted.revalidateFileWatchers();
+    assert.equal(rejected.ok, false);
+    if (!rejected.ok) assert.equal(rejected.error.code, 'watcher-tool-not-annotated');
+  });
+});
 
 function upsertCloneRow(volume: string, declarationId: string, state: string): void {
   const db = new DatabaseSync(path.join(volume, 'store.sqlite'));

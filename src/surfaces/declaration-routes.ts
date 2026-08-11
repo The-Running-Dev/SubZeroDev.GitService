@@ -131,6 +131,16 @@ function parseDeclareInput(body: Record<string, unknown>): { readonly ok: true; 
   const gitUserEmail = typeof identity?.gitUserEmail === 'string' ? identity.gitUserEmail : null;
   if (gitUserName === null || gitUserEmail === null) findings.push('identity: gitUserName and gitUserEmail must be strings');
 
+  let fileWatcher: DeclareInput['fileWatcher'] = null;
+  if (body.fileWatcher !== null && body.fileWatcher !== undefined) {
+    const watcher = body.fileWatcher as { readonly planTool?: unknown; readonly applyTool?: unknown; readonly autoMerge?: unknown };
+    if (typeof watcher.planTool !== 'string' || typeof watcher.applyTool !== 'string' || typeof watcher.autoMerge !== 'boolean') {
+      findings.push('fileWatcher: planTool and applyTool must be strings and autoMerge must be boolean');
+    } else {
+      fileWatcher = { planTool: watcher.planTool as RegistryToolName, applyTool: watcher.applyTool as RegistryToolName, autoMerge: watcher.autoMerge };
+    }
+  }
+
   if (findings.length > 0 || !idResult?.ok || !credentialResult?.ok || rawCloneUrl === null || host === null || gitUserName === null || gitUserEmail === null) {
     return { ok: false, findings };
   }
@@ -151,44 +161,47 @@ function parseDeclareInput(body: Record<string, unknown>): { readonly ok: true; 
       capabilityGrant: rawGrant as readonly DeclarationScopedCapability[],
       writablePathPrefixes: prefixResults.map((r) => (r as { readonly ok: true; readonly value: DeclareInput['writablePathPrefixes'][number] }).value),
       pinned: body.pinned === true,
-      contentDrop: null,
+      fileWatcher,
       identity: { gitUserName, gitUserEmail },
     },
   };
 }
 
-function toAmendInput(body: Record<string, unknown>): AmendInput {
+function toAmendInput(body: Record<string, unknown>): { readonly ok: true; readonly value: AmendInput } | { readonly ok: false; readonly findings: readonly string[] } {
   const rawGrant = Array.isArray(body.capabilityGrant) ? (body.capabilityGrant as readonly DeclarationScopedCapability[]) : null;
   const rawPrefixes = Array.isArray(body.writablePathPrefixes) ? (body.writablePathPrefixes as string[]).map((p) => pathPrefix(p)).filter((r) => r.ok).map((r) => r.value) : null;
   const identity = body.identity as { readonly gitUserName?: unknown; readonly gitUserEmail?: unknown } | undefined;
 
   const credentialRefResult = typeof body.credentialRef === 'string' ? credentialRef(body.credentialRef) : null;
 
-  // Three-valued per `20-contract.md` § Declaration: key omitted (or the
-  // JSON literal `undefined`, which never round-trips, so in practice
-  // "omitted") leaves it alone; present and `null` removes it; present and
-  // an object sets it. No fixture in this slice exercises a real value here
-  // — `isDropTarget` defaults to "nothing is a drop target" until a tool
-  // registry exists (S6+) — but the trichotomy itself is worth getting right.
-  const contentDropRaw = body.contentDrop;
-  const contentDrop =
-    !('contentDrop' in body)
-      ? undefined
-      : contentDropRaw === null
-        ? null
-        : (() => {
-            const obj = contentDropRaw as { readonly tool?: unknown; readonly autoMerge?: unknown };
-            return typeof obj.tool === 'string' ? { tool: obj.tool as RegistryToolName, autoMerge: obj.autoMerge === true } : undefined;
-          })();
+  // Three-valued per `20-contract.md` § Declaration: omitted leaves it alone,
+  // `null` removes it, and a complete object sets it. The declaration module
+  // then validates both names against the runtime registry.
+  const fileWatcherRaw = body.fileWatcher;
+  let fileWatcher: AmendInput['fileWatcher'] = undefined;
+  if ('fileWatcher' in body) {
+    if (fileWatcherRaw === null) {
+      fileWatcher = null;
+    } else {
+      const obj = fileWatcherRaw as { readonly planTool?: unknown; readonly applyTool?: unknown; readonly autoMerge?: unknown };
+      if (typeof obj?.planTool !== 'string' || typeof obj.applyTool !== 'string' || typeof obj.autoMerge !== 'boolean') {
+        return { ok: false, findings: ['fileWatcher: planTool and applyTool must be strings and autoMerge must be boolean'] };
+      }
+      fileWatcher = { planTool: obj.planTool as RegistryToolName, applyTool: obj.applyTool as RegistryToolName, autoMerge: obj.autoMerge };
+    }
+  }
 
   return {
-    cloneUrl: typeof body.cloneUrl === 'string' ? (body.cloneUrl as AmendInput['cloneUrl']) : null,
-    credentialRef: credentialRefResult?.ok ? credentialRefResult.value : null,
-    capabilityGrant: rawGrant,
-    writablePathPrefixes: rawPrefixes,
-    pinned: typeof body.pinned === 'boolean' ? body.pinned : null,
-    contentDrop,
-    identity: typeof identity?.gitUserName === 'string' && typeof identity?.gitUserEmail === 'string' ? { gitUserName: identity.gitUserName, gitUserEmail: identity.gitUserEmail } : null,
+    ok: true,
+    value: {
+      cloneUrl: typeof body.cloneUrl === 'string' ? (body.cloneUrl as AmendInput['cloneUrl']) : null,
+      credentialRef: credentialRefResult?.ok ? credentialRefResult.value : null,
+      capabilityGrant: rawGrant,
+      writablePathPrefixes: rawPrefixes,
+      pinned: typeof body.pinned === 'boolean' ? body.pinned : null,
+      fileWatcher,
+      identity: typeof identity?.gitUserName === 'string' && typeof identity?.gitUserEmail === 'string' ? { gitUserName: identity.gitUserName, gitUserEmail: identity.gitUserEmail } : null,
+    },
   };
 }
 
@@ -220,7 +233,7 @@ export async function handleDeclarationRoute(
   // ['declarations'] | ['declarations', id] | ['declarations', id, 'orphan'] | ['declarations', id, 'clone']
 
   if (req.method === 'GET' && segments.length === 1) {
-    const declarations = await deps.declarations.list({ state: null, hasContentDrop: null });
+    const declarations = await deps.declarations.list({ state: null, hasFileWatcher: null });
     const awaiting = deps.declarationsAwaitingRecovery ? await deps.declarationsAwaitingRecovery() : new Set<string>();
     const withClones = await Promise.all(
       declarations.map(async (d) => ({ declaration: d, clone: await deps.cloneStore.describe(d.id) })),
@@ -281,7 +294,12 @@ export async function handleDeclarationRoute(
       sendJson(res, 400, { error: 'bad-request' });
       return true;
     }
-    const result = await deps.declarations.amend(id, toAmendInput(body), actorFor(session));
+    const parsed = toAmendInput(body);
+    if (!parsed.ok) {
+      sendJson(res, 400, { error: 'validation', findings: parsed.findings });
+      return true;
+    }
+    const result = await deps.declarations.amend(id, parsed.value, actorFor(session));
     if (!result.ok) {
       sendDeclarationError(res, result.error);
       return true;

@@ -100,7 +100,7 @@ function declarationFor(id: DeclarationId, cloneUrl: string): Declaration {
     capabilityGrant: new Set(['repo.read', 'git.local.write', 'git.remote.write']) as unknown as Declaration['capabilityGrant'],
     writablePathPrefixes: [],
     pinned: false,
-    contentDrop: null,
+    fileWatcher: null,
     identity: { gitUserName: 'fixture', gitUserEmail: 'fixture@example.com' },
     state: 'active',
     grantEpoch: 0 as Declaration['grantEpoch'],

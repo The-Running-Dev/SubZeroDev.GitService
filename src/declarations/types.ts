@@ -22,8 +22,9 @@ export interface RepositoryIdentity {
   readonly gitUserEmail: string;
 }
 
-export interface ContentDropConfig {
-  readonly tool: RegistryToolName;
+export interface FileWatcherConfig {
+  readonly planTool: RegistryToolName;
+  readonly applyTool: RegistryToolName;
   readonly autoMerge: boolean;
 }
 
@@ -36,7 +37,7 @@ export interface Declaration {
   readonly capabilityGrant: DeclarationGrant;
   readonly writablePathPrefixes: readonly PathPrefix[];
   readonly pinned: boolean;
-  readonly contentDrop: ContentDropConfig | null;
+  readonly fileWatcher: FileWatcherConfig | null;
   readonly identity: RepositoryIdentity;
   readonly state: DeclarationState;
   readonly grantEpoch: GrantEpoch;
@@ -52,7 +53,7 @@ export interface DeclareInput {
   readonly capabilityGrant: readonly DeclarationScopedCapability[];
   readonly writablePathPrefixes: readonly PathPrefix[];
   readonly pinned: boolean;
-  readonly contentDrop: ContentDropConfig | null;
+  readonly fileWatcher: FileWatcherConfig | null;
   readonly identity: RepositoryIdentity;
 }
 
@@ -62,7 +63,7 @@ export interface AmendInput {
   readonly capabilityGrant: readonly DeclarationScopedCapability[] | null;
   readonly writablePathPrefixes: readonly PathPrefix[] | null;
   readonly pinned: boolean | null;
-  readonly contentDrop: ContentDropConfig | null | undefined;
+  readonly fileWatcher: FileWatcherConfig | null | undefined;
   readonly identity: RepositoryIdentity | null;
 }
 
@@ -73,12 +74,12 @@ export interface OrphanReport {
   readonly revokedGrants: readonly GrantId[];
   readonly retainedJournalEntries: readonly OperationId[];
   readonly cloneLeftOnDisk: boolean;
-  readonly dropWatchStopped: boolean;
+  readonly fileWatcherStopped: boolean;
 }
 
 export interface DeclarationFilter {
   readonly state: DeclarationState | null;
-  readonly hasContentDrop: boolean | null;
+  readonly hasFileWatcher: boolean | null;
 }
 
 export interface RepositoryConfig {

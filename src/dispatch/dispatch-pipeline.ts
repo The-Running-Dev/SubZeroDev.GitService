@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { DeclarationId, OperationId, RegistryToolName, RepoRelativePath, ScheduledJobId } from '../shared/brands.ts';
+import { repoRelativePath, type DeclarationId, type OperationId, type RegistryToolName, type RepoRelativePath, type ScheduledJobId } from '../shared/brands.ts';
 import type { ActorRef, OperationContextKind } from '../shared/actor.ts';
 import type { Session } from '../shared/session.ts';
 import type { CallContext } from '../shared/call-context.ts';
@@ -125,7 +125,7 @@ function byteLength(value: unknown): number {
  * dispatch path that materialises early, so the paths cannot drift apart.
  */
 function needsClone(entry: ToolDeclaration): boolean {
-  return entry.target.kind !== 'http';
+  return entry.target.kind !== 'http' && entry.annotations.fileWatcher !== 'plan';
 }
 
 /**
@@ -204,6 +204,31 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
     });
   }
 
+  async function validateWatcherApplyInput(request: DispatchRequest, entry: ToolDeclaration, declaration: Declaration): Promise<ToolResult<never> | null> {
+    if (entry.annotations.fileWatcher !== 'apply') return null;
+    const rawPaths = request.input !== null && typeof request.input === 'object' && !Array.isArray(request.input)
+      ? (request.input as Record<string, JsonValue>).permittedPaths
+      : undefined;
+    if (!Array.isArray(rawPaths) || !rawPaths.every((path) => typeof path === 'string')) {
+      return validation(`input for '${entry.name}' has malformed permittedPaths`, [{ path: 'permittedPaths', rule: 'array-of-paths', message: 'expected strings' }]);
+    }
+    const sorted = [...rawPaths].sort();
+    if (new Set(rawPaths).size !== rawPaths.length || rawPaths.some((path, index) => path !== sorted[index])) {
+      return validation(`input for '${entry.name}' requires sorted, duplicate-free permittedPaths`, [{ path: 'permittedPaths', rule: 'sorted-unique', message: 'paths must be canonical' }]);
+    }
+    const prefixes = declarations.effectiveWritablePrefixes(declaration, PROFILE_BY_KIND[request.session.kind]);
+    for (const rawPath of rawPaths) {
+      const parsed = repoRelativePath(rawPath);
+      if (!parsed.ok) return validation(`'${rawPath}' is not a valid repository-relative path`, [{ path: 'permittedPaths', rule: parsed.error.rule, message: rawPath }]);
+      const allowed = prefixes.some((prefix) => (prefix as string).endsWith('/') ? rawPath.startsWith(prefix as string) : rawPath === prefix as string);
+      if (!allowed) {
+        await audit.append({ at: clock.now(), operationId: null, declarationId: declaration.id, generation: declaration.generation, tool: entry.name, actorRef: request.session.actorRef, context: request.context, form: 'authorization-rejection', missing: [], rejectedPath: parsed.value });
+        return authorization(`'${rawPath}' is outside this declaration's effective writable paths`, []);
+      }
+    }
+    return null;
+  }
+
   function buildContext(request: DispatchRequest, entry: ToolDeclaration, declaration: Declaration | null, operationId: OperationId, actorRef: ActorRef, cloneRoot: CallContext['cloneRoot']): CallContext {
     const effectiveGrant = declarations.effectiveGrant(registry.contractCapabilitySet, ceiling, declaration, request.session.grant);
     const profile = PROFILE_BY_KIND[request.session.kind];
@@ -237,6 +262,19 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
       const outputFindings = validateAgainstSchema(entry.outputSchema, result.data as JsonValue);
       if (outputFindings.length > 0) {
         return infrastructure(`'${entry.name}' returned a value its own output schema rejects`);
+      }
+      if (entry.annotations.fileWatcher !== false) {
+        const field = entry.annotations.fileWatcher === 'plan' ? 'permittedPaths' : 'changedPaths';
+        const paths = typeof result.data === 'object' && result.data !== null && !Array.isArray(result.data)
+          ? (result.data as Record<string, unknown>)[field]
+          : undefined;
+        if (!Array.isArray(paths) || !paths.every((value) => typeof value === 'string' && repoRelativePath(value).ok)) {
+          return infrastructure(`'${entry.name}' returned malformed ${field}`);
+        }
+        const sorted = [...paths].sort();
+        if (new Set(paths).size !== paths.length || paths.some((value, index) => value !== sorted[index])) {
+          return infrastructure(`'${entry.name}' returned ${field} that is not sorted and duplicate-free`);
+        }
       }
     }
 
@@ -597,6 +635,11 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
       const inputFindings = validateAgainstSchema(entry.inputSchema, request.input);
       if (inputFindings.length > 0) {
         return validation(`input for '${entry.name}' does not satisfy its schema`, inputFindings);
+      }
+
+      if (declaration !== null) {
+        const watcherInputFailure = await validateWatcherApplyInput(request, entry, declaration);
+        if (watcherInputFailure) return watcherInputFailure;
       }
 
       const operationId = randomUUID() as OperationId;

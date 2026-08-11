@@ -85,13 +85,23 @@ function validateOne(declaration: ToolDeclaration): CompilerError[] {
       ),
     );
   }
-  if (declaration.annotations.dropTarget && declaration.executionClass !== 'mutating') {
-    errors.push(
-      moduleError(
-        { code: 'annotation-contradiction', name, rule: 'dropTarget tool that is not mutating' },
-        `tool '${name}' is a drop target but is not 'mutating'`,
-      ),
-    );
+  const watcherPhase = declaration.annotations.fileWatcher;
+  if (watcherPhase !== false) {
+    const isPlan = watcherPhase === 'plan';
+    const capabilitiesValid = isPlan
+      ? declaration.capabilities.length === 0
+      : declaration.capabilities.includes('git.local.write');
+    const validWatcherShape =
+      declaration.target.kind === 'module' &&
+      declaration.executionClass === (isPlan ? 'read' : 'mutating') &&
+      declaration.capabilityScope === 'declaration' &&
+      declaration.scopes.length === 1 && declaration.scopes[0] === 'write' &&
+      capabilitiesValid &&
+      declaration.annotations.schedulable === false &&
+      declaration.annotations.untrustedOutput === true;
+    if (!validWatcherShape) {
+      errors.push(moduleError({ code: 'annotation-contradiction', name, rule: `fixed file-watcher ${watcherPhase} shape` }, `tool '${name}' does not satisfy the fixed file-watcher ${watcherPhase} shape`));
+    }
   }
 
   if (declaration.executionClass === 'monitoring-wait' && declaration.limits.timeoutSeconds > MONITORING_WAIT_CAP_SECONDS) {
