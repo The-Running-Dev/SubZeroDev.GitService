@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compiler } from './compiler.ts';
+import { compiler, MIN_LIMIT, MONITORING_WAIT_CAP_SECONDS } from './compiler.ts';
 import { fixtureTool, httpTarget, moduleTarget } from './fixtures.ts';
 import { SELF_TEST_FIXTURES } from './self-test-fixtures.ts';
 import type { ToolDeclaration } from './tool-declaration.ts';
@@ -178,20 +178,58 @@ test('S23.1 — file-watcher entry shapes state 2 accepted and 8 rejected fixtur
   }).length, 8);
 });
 
-test('S23.1 — file-watcher schema projections state 2 accepted and 4 rejected fixtures', () => {
-  const accepted = [watcherPlan(), watcherApply()];
-  const rejected = [
-    watcherPlan({ inputSchema: { type: 'object' } as never }),
-    watcherPlan({ outputSchema: { type: 'object' } as never }),
-    watcherApply({ inputSchema: { type: 'object' } as never }),
-    watcherApply({ outputSchema: { type: 'object' } as never }),
-  ];
+/** A deep copy of one of the fixed watcher schemas, for mutating a single field out of shape. */
+function bend(schema: unknown, mutate: (copy: Record<string, never>) => void): never {
+  const copy = structuredClone(schema) as Record<string, never>;
+  mutate(copy);
+  return copy as never;
+}
 
+/**
+ * Each case names the finding path it must produce, not merely that *something*
+ * was rejected. Counting rejections alone let a fixture pass for the wrong
+ * reason — every case below whose schema is malformed in one specific place
+ * would still "reject" against a validator that only checked the outer type.
+ */
+const REJECTED_PROJECTIONS: readonly (readonly [string, ToolDeclaration, string])[] = [
+  ['plan input is bare', watcherPlan({ inputSchema: { type: 'object' } as never }), 'inputSchema.properties.sourceFile'],
+  ['plan output is bare', watcherPlan({ outputSchema: { type: 'object' } as never }), 'outputSchema.properties.branch'],
+  ['apply input is bare', watcherApply({ inputSchema: { type: 'object' } as never }), 'inputSchema.properties.permittedPaths'],
+  ['apply output is bare', watcherApply({ outputSchema: { type: 'object' } as never }), 'outputSchema.properties.changedPaths'],
+  ['outer schema declares no type', watcherPlan({ inputSchema: bend(WATCHER_PLAN_INPUT_SCHEMA, (s) => delete s.type) }), 'inputSchema'],
+  ['outer schema is an array', watcherPlan({ inputSchema: [] as never }), 'inputSchema'],
+  ['sourceFile is not a string', watcherPlan({ inputSchema: bend(WATCHER_PLAN_INPUT_SCHEMA, (s) => { (s.properties as never as Record<string, unknown>).sourceFile = { type: 'number' }; }) }), 'inputSchema.properties.sourceFile.type'],
+  ['sourceFile is a nullable union', watcherPlan({ inputSchema: bend(WATCHER_PLAN_INPUT_SCHEMA, (s) => { (s.properties as never as Record<string, unknown>).sourceFile = { type: ['string', 'null'] }; }) }), 'inputSchema.properties.sourceFile.type'],
+  ['permittedPaths is not an array', watcherPlan({ outputSchema: bend(WATCHER_PLAN_OUTPUT_SCHEMA, (s) => { (s.properties as never as Record<string, unknown>).permittedPaths = { type: 'string' }; }) }), 'outputSchema.properties.permittedPaths.type'],
+  ['permittedPaths holds non-strings', watcherPlan({ outputSchema: bend(WATCHER_PLAN_OUTPUT_SCHEMA, (s) => { (s.properties as never as Record<string, unknown>).permittedPaths = { type: 'array', items: { type: 'number' } }; }) }), 'outputSchema.properties.permittedPaths.items.type'],
+  ['pullRequest is not an object', watcherPlan({ outputSchema: bend(WATCHER_PLAN_OUTPUT_SCHEMA, (s) => { (s.properties as never as Record<string, unknown>).pullRequest = { type: 'string' }; }) }), 'outputSchema.properties.pullRequest'],
+  ['pullRequest omits body', watcherPlan({ outputSchema: bend(WATCHER_PLAN_OUTPUT_SCHEMA, (s) => { (s.properties as never as Record<string, { properties: Record<string, unknown>; required: string[] }>).pullRequest = { properties: { title: { type: 'string' } }, required: ['title'], type: 'object' } as never; }) }), 'outputSchema.properties.pullRequest.properties.body'],
+  ['changedPaths holds non-strings', watcherApply({ outputSchema: bend(WATCHER_APPLY_OUTPUT_SCHEMA, (s) => { (s.properties as never as Record<string, unknown>).changedPaths = { type: 'array', items: { type: 'number' } }; }) }), 'outputSchema.properties.changedPaths.items.type'],
+  // The four below are what "projection is exact" buys. Before it, each of
+  // these compiled — and the two input cases would then have failed schema
+  // validation on every dispatch the watcher ever made, since the watcher
+  // sends exactly the contract's fields and nothing else.
+  ['plan input requires a sixth field', watcherPlan({ inputSchema: bend(WATCHER_PLAN_INPUT_SCHEMA, (s) => { (s.properties as never as Record<string, unknown>).surprise = { type: 'string' }; (s.required as never as string[]).push('surprise'); }) }), 'inputSchema.properties.surprise'],
+  ['plan output declares an extra field', watcherPlan({ outputSchema: bend(WATCHER_PLAN_OUTPUT_SCHEMA, (s) => { (s.properties as never as Record<string, unknown>).surprise = { type: 'string' }; }) }), 'outputSchema.properties.surprise'],
+  ['apply input requires a third field', watcherApply({ inputSchema: bend(WATCHER_APPLY_INPUT_SCHEMA, (s) => { (s.properties as never as Record<string, unknown>).surprise = { type: 'string' }; (s.required as never as string[]).push('surprise'); }) }), 'inputSchema.properties.surprise'],
+  ['pullRequest declares an extra field', watcherPlan({ outputSchema: bend(WATCHER_PLAN_OUTPUT_SCHEMA, (s) => { (s.properties as never as Record<string, { properties: Record<string, unknown> }>)['pullRequest']!.properties['surprise'] = { type: 'string' }; }) }), 'outputSchema.properties.pullRequest.properties.surprise'],
+];
+
+test('S23.1 — file-watcher schema projections state 2 accepted and 17 rejected fixtures', () => {
+  const accepted = [watcherPlan(), watcherApply()];
   assert.equal(accepted.filter((entry) => compiler.compile([entry]).ok).length, 2);
-  assert.equal(rejected.filter((entry) => {
-    const result = compiler.compile([entry]);
-    return !result.ok && result.error.some((error) => error.code === 'schema-invalid');
-  }).length, 4);
+
+  assert.equal(REJECTED_PROJECTIONS.length, 17);
+  for (const [label, declaration, expectedPath] of REJECTED_PROJECTIONS) {
+    const result = compiler.compile([declaration]);
+    assert.equal(result.ok, false, `${label}: expected rejection`);
+    if (result.ok) continue;
+    const findings = result.error.flatMap((error) => (error.code === 'schema-invalid' ? error.findings : []));
+    assert.ok(
+      findings.some((finding) => finding.path === expectedPath && finding.rule === 'watcher-schema-projection'),
+      `${label}: expected a watcher-schema-projection finding at '${expectedPath}', got ${JSON.stringify(findings)}`,
+    );
+  }
 });
 
 test('contract limits state 1 accepted and 6 non-positive or fractional fixtures rejected', () => {
@@ -210,4 +248,27 @@ test('contract limits state 1 accepted and 6 non-positive or fractional fixtures
     const result = compiler.compile([entry]);
     return !result.ok && result.error.some((error) => error.code === 'limit-exceeds-cap');
   }).length, 6);
+
+  // `cap` is the bound the value failed against, and for these it is the lower
+  // one — the smallest value the field admits, not something the declaration
+  // exceeded (`20-contract.md` § Compiler). A consumer rendering `cap` reads it
+  // as "what this field accepts".
+  for (const entry of rejected) {
+    const result = compiler.compile([entry]);
+    assert.equal(result.ok, false);
+    if (result.ok) continue;
+    const capped = result.error.filter((error) => error.code === 'limit-exceeds-cap');
+    assert.equal(capped.length, 1, `${entry.name}: exactly one limit is out of shape`);
+    assert.equal(capped[0]!.code === 'limit-exceeds-cap' && capped[0]!.cap, MIN_LIMIT);
+  }
+
+  // The monitoring-wait ceiling still reports the ceiling, not the floor.
+  const overCap = compiler.compile([
+    fixtureTool({ name: 'slow_wait', executionClass: 'monitoring-wait', limits: { timeoutSeconds: MONITORING_WAIT_CAP_SECONDS + 1, maxResultBytes: 1024 } }),
+  ]);
+  assert.equal(overCap.ok, false);
+  if (!overCap.ok) {
+    const capped = overCap.error.find((error) => error.code === 'limit-exceeds-cap');
+    assert.equal(capped?.code === 'limit-exceeds-cap' && capped.cap, MONITORING_WAIT_CAP_SECONDS);
+  }
 });

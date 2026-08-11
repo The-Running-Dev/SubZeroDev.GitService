@@ -274,9 +274,18 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
     return result.ok && result.value ? toDeclaration(result.value) : null;
   }
 
-  async function list(filter: DeclarationFilter): Promise<readonly Declaration[]> {
+  /**
+   * `list` with the store read still distinguishable from an empty result. A
+   * caller that only renders declarations is well served by the lossy `list`
+   * below; a caller that *gates* on the outcome is not, because an unreadable
+   * table and a table holding nothing look identical in an empty array. Boot's
+   * invariant-B6 re-validation is the second kind, and `boot.ts` makes exactly
+   * this argument for the journal ("coming up ready on the first while
+   * believing the second admits ordinary traffic").
+   */
+  function listOutcome(filter: DeclarationFilter): Outcome<readonly Declaration[], StoreError> {
     const result = withDb(volumeRoot, (db) => db.prepare('SELECT * FROM declaration ORDER BY id, generation DESC').all() as unknown as DeclarationRow[]);
-    if (!result.ok) return [];
+    if (!result.ok) return err(result.error);
     // Highest generation per id wins — see `latestRowFor`'s comment for why
     // that is always the current era, active or orphaned.
     const latestPerId = new Map<string, DeclarationRow>();
@@ -287,7 +296,12 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
     let declarations = [...latestPerId.values()].map(toDeclaration);
     if (filter.state !== null) declarations = declarations.filter((d) => d.state === filter.state);
     if (filter.hasFileWatcher !== null) declarations = declarations.filter((d) => (d.fileWatcher !== null) === filter.hasFileWatcher);
-    return declarations;
+    return ok(declarations);
+  }
+
+  async function list(filter: DeclarationFilter): Promise<readonly Declaration[]> {
+    const result = listOutcome(filter);
+    return result.ok ? result.value : [];
   }
 
   return {
@@ -296,8 +310,14 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
     list,
 
     async revalidateFileWatchers(): Promise<Outcome<void, DeclarationError>> {
-      const declarations = await list({ state: 'active', hasFileWatcher: true });
-      for (const declaration of declarations) {
+      // Deliberately `listOutcome`, not `list`: this is a boot gate, and a gate
+      // that cannot read what it is gating must refuse rather than report a
+      // clean pass over zero rows.
+      const listed = listOutcome({ state: 'active', hasFileWatcher: true });
+      if (!listed.ok) {
+        return err(declarationError({ code: 'store-failed', cause: listed.error }, `the declaration table could not be read, so no file-watcher pair is known to be valid: ${listed.error.summary}`));
+      }
+      for (const declaration of listed.value) {
         if (declaration.fileWatcher) {
           const checked = watcherValidation(declaration.fileWatcher);
           if (!checked.ok) return checked;

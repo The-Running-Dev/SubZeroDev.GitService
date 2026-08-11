@@ -264,23 +264,26 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         return err(bootError({ code: 'store-failed', cause: opened.error }, opened.error.summary));
       }
 
-      const failAfterOpen = async (cause: StoreError): Promise<Outcome<BootReport, BootError>> => {
+      const failAfterOpen = async (error: BootError): Promise<Outcome<BootReport, BootError>> => {
         await deps.store.close();
         if (guard) {
           guard.release();
           guard = null;
         }
-        return err(bootError({ code: 'store-failed', cause }, cause.summary));
+        return err(error);
       };
+      /** The store's own failures, which are every one of these but the B6 gate below. */
+      const failAfterOpenWithStore = (cause: StoreError): Promise<Outcome<BootReport, BootError>> =>
+        failAfterOpen(bootError({ code: 'store-failed', cause }, cause.summary));
 
       const integrity = await deps.store.integrityCheck();
-      if (!integrity.ok) return failAfterOpen(integrity.error);
+      if (!integrity.ok) return failAfterOpenWithStore(integrity.error);
 
       const backup = await deps.store.backupBeforeMigration();
-      if (!backup.ok) return failAfterOpen(backup.error);
+      if (!backup.ok) return failAfterOpenWithStore(backup.error);
 
       const migrated = await deps.store.migrate();
-      if (!migrated.ok) return failAfterOpen(migrated.error);
+      if (!migrated.ok) return failAfterOpenWithStore(migrated.error);
 
       // The lease-takeover record can only be written now: audit_chain_head
       // is created by migration 0001, which has just run. Detected at step 1,
@@ -313,12 +316,7 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       // injects the declaration-owned validation operation.
       const watcherRevalidation = await deps.revalidateFileWatchers();
       if (!watcherRevalidation.ok) {
-        await deps.store.close();
-        if (guard) {
-          guard.release();
-          guard = null;
-        }
-        return err(
+        return failAfterOpen(
           bootError(
             { code: 'watcher-revalidation-failed', cause: watcherRevalidation.error },
             `file-watcher revalidation failed: ${watcherRevalidation.error.summary}`,
