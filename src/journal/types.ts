@@ -1,4 +1,4 @@
-import type { BranchName, DeclarationId, DropFileName, Generation, GitSha, IsoUtcTimestamp, OperationId, RegistryToolName, ScheduledJobId } from '../shared/brands.ts';
+import type { BranchName, DeclarationId, Generation, GitSha, IsoUtcTimestamp, OperationId, RegistryToolName, ScheduledJobId, WatchedFileName } from '../shared/brands.ts';
 import type { ActorRef, OperationContextKind } from '../shared/actor.ts';
 import type { JsonValue } from '../contract/json.ts';
 import type { PreState } from '../clone/types.ts';
@@ -56,7 +56,7 @@ export type TerminalState =
   | { readonly kind: 'required-check-failed'; readonly check: string; readonly pullRequest: PullRequestRef }
   | { readonly kind: 'wait-timeout'; readonly waitedSeconds: number; readonly tool: RegistryToolName }
   | { readonly kind: 'operation-parked'; readonly operationId: OperationId; readonly reason: string }
-  | { readonly kind: 'content-drop-failed'; readonly file: DropFileName; readonly reason: string };
+  | { readonly kind: 'file-watcher-failed'; readonly file: WatchedFileName; readonly reason: string };
 
 export interface MaintenanceSummary {
   readonly kind: 'maintenance-pass';

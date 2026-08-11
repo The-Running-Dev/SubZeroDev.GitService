@@ -508,7 +508,7 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
       });
       if (!written.ok) return err(declarationError({ code: 'store-failed', cause: written.error }, written.error.summary));
 
-      // Grants, scheduled jobs and the content-drop watch are owned by
+      // Grants, scheduled jobs and the file watcher are owned by
       // modules that do not exist yet (Authorization/S13, Scheduler/S16,
       // Watcher/S17) — `30-slices.md` § S5 "Out of scope": "the rest of the
       // orphaning cascade... each is added by the slice that creates them."
