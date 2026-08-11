@@ -5,6 +5,64 @@ import { fixtureTool, httpTarget, moduleTarget } from './fixtures.ts';
 import { SELF_TEST_FIXTURES } from './self-test-fixtures.ts';
 import type { ToolDeclaration } from './tool-declaration.ts';
 
+const WATCHER_PLAN_SCHEMA = { type: 'object', properties: { target: { type: 'string' } }, required: ['target'] } as never;
+const WATCHER_PLAN_INPUT_SCHEMA = {
+  type: 'object',
+  properties: { sourceFile: { type: 'string' }, content: { type: 'string' } },
+  required: ['sourceFile', 'content'],
+} as never;
+const WATCHER_PLAN_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    branch: { type: 'string' },
+    commitMessage: { type: 'string' },
+    pullRequest: { type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' } }, required: ['title', 'body'] },
+    permittedPaths: { type: 'array', items: { type: 'string' } },
+    plan: WATCHER_PLAN_SCHEMA,
+  },
+  required: ['branch', 'commitMessage', 'pullRequest', 'permittedPaths', 'plan'],
+} as never;
+const WATCHER_APPLY_INPUT_SCHEMA = {
+  type: 'object',
+  properties: { permittedPaths: { type: 'array', items: { type: 'string' } }, plan: WATCHER_PLAN_SCHEMA },
+  required: ['permittedPaths', 'plan'],
+} as never;
+const WATCHER_APPLY_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: { changedPaths: { type: 'array', items: { type: 'string' } } },
+  required: ['changedPaths'],
+} as never;
+
+function watcherPlan(overrides: Partial<ToolDeclaration> = {}): ToolDeclaration {
+  return fixtureTool({
+    name: 'watch_plan',
+    target: moduleTarget('watch.plan'),
+    inputSchema: WATCHER_PLAN_INPUT_SCHEMA,
+    outputSchema: WATCHER_PLAN_OUTPUT_SCHEMA,
+    scopes: ['write'],
+    capabilities: [],
+    capabilityScope: 'declaration',
+    executionClass: 'read',
+    annotations: { schedulable: false, fileWatcher: 'plan', untrustedOutput: true },
+    ...overrides,
+  });
+}
+
+function watcherApply(overrides: Partial<ToolDeclaration> = {}): ToolDeclaration {
+  return fixtureTool({
+    name: 'watch_apply',
+    target: moduleTarget('watch.apply'),
+    inputSchema: WATCHER_APPLY_INPUT_SCHEMA,
+    outputSchema: WATCHER_APPLY_OUTPUT_SCHEMA,
+    scopes: ['write'],
+    capabilities: ['git.local.write'],
+    capabilityScope: 'declaration',
+    executionClass: 'mutating',
+    annotations: { schedulable: false, fileWatcher: 'apply', untrustedOutput: true },
+    ...overrides,
+  });
+}
+
 test('compile([]) returns an empty, fingerprinted registry', () => {
   const result = compiler.compile([]);
   assert.equal(result.ok, true);
@@ -100,8 +158,8 @@ test('every CompilerError variant is exercised by the self-test fixtures (defini
 });
 
 test('S23.1 — file-watcher entry shapes state 2 accepted and 8 rejected fixtures', () => {
-  const plan = fixtureTool({ name: 'watch_plan', target: moduleTarget('watch.plan'), scopes: ['write'], capabilities: [], capabilityScope: 'declaration', executionClass: 'read', annotations: { schedulable: false, fileWatcher: 'plan', untrustedOutput: true } as never });
-  const apply = fixtureTool({ name: 'watch_apply', target: moduleTarget('watch.apply'), scopes: ['write'], capabilities: ['git.local.write'], capabilityScope: 'declaration', executionClass: 'mutating', annotations: { schedulable: false, fileWatcher: 'apply', untrustedOutput: true } as never });
+  const plan = watcherPlan();
+  const apply = watcherApply();
   const accepted = [plan, apply];
   const rejected: ToolDeclaration[] = [
     { ...plan, target: httpTarget('watch.plan') },
@@ -118,4 +176,20 @@ test('S23.1 — file-watcher entry shapes state 2 accepted and 8 rejected fixtur
     const result = compiler.compile([entry]);
     return !result.ok && result.error.some((error) => error.code === 'annotation-contradiction');
   }).length, 8);
+});
+
+test('S23.1 — file-watcher schema projections state 2 accepted and 4 rejected fixtures', () => {
+  const accepted = [watcherPlan(), watcherApply()];
+  const rejected = [
+    watcherPlan({ inputSchema: { type: 'object' } as never }),
+    watcherPlan({ outputSchema: { type: 'object' } as never }),
+    watcherApply({ inputSchema: { type: 'object' } as never }),
+    watcherApply({ outputSchema: { type: 'object' } as never }),
+  ];
+
+  assert.equal(accepted.filter((entry) => compiler.compile([entry]).ok).length, 2);
+  assert.equal(rejected.filter((entry) => {
+    const result = compiler.compile([entry]);
+    return !result.ok && result.error.some((error) => error.code === 'schema-invalid');
+  }).length, 4);
 });

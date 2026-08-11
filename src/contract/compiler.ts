@@ -1,8 +1,10 @@
 import { err, ok, type Outcome } from '../shared/outcome.ts';
 import { isoUtcTimestamp, type RegistryToolName, type Sha256Hex } from '../shared/brands.ts';
+import type { Finding } from '../shared/result-kind.ts';
 import { capabilityScopeOf, type CapabilityName, type ContractCapabilitySet } from './capabilities.ts';
 import { computeFingerprint, normaliseEntryOrder } from './fingerprint.ts';
 import { isJsonObject } from './json.ts';
+import type { SchemaObject } from './json-schema.ts';
 import type { CompiledRegistry, CompilerArtifact, ExecutionTarget, ToolDeclaration } from './tool-declaration.ts';
 import type { CompilerError } from './compiler-errors.ts';
 
@@ -34,6 +36,99 @@ function targetKey(target: ExecutionTarget): string {
 // 'infrastructure', which `isError` treats as a service/environment failure.
 function moduleError<T extends { readonly code: CompilerError['code'] }>(base: T, summary: string): CompilerError {
   return { resultKind: 'validation', retryable: false, summary, ...base } as unknown as CompilerError;
+}
+
+function schemaObject(value: unknown): SchemaObject | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as SchemaObject) : null;
+}
+
+function hasExactType(schema: SchemaObject, expected: string): boolean {
+  return schema.type === expected || (Array.isArray(schema.type) && schema.type.length === 1 && schema.type[0] === expected);
+}
+
+function requireObject(value: unknown, path: string, findings: Finding[]): SchemaObject | null {
+  const schema = schemaObject(value);
+  if (!schema || !hasExactType(schema, 'object')) {
+    findings.push({ path, rule: 'watcher-schema-projection', message: 'must declare type object' });
+    return null;
+  }
+  return schema;
+}
+
+function requireProperty(schema: SchemaObject, property: string, path: string, findings: Finding[]): SchemaObject | null {
+  if (!schema.required?.includes(property)) {
+    findings.push({ path: `${path}.required`, rule: 'watcher-schema-projection', message: `must require '${property}'` });
+  }
+  const value = schema.properties?.[property];
+  const propertySchema = schemaObject(value);
+  if (!propertySchema) {
+    findings.push({ path: `${path}.properties.${property}`, rule: 'watcher-schema-projection', message: 'must declare a schema' });
+    return null;
+  }
+  return propertySchema;
+}
+
+function requireStringProperty(schema: SchemaObject, property: string, path: string, findings: Finding[]): void {
+  const propertySchema = requireProperty(schema, property, path, findings);
+  if (propertySchema && !hasExactType(propertySchema, 'string')) {
+    findings.push({ path: `${path}.properties.${property}.type`, rule: 'watcher-schema-projection', message: 'must be string' });
+  }
+}
+
+function requireStringArrayProperty(schema: SchemaObject, property: string, path: string, findings: Finding[]): void {
+  const propertySchema = requireProperty(schema, property, path, findings);
+  if (!propertySchema) return;
+  if (!hasExactType(propertySchema, 'array')) {
+    findings.push({ path: `${path}.properties.${property}.type`, rule: 'watcher-schema-projection', message: 'must be array' });
+    return;
+  }
+  const items = schemaObject(propertySchema.items);
+  if (!items || !hasExactType(items, 'string')) {
+    findings.push({ path: `${path}.properties.${property}.items.type`, rule: 'watcher-schema-projection', message: 'must be string' });
+  }
+}
+
+function validateWatcherSchemas(declaration: ToolDeclaration): Finding[] {
+  const phase = declaration.annotations.fileWatcher;
+  if (phase === false) return [];
+
+  const findings: Finding[] = [];
+  if (phase === 'plan') {
+    const input = requireObject(declaration.inputSchema, 'inputSchema', findings);
+    if (input) {
+      requireStringProperty(input, 'sourceFile', 'inputSchema', findings);
+      requireStringProperty(input, 'content', 'inputSchema', findings);
+    }
+
+    const output = requireObject(declaration.outputSchema, 'outputSchema', findings);
+    if (output) {
+      requireStringProperty(output, 'branch', 'outputSchema', findings);
+      requireStringProperty(output, 'commitMessage', 'outputSchema', findings);
+      requireStringArrayProperty(output, 'permittedPaths', 'outputSchema', findings);
+      requireProperty(output, 'plan', 'outputSchema', findings);
+      const pullRequest = requireProperty(output, 'pullRequest', 'outputSchema', findings);
+      if (pullRequest) {
+        const pullRequestObject = requireObject(pullRequest, 'outputSchema.properties.pullRequest', findings);
+        if (pullRequestObject) {
+          requireStringProperty(pullRequestObject, 'title', 'outputSchema.properties.pullRequest', findings);
+          requireStringProperty(pullRequestObject, 'body', 'outputSchema.properties.pullRequest', findings);
+        }
+      }
+    }
+  } else {
+    const input = requireObject(declaration.inputSchema, 'inputSchema', findings);
+    if (input) {
+      requireStringArrayProperty(input, 'permittedPaths', 'inputSchema', findings);
+      requireProperty(input, 'plan', 'inputSchema', findings);
+    }
+
+    const output = requireObject(declaration.outputSchema, 'outputSchema', findings);
+    if (output) {
+      requireStringArrayProperty(output, 'changedPaths', 'outputSchema', findings);
+    }
+  }
+
+  return findings;
 }
 
 function validateOne(declaration: ToolDeclaration): CompilerError[] {
@@ -87,6 +182,10 @@ function validateOne(declaration: ToolDeclaration): CompilerError[] {
   }
   const watcherPhase = declaration.annotations.fileWatcher;
   if (watcherPhase !== false) {
+    const schemaFindings = validateWatcherSchemas(declaration);
+    if (schemaFindings.length > 0) {
+      errors.push(moduleError({ code: 'schema-invalid', name, findings: schemaFindings }, `tool '${name}' does not project the fixed file-watcher ${watcherPhase} schema`));
+    }
     const isPlan = watcherPhase === 'plan';
     const capabilitiesValid = isPlan
       ? declaration.capabilities.length === 0
