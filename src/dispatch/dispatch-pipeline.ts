@@ -519,31 +519,42 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
       const ctx = buildContext(effective, entry, declaration, operationId, actorRef, cloneRoot);
       const result = await invokeAndEnvelope(entry, ctx, effective.input);
 
-      if ((entry.name as string) === 'git_raw' && result.kind === 'timeout') {
+      // git_raw completes its own journal entry (settled or parked) inside
+      // the handler, for the same reason it writes its own audit trail
+      // there: its argv is caller-authored, so a post-state that came back
+      // unknown for a reason other than a timeout (a failed post-observation
+      // after a successful or cancelled child) still needs parking, and only
+      // the handler that made that observation can tell the two apart.
+      if ((entry.name as string) === 'git_raw') {
+        return result;
+      }
+
+      // `20-contract.md`'s `ExecError` table maps a timed-out child to
+      // `timeout` and requires the journal entry parked — what the command
+      // achieved is not knowable. Generic on `result.kind`, not on the tool
+      // name: `git_raw` is not the only mutating entry whose child can time
+      // out, and the invariant is the same one regardless of which entry hit it.
+      if (result.kind === 'timeout') {
         const parked = await journal.park?.(operationId, result.summary);
-        if (!parked?.ok) return infrastructure(`git.raw timed out, but its journal entry could not be parked: ${parked?.error.summary ?? 'journal park is unavailable'}`);
+        if (!parked?.ok) return infrastructure(`'${entry.name}' timed out, but its journal entry could not be parked: ${parked?.error.summary ?? 'journal park is unavailable'}`);
         await cloneStore.markAttention?.(declaration.id, result.summary);
         return result;
       }
 
       await journal.markApplied(operationId);
 
-      // git_raw writes its attributable intent/outcome pair inside the handler;
-      // a third generic call line would make the two-line audit contract false.
-      if ((entry.name as string) !== 'git_raw') {
-        await audit.append({
-          at: clock.now(),
-          operationId,
-          declarationId: declaration.id,
-          generation: declaration.generation,
-          tool: entry.name,
-          actorRef,
-          context: effective.context,
-          form: 'call',
-          resultKind: result.kind,
-          changedPaths: result.ok ? extractChangedPathsFromResultData(result.data) : [],
-        });
-      }
+      await audit.append({
+        at: clock.now(),
+        operationId,
+        declarationId: declaration.id,
+        generation: declaration.generation,
+        tool: entry.name,
+        actorRef,
+        context: effective.context,
+        form: 'call',
+        resultKind: result.kind,
+        changedPaths: result.ok ? extractChangedPathsFromResultData(result.data) : [],
+      });
 
       await journal.settle(operationId, null);
 

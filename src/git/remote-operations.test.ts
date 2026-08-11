@@ -23,7 +23,12 @@ const REF = 'fixture-token' as CredentialRef;
 const DECLARATION = 'repo-a' as DeclarationId;
 const OTHER_DECLARATION = 'repo-b' as DeclarationId;
 const SECRET = 'ghp-fixture-secret-0123456789';
-const successfulJournal = { appendStep: async () => ok(undefined) };
+const successfulJournal = {
+  appendStep: async () => ok(undefined),
+  markApplied: async () => ok(undefined),
+  settle: async () => ok(undefined),
+  park: async () => ok(undefined),
+};
 
 function git(args: readonly string[], cwd: string): void {
   const result = spawnSync('git', args, {
@@ -211,6 +216,9 @@ test('git_push commits its recovery step before spawning the remote child', asyn
             events.push('step:git.push.remote');
             return ok(undefined);
           },
+          markApplied: async () => ok(undefined),
+          settle: async () => ok(undefined),
+          park: async () => ok(undefined),
         },
         declarations: { get: async () => declaration },
         credentials: createCredentialResolver({ credentialMountRoot: mount.root, volumeRoot, clock: systemClock }),

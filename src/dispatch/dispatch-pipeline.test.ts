@@ -2186,31 +2186,37 @@ test('an http-targeted read tool never materialises a clone — no credential de
   });
 });
 
-test('S15.7 — a timed-out git_raw call parks its journal entry and marks the clone for attention', async () => {
+// `git_raw` completes its own journal entry (settled or parked) inside its
+// handler now — `git-operations.ts`'s `raw()` — rather than through
+// dispatch's generic completion; see `raw-operations.test.ts` for that
+// behaviour end to end, including the previously-unparked case of a
+// non-timeout unknown post-state. This test instead demonstrates the generic
+// mechanism dispatch retained: any mutating tool that times out is parked,
+// not only `git_raw`.
+test('S15.7 (generalized) — any mutating tool that times out parks its journal entry and marks the clone for attention', async () => {
   await withDeclaredRepo(async ({ declarations, cloneStore, exec, locks, fixture, volume }) => {
     fixture.current = fixtureDeclaration('repo-a', fixture.current!.cloneUrl, ['git.local.write']);
     const audit = createAudit({ volumeRoot: volume, clock: systemClock });
     const journal = createJournal({ volumeRoot: volume, clock: systemClock });
     const moduleAdapter = createModuleAdapter();
-    moduleAdapter.register('git.raw' as never, async () => timeoutResult('raw command exceeded 60 seconds', 60));
+    moduleAdapter.register('git.slow-mutation' as never, async () => timeoutResult('the mutation exceeded its timeout', 300));
     const entry = fixtureTool({
-      name: 'git_raw', capabilities: ['git.local.write'], scopes: ['write'], executionClass: 'mutating',
-      target: { kind: 'module', target: 'git.raw' as never }, limits: { timeoutSeconds: 60, maxResultBytes: 4_194_304 },
+      name: 'git_slow_mutation', capabilities: ['git.local.write'], scopes: ['write'], executionClass: 'mutating',
+      target: { kind: 'module', target: 'git.slow-mutation' as never }, limits: { timeoutSeconds: 300, maxResultBytes: 4_194_304 },
     });
     const pipeline = createDispatchPipeline({
       registry: mutatingRegistryOf([entry]), ceiling: MUTATION_CAPABILITY_SET, moduleAdapter, declarations, cloneStore, locks, audit, journal, exec, clock: systemClock,
     });
 
     const result = await pipeline.dispatch({
-      toolName: 'git_raw' as never, input: { argv: ['gc'] }, session: sessionWith(['git.local.write']), declarationId: 'repo-a' as never,
+      toolName: 'git_slow_mutation' as never, input: { argv: ['gc'] }, session: sessionWith(['git.local.write']), declarationId: 'repo-a' as never,
       scheduledJobId: null, context: 'normal', signal: new AbortController().signal,
     });
 
     assert.equal(result.kind, 'timeout');
     const parked = read(await journal.parked());
     assert.equal(parked.length, 1);
-    assert.equal(parked[0]?.tool, 'git_raw');
-    assert.equal(parked[0]?.context, 'hatch');
+    assert.equal(parked[0]?.tool, 'git_slow_mutation');
     const clone = await cloneStore.describe('repo-a' as never);
     assert.equal(clone.ok && clone.value.state, 'needs-attention');
   });
