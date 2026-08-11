@@ -189,7 +189,8 @@ interface RepositoryIdentity {
 }
 
 interface ContentDropConfig {
-  readonly tool: RegistryToolName;
+  readonly planTool: RegistryToolName;
+  readonly applyTool: RegistryToolName;
   readonly autoMerge: boolean;
 }
 
@@ -749,6 +750,33 @@ the same parser.
 ```ts
 type DropStage = 'inbox' | 'processing' | 'processed' | 'failed';
 
+interface ContentDropPlanInput {
+  readonly sourceFile: DropFileName;
+  readonly content: string;
+}
+
+interface ContentDropPullRequestPlan {
+  readonly title: string;
+  readonly body: string;
+}
+
+interface ContentDropPlanData<TPlan extends JsonValue = JsonValue> {
+  readonly branch: BranchName;
+  readonly commitMessage: string;
+  readonly pullRequest: ContentDropPullRequestPlan;
+  readonly permittedPaths: readonly RepoRelativePath[];
+  readonly plan: TPlan;
+}
+
+interface ContentDropApplyInput<TPlan extends JsonValue = JsonValue> {
+  readonly permittedPaths: readonly RepoRelativePath[];
+  readonly plan: TPlan;
+}
+
+interface ContentDropApplyData {
+  readonly changedPaths: readonly RepoRelativePath[];
+}
+
 type DropOutcome =
   | { readonly kind: 'succeeded'; readonly pullRequest: PullRequestRef }
   | { readonly kind: 'rejected'; readonly step: string; readonly result: ResultKind; readonly reason: string }
@@ -783,6 +811,25 @@ interface WatchTickReport {
   readonly stillPending: readonly PendingPullRequest[];
 }
 ```
+
+`ContentDropConfig.planTool` and `applyTool` are two registry entries that together form the one
+logical target described by the design. The plan tool consumes the claimed file after strict UTF-8
+decoding and returns all consumer-selected branch, commit, pull-request and path data plus an opaque
+JSON plan. Its handler is pure: dispatch supplies `CallContext.cloneRoot: null`, does not materialise
+a clone, and does not take either repository lock or begin a mutation journal entry. The apply tool
+receives that opaque plan unchanged together with the plan's permitted paths and performs the
+repository mutation.
+
+The plan tool's output schema and the apply tool's input schema may specialise `TPlan`, but the JSON
+Schemas at their respective `plan` properties must be byte-for-byte equal after compiler canonical
+serialisation. Declaration creation, amendment and boot re-validation reject a pair that does not
+match. `permittedPaths` is sorted and duplicate-free, every member must pass the watcher's effective
+write allowlist before `applyTool` is dispatched, and `applyTool.changedPaths` is also sorted and
+duplicate-free. The watcher independently dispatches `repo_status` after apply: its complete changed
+path set must equal `changedPaths`, and that set must be a subset of `permittedPaths`, before the
+watcher dispatches `git_stage`. After staging, a second `repo_status` must report exactly the same
+path set and every entry staged before commit may begin. A mismatch is a failed drop, never a partial
+success; no later git or host step is dispatched.
 
 ### Instance lease
 
@@ -1067,24 +1114,29 @@ Defaults the design fixes: `auditSegmentBytes` 67108864, `auditDays` 90, `journa
 `outboxDeliveredDays` 14, `preMigrationBackupsRetained` 3, `storeSnapshotsRetained` 7,
 `operatorSessionDays` 7, `processedDropDays` 14, `tokenDays` 7, `revokedGrantDays` 180,
 `terminalJobDays` 30, `maintenanceAtPercent` 85, `refuseAtPercent` 95, `cloneSeconds` 300,
-`fetchSeconds` 300, `pushSeconds` 300, `monitoringWaitCapSeconds` 1800, `pollIntervalSeconds` 15,
-`watcher.enabled` false, `remoteOperationsPermitted` false. The remaining values are deployment-set
-and the design declines to fix them — see `## Unresolved`.
+`fetchSeconds` 300, `pushSeconds` 300, `hatchSeconds` 60, `monitoringWaitCapSeconds` 1800,
+`mutationLockAcquireMs` 30000, `materialisationLockAcquireMs` 30000, `mutationQueueDepth` 32,
+`concurrentWaitsPerSession` 4, `concurrentLockFreeOperations` 16, `pollIntervalSeconds` 15,
+`watcher.enabled` false, `remoteOperationsPermitted` false, `sessionIdleSeconds` 3600 and
+`sessionAbsoluteSeconds` 43200. Configuration-backed values stay deployment-overridable; these are
+the values the service uses when it is not told otherwise. The session bounds are additionally
+bounded by `operatorSessionDays`, which retention fixes at 7.
 
-Two of those U6 values acquire **defaults, not resolutions**, because the console session cannot be
-built without them: `sessionIdleSeconds` 3600 and `sessionAbsoluteSeconds` 43200. Both stay
-deployment-overridable and U6 still owns the question of what a deployment should choose; these are
-what the service uses when it is not told otherwise. They are bounded by `operatorSessionDays`,
-which retention already fixes at 7.
+Notifier delivery makes at most five attempts. Each attempt has a 10-second timeout. After failed
+attempt number `n`, counted from one, the delay before another attempt is
+`min(1000 * 2 ** n, 30000)` milliseconds; five attempts therefore wait 2000, 4000, 8000 and 16000 ms.
+There is no global default `maxResultBytes`: every `ToolDeclaration` must carry an explicit positive
+limit, so adding a tool can never silently inherit a result-size budget.
 
 ### Contract types (L0)
 
 ```ts
 type ToolExecutionClass = 'read' | 'mutating' | 'monitoring-wait';
+type DropTargetPhase = false | 'plan' | 'apply';
 
 interface ToolAnnotations {
   readonly schedulable: boolean;
-  readonly dropTarget: boolean;
+  readonly dropTarget: DropTargetPhase;
   readonly untrustedOutput: boolean;
 }
 
@@ -1141,6 +1193,14 @@ interface CompilerArtifact {
   readonly documentation: GeneratedDocumentation;
 }
 ```
+
+A drop-target plan entry has a `module` target, `executionClass: 'read'`, no capabilities,
+`scopes: ['write']`, and annotations `{ schedulable: false, dropTarget: 'plan',
+untrustedOutput: true }`. An apply entry has a `module` target, `executionClass: 'mutating'`, includes
+`git.local.write`, has `scopes: ['write']`, and annotations `{ schedulable: false,
+dropTarget: 'apply', untrustedOutput: true }`. `false` preserves the ordinary-tool annotation used
+by the base registry. The compiler rejects every other combination; a plan entry's special
+no-clone dispatch behaviour follows from the phase annotation rather than from its target name.
 
 `untrustedOutput` is the annotation the prior art puts on a tool returning author-controlled text.
 
@@ -2580,6 +2640,14 @@ through that dispatch, so the watcher depends on neither `GitOperations` nor `Ho
 `start` fails unless all three switches are on: remote operations permitted, watcher enabled, and
 at least one declaration naming a drop.
 
+For a claimed file, the declaration-selected protocol is `planTool`, `prepare_branch`, `applyTool`,
+the two post-apply observations and `git_stage` described under `### Content drops`, `git_commit`,
+`git_push`, `pr_open`, then `pr_enable_auto_merge` when configured. The initial clean-tree
+`repo_status` gate remains before claim, and the plan phase must succeed before the first mutating
+repository step. Each name in that sequence is dispatched independently with no outer lock. Branch,
+commit and pull-request fields come only from the validated plan result; the watcher does not derive
+consumer naming conventions of its own.
+
 ### L3 — module adapter
 
 ```ts
@@ -2966,7 +3034,8 @@ type DeclarationError = ModuleErrorBase & (
   | { readonly code: 'remote-host-not-allowed'; readonly host: RemoteHost }
   | { readonly code: 'capability-outside-ceiling'; readonly capabilities: readonly CapabilityName[] }
   | { readonly code: 'capability-unsupported-by-host'; readonly capabilities: readonly CapabilityName[] }
-  | { readonly code: 'drop-tool-not-annotated'; readonly tool: RegistryToolName }
+  | { readonly code: 'drop-tool-not-annotated'; readonly tool: RegistryToolName; readonly expected: Exclude<DropTargetPhase, false> }
+  | { readonly code: 'drop-plan-schema-mismatch'; readonly planTool: RegistryToolName; readonly applyTool: RegistryToolName }
   | { readonly code: 'adoption-refused'; readonly blockers: readonly EvictionBlocker[] }
   | { readonly code: 'remote-mismatch'; readonly declared: CloneUrl; readonly observed: CloneUrl }
   | { readonly code: 'clone-still-present' }
@@ -2984,7 +3053,8 @@ type DeclarationError = ModuleErrorBase & (
 | `remote-host-not-allowed` | `cloneUrl`'s host is off the deployment allowlist | no | `validation`. This is the second, independent guard against credential redirection |
 | `capability-outside-ceiling` | A grant names a capability the ceiling lacks | no | `validation` |
 | `capability-unsupported-by-host` | A `generic` declaration is granted a `host.*` capability | no | `validation` |
-| `drop-tool-not-annotated` | `contentDrop.tool` is not annotated a drop target | no | `validation` |
+| `drop-tool-not-annotated` | A configured plan or apply tool is absent or does not carry the expected phase annotation | no | `validation` |
+| `drop-plan-schema-mismatch` | The configured plan output and apply input use different canonical schemas for `plan` | no | `validation` |
 | `adoption-refused` | Re-declaring an id whose orphaned clone is not clean, across every generation | no | `precondition` naming the blockers. The exit is to push the work, then `clone.remove` |
 | `remote-mismatch` | The orphaned clone points at a different remote | no | `precondition`. Never repoint an existing checkout |
 | `clone-still-present` | `declaration.remove` while a clone remains | no | `precondition` naming `clone.remove` |
@@ -3368,7 +3438,11 @@ Every variant **fails the build**. A warning is never sufficient — that is def
 2, and the rejection counts it asks for are the counts of these.
 
 `annotation-contradiction` covers a `read` execution class declaring a write capability, a
-`monitoring-wait` declaring a mutating capability, and a `dropTarget` tool that is not `mutating`.
+`monitoring-wait` declaring a mutating capability, and either drop-target phase departing from the
+target kind, execution class, capabilities, scopes or other annotations fixed under `ToolAnnotations`.
+`schema-invalid` also covers a drop plan or apply entry whose outer input or output schema does not
+project the corresponding `ContentDrop*` type; pairing the two consumer-specific `plan` schemas is a
+declaration check because the compiler receives registry entries but no `ContentDropConfig`.
 `limit-exceeds-cap` covers a `monitoring-wait` whose `timeoutSeconds` exceeds
 `monitoringWaitCapSeconds`.
 
@@ -3495,7 +3569,7 @@ responsible for maintaining it.
 | B3 | Boot verifies the registry fingerprint and the console asset manifest, and refuses to start on a mismatch. | Lifecycle |
 | B4 | The deployment ceiling is a subset of the contract capability set. Startup is fatal otherwise. | Lifecycle |
 | B5 | Every registry entry has exactly one executor registered for its `ExecutionTarget`, verified at boot. | Lifecycle |
-| B6 | `ScheduledJob.tool` names a registry entry annotated `schedulable`; `ContentDropConfig.tool` names one annotated `dropTarget`. Checked at creation, at fire time, and at boot re-validation. | Scheduler, Declarations |
+| B6 | `ScheduledJob.tool` names a registry entry annotated `schedulable`; `ContentDropConfig.planTool` and `applyTool` name entries annotated for their respective phases, whose canonical `plan` schemas match. Checked at creation, at fire time, and at boot re-validation. | Scheduler, Declarations |
 | B7 | No base tool name carries a `blog_` prefix, and no tool ships under a name intended for removal. | Compiler |
 | B8 | The compiler is absent from the runtime image. | Build |
 
@@ -3513,6 +3587,9 @@ responsible for maintaining it.
 | D8 | A file found in `processing/` at startup is moved to `failed/` and never reprocessed. | Watcher |
 | D9 | The pre-migration copy is taken before any migration runs, and the three most recent are retained. | Structured store |
 | D10 | At most one `declaration` row per id has `state = 'active'`. | Structured store |
+| D11 | A content-drop plan handler runs with no clone, no repository lock and no mutation journal, and no mutating repository step starts unless its output validates. | Dispatch pipeline, Watcher |
+| D12 | A content-drop apply result advances to staging only when an independent status observation reports exactly its declared changed paths and every path is inside both its plan and the effective watcher allowlist. | Watcher |
+| D13 | Content-drop staging names exactly the independently observed changed paths; commit starts only after a second observation reports that exact set fully staged. | Watcher |
 
 ---
 
@@ -3593,25 +3670,22 @@ S14.** Standard RFC-shaped paths under `/oauth/*` and `/.well-known/*`, with `is
 to `Authorization` as the one durable write the authorization-code exchange performs. See
 `### L5 — surfaces` above and `design/90-decisions.md`, 2026-08-10.
 
-**U6 — Operational numbers the design explicitly defers.** `mutationQueueDepth`,
-`concurrentWaitsPerSession`, `concurrentLockFreeOperations`, `mutationLockAcquireMs`,
-`materialisationLockAcquireMs`, `hatchSeconds`, `sessionIdleSeconds`, `sessionAbsoluteSeconds`, the
-notifier's retry bound and backoff schedule, and the default `maxResultBytes`. The design says
-these "belong with the other operational numbers rather than in this document". The types are fixed
-above; the values are not.
-
-*Partly narrowed 2026-08-04:* `sessionIdleSeconds` and `sessionAbsoluteSeconds` now carry defaults
-(3600 and 43200, above), because S4's console session cannot exist without a number. U6 still owns
-what a deployment ought to choose — a default is what the service falls back to, not an answer to
-the question.
-
-*Narrowed further 2026-08-10:* S15 fixes `hatchSeconds` at 60 seconds, reflected in the `git_raw`
-registry entry above. U6 otherwise stands for the remaining operational numbers.
+**U6 — Operational numbers, resolved 2026-08-11.** The deployment defaults, notifier attempt and
+backoff policy, and the requirement for an explicit per-tool `maxResultBytes` are fixed under
+`### Deployment configuration` above. The chosen finite values match the already exercised code
+defaults; `hatchSeconds`, `sessionIdleSeconds` and `sessionAbsoluteSeconds` retain their previously
+fixed values. See `design/90-decisions.md`, 2026-08-11. This unblocks S17.
 
 **U7 — The console package's element type and build entry.** `ConsoleViewRegistration` is generic
 over the element type because the design fixes what a view receives and what it declares, but not
 the UI framework binding, the package's exported build entry, or how the asset manifest is hashed
 into the console fingerprint.
+
+**U10 — The content-drop target protocol, resolved 2026-08-11.** One logical target is an explicit
+pair of ordinary compiled registry entries named by `ContentDropConfig.planTool` and `applyTool`.
+Their phase annotations, generic outer schemas, consumer-specific plan-schema equality and dispatch
+semantics are fixed under `### Declaration`, `### Content drops`, `### Contract types (L0)` and
+`### L2 — watcher` above. See `design/90-decisions.md`, 2026-08-11.
 
 ~~**U8 — The pre-state digest algorithms.**~~ — **resolved 2026-08-08.** `SHA256_hex(canonical(...))`
 over an ordered array of index entries and porcelain-status lines respectively, neither derived via
