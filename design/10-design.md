@@ -694,7 +694,10 @@ There is no human here to catch a bad guess.
 
 ##### The directory is the state machine
 
-Four directories, and **nothing dropped is ever deleted, only moved**:
+Four directories. **The delivery state machine never deletes a dropped file; it only moves it.**
+Scheduled retention is a separate lifecycle: a file in `processed/` may be deleted after the
+configured 14-day window because its published commit is then the durable record, while a file in
+`failed/` is never deleted automatically and remains until the operator clears it.
 
 | Directory | Meaning |
 |---|---|
@@ -766,10 +769,13 @@ tick.
 
 ##### Authority
 
-Enabling the watcher takes **three independent switches**, all off by default: the deployment
-must permit remote operations, must permit the watcher at all, and the declaration must name a
-drop. The prior art requires the same three, and the reason is that this is the one actor that
-acts with no caller present.
+Starting the watcher takes **two independent deployment switches**, both off by default: the
+deployment must permit remote operations and must permit the watcher at all. A declaration naming
+a drop is the third authority condition for processing that declaration, not for starting the
+watcher process. With no active drop-enabled declaration the watcher is healthy and idle; each tick
+resolves the current active declarations, so a runtime declaration addition or amendment takes
+effect without a restart. The prior art requires the same three authorities, and the reason is that
+this is the one actor that acts with no caller present.
 
 Its effective write allowlist is the declaration's intersected with the `watcher` profile's,
 which strips `.github/workflows/`, `.config/`, `tools/` and `build/` — the inherited rule that
@@ -1332,7 +1338,7 @@ its lifecycle is part of the security design rather than a framework default.
 | | 200, but serving a commit other than the expected merge commit | Explicit check of the served commit against the expected SHA | Polls to the 1800 s cap | `precondition` naming both SHAs | Unchanged. **No code path returns a URL in a success position without a confirmed successful deploy for that exact commit.** |
 | **This service's own deployment** (definition-of-done item 15) | Stale or mixed runtime, wrong catalogue, verification credential rejected | The companion check: poll `/healthz` until the commit SHA is stable, then run a real `initialize → tools/list → repo_status` session | Classifies rather than reporting a bare pass | `stale-runtime`, `mixed-runtime`, `verification-credential`, `unexpected-profile-or-catalog`, or `verified`. **Not a registry tool** — an executable check shipped alongside the service, as the brief describes | Unchanged |
 | **Notifier endpoint** | Unreachable, non-2xx | HTTP status | Outbox retries with backoff, bounded, then stops retrying and **surfaces the row in the health view and the status endpoint**. It is not dropped: an endpoint down overnight is exactly when the 03:00 merge conflict lands, and a notification that fails silently recreates the unwatched-means-unnoticed failure one level up | Nothing — it never blocks the operation it describes | Outbox row marked failed, retained until the operator clears it |
-| **Content drop** (watcher) | Incomplete input — the target tool's schema is not satisfied | Validation before any git action | Moves the file to `failed/` with a sibling `.error.txt`, audits, notifies at `attention` | Nothing — there is no caller | File preserved in `failed/`. Nothing is ever deleted |
+| **Content drop** (watcher) | Incomplete input — the target tool's schema is not satisfied | Validation before any git action | Moves the file to `failed/` with a sibling `.error.txt`, audits, notifies at `attention` | Nothing — there is no caller | File preserved in `failed/` until the operator clears it. Automatic retention never deletes it |
 | | Any later step fails — branch, write, stage, commit, push, PR, auto-merge | The step's own envelope | Same: `failed/` plus the reason, naming which step and what it returned | Nothing | Whatever the completed steps did. A commit may exist and be unpushed, or a PR may be open with auto-merge not enabled — the `.error.txt` says which |
 | | A file is still in `processing/` at startup | Directory scan before the first tick | Moves it to `failed/` and **never reprocesses it**, because it may already have an open pull request | Nothing | Untouched; the operator is told to check the host before dropping it again |
 | | Symlink dropped into the directory | Link-preserving stat | Ignored — never treated as a candidate file | Nothing | Untouched |

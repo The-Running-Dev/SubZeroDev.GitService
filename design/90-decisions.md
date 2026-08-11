@@ -11,6 +11,38 @@ Append-only. Newest at the top. The rejected alternatives are the point — with
 - **Repository config must stay descriptive.** Settled for now (see the decision below), and it holds only while the format carries no permission-shaped field. Worth a check at `/contract` rather than trusting anyone to remember. **The design states the test in checkable form** (`10-design.md` § `RepositoryConfig`): any field a caller could set that widens what the service will do lives in the declaration instead. **Checked at `/contract` 2026-08-03 and clean:** `RepositoryConfig` declares `baseBranch`, `requiredChecks`, `deployWorkflow` and `branchPrefixes` and nothing else; no capability, scope, path prefix, credential reference, remote, host, timeout or limit has drifted into it. The test is now invariant A8 in `20-contract.md`, so the next check is a re-read of one table row rather than a re-derivation.
 ---
 
+### 2026-08-11 — Processed content drops expire; delivery itself never deletes
+Context: The retention policy deleted `processed/` content drops after 14 days, while the watcher
+state machine and contract invariant D6 said the service never deletes any dropped file. Both could
+not be acceptance criteria: an implementation satisfying one necessarily violated the other.
+Chosen: delivery and interrupted-claim recovery never delete; every terminal path moves the file to
+`processed/` or `failed/`. Scheduled watcher retention may delete only `processed/` files older than
+the configured 14-day window, after the published commit is the durable record. `failed/` files are
+never deleted automatically and remain until the operator clears them.
+Rejected: **Never delete any dropped file** — preserves the absolute invariant but makes drop
+storage unbounded and contradicts the explicit retention window. **Delete failed files on a timer**
+— may discard the only copy of a delivery that never reached the repository. **Delete processed
+files immediately** — removes the recent trace window the 14-day policy deliberately provides.
+Reversibility: cheap before retention runs; irreversible for any processed copy already deleted.
+
+### 2026-08-11 — Watcher startup is independent of current content-drop declarations
+Context: Definition-of-done item 5 in the brief requires a running instance to pick up a new
+repository declaration without a restart. The contract instead made `Watcher.start` fail when no
+current declaration named a content drop, so an initially empty deployment could not activate its
+first content drop at runtime without restarting the watcher.
+Chosen: only the two deployment switches gate watcher startup: remote operations permitted and
+watcher enabled. With zero active content-drop declarations the watcher is healthy and idle. Every
+tick resolves the current active declarations, so a declaration added or amended at runtime becomes
+eligible on the next tick. A declaration's `contentDrop` remains the third authority condition for
+the individual drop: no file is claimed or processed without it.
+Rejected: **Keep the declaration condition as a startup gate** — preserves the existing error
+variant but requires a restart for the first runtime declaration, contradicting the brief.
+**Start the watcher from declaration management when a content drop appears** — adds a second
+lifecycle path and couples declaration mutation to watcher process ownership. **Resolve declarations
+once at watcher startup** — permits an empty start but still misses runtime additions and amendments.
+Reversibility: cheap before watcher implementation; expensive once clients branch on the removed
+`no-declaration-declares-a-drop` error variant.
+
 ### 2026-08-11 — The content-drop apply handler owns its path bound, not the watcher
 Context: Validating the content-drop amendment found that the apply tool's path check lived only in
 the watcher, while `permittedPaths` arrives as caller input and `applyTool` is an ordinary registry
