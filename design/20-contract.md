@@ -3479,10 +3479,21 @@ target kind, execution class, capabilities, scopes or other annotations fixed un
 `schema-invalid` also covers a watcher plan or apply entry whose outer input or output schema does not
 project the corresponding `FileWatcher*` type; pairing the two consumer-specific `plan` schemas is a
 declaration check because the compiler receives registry entries but no `FileWatcherConfig`.
+**Projection is exact**: the outer schema declares those properties, all of them required, and no
+others. `TPlan` is the one sanctioned point of variation, so a sixth property on a plan output is a
+different type rather than a richer one — and on either *input* schema it is worse than untidy,
+because the watcher dispatches exactly the contract's fields and an entry requiring more could never
+be dispatched successfully. Whether the two schemas additionally set `additionalProperties: false`
+is left to the declaring package, as it is for every other entry.
 `limit-exceeds-cap` covers a `monitoring-wait` whose `timeoutSeconds` exceeds
 `monitoringWaitCapSeconds`, and any entry whose `maxResultBytes` or `timeoutSeconds` is not a
 positive integer. There being no global `maxResultBytes` default is only a guarantee if a nonsense
-limit fails the build rather than passing as an explicit choice; `cap` carries the violated bound.
+limit fails the build rather than passing as an explicit choice. `cap` carries the bound the value
+failed against, which for the ceiling is `monitoringWaitCapSeconds` and for a non-positive or
+fractional limit is `1`, the smallest value either field admits. `cap` is therefore not always a
+value the declaration exceeded — for `timeoutSeconds: 1.5` it is the nearest admissible one — and a
+consumer that renders it must read it as "what this field accepts", never as "what you passed
+exceeded this". The `summary` names the rule that was broken.
 
 `no-executor` and `multiple-executors` are decided **within the declaration array alone**, because
 `compile` receives nothing else and invariant B1 forbids L0 from importing the layer that
@@ -3506,6 +3517,7 @@ type BootError = ModuleErrorBase & (
   | { readonly code: 'console-manifest-mismatch'; readonly expected: Sha256Hex; readonly found: Sha256Hex }
   | { readonly code: 'ceiling-outside-contract'; readonly capabilities: readonly CapabilityName[] }
   | { readonly code: 'executor-missing'; readonly tools: readonly RegistryToolName[] }
+  | { readonly code: 'watcher-revalidation-failed'; readonly cause: DeclarationError }
   | { readonly code: 'store-failed'; readonly cause: StoreError }
 );
 ```
@@ -3518,6 +3530,7 @@ type BootError = ModuleErrorBase & (
 | `registry-unreadable` | The registry artifact is absent, unparseable, or carries no valid fingerprint | no | Fatal, naming the reason. Distinct from `fingerprint-mismatch`, which has two real digests to report; here there is nothing to compare, and reporting it as a mismatch would mean inventing them |
 | `ceiling-outside-contract` | The deployment ceiling names a capability the contract set lacks | no | Fatal |
 | `executor-missing` | A registry entry has no registered executor | no | Fatal |
+| `watcher-revalidation-failed` | An active declaration's stored file-watcher pair is invalid against the registry loaded by this boot | no | Fatal, preserving the `DeclarationError` as `cause`; no transport starts under invalid declaration authority |
 | `store-failed` | Open, integrity check or migration failed | no | Fatal, per the store's own table |
 
 A broken audit chain is **not** in this list, deliberately.

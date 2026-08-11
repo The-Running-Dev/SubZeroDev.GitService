@@ -13,6 +13,7 @@ import type { HttpOperationName, ModuleTargetName } from '../shared/brands.ts';
 import type { ToolDeclaration } from '../contract/tool-declaration.ts';
 import type { RecoveryClassification } from '../recovery/types.ts';
 import type { Notifier } from '../notifier/notifier.ts';
+import type { DeclarationError } from '../declarations/errors.ts';
 import { acquireLease, type InstanceLease, type LeaseGuard, type LockAcquirer } from './lease.ts';
 import { verifyRegistryArtifact } from './registry-integrity.ts';
 import { declarationsWithUnsettledEntries, recoverDeclaration as runRecoveryLadder, type RecoveryDependencies } from './recovery.ts';
@@ -26,6 +27,7 @@ export type BootError = ModuleErrorBase &
     | { readonly code: 'console-manifest-mismatch'; readonly expected: Sha256Hex; readonly found: Sha256Hex }
     | { readonly code: 'ceiling-outside-contract'; readonly capabilities: readonly CapabilityName[] }
     | { readonly code: 'executor-missing'; readonly tools: readonly RegistryToolName[] }
+    | { readonly code: 'watcher-revalidation-failed'; readonly cause: DeclarationError }
     | { readonly code: 'store-failed'; readonly cause: StoreError }
   );
 
@@ -114,6 +116,8 @@ export interface LifecycleDependencies {
   readonly registeredModuleTargets?: ReadonlySet<ModuleTargetName>;
   /** S12 — the same check as `registeredModuleTargets`, for the registry's http-targeted entries. Optional and independent of it: a `Lifecycle` built before the http adapter existed still compiles, and an http-targeted entry is simply not examined until this is supplied. */
   readonly registeredHttpOperations?: ReadonlySet<HttpOperationName>;
+  /** Invariant B6 — active declarations must still name a valid plan/apply pair in the registry loaded by this boot. */
+  readonly revalidateFileWatchers: () => Promise<Outcome<void, DeclarationError>>;
   readonly acquirer?: LockAcquirer;
   /** Fires alongside the durable `lease-takeover` audit record — operator-visible even if the trail itself cannot be written. */
   readonly onTakeover?: (previousHolder: InstanceLease, current: InstanceLease) => void;
@@ -260,23 +264,26 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         return err(bootError({ code: 'store-failed', cause: opened.error }, opened.error.summary));
       }
 
-      const failAfterOpen = async (cause: StoreError): Promise<Outcome<BootReport, BootError>> => {
+      const failAfterOpen = async (error: BootError): Promise<Outcome<BootReport, BootError>> => {
         await deps.store.close();
         if (guard) {
           guard.release();
           guard = null;
         }
-        return err(bootError({ code: 'store-failed', cause }, cause.summary));
+        return err(error);
       };
+      /** The store's own failures, which are every one of these but the B6 gate below. */
+      const failAfterOpenWithStore = (cause: StoreError): Promise<Outcome<BootReport, BootError>> =>
+        failAfterOpen(bootError({ code: 'store-failed', cause }, cause.summary));
 
       const integrity = await deps.store.integrityCheck();
-      if (!integrity.ok) return failAfterOpen(integrity.error);
+      if (!integrity.ok) return failAfterOpenWithStore(integrity.error);
 
       const backup = await deps.store.backupBeforeMigration();
-      if (!backup.ok) return failAfterOpen(backup.error);
+      if (!backup.ok) return failAfterOpenWithStore(backup.error);
 
       const migrated = await deps.store.migrate();
-      if (!migrated.ok) return failAfterOpen(migrated.error);
+      if (!migrated.ok) return failAfterOpenWithStore(migrated.error);
 
       // The lease-takeover record can only be written now: audit_chain_head
       // is created by migration 0001, which has just run. Detected at step 1,
@@ -300,6 +307,22 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
 
       const auditChain = await deps.audit.verify();
       const provisioningPending = (await deps.operatorIdentity.provisioningState()) === 'pending';
+
+      // Invariant B6 — an image upgrade may remove or change a tool named by
+      // an active declaration's file-watcher pair. The declarations store is
+      // readable only after migration, and this check must finish before
+      // clone derivation or readiness admits any work under the drifted
+      // authority. Lifecycle owns the ordering; the composition root merely
+      // injects the declaration-owned validation operation.
+      const watcherRevalidation = await deps.revalidateFileWatchers();
+      if (!watcherRevalidation.ok) {
+        return failAfterOpen(
+          bootError(
+            { code: 'watcher-revalidation-failed', cause: watcherRevalidation.error },
+            `file-watcher revalidation failed: ${watcherRevalidation.error.summary}`,
+          ),
+        );
+      }
 
       // Step 8 — re-derive clone state from disk. The stored value is a
       // report, not a source of truth (`10-design.md` § Boot and recovery).

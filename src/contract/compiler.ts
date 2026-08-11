@@ -1,8 +1,10 @@
 import { err, ok, type Outcome } from '../shared/outcome.ts';
 import { isoUtcTimestamp, type RegistryToolName, type Sha256Hex } from '../shared/brands.ts';
+import type { Finding } from '../shared/result-kind.ts';
 import { capabilityScopeOf, type CapabilityName, type ContractCapabilitySet } from './capabilities.ts';
 import { computeFingerprint, normaliseEntryOrder } from './fingerprint.ts';
 import { isJsonObject } from './json.ts';
+import type { SchemaObject } from './json-schema.ts';
 import type { CompiledRegistry, CompilerArtifact, ExecutionTarget, ToolDeclaration } from './tool-declaration.ts';
 import type { CompilerError } from './compiler-errors.ts';
 
@@ -12,6 +14,15 @@ import type { CompilerError } from './compiler-errors.ts';
  * past this build-time ceiling — that is what `limit-exceeds-cap` protects.
  */
 export const MONITORING_WAIT_CAP_SECONDS = 1800;
+
+/**
+ * The smallest value `timeoutSeconds` and `maxResultBytes` admit. There is no
+ * global `maxResultBytes` default precisely so that a nonsense limit fails the
+ * build rather than passing as an explicit choice (`20-contract.md`
+ * § Deployment configuration), which only holds if zero, negative and
+ * fractional values are all rejected.
+ */
+export const MIN_LIMIT = 1;
 
 const NAME_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 
@@ -34,6 +45,131 @@ function targetKey(target: ExecutionTarget): string {
 // 'infrastructure', which `isError` treats as a service/environment failure.
 function moduleError<T extends { readonly code: CompilerError['code'] }>(base: T, summary: string): CompilerError {
   return { resultKind: 'validation', retryable: false, summary, ...base } as unknown as CompilerError;
+}
+
+function schemaObject(value: unknown): SchemaObject | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as SchemaObject) : null;
+}
+
+function hasExactType(schema: SchemaObject, expected: string): boolean {
+  return schema.type === expected || (Array.isArray(schema.type) && schema.type.length === 1 && schema.type[0] === expected);
+}
+
+function requireObject(value: unknown, path: string, findings: Finding[]): SchemaObject | null {
+  const schema = schemaObject(value);
+  if (!schema || !hasExactType(schema, 'object')) {
+    findings.push({ path, rule: 'watcher-schema-projection', message: 'must declare type object' });
+    return null;
+  }
+  return schema;
+}
+
+function requireProperty(schema: SchemaObject, property: string, path: string, findings: Finding[]): SchemaObject | null {
+  if (!schema.required?.includes(property)) {
+    findings.push({ path: `${path}.required`, rule: 'watcher-schema-projection', message: `must require '${property}'` });
+  }
+  const value = schema.properties?.[property];
+  const propertySchema = schemaObject(value);
+  if (!propertySchema) {
+    findings.push({ path: `${path}.properties.${property}`, rule: 'watcher-schema-projection', message: 'must declare a schema' });
+    return null;
+  }
+  return propertySchema;
+}
+
+function requireStringProperty(schema: SchemaObject, property: string, path: string, findings: Finding[]): void {
+  const propertySchema = requireProperty(schema, property, path, findings);
+  if (propertySchema && !hasExactType(propertySchema, 'string')) {
+    findings.push({ path: `${path}.properties.${property}.type`, rule: 'watcher-schema-projection', message: 'must be string' });
+  }
+}
+
+function requireStringArrayProperty(schema: SchemaObject, property: string, path: string, findings: Finding[]): void {
+  const propertySchema = requireProperty(schema, property, path, findings);
+  if (!propertySchema) return;
+  if (!hasExactType(propertySchema, 'array')) {
+    findings.push({ path: `${path}.properties.${property}.type`, rule: 'watcher-schema-projection', message: 'must be array' });
+    return;
+  }
+  const items = schemaObject(propertySchema.items);
+  if (!items || !hasExactType(items, 'string')) {
+    findings.push({ path: `${path}.properties.${property}.items.type`, rule: 'watcher-schema-projection', message: 'must be string' });
+  }
+}
+
+/**
+ * Projection is *exact*: the contract admits specialisation at `TPlan` and
+ * nowhere else (`20-contract.md` § File watcher), so a property the
+ * `FileWatcher*` type does not have is not a richer projection of it — it is a
+ * different type. The asymmetry matters most on the input side, where the
+ * watcher dispatches exactly the contract's fields: an entry requiring a sixth
+ * one compiles happily and then fails schema validation on every dispatch, at
+ * runtime, which is the class of error definition-of-done item 2 exists to
+ * pull forward to the build.
+ */
+function requireExactProperties(schema: SchemaObject, expected: readonly string[], path: string, findings: Finding[]): void {
+  for (const declared of Object.keys(schema.properties ?? {})) {
+    if (!expected.includes(declared)) {
+      findings.push({ path: `${path}.properties.${declared}`, rule: 'watcher-schema-projection', message: `is not a property of the fixed schema (expected only: ${expected.join(', ')})` });
+    }
+  }
+  for (const required of schema.required ?? []) {
+    if (!expected.includes(required)) {
+      findings.push({ path: `${path}.required`, rule: 'watcher-schema-projection', message: `must not require '${required}', which is not a property of the fixed schema` });
+    }
+  }
+}
+
+const PLAN_INPUT_PROPERTIES = ['sourceFile', 'content'] as const;
+const PLAN_OUTPUT_PROPERTIES = ['branch', 'commitMessage', 'pullRequest', 'permittedPaths', 'plan'] as const;
+const PULL_REQUEST_PROPERTIES = ['title', 'body'] as const;
+const APPLY_INPUT_PROPERTIES = ['permittedPaths', 'plan'] as const;
+const APPLY_OUTPUT_PROPERTIES = ['changedPaths'] as const;
+
+/** `phase` comes from the caller, which has already narrowed it — re-reading the annotation here would be a second source of truth for the same fact. */
+function validateWatcherSchemas(declaration: ToolDeclaration, phase: 'plan' | 'apply'): Finding[] {
+  const findings: Finding[] = [];
+  if (phase === 'plan') {
+    const input = requireObject(declaration.inputSchema, 'inputSchema', findings);
+    if (input) {
+      requireStringProperty(input, 'sourceFile', 'inputSchema', findings);
+      requireStringProperty(input, 'content', 'inputSchema', findings);
+      requireExactProperties(input, PLAN_INPUT_PROPERTIES, 'inputSchema', findings);
+    }
+
+    const output = requireObject(declaration.outputSchema, 'outputSchema', findings);
+    if (output) {
+      requireStringProperty(output, 'branch', 'outputSchema', findings);
+      requireStringProperty(output, 'commitMessage', 'outputSchema', findings);
+      requireStringArrayProperty(output, 'permittedPaths', 'outputSchema', findings);
+      requireProperty(output, 'plan', 'outputSchema', findings);
+      const pullRequest = requireProperty(output, 'pullRequest', 'outputSchema', findings);
+      if (pullRequest) {
+        const pullRequestObject = requireObject(pullRequest, 'outputSchema.properties.pullRequest', findings);
+        if (pullRequestObject) {
+          requireStringProperty(pullRequestObject, 'title', 'outputSchema.properties.pullRequest', findings);
+          requireStringProperty(pullRequestObject, 'body', 'outputSchema.properties.pullRequest', findings);
+          requireExactProperties(pullRequestObject, PULL_REQUEST_PROPERTIES, 'outputSchema.properties.pullRequest', findings);
+        }
+      }
+      requireExactProperties(output, PLAN_OUTPUT_PROPERTIES, 'outputSchema', findings);
+    }
+  } else {
+    const input = requireObject(declaration.inputSchema, 'inputSchema', findings);
+    if (input) {
+      requireStringArrayProperty(input, 'permittedPaths', 'inputSchema', findings);
+      requireProperty(input, 'plan', 'inputSchema', findings);
+      requireExactProperties(input, APPLY_INPUT_PROPERTIES, 'inputSchema', findings);
+    }
+
+    const output = requireObject(declaration.outputSchema, 'outputSchema', findings);
+    if (output) {
+      requireStringArrayProperty(output, 'changedPaths', 'outputSchema', findings);
+      requireExactProperties(output, APPLY_OUTPUT_PROPERTIES, 'outputSchema', findings);
+    }
+  }
+
+  return findings;
 }
 
 function validateOne(declaration: ToolDeclaration): CompilerError[] {
@@ -87,6 +223,10 @@ function validateOne(declaration: ToolDeclaration): CompilerError[] {
   }
   const watcherPhase = declaration.annotations.fileWatcher;
   if (watcherPhase !== false) {
+    const schemaFindings = validateWatcherSchemas(declaration, watcherPhase);
+    if (schemaFindings.length > 0) {
+      errors.push(moduleError({ code: 'schema-invalid', name, findings: schemaFindings }, `tool '${name}' does not project the fixed file-watcher ${watcherPhase} schema`));
+    }
     const isPlan = watcherPhase === 'plan';
     const capabilitiesValid = isPlan
       ? declaration.capabilities.length === 0
@@ -107,7 +247,31 @@ function validateOne(declaration: ToolDeclaration): CompilerError[] {
     }
   }
 
-  if (declaration.executionClass === 'monitoring-wait' && declaration.limits.timeoutSeconds > MONITORING_WAIT_CAP_SECONDS) {
+  // `cap` carries the bound the value failed against, and for these two the
+  // bound is the *lower* one: `MIN_LIMIT` is the smallest value either field
+  // admits (`20-contract.md` § Compiler). Reporting it for a fractional value
+  // is not a claim that 1.5 exceeds 1 — the summary says which rule was
+  // broken; `cap` says what the field will accept.
+  const limitFields = [
+    ['timeoutSeconds', declaration.limits.timeoutSeconds],
+    ['maxResultBytes', declaration.limits.maxResultBytes],
+  ] as const;
+  for (const [field, value] of limitFields) {
+    if (!Number.isInteger(value) || value <= 0) {
+      errors.push(
+        moduleError(
+          { code: 'limit-exceeds-cap', name, cap: MIN_LIMIT },
+          `tool '${name}' ${field} must be a positive integer, not ${value}; the smallest value it admits is ${MIN_LIMIT}`,
+        ),
+      );
+    }
+  }
+
+  if (
+    declaration.executionClass === 'monitoring-wait' &&
+    Number.isInteger(declaration.limits.timeoutSeconds) &&
+    declaration.limits.timeoutSeconds > MONITORING_WAIT_CAP_SECONDS
+  ) {
     errors.push(
       moduleError(
         { code: 'limit-exceeds-cap', name, cap: MONITORING_WAIT_CAP_SECONDS },

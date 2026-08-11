@@ -122,6 +122,26 @@ test('S23.2 — a valid watcher survives restart and boot re-validation rejects 
   });
 });
 
+test('S23.2 — an unreadable declaration table fails re-validation rather than passing over zero rows', async () => {
+  // The volume is deliberately *not* migrated, so `SELECT * FROM declaration`
+  // throws rather than returning nothing. That is the shape of any read
+  // failure here, and the distinction it forces is the whole point: a boot
+  // gate that cannot read the table it is gating must refuse, not report a
+  // clean pass. `list` still absorbs the same failure into an empty array,
+  // which is correct for the callers that only render declarations.
+  await withVolumeAsync(async (volume) => {
+    const declarations = declarationsFor(volume, { registryEntries: [WATCH_PLAN, WATCH_APPLY] });
+
+    const revalidated = await declarations.revalidateFileWatchers();
+    assert.equal(revalidated.ok, false, 'an unreadable table is not a clean bill of health');
+    if (revalidated.ok) return;
+    assert.equal(revalidated.error.code, 'store-failed');
+    assert.equal(revalidated.error.resultKind, 'infrastructure');
+
+    assert.deepEqual(await declarations.list({ state: null, hasFileWatcher: null }), [], 'list stays lossy on purpose');
+  });
+});
+
 function upsertCloneRow(volume: string, declarationId: string, state: string): void {
   const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
   db.prepare(

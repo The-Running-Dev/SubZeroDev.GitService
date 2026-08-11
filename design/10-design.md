@@ -1171,18 +1171,22 @@ operation.
    probing the host during recovery was rejected. Any entry needing a resume is left for the lazy
    pass, and its job simply stays `running` until that happens, which is a state the console
    shows rather than one that silently fires.
-7. **Re-validate every pending scheduled job — and every unsettled journal entry — against the
-   registry and catalogue just loaded.** An image upgrade can rename a tool, remove one, or change
-   its input schema while jobs referencing the old shape sit pending; without this sweep the
-   failure surfaces weeks later at fire time, with its cause an upgrade nobody is still thinking
-   about. A job whose tool no longer exists, or whose stored input no longer validates, becomes
-   `needs-attention` with the reason naming the upgrade.
+7. **Re-validate every pending scheduled job, every unsettled journal entry, and every active
+   declaration's file-watcher pair against the registry and catalogue just loaded.** An image
+   upgrade can rename a tool, remove one, or change its input schema while jobs or declarations
+   reference the old shape; without this sweep the failure surfaces later at fire time, with its
+   cause an upgrade nobody is still thinking about. A job whose tool no longer exists, or whose
+   stored input no longer validates, becomes `needs-attention` with the reason naming the upgrade.
 
    The same upgrade can remove the **recovery descriptor** an unsettled entry depends on, and the
    sweep catches that too: an entry whose tool has no descriptor in the new catalogue is parked as
    `attention` here rather than falling into a lookup the recovery ladder has no branch for. Both
    are store queries rather than git work, so the sweep costs nothing against lazy recovery, and
    the operator sees both next to the fingerprint checks that caused them rather than at 03:00.
+   A file-watcher pair that no longer names correctly annotated plan and apply tools with matching
+   canonical plan schemas fails boot with `watcher-revalidation-failed`: unlike an individual
+   pending job, it is active declaration authority, and the service has no disabled state in which
+   it could retain that authority while honestly starting.
 8. Re-derive every clone's state from disk. The stored value is a report, not a source of truth.
 9. **Readiness passes and transports start**, before any recovery work runs. Recovery is
    per-declaration and lazy: a declaration with unsettled journal entries is marked

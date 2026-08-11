@@ -1,6 +1,5 @@
 import type {
   DeclarationId,
-  DropFileName,
   Generation,
   IsoUtcTimestamp,
   OperationId,
@@ -8,6 +7,7 @@ import type {
   RepoRelativePath,
   Sha256Hex,
   Subject,
+  WatchedFileName,
 } from '../shared/brands.ts';
 import type { CapabilityName } from '../contract/capabilities.ts';
 import type { ResultKind } from '../shared/result-kind.ts';
@@ -60,7 +60,7 @@ export type AuditRecordForm =
   | 'authorization-rejection'
   | 'hatch-intent'
   | 'hatch-outcome'
-  | 'content-drop'
+  | 'file-watcher'
   | 'identity-event'
   | 'lease-takeover';
 
@@ -88,7 +88,7 @@ export type IdentityEvent =
   | 'grant-revoked'
   | 'token-revoked';
 
-export type DropOutcome =
+export type WatchedFileOutcome =
   | { readonly kind: 'succeeded'; readonly pullRequest: PullRequestRef }
   | { readonly kind: 'rejected'; readonly step: string; readonly result: ResultKind; readonly reason: string }
   | { readonly kind: 'interrupted-claim'; readonly reason: string };
@@ -98,7 +98,7 @@ export type AuditRecordBody =
   | { readonly form: 'authorization-rejection'; readonly missing: readonly CapabilityName[]; readonly rejectedPath: RepoRelativePath | null }
   | { readonly form: 'hatch-intent'; readonly argv: readonly string[] }
   | { readonly form: 'hatch-outcome'; readonly resultKind: ResultKind; readonly changedPaths: readonly RepoRelativePath[] | null }
-  | { readonly form: 'content-drop'; readonly file: DropFileName; readonly outcome: DropOutcome }
+  | { readonly form: 'file-watcher'; readonly file: WatchedFileName; readonly outcome: WatchedFileOutcome }
   | { readonly form: 'identity-event'; readonly event: IdentityEvent }
   | { readonly form: 'lease-takeover'; readonly previousHolder: InstanceLease };
 

@@ -1,8 +1,8 @@
 import type { BranchName, GitSha, HttpsUrl, IsoUtcTimestamp } from '../shared/brands.ts';
 
 /**
- * Type only. The host adapter (L2) that produces these is S10; `DropOutcome`
- * (needed for `AuditRecordBody`'s `content-drop` form) references it, so the
+ * Type only. The host adapter (L2) that produces these is S10; `WatchedFileOutcome`
+ * (needed for `AuditRecordBody`'s `file-watcher` form) references it, so the
  * type is needed before the module that owns it exists.
  */
 export interface PullRequestRef {

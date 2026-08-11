@@ -392,6 +392,7 @@ async function main(): Promise<void> {
     registryEntries: PRODUCTION_TOOL_DECLARATIONS,
     registeredModuleTargets: moduleAdapter.registeredTargets(),
     registeredHttpOperations: httpAdapter.declaredOperations(),
+    revalidateFileWatchers: () => declarations.revalidateFileWatchers(),
     recovery,
     notifier,
     onTakeover: (previous, current) => {
@@ -412,14 +413,6 @@ async function main(): Promise<void> {
   const booted = await lifecycle.boot();
   if (!booted.ok) {
     console.error(`server: boot failed (${booted.error.code}) — ${booted.error.summary}`);
-    console.error('server: refusing to start; no transport starts.');
-    await lifecycle.shutdown('fatal');
-    process.exit(1);
-    return;
-  }
-  const watcherRevalidation = await declarations.revalidateFileWatchers();
-  if (!watcherRevalidation.ok) {
-    console.error(`server: boot failed (${watcherRevalidation.error.code}) — ${watcherRevalidation.error.summary}`);
     console.error('server: refusing to start; no transport starts.');
     await lifecycle.shutdown('fatal');
     process.exit(1);
