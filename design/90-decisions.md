@@ -13,6 +13,35 @@ Append-only. Newest at the top. The rejected alternatives are the point — with
 - **Repository config must stay descriptive.** Settled for now (see the decision below), and it holds only while the format carries no permission-shaped field. Worth a check at `/contract` rather than trusting anyone to remember. **The design states the test in checkable form** (`10-design.md` § `RepositoryConfig`): any field a caller could set that widens what the service will do lives in the declaration instead. **Checked at `/contract` 2026-08-03 and clean:** `RepositoryConfig` declares `baseBranch`, `requiredChecks`, `deployWorkflow` and `branchPrefixes` and nothing else; no capability, scope, path prefix, credential reference, remote, host, timeout or limit has drifted into it. The test is now invariant A8 in `20-contract.md`, so the next check is a re-read of one table row rather than a re-derivation.
 ---
 
+### 2026-08-12 — TOTP recovery is a globally enforced, purpose-limited session
+Context: Contract open question U11 identified that the design required recovery-code login to
+force TOTP re-enrolment but did not determine the identity operation, browser route or authority
+held between proof and completion. The same gap applied to break-glass, whose purpose is recovery
+from a lost TOTP device and therefore cannot safely finish with the lost factor still active.
+Chosen: A successful recovery-code or break-glass proof atomically sets the singleton
+`totp_reenrol_required` flag, revokes all existing operator sessions and creates a persisted
+`totp-reenrolment` session. While the flag is set, every successful local, recovery-code,
+break-glass or OIDC login creates only that restricted purpose. It may inspect itself, log out, and
+call cookie-, Origin- and CSRF-protected `POST /auth/totp/re-enrol/start` and
+`POST /auth/totp/re-enrol/complete`; any other authenticated route returns `403` with
+`totp-reenrolment-required`. Start stores or replays one session-scoped sealed pending secret.
+Successful completion atomically promotes it, clears the flag, upgrades that session, revokes all
+others, invalidates the old recovery-code set and returns ten replacement codes once; an invalid
+confirmation changes nothing.
+Rejected: **Grant a full session and rely on a console redirect** — direct route calls bypass the
+repair. **Use a separate opaque challenge** — duplicates session persistence, expiry, revocation
+and replay rules. **Let break-glass grant unrestricted authority** — restores access without
+repairing the lost factor. **Restrict only the recovery session or exempt local and OIDC login** —
+another proof bypasses the global recovery state. **Preserve or suspend existing sessions** — their
+authority after a credential reset is ambiguous. **Preserve unused recovery codes, or rotate only
+after break-glass** — leaves a possibly exposed set valid and treats equivalent recovery paths
+differently. **Return the secret from login, use one route or distinguish actions in a request
+field** — a lost response cannot safely replay the pending secret and the state transitions become
+less explicit. **Return `401` outside the recovery routes** — misstates an authorisation boundary
+as failed authentication and sends the browser back into a login loop.
+Reversibility: expensive once clients consume the session purpose, error code and two route shapes;
+the internal placement of the sealed pending secret remains comparatively cheap to change.
+
 ### 2026-08-12 — Peer validation hardens the S23 reconciliation's three weakest joints
 Context: Peer validation of PR #102, before merge. The reconciliation was correct in direction and
 green on every gate, but three of its new guarantees were weaker than the sentences written to

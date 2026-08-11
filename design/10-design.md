@@ -422,6 +422,22 @@ console session survives a restart, on the same reasoning that made OAuth grants
 sessions stay in memory because their durability lives in the `Grant` and refresh `Token` that
 re-establish them.
 
+An operator session additionally carries a persisted **purpose**: `full` or
+`totp-reenrolment`. A `totp-reenrolment` session is authenticated but not generally authorised: it
+may inspect its own session, start or complete TOTP re-enrolment, or log out, and no other console
+route. These two fields extend the persisted row; neither belongs to the generic dispatch
+`Session` above.
+
+| Field | Type | Notes |
+|---|---|---|
+| `purpose` | `full` \| `totp-reenrolment` | Reported by session inspection and enforced centrally before route dispatch. |
+| `pendingTotpSecretSealed` | string? | Present only after a restricted session starts re-enrolment; never returned by session inspection. |
+
+The pending secret is sealed with the same credential-mount key as the active secret. It expires
+or is revoked with the session. Keeping it on the session rather than on the singleton credential
+lets two authenticated recovery attempts remain distinguishable; only the session that received a
+pending secret can confirm it.
+
 An MCP session binds to exactly one repository at `initialize`, because the MCP resource
 indicator *is* the repository: the canonical URI is `/mcp/{declarationId}`. That is what lets
 capability filtering affect **discovery as well as dispatch**, which the prior art requires and
@@ -861,7 +877,7 @@ L0  Contract        contract types  |  compiler  |  generated registry
 | **Http adapter** (L3) | Invoking a registry entry whose execution target is a declared HTTP endpoint: request shaping, the declared timeout, response mapping into the envelope. Its consumer is published-URL verification — see below. | L1, contract types. | Invoke. |
 | **Dispatch pipeline** (L4) | The one canonical call path: identify, authenticate, enforce scopes, enforce capabilities, validate input, apply limits and cancellation, invoke adapter, validate output, scrub, audit, envelope. | L3, L1, the registry artifact. **Not L2** — see the acyclicity argument. | Dispatch. |
 | **Authorization** (L4) | Resource-server token verification, the embedded provider, durable clients and grants, operator API tokens, revocation and the grant-epoch check. | Structured store. | MCP session establishment, API-token verification, revocation the console calls, `runRetention`. |
-| **Operator identity** (L4) | First-boot provisioning, password, enforced TOTP, recovery codes, break-glass, OIDC relying party, subject allowlist, and the persisted operator session. | Structured store. | Operator session establishment, logout, revocation. |
+| **Operator identity** (L4) | First-boot provisioning, password, enforced TOTP, recovery codes, break-glass, TOTP re-enrolment, OIDC relying party, subject allowlist, and the persisted operator session. | Structured store. | Full and purpose-limited operator session establishment, TOTP re-enrolment, logout, revocation. |
 | **Surfaces** (L5) | Transport framing, routing, session lifecycle, cookie attributes, CSRF defence, static console assets. | L4 only. | Nothing inward. |
 
 ### The acyclicity argument
@@ -1053,6 +1069,13 @@ operation.
    declaration; per-repository narrowing still applies per call, because the effective set is
    computed against the declaration named in the request.
 
+   Before issuing full authority, login reads the singleton `totp_reenrol_required` state. While
+   it is set, **every** successful proof — local TOTP, recovery code, break-glass or OIDC — creates
+   only a `totp-reenrolment` session. This is global operator state, not a property a caller can
+   evade by choosing another login method. A successful recovery-code or break-glass proof sets
+   the flag, revokes every existing operator session and creates the new purpose-limited session
+   in one store transaction.
+
    **The API accepts two credentials, and which routes accept which is stated rather than
    implied.** A browser presents the session cookie with the `Origin` check and the double-submit
    token. A script presents `Authorization: Bearer` with an operator API token — an
@@ -1108,6 +1131,14 @@ operation.
    reachable only through the hatch or from outside the service, so requiring the hatch to leave
    it asks for nothing that was not already granted deliberately. The repair session covers what
    the base surface can actually create.
+
+8. **A purpose-limited session cannot reach the console by navigating around the re-enrolment
+   view.** Session inspection reports its purpose. Every other authenticated route centrally
+   requires `full` and returns `403` with `totp-reenrolment-required`; it does not return `401`,
+   because the identity has already been proved and sending the caller back through login creates
+   a loop. The only exceptions are session inspection, `POST /auth/totp/re-enrol/start`,
+   `POST /auth/totp/re-enrol/complete` and logout. Both mutating re-enrolment routes require the
+   same cookie, Origin check and double-submit CSRF token as any other mutating cookie route.
 
 ### 3. Boot and recovery — triggered by process start
 
@@ -1282,19 +1313,41 @@ Definition-of-done item 10 requires a working path, and there are two, deliberat
 of each other and of the identity provider.
 
 - **Recovery codes.** Ten single-use codes generated at first enrolment, displayed exactly once,
-  stored only as hashes. Using one authenticates, burns the code, writes an audit line, and
-  forces TOTP re-enrolment. They work while the identity provider is down, because they are
-  local.
+  stored only as hashes. Using one authenticates, burns the code, writes an audit line, revokes
+  existing operator sessions, and enters the purpose-limited re-enrolment state. They work while
+  the identity provider is down, because they are local.
 - **Break-glass.** A short-lived single-use token an operator with host access writes into the
-  volume, consumed at the next login and audited. This is the path for a lost TOTP device *and*
-  lost recovery codes, and it is the reason volume access is the ultimate authority rather than
-  re-provisioning the instance.
+  volume, consumed at the next login and audited. It enters the **same** purpose-limited state as
+  a recovery code: granting an unrestricted session would get the operator in once without
+  repairing the lost factor. This is the path for a lost TOTP device *and* lost recovery codes,
+  and it is the reason volume access is the ultimate authority rather than re-provisioning the
+  instance.
 
 The case worth naming, because the failure-mode table's answer to a broken identity provider is
 "local password plus TOTP still works": that answer is no help when TOTP is precisely what was
 lost. Recovery codes cover an unavailable provider, break-glass covers a lost second factor, and
 neither depends on the other. No path requires the identity provider to restore local access, and
 no path requires a working TOTP device to burn a recovery code.
+
+**Re-enrolment is a durable two-step protocol inside that restricted session.**
+
+1. `POST /auth/totp/re-enrol/start` generates a new secret when the session has none, seals it on
+   that session row, and returns the clear secret for authenticator enrolment. Repeating the call
+   returns the same pending secret, so a lost browser response does not force another recovery
+   credential to be consumed.
+2. `POST /auth/totp/re-enrol/complete` accepts one TOTP code. An invalid code changes nothing. A
+   valid code atomically promotes the pending secret to the active credential, clears
+   `totp_reenrol_required`, invalidates the entire old recovery-code set, inserts ten new hashes,
+   upgrades the completing session to `full`, clears its pending secret, and revokes every other
+   operator session. It then writes `totp-reenrolled` to the audit trail and returns the ten new
+   recovery codes exactly once.
+
+The transaction is the boundary. No caller can observe a new active secret with the old recovery
+set, a cleared flag with a restricted session, or two sessions upgraded by concurrent completion.
+If the store write fails, the pending secret and restricted session remain and the operator may
+retry. If the audit append fails, completion stands, matching the audit module's best-effort rule.
+If the response carrying the new recovery codes is lost, their hashes remain authoritative and the
+clear values cannot be recovered; break-glass remains the independent route to repeat recovery.
 
 ### Console session
 
@@ -1337,6 +1390,7 @@ its lifecycle is part of the security design rather than a framework default.
 | | Corrupt | Integrity check at boot | **Refuses to start**, naming the newest daily snapshot **and its age**, alongside the pre-migration copy. The two are for different failures: the pre-migration copy is a rollback target for a bad image and can be months old, so offering it as the answer to corruption would silently propose reverting every declaration, grant and journal entry written since the last upgrade | No service | Volume untouched; the audit log is still readable, which is why it does not live in this store |
 | | Migration fails | Non-zero from the migration step | Refuses to start; the backup was taken first | No service | The backup is the rollback target for item 18 |
 | **Identity provider** | Unreachable, key rotation, clock skew | Discovery or JWKS fetch failure; signature or validity-window failure | Federated login fails; **local password plus TOTP still works** | `401` with a reason | No session |
+| **TOTP re-enrolment** | Sealing key absent, pending secret absent, confirmation code invalid, or store transaction fails | Key read, purpose and pending-secret checks, TOTP verification, transactional write | Keeps the session purpose-limited and leaves the active secret, flag and recovery-code set unchanged; a valid completion commits all credential and session changes together | `401` for the existing key/code failures, `403` when the session is not eligible, or `503` for store failure | The same restricted session and, once started, the same sealed pending secret remain retryable |
 | **Deploy target** (a managed repository's published URL) | Unreachable or non-2xx | HTTP status from the http adapter | No retry inside the call | `upstream` | Unchanged |
 | | 200, but serving a commit other than the expected merge commit | Explicit check of the served commit against the expected SHA | Polls to the 1800 s cap | `precondition` naming both SHAs | Unchanged. **No code path returns a URL in a success position without a confirmed successful deploy for that exact commit.** |
 | **This service's own deployment** (definition-of-done item 15) | Stale or mixed runtime, wrong catalogue, verification credential rejected | The companion check: poll `/healthz` until the commit SHA is stable, then run a real `initialize → tools/list → repo_status` session | Classifies rather than reporting a bare pass | `stale-runtime`, `mixed-runtime`, `verification-credential`, `unexpected-profile-or-catalog`, or `verified`. **Not a registry tool** — an executable check shipped alongside the service, as the brief describes | Unchanged |
@@ -1365,6 +1419,7 @@ its lifecycle is part of the security design rather than a framework default.
 | | Cannot append the **`git.raw` intent line** | **Aborts before the child process starts.** A hatch use the service cannot record must not run. The claim is refusal at call time only, not that a recorded use stays recorded — see The escape hatch's residual risk | `infrastructure` | None |
 | | Cannot append the **`git.raw` outcome line** | Proceeds; the intent line already records the use and its argument vector | The envelope the command produced | Whatever the command did. The trail says what was attempted, not what it achieved |
 | **Output validation** | Handler returns something the schema does not admit | Rejects before any structured content reaches the client | `infrastructure` | Side effects already happened; the journal records them |
+| **Operator-session purpose** | A `totp-reenrolment` session calls any route outside session inspection, TOTP start/complete or logout | Rejects before the route's operation runs; preserves the session so the operator can complete recovery | `403` with `totp-reenrolment-required` | None |
 | **Instance lease** | Second instance, live holder | Refuses to start, naming the holder | No service | Untouched |
 | | Lease file present, OS lock free | Takes over, audits the takeover, runs recovery | No service until ready | Recovered per the boot path |
 | | Filesystem grants the lock to a second process | Child-process self-test at boot | **Fatal**, naming the volume configuration — this is the bind-mount case, and the alternative is two instances silently sharing one store, journal and set of clones | No service | Untouched |
@@ -1557,6 +1612,10 @@ What runs simultaneously:
 - **Any number of MCP sessions, the console, the scheduler tick and the watcher.** They contend
   for the same mutation lock and are ordered FIFO by arrival. There is no priority and no
   fairness beyond arrival order.
+- **Several operator authentication or re-enrolment requests.** They do not take either repository
+  lock; the structured-store transaction serialises the singleton credential transition. A later
+  recovery proof may revoke an earlier restricted session, and the first valid completion that
+  commits revokes every competing session. No two completions can both promote a pending secret.
 
 What must not, and what enforces it:
 
@@ -1927,12 +1986,33 @@ use is friction an operator routes around. Rejected: *direct programmatic use go
 one authenticated surface for scripts, and it demotes a surface the brief lists as first-class
 with its own named consumer.
 
+**TOTP recovery uses a persisted, purpose-limited session and a two-step secret confirmation.**
+Rejected: *issue a fully authoritative session and rely on the console to redirect* — the current
+flag would then be advisory, and a direct route call could bypass the view. Rejected: *issue a
+separate opaque recovery challenge and no operator session* — stronger separation, at the cost of
+a second credential lifecycle, store, expiry and replay model beside the cookie session that
+already supplies all four. Rejected: *return the new secret directly from recovery login and expose
+only completion* — one fewer route, and a lost response leaves no safe way to display the same
+pending secret again. The restricted session reuses persistence, expiry, revocation and CSRF; the
+start/complete split makes secret delivery repeatable without making confirmation repeatable.
+
+**Recovery is global operator state and rotates every recovery code.** Rejected: *restrict only
+the session created by the recovery proof* — a fresh local or OIDC login would regain full
+authority while the flag still claimed re-enrolment was forced. Rejected: *preserve unused codes*
+— less disruption after a lost authenticator, and it leaves codes from a potentially exposed set
+valid and leaves break-glass recovery with no restored code path. Rejected: *suspend existing
+sessions and restore them after completion* — preserves continuity, at the cost of a second
+session state whose authority after a credential reset is ambiguous. Recovery instead revokes
+existing sessions, admits only purpose-limited ones while the flag is set, and issues a fresh set
+on the successful transition.
+
 ---
 
 ## Open questions
 
-**None.** All seven questions this document opened are answered; each is a dated entry in
-`90-decisions.md` with its rejected alternatives. The last of them — whether `git.raw` is
+**None.** Contract open question U11 is now settled here for the contract-amendment phase. The
+original seven questions this document opened are also answered; each is a dated entry in
+`90-decisions.md` with its rejected alternatives. The last of those — whether `git.raw` is
 reachable from MCP sessions — is settled as reachable, with the declaration layer carrying the
 default-deny; see The escape hatch's residual risk for what that places on a single field.
 
