@@ -3506,6 +3506,7 @@ type BootError = ModuleErrorBase & (
   | { readonly code: 'console-manifest-mismatch'; readonly expected: Sha256Hex; readonly found: Sha256Hex }
   | { readonly code: 'ceiling-outside-contract'; readonly capabilities: readonly CapabilityName[] }
   | { readonly code: 'executor-missing'; readonly tools: readonly RegistryToolName[] }
+  | { readonly code: 'watcher-revalidation-failed'; readonly cause: DeclarationError }
   | { readonly code: 'store-failed'; readonly cause: StoreError }
 );
 ```
@@ -3518,6 +3519,7 @@ type BootError = ModuleErrorBase & (
 | `registry-unreadable` | The registry artifact is absent, unparseable, or carries no valid fingerprint | no | Fatal, naming the reason. Distinct from `fingerprint-mismatch`, which has two real digests to report; here there is nothing to compare, and reporting it as a mismatch would mean inventing them |
 | `ceiling-outside-contract` | The deployment ceiling names a capability the contract set lacks | no | Fatal |
 | `executor-missing` | A registry entry has no registered executor | no | Fatal |
+| `watcher-revalidation-failed` | An active declaration's stored file-watcher pair is invalid against the registry loaded by this boot | no | Fatal, preserving the `DeclarationError` as `cause`; no transport starts under invalid declaration authority |
 | `store-failed` | Open, integrity check or migration failed | no | Fatal, per the store's own table |
 
 A broken audit chain is **not** in this list, deliberately.

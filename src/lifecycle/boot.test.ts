@@ -15,7 +15,8 @@ import { createJournal } from '../journal/journal.ts';
 import { createNotifier, type Notifier } from '../notifier/notifier.ts';
 import { createRecoveryCatalogue } from '../recovery/catalogue.ts';
 import { RECONCILE_AFTER_MERGE_RECOVERY } from '../composites/recovery-descriptors.ts';
-import { ok } from '../shared/outcome.ts';
+import { err, ok } from '../shared/outcome.ts';
+import { declarationError } from '../declarations/errors.ts';
 import type { RecoveryDependencies } from './recovery.ts';
 
 /** The outbox as it stands on disk, for the redrive tests below. */
@@ -28,7 +29,7 @@ function readOutboxRows(volume: string): { status: string }[] {
 import type { Audit } from '../audit/audit.ts';
 import type { CapabilityName, DeploymentCeiling } from '../contract/capabilities.ts';
 import { fixtureTool, httpTarget } from '../contract/fixtures.ts';
-import { createLifecycle } from './boot.ts';
+import { createLifecycle, type LifecycleDependencies } from './boot.ts';
 import type { LeaseAcquisition, LockAcquirer } from './lease.ts';
 
 /**
@@ -81,6 +82,7 @@ function lifecycleFor(
     readonly registryDeclarations?: Parameters<typeof compiler.compile>[0];
     readonly notifier?: Pick<Notifier, 'redriveUndelivered'>;
     readonly recovery?: RecoveryDependencies;
+    readonly revalidateFileWatchers?: LifecycleDependencies['revalidateFileWatchers'];
   } = {},
 ) {
   const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
@@ -94,6 +96,7 @@ function lifecycleFor(
     operatorIdentity: operatorIdentityFor(volume, audit),
     consoleFingerprint: NO_CONSOLE_FINGERPRINT,
     ceiling: options.ceiling ?? EMPTY_CEILING,
+    revalidateFileWatchers: options.revalidateFileWatchers ?? (async () => ok(undefined)),
     ...(acquirer ? { acquirer } : {}),
     ...(options.notifier ? { notifier: options.notifier } : {}),
     ...(options.recovery ? { recovery: options.recovery } : {}),
@@ -117,6 +120,30 @@ test('boot takes the lease, applies migrations and reports both', async () => {
     } finally {
       await lifecycle.shutdown('operator');
     }
+  });
+});
+
+test('S23 — boot refuses a stored file-watcher pair that no longer matches the registry and releases its resources', async () => {
+  await withVolumeAsync(async (volume) => {
+    const cause = declarationError(
+      { code: 'watcher-tool-not-annotated', tool: 'removed_plan_tool' as never, expected: 'plan' },
+      "tool 'removed_plan_tool' is absent or is not a file-watcher plan",
+    );
+    const { lifecycle } = lifecycleFor(volume, undefined, {
+      revalidateFileWatchers: async () => err(cause),
+    });
+
+    const booted = await lifecycle.boot();
+    assert.equal(booted.ok, false, 'registry drift in a stored file-watcher pair is fatal at boot');
+    if (booted.ok) return;
+    assert.equal(booted.error.code, 'watcher-revalidation-failed');
+    if (booted.error.code !== 'watcher-revalidation-failed') return;
+    assert.equal(booted.error.cause, cause, 'the boot error preserves the declaration failure');
+
+    const { lifecycle: retry } = lifecycleFor(volume);
+    const retried = await retry.boot();
+    assert.equal(retried.ok, true, 'the failed boot closed the store and released the lease');
+    await retry.shutdown('operator');
   });
 });
 
@@ -478,6 +505,7 @@ test('a boot that fails after opening the store closes it again, leaking no hand
       operatorIdentity: operatorIdentityFor(volume, audit),
       consoleFingerprint: NO_CONSOLE_FINGERPRINT,
       ceiling: EMPTY_CEILING,
+      revalidateFileWatchers: async () => ok(undefined),
     });
 
     const booted = await lifecycle.boot();
@@ -499,6 +527,7 @@ test('a registry that is absent reports registry-unreadable, not a mismatch with
       operatorIdentity: operatorIdentityFor(volume, audit),
       consoleFingerprint: NO_CONSOLE_FINGERPRINT,
       ceiling: EMPTY_CEILING,
+      revalidateFileWatchers: async () => ok(undefined),
     });
 
     const booted = await lifecycle.boot();
@@ -580,6 +609,7 @@ test('S6 — boot exits with executor-missing when a registry entry has no regis
       operatorIdentity: operatorIdentityFor(volume, audit),
       consoleFingerprint: NO_CONSOLE_FINGERPRINT,
       ceiling: new Set(['repo.read']) as unknown as DeploymentCeiling,
+      revalidateFileWatchers: async () => ok(undefined),
       registryEntries: registryDeclarations,
       registeredModuleTargets: new Set(), // nothing registered — the fixture's target has no executor
     });
@@ -613,6 +643,7 @@ test('S12 — boot exits with executor-missing for an http-targeted entry when r
       operatorIdentity: operatorIdentityFor(volume, audit),
       consoleFingerprint: NO_CONSOLE_FINGERPRINT,
       ceiling: new Set(['repo.read']) as unknown as DeploymentCeiling,
+      revalidateFileWatchers: async () => ok(undefined),
       registryEntries: registryDeclarations,
       registeredModuleTargets: new Set(),
       // registeredHttpOperations deliberately omitted — a composition root
@@ -648,6 +679,7 @@ test('S6 — boot succeeds when every registry entry has a registered executor',
       operatorIdentity: operatorIdentityFor(volume, audit),
       consoleFingerprint: NO_CONSOLE_FINGERPRINT,
       ceiling: new Set(['repo.read']) as unknown as DeploymentCeiling,
+      revalidateFileWatchers: async () => ok(undefined),
       registryEntries: registryDeclarations,
       registeredModuleTargets: new Set(['fixture.registered' as never]),
     });
