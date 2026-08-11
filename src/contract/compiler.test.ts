@@ -193,3 +193,21 @@ test('S23.1 — file-watcher schema projections state 2 accepted and 4 rejected 
     return !result.ok && result.error.some((error) => error.code === 'schema-invalid');
   }).length, 4);
 });
+
+test('contract limits state 1 accepted and 6 non-positive or fractional fixtures rejected', () => {
+  const accepted = [fixtureTool({ name: 'valid_limits', limits: { timeoutSeconds: 1, maxResultBytes: 1 } })];
+  const rejected = [
+    fixtureTool({ name: 'zero_timeout', limits: { timeoutSeconds: 0, maxResultBytes: 1 } }),
+    fixtureTool({ name: 'negative_timeout', limits: { timeoutSeconds: -1, maxResultBytes: 1 } }),
+    fixtureTool({ name: 'fractional_timeout', limits: { timeoutSeconds: 1.5, maxResultBytes: 1 } }),
+    fixtureTool({ name: 'zero_result_limit', limits: { timeoutSeconds: 1, maxResultBytes: 0 } }),
+    fixtureTool({ name: 'negative_result_limit', limits: { timeoutSeconds: 1, maxResultBytes: -1 } }),
+    fixtureTool({ name: 'fractional_result_limit', limits: { timeoutSeconds: 1, maxResultBytes: 1.5 } }),
+  ];
+
+  assert.equal(accepted.filter((entry) => compiler.compile([entry]).ok).length, 1);
+  assert.equal(rejected.filter((entry) => {
+    const result = compiler.compile([entry]);
+    return !result.ok && result.error.some((error) => error.code === 'limit-exceeds-cap');
+  }).length, 6);
+});

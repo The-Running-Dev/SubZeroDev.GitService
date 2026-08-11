@@ -206,7 +206,26 @@ function validateOne(declaration: ToolDeclaration): CompilerError[] {
     }
   }
 
-  if (declaration.executionClass === 'monitoring-wait' && declaration.limits.timeoutSeconds > MONITORING_WAIT_CAP_SECONDS) {
+  const limitFields = [
+    ['timeoutSeconds', declaration.limits.timeoutSeconds],
+    ['maxResultBytes', declaration.limits.maxResultBytes],
+  ] as const;
+  for (const [field, value] of limitFields) {
+    if (!Number.isInteger(value) || value <= 0) {
+      errors.push(
+        moduleError(
+          { code: 'limit-exceeds-cap', name, cap: 1 },
+          `tool '${name}' ${field} must be a positive integer`,
+        ),
+      );
+    }
+  }
+
+  if (
+    declaration.executionClass === 'monitoring-wait' &&
+    Number.isInteger(declaration.limits.timeoutSeconds) &&
+    declaration.limits.timeoutSeconds > MONITORING_WAIT_CAP_SECONDS
+  ) {
     errors.push(
       moduleError(
         { code: 'limit-exceeds-cap', name, cap: MONITORING_WAIT_CAP_SECONDS },
