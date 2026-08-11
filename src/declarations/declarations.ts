@@ -33,6 +33,7 @@ import type { EvictionBlocker, SafeToEvictVerdict } from '../clone/types.ts';
 import { declarationError, type DeclarationError } from './errors.ts';
 import type { ActorProfile, AmendInput, Declaration, DeclareInput, DeclarationFilter, OrphanReport } from './types.ts';
 import type { ToolDeclaration } from '../contract/tool-declaration.ts';
+import type { SchemaObject } from '../contract/json-schema.ts';
 import { canonicalize } from '../shared/canonical-json.ts';
 
 export interface Declarations {
@@ -56,6 +57,8 @@ export interface Declarations {
 
   bumpGrantEpoch(id: DeclarationId, tx: StoreTransaction): Outcome<GrantEpoch, DeclarationError>;
   remoteHostAllowlist(): readonly RemoteHost[];
+
+  revalidateFileWatchers(): Promise<Outcome<void, DeclarationError>>;
 }
 
 /**
@@ -217,11 +220,7 @@ function latestRowFor(db: DatabaseSync, id: string): DeclarationRow | null {
   return rows[0] ?? null;
 }
 
-interface DeclarationRevalidation {
-  revalidateFileWatchers(): Promise<Outcome<void, DeclarationError>>;
-}
-
-export function createDeclarations(deps: DeclarationsDependencies): Declarations & DeclarationRevalidation {
+export function createDeclarations(deps: DeclarationsDependencies): Declarations {
   const { volumeRoot, clock } = deps;
   const registryEntry = deps.registryEntry ?? (() => null);
 
@@ -234,8 +233,8 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
     if (!apply || apply.annotations.fileWatcher !== 'apply') {
       return err(declarationError({ code: 'watcher-tool-not-annotated', tool: config.applyTool, expected: 'apply' }, `tool '${config.applyTool}' is absent or is not a file-watcher apply`));
     }
-    const outputPlan = (plan.outputSchema as unknown as { properties?: Record<string, unknown> }).properties?.plan;
-    const inputPlan = (apply.inputSchema as unknown as { properties?: Record<string, unknown> }).properties?.plan;
+    const outputPlan = (plan.outputSchema as SchemaObject).properties?.plan;
+    const inputPlan = (apply.inputSchema as SchemaObject).properties?.plan;
     if (outputPlan === undefined || inputPlan === undefined || canonicalize(outputPlan) !== canonicalize(inputPlan)) {
       return err(declarationError({ code: 'watcher-plan-schema-mismatch', planTool: config.planTool, applyTool: config.applyTool }, `file-watcher tools '${config.planTool}' and '${config.applyTool}' have unequal canonical plan schemas`));
     }

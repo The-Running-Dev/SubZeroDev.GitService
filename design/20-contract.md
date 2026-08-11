@@ -1697,6 +1697,8 @@ interface Declarations {
 
   bumpGrantEpoch(id: DeclarationId, tx: StoreTransaction): Outcome<GrantEpoch, DeclarationError>;
   remoteHostAllowlist(): readonly RemoteHost[];
+
+  revalidateFileWatchers(): Promise<Outcome<void, DeclarationError>>;
 }
 ```
 
@@ -1704,6 +1706,11 @@ interface Declarations {
 check needs the recomputed set and not just a verdict. Each capability's own scope decides whether
 layer 3 participates in its intersection; an instance-scoped capability intersects layers 1, 2 and
 4 only, which is why `declaration` may be null.
+
+`revalidateFileWatchers` re-checks every active declaration's plan/apply tool pair against the
+current registry at boot, per the file-watcher boot re-validation this contract already requires
+(§ "File watcher", "Checked at creation, at fire time, and at boot re-validation"). It returns the
+first mismatch found, not a full report, because boot fails closed on the first one either way.
 
 ### L1 — credentials
 

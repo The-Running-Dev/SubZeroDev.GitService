@@ -90,17 +90,20 @@ function validateOne(declaration: ToolDeclaration): CompilerError[] {
     const isPlan = watcherPhase === 'plan';
     const capabilitiesValid = isPlan
       ? declaration.capabilities.length === 0
-      : declaration.capabilities.includes('git.local.write');
-    const validWatcherShape =
-      declaration.target.kind === 'module' &&
-      declaration.executionClass === (isPlan ? 'read' : 'mutating') &&
-      declaration.capabilityScope === 'declaration' &&
-      declaration.scopes.length === 1 && declaration.scopes[0] === 'write' &&
-      capabilitiesValid &&
-      declaration.annotations.schedulable === false &&
-      declaration.annotations.untrustedOutput === true;
-    if (!validWatcherShape) {
-      errors.push(moduleError({ code: 'annotation-contradiction', name, rule: `fixed file-watcher ${watcherPhase} shape` }, `tool '${name}' does not satisfy the fixed file-watcher ${watcherPhase} shape`));
+      : declaration.capabilities.length === 1 && declaration.capabilities[0] === 'git.local.write';
+    const watcherChecks: readonly (readonly [boolean, string])[] = [
+      [declaration.target.kind === 'module', 'target must be a module tool'],
+      [declaration.executionClass === (isPlan ? 'read' : 'mutating'), `executionClass must be '${isPlan ? 'read' : 'mutating'}'`],
+      [declaration.capabilityScope === 'declaration', "capabilityScope must be 'declaration'"],
+      [declaration.scopes.length === 1 && declaration.scopes[0] === 'write', "scopes must be exactly ['write']"],
+      [capabilitiesValid, isPlan ? 'capabilities must be empty' : "capabilities must be exactly ['git.local.write']"],
+      [declaration.annotations.schedulable === false, 'schedulable must be false'],
+      [declaration.annotations.untrustedOutput === true, 'untrustedOutput must be true'],
+    ];
+    for (const [valid, reason] of watcherChecks) {
+      if (!valid) {
+        errors.push(moduleError({ code: 'annotation-contradiction', name, rule: `file-watcher ${watcherPhase} shape: ${reason}` }, `tool '${name}' does not satisfy the fixed file-watcher ${watcherPhase} shape: ${reason}`));
+      }
     }
   }
 
