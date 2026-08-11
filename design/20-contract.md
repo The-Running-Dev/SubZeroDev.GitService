@@ -3740,6 +3740,12 @@ Their phase annotations, generic outer schemas, consumer-specific plan-schema eq
 semantics are fixed under `### Declaration`, `### File watcher`, `### Contract types (L0)` and
 `### L2 — watcher` above. See `design/90-decisions.md`, 2026-08-11.
 
+**U11 — TOTP re-enrolment after recovery-code use.** The design requires a successful recovery-code
+login to force TOTP re-enrolment. The persisted flag and the `totp-reenrolled` audit event exist,
+but the design does not determine the `OperatorIdentity` signature, its input and return types, or
+the console route that completes re-enrolment and clears the flag. Those shapes must be fixed by a
+contract amendment before S18.8 is implemented.
+
 ~~**U8 — The pre-state digest algorithms.**~~ — **resolved 2026-08-08.** `SHA256_hex(canonical(...))`
 over an ordered array of index entries and porcelain-status lines respectively, neither derived via
 a command that writes to the object database. See `### Clone`, immediately after `ObservedGitState`,
