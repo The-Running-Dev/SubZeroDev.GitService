@@ -35,6 +35,7 @@ import type { ModuleTargetName } from './shared/brands.ts';
 import type { ContractCapabilitySet } from './contract/capabilities.ts';
 import type { CompiledRegistry } from './contract/tool-declaration.ts';
 import { createComposites } from './composites/composites.ts';
+import { createWatcher } from './watcher/watcher.ts';
 import { COMPOSITE_RECOVERY_DESCRIPTORS } from './composites/recovery-descriptors.ts';
 import { createHttpAdapter } from './http/http-adapter.ts';
 import { createAuthorization } from './authorization/authorization.ts';
@@ -146,6 +147,34 @@ function resolveNotifierIntervalSeconds(): number {
   const value = Number(raw);
   if (!Number.isInteger(value) || value < 1) {
     console.error(`server: NOTIFIER_INTERVAL_SECONDS must be an integer of at least 1 (got '${raw}')`);
+    process.exit(1);
+  }
+  return value;
+}
+
+/** `DeploymentConfig.remoteOperationsPermitted` (`20-contract.md` § Deployment configuration) — default off, so an unset variable never grants it. */
+function resolveRemoteOperationsPermitted(): boolean {
+  return process.env.REMOTE_OPERATIONS_PERMITTED === 'true';
+}
+
+/** `DeploymentConfig.watcher.enabled` — default off, the same direction as `remoteOperationsPermitted`. */
+function resolveWatcherEnabled(): boolean {
+  return process.env.WATCHER_ENABLED === 'true';
+}
+
+/**
+ * `DeploymentConfig.watcher.pollIntervalSeconds` — contract default 15. The
+ * strict check only applies when the watcher is actually enabled: a
+ * deployment that never opted in must not be taken down by a stray malformed
+ * value it was never going to use.
+ */
+function resolveWatcherPollIntervalSeconds(watcherEnabled: boolean): number {
+  const raw = process.env.WATCHER_POLL_INTERVAL_SECONDS;
+  if (raw === undefined || raw.trim().length === 0) return 15;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    if (!watcherEnabled) return 15;
+    console.error(`server: WATCHER_POLL_INTERVAL_SECONDS must be an integer of at least 1 (got '${raw}')`);
     process.exit(1);
   }
   return value;
@@ -447,6 +476,31 @@ async function main(): Promise<void> {
   // boot step).
   dispatchRef = dispatchPipeline.dispatch;
 
+  // S17 — the watcher. Both deployment switches default off (`not-permitted`
+  // is the expected, ordinary shape of `start()`'s refusal on a deployment
+  // that never opted in), so a refusal here is logged, not fatal — unlike
+  // `lifecycle.boot()` above, nothing about serving MCP or console traffic
+  // depends on the watcher running.
+  const watcherEnabled = resolveWatcherEnabled();
+  const watcher = createWatcher({
+    volumeRoot,
+    clock: systemClock,
+    dispatch: dispatchPipeline.dispatch,
+    declarations,
+    cloneStore,
+    audit,
+    notifier,
+    store,
+    contractCapabilitySet,
+    remoteOperationsPermitted: resolveRemoteOperationsPermitted(),
+    watcherEnabled,
+    pollIntervalSeconds: resolveWatcherPollIntervalSeconds(watcherEnabled),
+  });
+  const watcherStarted = await watcher.start();
+  if (!watcherStarted.ok) {
+    console.log(`server: watcher not started (${watcherStarted.error.summary})`);
+  }
+
   const server = createSurfacesServer({
     commitSha,
     contractFingerprint: booted.value.registryFingerprint,
@@ -566,6 +620,11 @@ async function main(): Promise<void> {
   const shutdown = (signal: NodeJS.Signals): void => {
     ready = false;
     clearInterval(deliveryTimer);
+    // `watcher.stop()` itself waits out any tick already in flight (a tick
+    // does the same class of writes as a delivery pass — git push, PR open,
+    // store/audit transactions), so it is awaited alongside `deliveryInFlight`
+    // below rather than fired-and-forgotten.
+    const watcherStopped = watcher.stop();
     server.close(() => {
       // A delivery pass holds its own connections to `store.sqlite`, so
       // releasing the lease while one is still running would let this
@@ -574,6 +633,7 @@ async function main(): Promise<void> {
       // Bounded because every attempt now carries a timeout.
       void Promise.resolve(deliveryInFlight)
         .catch(() => undefined)
+        .then(() => watcherStopped.catch(() => undefined))
         .then(() => lifecycle.shutdown('signal'))
         .then(() => process.exit(0));
     });
