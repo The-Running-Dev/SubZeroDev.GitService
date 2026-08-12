@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFil
 import path from 'node:path';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
 import { systemClock } from '../clock/clock.ts';
-import { success, validation, authorization, upstream } from '../result/envelope.ts';
+import { success, validation, authorization, upstream, infrastructure, precondition } from '../result/envelope.ts';
 import type { ToolResult } from '../result/envelope.ts';
 import type { DispatchRequest, Dispatch } from '../dispatch/dispatch-pipeline.ts';
 import type { Declaration } from '../declarations/types.ts';
@@ -19,6 +19,8 @@ import type { NotificationRequest } from '../journal/types.ts';
 import type { StructuredStore, StoreTransaction } from '../store/structured-store.ts';
 import type { ContractCapabilitySet } from '../contract/capabilities.ts';
 import { createWatcher, type WatcherDependencies } from './watcher.ts';
+import { pendingPullRequestsPath, readPendingPullRequests, writePendingPullRequests } from './pending-pull-requests.ts';
+import type { PendingPullRequest } from './types.ts';
 
 const CAPABILITY_SET = new Set(['repo.read', 'git.local.write', 'git.remote.write', 'host.pr.write']) as unknown as ContractCapabilitySet;
 
@@ -547,6 +549,156 @@ test('S17.15 — a failed file in one declaration does not block the tick from p
 
     assert.equal(auditLog.length, 2, 'one file-watcher audit record per claimed file');
     assert.equal(notifications.length, 1, 'only the failed file notifies');
+  });
+});
+
+function pendingEntry(overrides: Partial<PendingPullRequest> = {}): PendingPullRequest {
+  return {
+    declarationId: 'repo-a' as never,
+    number: 7,
+    branch: 'watcher/post-1' as never,
+    openedAt: systemClock.now(),
+    sourceFile: 'post.md' as never,
+    ...overrides,
+  };
+}
+
+function prStatusResult(state: 'open' | 'merged' | 'closed', overrides: Partial<{ headSha: string; number: number; branch: string }> = {}): ToolResult<never> {
+  const number = overrides.number ?? 7;
+  return success(
+    'status',
+    {
+      status: {
+        ref: { number, url: `https://example.com/pr/${number}`, branch: overrides.branch ?? 'watcher/post-1' },
+        state,
+        headSha: overrides.headSha ?? 'a'.repeat(40),
+        baseSha: 'b'.repeat(40),
+        mergeCommitSha: state === 'merged' ? 'c'.repeat(40) : null,
+        mergeable: state === 'open' ? true : null,
+        autoMergeEnabled: false,
+      },
+    },
+    diag(),
+  ) as unknown as ToolResult<never>;
+}
+
+test('S24.1 — a missing or unparseable pending pull-request list is treated as empty and never crashes a tick; a delivered file records a new entry, written temp-then-rename', async () => {
+  await withVolumeAsync(async (volume) => {
+    assert.deepEqual(readPendingPullRequests(volume, 'repo-a' as never), { entries: [] });
+
+    mkdirSync(path.dirname(pendingPullRequestsPath(volume, 'repo-a' as never)), { recursive: true });
+    writeFileSync(pendingPullRequestsPath(volume, 'repo-a' as never), 'not json', 'utf8');
+    assert.deepEqual(readPendingPullRequests(volume, 'repo-a' as never), { entries: [] });
+
+    const emptyLog: DispatchRequest[] = [];
+    const { deps: emptyDeps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch(emptyLog, { repo_status: () => repoStatus(false) }),
+    });
+    await createWatcher(emptyDeps).tick();
+    assert.equal(emptyLog.some((r) => r.toolName === 'pr_status'), false, 'an unparseable list dispatches no reconciliation calls');
+
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+    const dispatchLog: DispatchRequest[] = [];
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch(dispatchLog, successfulHandlers()),
+    });
+    const reports = await createWatcher(deps).tick();
+    assert.equal(reports[0]!.outcome?.kind, 'succeeded');
+
+    const list = readPendingPullRequests(volume, 'repo-a' as never);
+    assert.equal(list.entries.length, 1);
+    assert.equal(list.entries[0]!.number, 7);
+    assert.equal(list.entries[0]!.branch, 'watcher/post-1');
+    assert.equal(list.entries[0]!.sourceFile, 'post.md');
+    assert.equal(list.entries[0]!.declarationId, 'repo-a');
+
+    const siblingFiles = readdirSync(path.dirname(pendingPullRequestsPath(volume, 'repo-a' as never)));
+    assert.deepEqual(
+      siblingFiles.filter((f) => f.endsWith('.tmp')),
+      [],
+      'temp-then-rename leaves no stray .tmp file',
+    );
+  });
+});
+
+test('S24.2 — each tick re-reads host state: open and a transient status-read failure stay pending; closed is removed without reconciling; merged reconciles once and is removed whether it succeeds or fails', async () => {
+  await withVolumeAsync(async (volume) => {
+    const entries: PendingPullRequest[] = [
+      pendingEntry({ number: 1 }), // open -> stays pending
+      pendingEntry({ number: 2 }), // transient pr_status failure -> stays pending
+      pendingEntry({ number: 3 }), // closed -> removed, not reconciled
+      pendingEntry({ number: 4 }), // merged, reconciliation succeeds -> reconciled, removed
+      pendingEntry({ number: 5 }), // merged, reconciliation fails -> reconciled anyway, removed
+    ];
+    writePendingPullRequests(volume, 'repo-a' as never, { entries });
+
+    const dispatchLog: DispatchRequest[] = [];
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch(dispatchLog, {
+        repo_status: () => repoStatus(false),
+        pr_status: (req) => {
+          const number = (req.input as { number: number }).number;
+          if (number === 1) return prStatusResult('open', { number });
+          if (number === 2) return infrastructure('transient host read failure');
+          if (number === 3) return prStatusResult('closed', { number });
+          return prStatusResult('merged', { number });
+        },
+        reconcile_after_merge: (req) => {
+          const number = (req.input as { pullRequestNumber: number }).pullRequestNumber;
+          return number === 5 ? precondition('base is not fast-forwardable', []) : (success('reconciled', {}, diag()) as unknown as ToolResult<never>);
+        },
+      }),
+    });
+
+    const reports = await createWatcher(deps).tick();
+    const report = reports[0]!;
+    assert.deepEqual(
+      report.stillPending.map((e) => e.number).sort(),
+      [1, 2],
+    );
+    assert.deepEqual(
+      report.reconciled.map((e) => e.number).sort(),
+      [4, 5],
+    );
+
+    const remaining = readPendingPullRequests(volume, 'repo-a' as never);
+    assert.deepEqual(
+      remaining.entries.map((e) => e.number).sort(),
+      [1, 2],
+    );
+  });
+});
+
+test('S24.3 — reconciliation is an independent dispatch, run even when the clone-readiness gate that guards claiming a new file skips the tick', async () => {
+  await withVolumeAsync(async (volume) => {
+    writePendingPullRequests(volume, 'repo-a' as never, { entries: [pendingEntry({ number: 9 })] });
+
+    const dispatchLog: DispatchRequest[] = [];
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      cloneStore: stubCloneStore({ current: 'needs-attention' }),
+      dispatch: scriptedDispatch(dispatchLog, {
+        pr_status: () => prStatusResult('merged', { number: 9 }),
+        reconcile_after_merge: () => success('reconciled', {}, diag()) as unknown as ToolResult<never>,
+      }),
+    });
+
+    const reports = await createWatcher(deps).tick();
+    assert.equal(reports[0]!.skipped, 'clone-needs-attention');
+    assert.deepEqual(
+      reports[0]!.reconciled.map((e) => e.number),
+      [9],
+    );
+    assert.deepEqual(
+      dispatchLog.map((r) => r.toolName),
+      ['pr_status', 'reconcile_after_merge'],
+    );
+    assert.equal(readPendingPullRequests(volume, 'repo-a' as never).entries.length, 0);
   });
 });
 

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { systemClock } from '../clock/clock.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
@@ -346,6 +346,90 @@ test('declaration.remove on an active declaration returns not-orphaned', async (
     const removed = await declarations.remove('repo-8' as DeclareInput['id'], OPERATOR);
     assert.equal(removed.ok, false);
     if (!removed.ok) assert.equal(removed.error.code, 'not-orphaned');
+  });
+});
+
+test('S24.4 — orphan() reports fileWatcherStopped only when the declaration named a file watcher', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declarations = declarationsFor(volume, { registryEntries: [WATCH_PLAN, WATCH_APPLY] });
+
+    const declaredNoWatcher = await declarations.declare(declareInputFor('repo-9'), OPERATOR);
+    assert.equal(declaredNoWatcher.ok, true);
+    const orphanedNoWatcher = await declarations.orphan('repo-9' as DeclareInput['id'], OPERATOR);
+    assert.equal(orphanedNoWatcher.ok, true);
+    if (orphanedNoWatcher.ok) assert.equal(orphanedNoWatcher.value.fileWatcherStopped, false);
+
+    const declaredWatcher = await declarations.declare(
+      declareInputFor('repo-9b', { fileWatcher: { planTool: WATCH_PLAN.name, applyTool: WATCH_APPLY.name, autoMerge: false } }),
+      OPERATOR,
+    );
+    assert.equal(declaredWatcher.ok, true);
+    const orphanedWatcher = await declarations.orphan('repo-9b' as DeclareInput['id'], OPERATOR);
+    assert.equal(orphanedWatcher.ok, true);
+    if (orphanedWatcher.ok) assert.equal(orphanedWatcher.value.fileWatcherStopped, true);
+  });
+});
+
+test('S24.4 — declaration.remove refuses watcher-directory-not-empty while the watcher inbox holds a file, and succeeds once it is empty', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declarations = declarationsFor(volume);
+    const declared = await declarations.declare(declareInputFor('repo-10'), OPERATOR);
+    assert.equal(declared.ok, true);
+
+    const inboxDir = path.join(volume, 'watcher-inboxes', 'repo-10');
+    mkdirSync(inboxDir, { recursive: true });
+    writeFileSync(path.join(inboxDir, 'dropped.md'), 'content', 'utf8');
+
+    const orphaned = await declarations.orphan('repo-10' as DeclareInput['id'], OPERATOR);
+    assert.equal(orphaned.ok, true);
+
+    const refused = await declarations.remove('repo-10' as DeclareInput['id'], OPERATOR);
+    assert.equal(refused.ok, false);
+    if (!refused.ok) {
+      assert.equal(refused.error.code, 'watcher-directory-not-empty');
+      if (refused.error.code === 'watcher-directory-not-empty') assert.equal(refused.error.files, 1);
+    }
+
+    unlinkSync(path.join(inboxDir, 'dropped.md'));
+    const removed = await declarations.remove('repo-10' as DeclareInput['id'], OPERATOR);
+    assert.equal(removed.ok, true);
+  });
+});
+
+test('S24.4 — a file anywhere under the per-declaration watcher directory blocks removal, including processed/ history', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declarations = declarationsFor(volume);
+    const declared = await declarations.declare(declareInputFor('repo-10b'), OPERATOR);
+    assert.equal(declared.ok, true);
+
+    const processedDir = path.join(volume, 'watcher-inboxes', 'repo-10b', 'processed');
+    mkdirSync(processedDir, { recursive: true });
+    writeFileSync(path.join(processedDir, '2026-01-01-post.md'), 'content', 'utf8');
+
+    const orphaned = await declarations.orphan('repo-10b' as DeclareInput['id'], OPERATOR);
+    assert.equal(orphaned.ok, true);
+
+    const refused = await declarations.remove('repo-10b' as DeclareInput['id'], OPERATOR);
+    assert.equal(refused.ok, false);
+    if (!refused.ok) assert.equal(refused.error.code, 'watcher-directory-not-empty');
+  });
+});
+
+test('S24.4 — an empty pending pull-request list file never blocks declaration.remove', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declarations = declarationsFor(volume);
+    const declared = await declarations.declare(declareInputFor('repo-10c'), OPERATOR);
+    assert.equal(declared.ok, true);
+
+    const pendingDir = path.join(volume, 'watcher-pending-pull-requests');
+    mkdirSync(pendingDir, { recursive: true });
+    writeFileSync(path.join(pendingDir, 'repo-10c.json'), JSON.stringify({ entries: [] }), 'utf8');
+
+    const orphaned = await declarations.orphan('repo-10c' as DeclareInput['id'], OPERATOR);
+    assert.equal(orphaned.ok, true);
+
+    const removed = await declarations.remove('repo-10c' as DeclareInput['id'], OPERATOR);
+    assert.equal(removed.ok, true);
   });
 });
 
