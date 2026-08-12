@@ -182,6 +182,25 @@ export function cloneUrlHost(value: string): string | null {
   return null;
 }
 
+/**
+ * `watchedFileName()` is S17's (`30-slices.md` § S17, Watcher): the first
+ * slice that needs `WatchedFileName` for real rather than as a
+ * type-checking placeholder — `20-contract.md`'s own brand table lists no
+ * row for it, the same gap `repoRelativePath` and friends filled for S5. A
+ * watched file is a bare basename directly inside a declaration's inbox
+ * root (`10-design.md` § "The directory is the state machine": "only files
+ * sitting directly here are considered; subdirectories are left alone"), so
+ * the invariant is non-empty, no path separator, and not `.` or `..`.
+ */
+const WATCHED_FILE_NAME_RULE = 'non-empty basename, no / or \\, not "." or ".."';
+
+export function watchedFileName(value: string): Outcome<WatchedFileName, ValidationFailure> {
+  if (value.length === 0 || value === '.' || value === '..' || value.includes('/') || value.includes('\\')) {
+    return { ok: false, error: fail('WatchedFileName', WATCHED_FILE_NAME_RULE, value) };
+  }
+  return { ok: true, value: value as WatchedFileName };
+}
+
 export function cloneUrl(value: string, allowed: readonly RemoteHost[]): Outcome<CloneUrl, ValidationFailure> {
   const host = cloneUrlHost(value);
   if (host === null) {
