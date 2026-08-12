@@ -399,9 +399,12 @@ is empty. `repositoryBinding` is non-null for `mcp` and `watcher`, null for `ope
 for `scheduler` because a scheduler session binds per job rather than per session.
 
 ```ts
+type OperatorSessionPurpose = 'full' | 'totp-reenrolment';
+
 interface OperatorSession {
   readonly id: SessionId;
   readonly subject: Subject;
+  readonly purpose: OperatorSessionPurpose;
   readonly createdAt: IsoUtcTimestamp;
   readonly lastSeenAt: IsoUtcTimestamp;
   readonly idleExpiresAt: IsoUtcTimestamp;
@@ -409,6 +412,14 @@ interface OperatorSession {
   readonly revokedAt: IsoUtcTimestamp | null;
 }
 ```
+
+`purpose` is what session inspection reports, and it is the **only** field this flow adds to a type.
+The session's sealed pending TOTP secret is a column on the persisted row and appears in no
+signature in this document — see `### Persisted schemas` and invariant S10.
+
+`SessionKind`, `ActorProfile` and `Session` are unchanged. A purpose-limited session reaches no
+dispatch route at all, so the purpose is not a capability, not a profile, and not a member of the
+generic dispatch session; it is checked once at the route layer, per invariant A11.
 
 ### Authorization records
 
@@ -1386,13 +1397,16 @@ CREATE TABLE operator_recovery_code (
 ) STRICT;
 
 CREATE TABLE operator_session (
-  id                  TEXT PRIMARY KEY,
-  subject             TEXT NOT NULL,
-  created_at          TEXT NOT NULL,
-  last_seen_at        TEXT NOT NULL,
-  idle_expires_at     TEXT NOT NULL,
-  absolute_expires_at TEXT NOT NULL,
-  revoked_at          TEXT
+  id                         TEXT PRIMARY KEY,
+  subject                    TEXT NOT NULL,
+  purpose                    TEXT NOT NULL CHECK (purpose IN ('full','totp-reenrolment')),
+  pending_totp_secret_sealed TEXT,
+  created_at                 TEXT NOT NULL,
+  last_seen_at               TEXT NOT NULL,
+  idle_expires_at            TEXT NOT NULL,
+  absolute_expires_at        TEXT NOT NULL,
+  revoked_at                 TEXT,
+  CHECK (pending_totp_secret_sealed IS NULL OR purpose = 'totp-reenrolment')
 ) STRICT;
 
 CREATE INDEX operator_session_retention ON operator_session (absolute_expires_at, revoked_at);
@@ -1400,6 +1414,19 @@ CREATE INDEX operator_session_retention ON operator_session (absolute_expires_at
 
 `operator_credential` is a singleton table. The `CHECK` is what makes "one operator identity, no
 accounts table" enforceable rather than asserted.
+
+**`operator_session`'s table `CHECK` is what makes a `full` session with a pending secret
+unrepresentable** rather than merely unwritten: a completion promotes the pending secret and
+upgrades the session in one transaction, so the two states never coexist on a committed row.
+`purpose` is `NOT NULL` with no default — a session's authority is not a field an insert may omit.
+`pending_totp_secret_sealed` is nullable because it exists only between a start and its completion.
+
+**`pending_totp_secret_sealed` is sealed exactly as `totp_secret_sealed` is**, under the same
+credential-mount key, for the same two reasons stated for that column above and with the same
+consequence: the pre-migration copies on the data volume carry no means to open it. It holds a
+candidate factor rather than the active one, which changes nothing about how it must be stored.
+Both columns are part of migration `0001`, so the migration story is the one stated once at the top
+of this section.
 
 **`password_hash` is a one-way hash; `totp_secret_sealed` is not, and cannot be.** Verifying a
 password compares hashes, but verifying a TOTP code recomputes `HMAC-SHA1(secret, timeStep)` on
@@ -2877,6 +2904,15 @@ interface OidcRedirect {
   readonly state: string;
 }
 
+interface ReenrolmentStart {
+  readonly totpSecret: string;
+}
+
+interface ReenrolmentResult {
+  readonly session: OperatorSession;
+  readonly recoveryCodes: readonly string[];
+}
+
 interface OperatorIdentity {
   provisioningState(): Promise<ProvisioningState>;
   enrol(request: EnrolmentRequest): Promise<Outcome<EnrolmentResult, OperatorIdentityError>>;
@@ -2888,6 +2924,9 @@ interface OperatorIdentity {
   beginOidc(): Promise<Outcome<OidcRedirect, OperatorIdentityError>>;
   completeOidc(code: string, state: string): Promise<Outcome<OperatorSession, OperatorIdentityError>>;
 
+  startTotpReenrolment(sessionId: SessionId): Promise<Outcome<ReenrolmentStart, OperatorIdentityError>>;
+  completeTotpReenrolment(sessionId: SessionId, totpCode: string): Promise<Outcome<ReenrolmentResult, OperatorIdentityError>>;
+
   touch(sessionId: SessionId): Promise<Outcome<OperatorSession, OperatorIdentityError>>;
   logout(sessionId: SessionId): Promise<Outcome<void, OperatorIdentityError>>;
   revokeSession(sessionId: SessionId, actor: ActorRef): Promise<Outcome<void, OperatorIdentityError>>;
@@ -2896,8 +2935,29 @@ interface OperatorIdentity {
 }
 ```
 
-`EnrolmentResult` is the only place the TOTP secret and the recovery codes exist in the clear, and
-it is returned exactly once. The store holds hashes.
+`EnrolmentResult` is the only place the TOTP secret and the recovery codes exist in the clear at
+first enrolment, and it is returned exactly once. The store holds hashes.
+
+**Re-enrolment is two calls because the two halves have opposite replay rules.** `ReenrolmentStart`
+is deliberately repeatable: a second `startTotpReenrolment` on the same session returns the same
+pending secret, so a lost browser response costs nothing. `ReenrolmentResult` is not repeatable —
+it is produced once, by the completion that commits, and its ten codes cannot be recovered
+afterwards. Splitting them is what keeps secret *delivery* retryable without making the credential
+*transition* retryable. `ReenrolmentResult` carries no TOTP secret: the caller already holds it from
+start, and returning it again would give a second copy no route needs.
+
+**No login signature changes, and none needs to.** `loginLocal`, `loginWithRecoveryCode`,
+`loginWithBreakGlass` and `completeOidc` still return `OperatorSession`, which now reports its own
+`purpose`. A caller reads that field rather than inferring authority from which method it called —
+which is what makes the global state in `totp_reenrol_required` unevadable at the type level too,
+per invariant A10.
+
+**Session inspection is `touch`'s return value.** It reports the purpose because `OperatorSession`
+carries it, so this flow adds no inspection signature.
+
+The bulk revocation both transitions perform has no signature here: it is a write inside the
+module's own transaction, not a module boundary. `revokeSession` remains the operator-facing one,
+and `listSessions` now reports each session's purpose to the grants view without changing shape.
 
 ### L0 — contract types and compiler
 
@@ -2959,6 +3019,15 @@ not fixed here — see `## Unresolved`.
 `GET /health`, the latter two authenticated. U4 still owns the rest of the route table, but these
 three are externally observable — an operator's monitoring binds to them — so U4 resolving later
 must accept them rather than rename a live endpoint.
+
+**Two more are fixed because the design names them**: `POST /auth/totp/re-enrol/start` and
+`POST /auth/totp/re-enrol/complete`, both cookie-authenticated and both mutating, so both carry the
+`Origin` check and the double-submit token that E7 already requires of every mutating cookie route.
+With session inspection and logout — whose paths U4 still owns — they are the entire set a
+`totp-reenrolment` session may reach; every other authenticated route rejects one with `403` and
+`totp-reenrolment-required` before its operation runs, per invariant A11. U4 must accept these two
+rather than rename them, for the same reason as the three above: a recovery route an operator has
+been told to visit is externally observable.
 
 #### OAuth endpoints and the MCP transport (resolves U5)
 
@@ -3434,6 +3503,9 @@ type OperatorIdentityError = ModuleErrorBase & (
   | { readonly code: 'recovery-code-invalid' }
   | { readonly code: 'recovery-code-used' }
   | { readonly code: 'break-glass-invalid' }
+  | { readonly code: 'totp-reenrolment-required' }
+  | { readonly code: 'totp-reenrolment-not-pending' }
+  | { readonly code: 'totp-reenrolment-not-started' }
   | { readonly code: 'oidc-unavailable'; readonly reason: 'discovery' | 'jwks' | 'signature' | 'validity-window' }
   | { readonly code: 'subject-not-allowlisted'; readonly subject: Subject }
   | { readonly code: 'session-unknown' }
@@ -3449,11 +3521,21 @@ type OperatorIdentityError = ModuleErrorBase & (
 | `already-provisioned`, `provisioning-secret-invalid` | Enrolment after the file was burned, or with the wrong secret | no | `401`. The file's presence authorises nothing |
 | `credentials-invalid`, `totp-invalid` | Local login | no | `401` with a reason. TOTP is enforced, not offered |
 | `totp-key-unavailable` | The sealing key is absent or unreadable, so no TOTP code can be verified | by the operator, after restoring the key | `401` naming the missing key. **Never fatal at boot** — break-glass is the way back in, and it needs the service running |
-| `recovery-code-invalid`, `recovery-code-used` | Recovery-code login | no | `401`. A successful use burns the code, audits, and forces TOTP re-enrolment |
-| `break-glass-invalid` | The token is absent, stale or already consumed | no | `401`. Consumption is audited |
+| `recovery-code-invalid`, `recovery-code-used` | Recovery-code login | no | `401`. A successful use burns the code, audits, and enters the purpose-limited re-enrolment state |
+| `break-glass-invalid` | The token is absent, stale or already consumed | no | `401`. Consumption is audited, and a successful one enters the same state as a recovery code |
+| `totp-reenrolment-required` | Any authenticated route other than session inspection, re-enrolment start, re-enrolment complete and logout, called by a session whose `purpose` is `totp-reenrolment` | not until re-enrolment completes | `403`, **never `401`** — the identity is already proved, and returning the browser to login makes a loop out of a route it cannot reach yet. Send the operator to the re-enrolment view |
+| `totp-reenrolment-not-pending` | Start or complete called by a `full` session | no | `403`. There is no lost factor to repair, and nothing changes |
+| `totp-reenrolment-not-started` | Complete called on a restricted session holding no pending secret | no — call start first | `403`. The next call is start, which is why this is not the same code as the one above |
 | `oidc-unavailable` | Discovery, JWKS, signature or validity-window failure | by the operator, later | `401` with a reason. **Local password plus TOTP still works** |
 | `subject-not-allowlisted` | Federated login returned an unlisted subject | no | `401` |
 | `session-unknown`, `session-expired`, `session-revoked` | A cookie presented against the persisted row | no | `401`. Invalidation is server-side, not a cleared cookie |
+
+The three `totp-reenrolment-*` variants are the **only** `403`s in this union: every other variant
+above is a `401`, and `store-failed` is a `503`, following the same rule the `Authorization` module
+states for that code. Re-enrolment raises no new variant for the two failures the design points at
+the existing ones — an invalid confirmation code is `totp-invalid` and an unreadable sealing key is
+`totp-key-unavailable`, in both cases with `401` and with the pending secret and restricted session
+left intact and retryable.
 
 ### Compiler
 
@@ -3555,6 +3637,8 @@ responsible for maintaining it.
 | A7 | `declaration.manage`, `auth.manage`, `audit.read` and `attention.resolve` are absent from every profile whose kind is `mcp`, `scheduler` or `watcher`. | Authorization |
 | A8 | No field of `RepositoryConfig` is a capability, scope, path prefix, credential reference, remote, host, timeout or limit. Any field a caller could set that widens what the service will do lives in `Declaration`. | Contract — re-checked at every amendment of `RepositoryConfig` |
 | A9 | `visibleTools` and `dispatch` apply the same predicate. A tool absent from `visibleTools` returns `authorization` from `dispatch` and never reaches a handler. | Dispatch pipeline |
+| A10 | While `operator_credential.totp_reenrol_required` is 1, no live `operator_session` row has `purpose = 'full'` — whichever of local, recovery-code, break-glass or OIDC proof created it. | Operator identity |
+| A11 | Every authenticated route other than session inspection, `POST /auth/totp/re-enrol/start`, `POST /auth/totp/re-enrol/complete` and logout requires `purpose = 'full'`, checked in one place before the route's operation runs. | Surfaces |
 
 ### Recovery and ordering
 
@@ -3583,6 +3667,8 @@ responsible for maintaining it.
 | C6 | Every monitoring wait's effective timeout is at most `monitoringWaitCapSeconds`, regardless of what was requested. | Dispatch pipeline, Compiler |
 | C7 | At most one process holds the instance lease, and boot proves cross-process exclusion with a real child process before serving. | Lifecycle |
 | C8 | A stdio process opens no volume, takes no lock and holds no clone. | Surfaces |
+| C9 | A recovery-code or break-glass proof sets `totp_reenrol_required`, revokes every existing operator session and creates the purpose-limited session in one store transaction. No caller observes a set flag beside a surviving `full` session. | Operator identity, Structured store |
+| C10 | A re-enrolment completion promotes the pending secret, clears `totp_reenrol_required`, replaces the entire recovery-code set, upgrades the completing session to `full` and revokes every other operator session in one store transaction. Concurrent completions serialise on it, so at most one promotes a pending secret; a failed transaction changes none of the five. | Operator identity, Structured store |
 
 ### Audit and secrets
 
@@ -3597,6 +3683,7 @@ responsible for maintaining it.
 | S7 | Revocation writes a timestamp. No revocation deletes a row, and no cascade is written as a batch — `grantIsLive` walks upward at check time. | Authorization |
 | S8 | Every mutating call, every authorization rejection, every `git.raw` intent and outcome, every watched-file outcome, every identity event and every lease takeover produces an audit record. | Dispatch pipeline, Watcher, Operator identity, Lifecycle |
 | S9 | `git.raw` appends its intent line, carrying the argument vector, before the child process starts. | Git operations |
+| S10 | `operator_session.pending_totp_secret_sealed` is sealed under the credential-mount key and appears in no return type; `OperatorSession` does not carry it. `ReenrolmentStart` and `ReenrolmentResult` are this flow's only value-bearing types — the first returned on each start, the second exactly once, by the completion that commits. | Operator identity |
 
 ### Envelope and surfaces
 
@@ -3740,11 +3827,17 @@ Their phase annotations, generic outer schemas, consumer-specific plan-schema eq
 semantics are fixed under `### Declaration`, `### File watcher`, `### Contract types (L0)` and
 `### L2 — watcher` above. See `design/90-decisions.md`, 2026-08-11.
 
-**U11 — TOTP re-enrolment after recovery-code use.** The design requires a successful recovery-code
-login to force TOTP re-enrolment. The persisted flag and the `totp-reenrolled` audit event exist,
-but the design does not determine the `OperatorIdentity` signature, its input and return types, or
-the console route that completes re-enrolment and clears the flag. Those shapes must be fixed by a
-contract amendment before S18.8 is implemented.
+**U11 — TOTP re-enrolment after recovery-code use, resolved 2026-08-12 by the S18.8 contract
+amendment.** `OperatorSessionPurpose` and `OperatorSession.purpose` are fixed under
+`### Actors, profiles and sessions`; the two new `operator_session` columns under
+`### Persisted schemas`; `startTotpReenrolment`, `completeTotpReenrolment`, `ReenrolmentStart` and
+`ReenrolmentResult` under `### L4 — operator identity`; the two fixed route paths under
+`### L5 — surfaces`; the three `totp-reenrolment-*` variants under `### Operator identity` error
+semantics; and invariants A10, A11, C9, C10 and S10. The flow itself is the design's, not this
+document's — `10-design.md` § Lockout recovery and `design/90-decisions.md`, 2026-08-12. This
+unblocks S18.8. Break-glass, which the original entry did not name, is covered: it enters the same
+purpose-limited state as a recovery code. `IdentityEvent` needed no amendment — `totp-reenrolled`
+was already a member, and S8 already requires an audit record for every identity event.
 
 ~~**U8 — The pre-state digest algorithms.**~~ — **resolved 2026-08-08.** `SHA256_hex(canonical(...))`
 over an ordered array of index entries and porcelain-status lines respectively, neither derived via

@@ -10,8 +10,41 @@ Append-only. Newest at the top. The rejected alternatives are the point — with
 - **A connected MCP client can hold a stale tool catalogue.** A client that ran `tools/list` before a redeploy and never re-ran `initialize` keeps the old catalogue, and the prior art records that there is no supported way to push a refresh (`blog-mcp` issue #108). "A deployed instance executes only its predefined operations" is therefore true of the server and not of every client's view of it. **Bounded, not closed, 2026-08-03:** dispatch re-checks capabilities and returns `authorization` for a tool the session was never shown, so a stale catalogue misleads the client without reaching a handler. **Bounded further the same day:** the grant epoch means a client holding a stale catalogue is also re-checked against the current declaration grant on every call, so a narrowing lands before the handler regardless of what the client believes it may call.
 - **`revalidateFileWatchers` stops at the first bad declaration, while boot's sibling gates collect.** `ceiling-outside-contract` and `executor-missing` both report the full offending set in one `BootError`; the B6 watcher gate returns the first `DeclarationError` and stops. For a fatal error whose remedy is operator repair, that is one restart per broken declaration. Noticed during peer validation of PR #102 and deliberately not acted on: collecting would mean a `DeclarationError` that can carry several failures, which is a contract change disproportionate to a case that needs two or more declarations broken by the same upgrade.
 - **A failed journal read at boot returns without closing the store or releasing the lease.** `boot.ts` states the rule directly above `store.open()` — "every failure from here on must close the store as well as release the lease", because a caller is entitled to treat a failed boot as "nothing was acquired" — and the `allUnsettled()` failure path is the one that does not follow it, leaking a SQLite handle and the lease for the life of the process. Pre-existing; noticed during peer validation of PR #102, where the new B6 gate does follow the rule. Now a one-line fix, since that path can call the generalised `failAfterOpen`, but it belongs to whatever slice owns the recovery listing rather than to a watcher-schema reconciliation.
-- **Repository config must stay descriptive.** Settled for now (see the decision below), and it holds only while the format carries no permission-shaped field. Worth a check at `/contract` rather than trusting anyone to remember. **The design states the test in checkable form** (`10-design.md` § `RepositoryConfig`): any field a caller could set that widens what the service will do lives in the declaration instead. **Checked at `/contract` 2026-08-03 and clean:** `RepositoryConfig` declares `baseBranch`, `requiredChecks`, `deployWorkflow` and `branchPrefixes` and nothing else; no capability, scope, path prefix, credential reference, remote, host, timeout or limit has drifted into it. The test is now invariant A8 in `20-contract.md`, so the next check is a re-read of one table row rather than a re-derivation.
+- **Repository config must stay descriptive.** Settled for now (see the decision below), and it holds only while the format carries no permission-shaped field. Worth a check at `/contract` rather than trusting anyone to remember. **The design states the test in checkable form** (`10-design.md` § `RepositoryConfig`): any field a caller could set that widens what the service will do lives in the declaration instead. **Checked at `/contract` 2026-08-03 and clean:** `RepositoryConfig` declares `baseBranch`, `requiredChecks`, `deployWorkflow` and `branchPrefixes` and nothing else; no capability, scope, path prefix, credential reference, remote, host, timeout or limit has drifted into it. The test is now invariant A8 in `20-contract.md`, so the next check is a re-read of one table row rather than a re-derivation. **Re-checked at `/contract` 2026-08-12 and still clean:** the four fields are unchanged, and the U11 amendment touched operator identity only.
 ---
+
+### 2026-08-12 — The contract shapes for TOTP re-enrolment (resolves U11)
+Context: The decision below settled the flow; `/contract` still had to fix the types, signatures,
+columns, error variants and invariants the design does not state in code. These are the choices the
+design left to this document, logged because a future reader will ask why each is shaped this way.
+Chosen: `purpose` on `OperatorSession` and nothing else on any existing type — every login method
+already returns that type, so the global restriction is reported rather than inferred from which
+method was called, and no login signature changes. Two methods, `startTotpReenrolment` and
+`completeTotpReenrolment`, returning `ReenrolmentStart` and `ReenrolmentResult`: two types because
+start is replayable and completion is not, and `ReenrolmentResult` carries the upgraded session and
+the ten codes but no TOTP secret. Session inspection is `touch`'s existing return value, so this
+flow adds no inspection signature, and the bulk revocation stays a write inside the module's own
+transaction rather than a boundary. Three new error variants, all `403`: `totp-reenrolment-required`,
+`totp-reenrolment-not-pending`, `totp-reenrolment-not-started`. The sealed pending secret is a
+nullable `operator_session` column with a table `CHECK` tying it to the restricted purpose, and no
+type carries it. Invariants A10 (flag set implies no `full` session), A11 (one central route gate),
+C9 and C10 (the two transitions are each one store transaction), S10 (the sealed column and the two
+value-bearing types).
+Rejected: **A dedicated `describeSession` for inspection** — `touch` already returns the row on the
+path every authenticated request takes, and a second reader of the same row is a second place for
+the purpose to be read from. **Reusing `EnrolmentResult` for completion** — it carries a clear TOTP
+secret, which completion must not hand back a second time. **One combined re-enrolment method, or a
+single `totp-reenrolment-ineligible` code** — collapsing them loses the distinction between "you are
+not in recovery" and "you have not started", which are different next actions for the operator.
+**A distinct error code for an invalid confirmation code or an unreadable sealing key** — the design
+points those at the existing `totp-invalid` and `totp-key-unavailable`, and a second spelling of the
+same failure is how two `401`s come to disagree. **Putting the pending secret on `OperatorSession`**
+— the type is what session inspection returns, so the field would be one route away from being
+served to a browser. **Modelling the restriction as a capability or a second `ActorProfile`** — a
+purpose-limited session reaches no dispatch route at all, so a capability would be checked in the
+one layer this flow never enters.
+Reversibility: expensive for `purpose`, the two route paths and the three error codes, which clients
+observe; cheap for the method and type names, and for where the sealed pending secret sits.
 
 ### 2026-08-12 — TOTP recovery is a globally enforced, purpose-limited session
 Context: Contract open question U11 identified that the design required recovery-code login to
