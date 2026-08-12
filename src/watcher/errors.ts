@@ -22,7 +22,26 @@ export type WatcherError = ModuleErrorBase &
  * authority refusing an action outright, not a validation or transient
  * failure.
  */
-export function watcherError<T extends { readonly code: WatcherError['code'] }>(variant: T, summary: string): WatcherError {
-  const resultKind: ResultKind = variant.code === 'watched-file-unreadable' ? 'validation' : 'authorization';
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+type WatcherErrorVariant = DistributiveOmit<WatcherError, 'resultKind' | 'retryable' | 'summary'>;
+
+function watcherErrorResultKind(variant: WatcherErrorVariant): ResultKind {
+  switch (variant.code) {
+    case 'watched-file-unreadable':
+      return 'validation';
+    case 'step-failed':
+      // `step-failed` already carries the dispatched step's own accurate
+      // `ResultKind` — use it rather than a hardcoded guess.
+      return variant.result;
+    case 'claim-failed':
+    case 'interrupted-claim':
+      return 'infrastructure';
+    case 'not-permitted':
+      return 'authorization';
+  }
+}
+
+export function watcherError<T extends WatcherErrorVariant>(variant: T, summary: string): WatcherError {
+  const resultKind = watcherErrorResultKind(variant);
   return { resultKind, retryable: variant.code === 'claim-failed', summary, ...variant } as unknown as WatcherError;
 }

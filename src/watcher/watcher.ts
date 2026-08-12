@@ -14,10 +14,11 @@ import type { Audit } from '../audit/audit.ts';
 import type { WatchedFileOutcome } from '../audit/types.ts';
 import type { Notifier } from '../notifier/notifier.ts';
 import type { StructuredStore, StoreTransaction } from '../store/structured-store.ts';
-import type { ContractCapabilitySet } from '../contract/capabilities.ts';
+import { capabilityScopeOf, type CapabilityName, type ContractCapabilitySet } from '../contract/capabilities.ts';
 import type { JsonValue } from '../contract/json.ts';
 import type { ToolResult } from '../result/envelope.ts';
 import type { ResultKind } from '../shared/result-kind.ts';
+import type { OperationContextKind } from '../shared/actor.ts';
 import type { RetentionReport } from '../shared/retention.ts';
 import type { RepoStatusData } from '../git/types.ts';
 import type { PrOpenData } from '../host/types.ts';
@@ -105,6 +106,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
   const pollIntervalSeconds = deps.pollIntervalSeconds ?? POLL_INTERVAL_SECONDS_DEFAULT;
 
   let pollHandle: ReturnType<typeof setInterval> | null = null;
+  let tickInFlight: Promise<readonly WatchTickReport[]> | null = null;
 
   function watcherInboxesRoot(): string {
     return path.join(volumeRoot, 'watcher-inboxes');
@@ -122,13 +124,25 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     return path.join(inboxRootFor(declarationId), 'failed');
   }
 
+  /**
+   * `20-contract.md` invariant A7: `declaration.manage`, `auth.manage`,
+   * `audit.read` and `attention.resolve` are absent from every profile whose
+   * kind is `mcp`, `scheduler` or `watcher`. The watcher's grant is scoped to
+   * declaration-scoped capabilities only, so it never inherits an
+   * instance-scoped capability a future tool declaration might add to
+   * `contractCapabilitySet`.
+   */
+  const declarationScopedCapabilities = new Set(
+    [...(contractCapabilitySet as unknown as ReadonlySet<CapabilityName>)].filter((capability) => capabilityScopeOf(capability) === 'declaration'),
+  ) as unknown as Session['grant'];
+
   function watcherSessionFor(declaration: Declaration): Session {
     return {
       id: randomUUID() as SessionId,
       kind: 'watcher',
       actorRef: { kind: 'watcher', subject: `watcher:${declaration.id}` as Subject, clientId: null, grantId: null },
       repositoryBinding: declaration.id,
-      grant: contractCapabilitySet as unknown as Session['grant'],
+      grant: declarationScopedCapabilities,
       writablePathPrefixes: [],
       frozenAtEpoch: declaration.grantEpoch as unknown as Session['frozenAtEpoch'],
     };
@@ -230,7 +244,14 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     return { kind: 'succeeded', pullRequest: prRef };
   }
 
-  async function auditAndNotify(declarationId: DeclarationId, generation: Declaration['generation'] | null, actorRef: ActorRef, file: string, outcome: WatchedFileOutcome): Promise<void> {
+  async function auditAndNotify(
+    declarationId: DeclarationId,
+    generation: Declaration['generation'] | null,
+    actorRef: ActorRef,
+    context: OperationContextKind,
+    file: string,
+    outcome: WatchedFileOutcome,
+  ): Promise<void> {
     await audit.append({
       at: clock.now(),
       operationId: null,
@@ -238,7 +259,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
       generation,
       tool: null,
       actorRef,
-      context: actorRef.subject === RECOVERY_ACTOR_REF.subject ? 'recovery' : 'normal',
+      context,
       form: 'file-watcher',
       file: file as never,
       outcome,
@@ -246,7 +267,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
 
     if (outcome.kind === 'succeeded') return;
     const reason = outcome.kind === 'rejected' ? `step '${outcome.step}' returned ${outcome.result}: ${outcome.reason}` : outcome.reason;
-    await store.transaction(async (tx: StoreTransaction) => {
+    const notified = await store.transaction(async (tx: StoreTransaction) => {
       notifier.enqueue(
         {
           severity: 'attention',
@@ -257,6 +278,9 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
         tx,
       );
     });
+    if (!notified.ok) {
+      console.error(`watcher: failed to enqueue attention notification for '${file}' (declaration '${declarationId}'): ${notified.error.summary}`);
+    }
   }
 
   function moveToFailed(declarationId: DeclarationId, sourcePath: string, file: string, reasonText: string): void {
@@ -313,7 +337,12 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
 
   async function tickOneDeclaration(declaration: Declaration): Promise<WatchTickReport> {
     const described = await cloneStore.describe(declaration.id);
-    if (!described.ok || described.value.state === 'needs-attention') {
+    if (!described.ok || described.value.state !== 'ready') {
+      // Any non-`ready` clone state (`absent`, `materialising`, `dirty`,
+      // `recovery-pending`, `evicted`, `needs-attention`) is reported as
+      // `clone-needs-attention` here — a `repo_status` read against a
+      // not-yet-materialised or otherwise non-ready clone would trigger
+      // clone-on-demand and, on failure, get misreported as `clone-not-clean`.
       return emptyReport(declaration.id, 'clone-needs-attention');
     }
 
@@ -327,7 +356,14 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     const candidate = pickCandidate(declaration.id);
     if (candidate === null) return emptyReport(declaration.id, null);
 
-    if (!claim(declaration.id, candidate)) return emptyReport(declaration.id, null);
+    if (!claim(declaration.id, candidate)) {
+      // `20-contract.md` § Watcher, `claim-failed`: "every outcome above is
+      // audited, and every failure notifies at attention" — the file stays
+      // in the inbox (nothing is moved) and is retried on the next tick.
+      const outcome = rejectedOutcome('claim', 'infrastructure', 'the claim into processing/ failed');
+      await auditAndNotify(declaration.id, declaration.generation, session.actorRef, 'normal', candidate, outcome);
+      return { declarationId: declaration.id, skipped: null, claimed: null, outcome, reconciled: [], stillPending: [] };
+    }
 
     const processingPath = path.join(processingDirFor(declaration.id), candidate);
     const read = readStrictUtf8(processingPath);
@@ -345,7 +381,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
       moveToFailed(declaration.id, processingPath, candidate, reasonText);
     }
 
-    await auditAndNotify(declaration.id, declaration.generation, session.actorRef, candidate, outcome);
+    await auditAndNotify(declaration.id, declaration.generation, session.actorRef, 'normal', candidate, outcome);
 
     return { declarationId: declaration.id, skipped: null, claimed: candidate as never, outcome, reconciled: [], stillPending: [] };
   }
@@ -363,7 +399,21 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
 
       if (pollHandle === null) {
         pollHandle = setInterval(() => {
-          void this.tick();
+          // Reentrancy guard, matching the notifier's `deliveryInFlight`
+          // pattern (`src/server.ts`): a tick whose network-bound protocol
+          // steps outlast `pollIntervalSeconds` must not let the next firing
+          // start a second, overlapping tick on the same working tree. The
+          // `.catch` also ensures a thrown fs error (e.g. a locked file)
+          // never becomes an unhandled rejection that kills the process.
+          if (tickInFlight !== null) return;
+          tickInFlight = this.tick()
+            .catch((error: unknown) => {
+              console.error(`watcher: tick failed: ${error instanceof Error ? error.message : String(error)}`);
+              return [] as readonly WatchTickReport[];
+            })
+            .finally(() => {
+              tickInFlight = null;
+            });
         }, pollIntervalSeconds * 1000);
         pollHandle.unref?.();
       }
@@ -374,6 +424,13 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
       if (pollHandle !== null) {
         clearInterval(pollHandle);
         pollHandle = null;
+      }
+      // Mirrors the shutdown path's `deliveryInFlight` wait (`src/server.ts`):
+      // releasing the volume lease while a tick is still pushing/opening a
+      // pull request would let this process keep writing after a replacement
+      // has taken the volume.
+      if (tickInFlight !== null) {
+        await tickInFlight;
       }
     },
 
@@ -409,7 +466,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
             "found in 'processing/' at startup — a prior run was interrupted mid-delivery and this file may already have an open pull request; it is never reprocessed";
           const outcome: WatchedFileOutcome = { kind: 'interrupted-claim', reason };
           moveToFailed(declarationId, full, fileEntry, reason);
-          await auditAndNotify(declarationId, null, RECOVERY_ACTOR_REF, fileEntry, outcome);
+          await auditAndNotify(declarationId, null, RECOVERY_ACTOR_REF, 'recovery', fileEntry, outcome);
           reports.push({ declarationId, skipped: null, claimed: fileEntry as never, outcome, reconciled: [], stillPending: [] });
         }
       }

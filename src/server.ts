@@ -162,12 +162,18 @@ function resolveWatcherEnabled(): boolean {
   return process.env.WATCHER_ENABLED === 'true';
 }
 
-/** `DeploymentConfig.watcher.pollIntervalSeconds` — contract default 15. */
-function resolveWatcherPollIntervalSeconds(): number {
+/**
+ * `DeploymentConfig.watcher.pollIntervalSeconds` — contract default 15. The
+ * strict check only applies when the watcher is actually enabled: a
+ * deployment that never opted in must not be taken down by a stray malformed
+ * value it was never going to use.
+ */
+function resolveWatcherPollIntervalSeconds(watcherEnabled: boolean): number {
   const raw = process.env.WATCHER_POLL_INTERVAL_SECONDS;
   if (raw === undefined || raw.trim().length === 0) return 15;
   const value = Number(raw);
   if (!Number.isInteger(value) || value < 1) {
+    if (!watcherEnabled) return 15;
     console.error(`server: WATCHER_POLL_INTERVAL_SECONDS must be an integer of at least 1 (got '${raw}')`);
     process.exit(1);
   }
@@ -475,6 +481,7 @@ async function main(): Promise<void> {
   // that never opted in), so a refusal here is logged, not fatal — unlike
   // `lifecycle.boot()` above, nothing about serving MCP or console traffic
   // depends on the watcher running.
+  const watcherEnabled = resolveWatcherEnabled();
   const watcher = createWatcher({
     volumeRoot,
     clock: systemClock,
@@ -486,8 +493,8 @@ async function main(): Promise<void> {
     store,
     contractCapabilitySet,
     remoteOperationsPermitted: resolveRemoteOperationsPermitted(),
-    watcherEnabled: resolveWatcherEnabled(),
-    pollIntervalSeconds: resolveWatcherPollIntervalSeconds(),
+    watcherEnabled,
+    pollIntervalSeconds: resolveWatcherPollIntervalSeconds(watcherEnabled),
   });
   const watcherStarted = await watcher.start();
   if (!watcherStarted.ok) {
@@ -613,7 +620,11 @@ async function main(): Promise<void> {
   const shutdown = (signal: NodeJS.Signals): void => {
     ready = false;
     clearInterval(deliveryTimer);
-    void watcher.stop();
+    // `watcher.stop()` itself waits out any tick already in flight (a tick
+    // does the same class of writes as a delivery pass — git push, PR open,
+    // store/audit transactions), so it is awaited alongside `deliveryInFlight`
+    // below rather than fired-and-forgotten.
+    const watcherStopped = watcher.stop();
     server.close(() => {
       // A delivery pass holds its own connections to `store.sqlite`, so
       // releasing the lease while one is still running would let this
@@ -622,6 +633,7 @@ async function main(): Promise<void> {
       // Bounded because every attempt now carries a timeout.
       void Promise.resolve(deliveryInFlight)
         .catch(() => undefined)
+        .then(() => watcherStopped.catch(() => undefined))
         .then(() => lifecycle.shutdown('signal'))
         .then(() => process.exit(0));
     });
