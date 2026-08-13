@@ -2,22 +2,59 @@
 description: Discover this repository's gates, run them, and report honestly what did and did not run
 ---
 
+<!-- companion:start -->
+**Per-repo companion:** `.claude/commands/verify-local.md`. Read it now, if it exists — an absent,
+empty, or frontmatter-only file is no companion, and this file then stands alone.
+It may override: `vocabulary`, `extra-steps`, `gate-commands`. It may never override anything in
+[`.claude/COMPANIONS.md`](../COMPANIONS.md) § *Never*, which is also where these categories are defined.
+<!-- companion:end -->
+
 Run the checks this repository actually has, and report the result without softening it.
 
-**`/pr` runs this as its gate phase**, against the branch and worktree its pull request points at, and writes the report below into that PR's `Verified` section **verbatim** — the same three lists, not a summary. This file owns the procedure; `/pr` owns only where the sequence sits. Invoked on its own, it does the same discovery and the same three lists against whatever tree is checked out, and writes to no pull request.
+**`/pr` runs this as its gate phase**, against the branch and worktree its pull request points at, and writes the report below into that PR's `Verified` section **verbatim** — the same three lists, not a summary, rendered from a `.claude/verify-report.json` that `tools/Test-VerifyReport.ps1` has validated (see *Report*). This file owns the procedure; `/pr` owns only where the sequence sits. Invoked on its own, it does the same discovery and the same three lists against whatever tree is checked out, and writes to no pull request.
 
 **The point of this command is the second half of its report — what did *not* run.** Silence is not success, and a gate that could not run is the most likely place a false "everything passes" comes from.
 
 ## Discover, do not assume
 
-**Check the cache first.** `tools/Test-GatesCache.ps1 -RepoRoot <repo>` hashes the files this discovery reads (every workflow's content, `package.json`'s content, and whether the known build-script paths exist) and compares it to `.claude/gates.json`. `Fresh` means none of those inputs have changed since the last discovery — skip straight to **Run** with the gates it returns. `Stale` or `Missing` means discover as below, then call `tools/Test-GatesCache.ps1 -Write -GatesJson '<the gates you found, as [{"name","command"}]>'` before running them, so the next `/verify` on this tree does not re-derive the same answer. The cache only remembers gates; it never decides what they are — that judgement stays here.
+**A gate declares itself; this command does not go hunting for one.** A CI step that gates
+this repository carries `# verification: true` as a plain YAML comment on the line
+immediately above its `- name:` line, inside `.github/workflows/*.yml`. That is the flag —
+not a prose reading of what a workflow "does", not a guess from file layout. Scan every
+workflow file for that comment; each step it precedes is a discovered gate, named by the
+step's own `name:`. **A step without the flag is not a gate this command owns**, even if it
+happens to run something useful — do not add it to the report on your own judgement, and
+do not drop the flag from a step that is still meant to gate the repository.
 
-**CI is the authoritative list.** Read `.github/workflows/*.yml` first: whatever the required checks invoke is the set worth running locally. A gate that exists but CI never runs is optional; a gate CI runs that you skipped is a hole in your report.
+**Check the cache first.** `tools/Test-GatesCache.ps1 -RepoRoot <repo>` hashes the files
+this discovery reads (every workflow's full content — so a flag added, moved, or removed
+invalidates it same as any other step edit — plus `package.json`'s content and whether the
+known build-script paths exist) and compares it to `.claude/gates.json`. `Fresh` means none
+of those inputs have changed since the last discovery — skip straight to **Run** with the
+gates it returns. `Stale` or `Missing` means discover as below, then call
+`tools/Test-GatesCache.ps1 -Write -GatesJson '<the gates you found, as [{"name","command"}]>'`
+before running them, so the next `/verify` on this tree does not re-derive the same answer.
+The cache only remembers gates; it never decides what they are — that judgement stays here.
 
-Then look for what those workflows call, and for anything else the repository ships:
+For each flagged step, read its `run:` block and translate it to the equivalent local
+invocation — that translation is still genuine judgement, the flag only says *that* a step
+is a gate, not *how* to reproduce it outside CI. This repository's current flagged steps and
+their local equivalents:
+
+| Flagged step (`.github/workflows/verify.yml`) | Run locally |
+|---|---|
+| `Parse-check PowerShell scripts` | Parse every `*.ps1` with `[System.Management.Automation.Language.Parser]::ParseFile`, as the step does |
+| `Run Pester tests` | `Invoke-Pester -Path tools -Output Detailed -PassThru` |
+
+A repository can gain, lose, or rename flagged steps over time — re-derive this table from
+the workflow files rather than trusting a memorized list; the two rows above describe this
+repository's steps as of this writing, not a fixed schema.
+
+Then look for anything else the repository ships that is not CI-gated. These are optional —
+worth running and worth naming if run, but their absence from CI means they never enter the
+"did not run because it did not run" failure mode the flag exists to close:
 
 ```powershell
-Get-ChildItem .github/workflows -Filter *.yml
 Get-Content package.json | Select-String '"scripts"' -Context 0,20
 Get-ChildItem . -Filter *.sln, *.csproj -Recurse -Depth 2
 Get-ChildItem build -Filter *.ps1
@@ -37,7 +74,9 @@ Common shapes, none of them assumed:
 
 ## Report
 
-Three lists. All three are required, and the second is the one that matters.
+**Write the result as a structured artifact first, never the prose directly.** Same pattern as `Test-DesignDrift.ps1` (`AGENTS.md`, "structured artifact plus deterministic validator"): this command writes `.claude/verify-report.json` — one entry per discovered gate, `{"name", "status", "detail"|"reason"}` with `status` one of `Passed` / `Failed` / `DidNotRun` — and never edits a PR body or any other visible surface directly. Then run `tools/Test-VerifyReport.ps1` against it. `Valid` (exit 0) means every gate has exactly one outcome, every `Failed` gate carries real detail, and every `DidNotRun` gate carries a reason — render the three lists below from the artifact and proceed. `Invalid` or `NotEvaluated` (exit 1 or 2) means the report itself is malformed — fix the artifact, not the prose, and do not render or hand off a report that failed validation.
+
+Three lists, rendered from the validated artifact. All three are required, and the second is the one that matters.
 
 ```
 Ran and passed:   <gate> — <what it covered>
@@ -45,7 +84,11 @@ Ran and failed:   <gate> — <the actual output, not a summary>
 Did not run:      <gate> — <why: tool missing, Docker down, no such script>
 ```
 
-- **Quote failures.** Paste the failing output. A summary of a failure is a claim about a failure.
+- **Every `# verification: true` step goes in exactly one of the three lists.** That is the
+  point of discovering gates by flag instead of by looking: a flagged step cannot be
+  silently absent from the report the way a gate nobody thought to search for could be.
+  Cross-check the list you are about to write against the flags you found before finishing.
+- **Quote failures.** Paste the failing output into the artifact's `detail` field. A summary of a failure is a claim about a failure — `Test-VerifyReport.ps1` rejects a `detail` too short to plausibly be pasted output.
 - **Never write "all checks pass"** unless every discovered gate is in the first list. If anything is in the third list, the honest sentence names it: *"the three that ran passed; the documentation build did not run because Docker is unavailable."*
 - **A gate that cannot run locally is not a gate you may report on.** Say so, and say that the corresponding CI check on the pull request is where the answer will come from.
 - If CI runs a check you could not reproduce locally at all, name it explicitly rather than leaving it out.
@@ -61,3 +104,11 @@ A clean run needs no question. Say it is clean, name what ran, and stop.
 - Do not fix a failure as part of this command. Verifying and repairing are different jobs, and doing both means the report describes a tree that no longer exists.
 - Do not re-run a gate until it passes. If a check is flaky, that is a finding — say how many runs and what varied. **A fix that only changed the odds is not a fix.**
 - Do not skip the full suite in favour of the tests you think are relevant.
+
+## Re-run
+
+Re-running this command itself (not an individual flaky gate, forbidden above) is expected —
+`/pr` calls it fresh on every pass through its gate phase. Discovery is cache-assisted
+(`tools/Test-GatesCache.ps1`, above) but the run and the report are not: every invocation
+re-runs the full discovered set and reports fresh, never reusing a prior pass's pass/fail
+verdict. A gate that passed last time is still run again, not assumed still green.

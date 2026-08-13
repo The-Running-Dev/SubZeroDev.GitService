@@ -2,6 +2,13 @@
 description: Generate the human-facing guide from the design docs
 ---
 
+<!-- companion:start -->
+**Per-repo companion:** `.claude/commands/make-human-docs-local.md`. Read it now, if it exists — an absent,
+empty, or frontmatter-only file is no companion, and this file then stands alone.
+It may override: `vocabulary`, `document-map`, `extra-steps`. It may never override anything in
+[`.claude/COMPANIONS.md`](../COMPANIONS.md) § *Never*, which is also where these categories are defined.
+<!-- companion:end -->
+
 Read `design/10-design.md`, `design/20-contract.md`, and `design/00-brief.md`. Write `docs/docs/guide.md`.
 
 If the repository has no `docs/` documentation project, write `guide.md` at the repository root instead and say that you did. Do not create a `docs/docs/` tree that nothing serves.
@@ -32,3 +39,10 @@ The file opens with:
 - You would have to invent behaviour to make the guide read coherently.
 
 Report what you cut, and anything the design left ambiguous.
+
+## Re-run
+
+Overwrites the guide in full from the current design docs — there is no partial regeneration
+and no diffing against the previous version. Re-run whenever `design/` changes underneath it;
+`/reconcile`'s *Generated-guide drift* is what notices when a stale copy was never
+regenerated, not this command noticing its own staleness.
