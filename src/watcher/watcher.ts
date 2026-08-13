@@ -17,13 +17,14 @@ import type { StructuredStore, StoreTransaction } from '../store/structured-stor
 import { capabilityScopeOf, type CapabilityName, type ContractCapabilitySet } from '../contract/capabilities.ts';
 import type { JsonValue } from '../contract/json.ts';
 import type { ToolResult } from '../result/envelope.ts';
-import type { ResultKind } from '../shared/result-kind.ts';
+import { isError, type ResultKind } from '../shared/result-kind.ts';
 import type { OperationContextKind } from '../shared/actor.ts';
 import type { RetentionReport } from '../shared/retention.ts';
 import type { RepoStatusData } from '../git/types.ts';
-import type { PrOpenData } from '../host/types.ts';
+import type { PrOpenData, PrStatusData } from '../host/types.ts';
 import { watcherError, type WatcherError } from './errors.ts';
-import type { FileWatcherApplyData, FileWatcherPlanData, WatchTickReport } from './types.ts';
+import type { FileWatcherApplyData, FileWatcherPlanData, PendingPullRequest, WatchTickReport } from './types.ts';
+import { readPendingPullRequests, writePendingPullRequests } from './pending-pull-requests.ts';
 
 /** `20-contract.md` § L2 — watcher. */
 export interface Watcher {
@@ -331,11 +332,81 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     }
   }
 
-  function emptyReport(declarationId: DeclarationId, skipped: WatchTickReport['skipped']): WatchTickReport {
-    return { declarationId, skipped, claimed: null, outcome: null, reconciled: [], stillPending: [] };
+  function emptyReport(
+    declarationId: DeclarationId,
+    skipped: WatchTickReport['skipped'],
+    reconciled: readonly PendingPullRequest[] = [],
+    stillPending: readonly PendingPullRequest[] = [],
+  ): WatchTickReport {
+    return { declarationId, skipped, claimed: null, outcome: null, reconciled, stillPending };
+  }
+
+  /**
+   * `20-contract.md` § L2 — watcher, `PendingPullRequestList`, and `30-slices.md`
+   * § S24. "Each tick re-reads host state" (S24.2) — independent of the
+   * clean-tree gate `tickOneDeclaration` applies before claiming a new file
+   * (S24.3: "No watcher lock spans either the status read or the composite").
+   * An open pull request or a transient `pr_status` failure stays pending; a
+   * closed one is dropped without reconciliation; a merged one dispatches
+   * `reconcile_after_merge` once and is dropped whether that succeeds or
+   * fails — never retried, per S24.2's own text. Both dispatch calls go
+   * through the ordinary pipeline, which already audits the call and, for a
+   * timeout, parks and later notifies via boot recovery (`10-design.md` §
+   * control flow #1) — no separate audit or notification is added here.
+   *
+   * The list is written after **each** entry is resolved, not once after the
+   * whole loop: a process killed mid-tick — the same event
+   * `recoverInterruptedClaims` exists to recover from — must not re-dispatch
+   * `reconcile_after_merge` for an entry this tick already reconciled. Each
+   * write reflects every decision made so far plus the entries not yet
+   * reached this tick.
+   */
+  async function reconcilePendingPullRequests(declaration: Declaration, session: Session): Promise<{ reconciled: readonly PendingPullRequest[]; stillPending: readonly PendingPullRequest[] }> {
+    const list = readPendingPullRequests(volumeRoot, declaration.id);
+    if (list.entries.length === 0) return { reconciled: [], stillPending: [] };
+
+    const reconciled: PendingPullRequest[] = [];
+    const stillPending: PendingPullRequest[] = [];
+
+    for (let index = 0; index < list.entries.length; index += 1) {
+      const entry = list.entries[index]!;
+      const statusResult = await callTool('pr_status', { number: entry.number }, declaration, session);
+      const statusData = statusResult.ok ? (statusResult.data as unknown as PrStatusData | undefined) : undefined;
+
+      if (!statusResult.ok || statusData === undefined) {
+        // `isError` (`upstream`/`timeout`/`infrastructure`) is a transient
+        // read failure and stays pending for the next tick. A non-transient
+        // one — `validation`/`authorization`/`precondition`/`conflict`, e.g.
+        // the declaration's grant no longer includes `host.pr.read` — will
+        // never succeed on retry either, so it is dropped here instead of
+        // retried forever. There is no `TerminalState` variant this can
+        // raise an `attention` notification through without widening the
+        // closed union in `20-contract.md`; the per-call audit record
+        // `dispatch` already wrote for this `pr_status` call is this entry's
+        // only trail until that contract amendment exists.
+        if (statusResult.ok || isError(statusResult.kind)) stillPending.push(entry);
+      } else {
+        const status = statusData.status;
+        if (status.state === 'open') {
+          stillPending.push(entry);
+        } else if (status.state === 'closed') {
+          // Removed without reconciliation (S24.2) — neither list.
+        } else {
+          await callTool('reconcile_after_merge', { pullRequestNumber: entry.number, expectedHeadSha: status.headSha }, declaration, session);
+          reconciled.push(entry);
+        }
+      }
+
+      writePendingPullRequests(volumeRoot, declaration.id, { entries: [...stillPending, ...list.entries.slice(index + 1)] });
+    }
+
+    return { reconciled, stillPending };
   }
 
   async function tickOneDeclaration(declaration: Declaration): Promise<WatchTickReport> {
+    const session = watcherSessionFor(declaration);
+    const { reconciled, stillPending } = await reconcilePendingPullRequests(declaration, session);
+
     const described = await cloneStore.describe(declaration.id);
     if (!described.ok || described.value.state !== 'ready') {
       // Any non-`ready` clone state (`absent`, `materialising`, `dirty`,
@@ -343,18 +414,17 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
       // `clone-needs-attention` here — a `repo_status` read against a
       // not-yet-materialised or otherwise non-ready clone would trigger
       // clone-on-demand and, on failure, get misreported as `clone-not-clean`.
-      return emptyReport(declaration.id, 'clone-needs-attention');
+      return emptyReport(declaration.id, 'clone-needs-attention', reconciled, stillPending);
     }
 
-    const session = watcherSessionFor(declaration);
     const status = await callTool('repo_status', {}, declaration, session);
     const statusData = status.ok ? (status.data as unknown as RepoStatusData | undefined) : undefined;
     if (!status.ok || statusData === undefined || statusData.dirty !== false) {
-      return emptyReport(declaration.id, 'clone-not-clean');
+      return emptyReport(declaration.id, 'clone-not-clean', reconciled, stillPending);
     }
 
     const candidate = pickCandidate(declaration.id);
-    if (candidate === null) return emptyReport(declaration.id, null);
+    if (candidate === null) return emptyReport(declaration.id, null, reconciled, stillPending);
 
     if (!claim(declaration.id, candidate)) {
       // `20-contract.md` § Watcher, `claim-failed`: "every outcome above is
@@ -362,7 +432,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
       // in the inbox (nothing is moved) and is retried on the next tick.
       const outcome = rejectedOutcome('claim', 'infrastructure', 'the claim into processing/ failed');
       await auditAndNotify(declaration.id, declaration.generation, session.actorRef, 'normal', candidate, outcome);
-      return { declarationId: declaration.id, skipped: null, claimed: null, outcome, reconciled: [], stillPending: [] };
+      return { declarationId: declaration.id, skipped: null, claimed: null, outcome, reconciled, stillPending };
     }
 
     const processingPath = path.join(processingDirFor(declaration.id), candidate);
@@ -376,6 +446,15 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
 
     if (outcome.kind === 'succeeded') {
       moveToProcessed(declaration.id, processingPath, candidate);
+      const pending = readPendingPullRequests(volumeRoot, declaration.id);
+      const entry: PendingPullRequest = {
+        declarationId: declaration.id,
+        number: outcome.pullRequest.number,
+        branch: outcome.pullRequest.branch,
+        openedAt: clock.now(),
+        sourceFile: candidate as never,
+      };
+      writePendingPullRequests(volumeRoot, declaration.id, { entries: [...pending.entries, entry] });
     } else {
       const reasonText = outcome.kind === 'rejected' ? `step '${outcome.step}' returned ${outcome.result}: ${outcome.reason}` : outcome.reason;
       moveToFailed(declaration.id, processingPath, candidate, reasonText);
@@ -383,7 +462,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
 
     await auditAndNotify(declaration.id, declaration.generation, session.actorRef, 'normal', candidate, outcome);
 
-    return { declarationId: declaration.id, skipped: null, claimed: candidate as never, outcome, reconciled: [], stillPending: [] };
+    return { declarationId: declaration.id, skipped: null, claimed: candidate as never, outcome, reconciled, stillPending };
   }
 
   return {
@@ -478,10 +557,9 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
      * `20-contract.md` § L2 — watcher: "Every `tick` resolves the current
      * active declarations before selecting work" — a declaration added or
      * amended at runtime is eligible on the next tick with no restart.
-     * `reconciled`/`stillPending` are always empty: recording and
-     * reconciling opened pull requests is S24 (`30-slices.md` § S17 out of
-     * scope — "following an opened pull request after this tick (S24)"),
-     * which depends on this slice.
+     * `reconciled`/`stillPending` come from `reconcilePendingPullRequests`
+     * (S24, `30-slices.md`), which every declaration's tick runs regardless
+     * of that declaration's clone-readiness gate for claiming a new file.
      */
     async tick(): Promise<readonly WatchTickReport[]> {
       const active = await declarations.list({ state: 'active', hasFileWatcher: true });

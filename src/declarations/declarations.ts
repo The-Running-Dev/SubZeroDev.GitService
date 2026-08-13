@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { ok, err, type Outcome } from '../shared/outcome.ts';
@@ -182,6 +182,34 @@ function withLocalTransaction<T>(db: DatabaseSync, work: (tx: StoreTransaction) 
       // Already rolled back by the failure itself.
     }
     throw cause;
+  }
+}
+
+function countFiles(root: string): number {
+  if (!existsSync(root)) return 0;
+  let count = 0;
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const full = path.join(root, entry.name);
+    count += entry.isDirectory() ? countFiles(full) : 1;
+  }
+  return count;
+}
+
+/**
+ * `watcher/pending-pull-requests.ts`'s own path convention (`pendingPullRequestsPath`),
+ * inlined for the same reason `watcher-inboxes/<id>` is inlined above — Declarations
+ * is L1 and Watcher is L2. Keyed by declaration id alone, with no generation, so a
+ * re-declared id must have this cleared explicitly rather than let a new era read a
+ * previous era's entries: `10-design.md` § "Re-declaring the same `id` does not
+ * inherit any of it" would otherwise be silently violated by watcher state that
+ * lives outside `watcher-inboxes/` and outside this module's own store.
+ */
+function clearPendingPullRequests(volumeRoot: string, id: DeclarationId): void {
+  const full = path.join(volumeRoot, 'watcher-pending-pull-requests', `${id as string}.json`);
+  try {
+    unlinkSync(full);
+  } catch {
+    // Nothing to clear — the common case.
   }
 }
 
@@ -426,6 +454,12 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
         return err(declarationError({ code: 'store-failed', cause: written.error }, written.error.summary));
       }
 
+      // A fresh declare (generation 1) and an adopted one (generation N+1,
+      // above) both start this era with no pending pull requests of its own
+      // — clearing unconditionally is cheap and correct either way, and
+      // never fires on the common case where the file does not exist.
+      clearPendingPullRequests(volumeRoot, input.id);
+
       return ok(toDeclaration(written.value));
     },
 
@@ -528,12 +562,19 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
       });
       if (!written.ok) return err(declarationError({ code: 'store-failed', cause: written.error }, written.error.summary));
 
-      // Grants, scheduled jobs and the file watcher are owned by
-      // modules that do not exist yet (Authorization/S13, Scheduler/S16,
-      // Watcher/S17) — `30-slices.md` § S5 "Out of scope": "the rest of the
-      // orphaning cascade... each is added by the slice that creates them."
-      // Empty here is the honest current answer, not a stub standing in for
-      // one: nothing has been cancelled or revoked because nothing existed to.
+      // Grants and scheduled jobs are owned by modules that do not exist yet
+      // (Authorization/S13, Scheduler/S16) — `30-slices.md` § S5 "Out of
+      // scope": "the rest of the orphaning cascade... each is added by the
+      // slice that creates them." Empty here is the honest current answer,
+      // not a stub standing in for one: nothing has been cancelled or
+      // revoked because nothing existed to.
+      //
+      // `fileWatcherStopped` is true whenever this declaration named a file
+      // watcher, because the state flip to `orphaned` above is itself what
+      // stops it: `Watcher.tick()` only lists `{ state: 'active', hasFileWatcher:
+      // true }` declarations (`watcher.ts`), so the very next tick excludes
+      // this one with no further action needed here (`10-design.md` § "File
+      // watcher directory": "Watching stops immediately").
       return ok({
         declarationId: id,
         generation: existing.generation,
@@ -541,7 +582,7 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
         revokedGrants: [],
         retainedJournalEntries: [],
         cloneLeftOnDisk: true,
-        fileWatcherStopped: false,
+        fileWatcherStopped: existing.fileWatcher !== null,
       });
     },
 
@@ -566,6 +607,20 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
       const directoryPresent = existsSync(path.join(volumeRoot, 'clones', id));
       if (rowSaysPresent || directoryPresent) {
         return err(declarationError({ code: 'clone-still-present' }, `a clone for '${id}' still exists — run clone.remove first`));
+      }
+
+      // `10-design.md` § "File watcher directory": "`declaration.remove`
+      // refuses while the directory holds anything, on the same principle as
+      // `clone.remove` — a watched file the service accepted is a copy
+      // nobody else may hold." `watcher-inboxes/<id>` is `watcher.ts`'s own
+      // path convention (`inboxRootFor`), inlined here rather than imported
+      // because Declarations is L1 and Watcher is L2 — dependencies point
+      // downward only (`10-design.md` § Module boundaries). The pending
+      // pull-request list lives outside that tree (`pending-pull-requests.ts`)
+      // precisely so an empty list never counts as "holds anything" here.
+      const watcherFileCount = countFiles(path.join(volumeRoot, 'watcher-inboxes', id));
+      if (watcherFileCount > 0) {
+        return err(declarationError({ code: 'watcher-directory-not-empty', files: watcherFileCount }, `the file-watcher directory for '${id}' still holds ${watcherFileCount} file(s)`));
       }
 
       const deleted = withDb(volumeRoot, (db) => {
