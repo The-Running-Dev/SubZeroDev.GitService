@@ -2445,6 +2445,7 @@ test('2026-08-13 post-S27 reconciliation — the refuse watermark gates a mutati
 
     const diskFullFindingsRequests: number[] = [];
     let readingsTaken = 0;
+    let mutationHolderDuringFindings: unknown = 'never called';
     const instrumentedCloneStore: typeof cloneStore = {
       ...cloneStore,
       async readVolumeUsage() {
@@ -2456,6 +2457,13 @@ test('2026-08-13 post-S27 reconciliation — the refuse watermark gates a mutati
       },
       async diskFullFindings(usage) {
         diskFullFindingsRequests.push(usage.usedPercent);
+        // The real `diskFullFindings` walks every materialised declaration
+        // and runs five git subprocesses against each. Holding the *global*
+        // mutation lock across that made one refusal serialise every other
+        // mutation in the process behind ~5N child processes, and since each
+        // of those then refused identically, the convoy sustained itself for
+        // as long as the volume stayed full (review of PR #112).
+        mutationHolderDuringFindings = locks.currentMutationHolder();
         return [{ path: 'volume.byConsumer', rule: 'clones', message: '960 bytes' }];
       },
     };
@@ -2497,6 +2505,11 @@ test('2026-08-13 post-S27 reconciliation — the refuse watermark gates a mutati
     assert.equal(handlerCalls, 1, 'the refused mutation never reached the handler — journal.begin was never called');
     assert.deepEqual(second.findings, [{ path: 'volume.byConsumer', rule: 'clones', message: '960 bytes' }]);
     assert.deepEqual(diskFullFindingsRequests, [96]);
+    assert.equal(
+      mutationHolderDuringFindings,
+      null,
+      'the refusal is decided before acquireMutation — the global mutation lock is never held while findings are built',
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(readingsTaken, 2, 'the refused call still takes its own post-mutation reading in its own finally');

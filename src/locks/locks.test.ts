@@ -43,27 +43,36 @@ test('2026-08-13 post-S27 reconciliation — mutationQueueDepth refuses a waiter
   if (settledB.ok) settledB.value.release();
 });
 
-test('2026-08-13 post-S27 reconciliation — mutationQueueDepth bounds a per-declaration materialisation queue the same way', async () => {
+test('mutationQueueDepth does not bound a materialisation queue — a read behind a long transfer waits, it is not refused', async () => {
+  // Every dispatch acquires the materialisation mutex through
+  // `CloneStore.ensure`, reads included, while a push or fetch holds it for
+  // the whole transfer. Bounding it by `mutationQueueDepth` turned the 33rd
+  // concurrent read of one declaration into a `conflict` (review of PR #112);
+  // the global mutation lock is held for that same transfer, so its own bound
+  // already covers the waiter growth the queue-depth decision protects against.
   const locks = createLocks({ mutationQueueDepth: 1, concurrentWaitsPerSession: 4, concurrentLockFreeOperations: 16 });
   const signal = new AbortController().signal;
 
   const held = await locks.acquireMaterialisation('repo-a' as never, holder(), 5000, signal);
   assert.equal(held.ok, true);
 
-  const waiter = locks.acquireMaterialisation('repo-a' as never, holder(), 5000, signal);
-  const refused = await locks.acquireMaterialisation('repo-a' as never, holder(), 5000, signal);
-  assert.equal(refused.ok, false);
-  if (!refused.ok) assert.equal(refused.error.code, 'queue-full');
+  // Three waiters against a `mutationQueueDepth` of 1. None is refused.
+  const waiters = [
+    locks.acquireMaterialisation('repo-a' as never, holder(), 5000, signal),
+    locks.acquireMaterialisation('repo-a' as never, holder(), 5000, signal),
+    locks.acquireMaterialisation('repo-a' as never, holder(), 5000, signal),
+  ];
 
-  // A different declaration's queue is unaffected — the bound is per mutex,
-  // not process-wide.
+  // A different declaration's mutex is a separate instance, and free.
   const otherHeld = await locks.acquireMaterialisation('repo-b' as never, holder(), 5000, signal);
   assert.equal(otherHeld.ok, true);
 
   if (held.ok) held.value.release();
-  const settled = await waiter;
-  assert.equal(settled.ok, true);
-  if (settled.ok) settled.value.release();
+  for (const waiter of waiters) {
+    const settled = await waiter;
+    assert.equal(settled.ok, true, 'every waiter is granted in arrival order, never refused for queue depth');
+    if (settled.ok) settled.value.release();
+  }
   if (otherHeld.ok) otherHeld.value.release();
 });
 

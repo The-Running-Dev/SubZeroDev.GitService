@@ -12,6 +12,100 @@ Append-only. Newest at the top. The rejected alternatives are the point — with
 - **Repository config must stay descriptive.** Settled for now (see the decision below), and it holds only while the format carries no permission-shaped field. Worth a check at `/contract` rather than trusting anyone to remember. **The design states the test in checkable form** (`10-design.md` § `RepositoryConfig`): any field a caller could set that widens what the service will do lives in the declaration instead. **Checked at `/contract` 2026-08-03 and clean:** `RepositoryConfig` declares `baseBranch`, `requiredChecks`, `deployWorkflow` and `branchPrefixes` and nothing else; no capability, scope, path prefix, credential reference, remote, host, timeout or limit has drifted into it. The test is now invariant A8 in `20-contract.md`, so the next check is a re-read of one table row rather than a re-derivation.
 ---
 
+### 2026-08-14 — Post-S27 review: the disk-full refusal is decided before the global mutation lock, not after it
+Context: The new pre-`Journal.begin` refuse check landed after pre-state capture, inside the block
+that holds the **global** mutation lock. Its comment justified the position as keeping disk I/O off
+the hot path, which is true of reading `lastObservedUsage` and false of what the branch then does:
+`CloneStore.diskFullFindings` walks every materialised declaration and runs five git subprocesses
+against each (`computeBlockers` — status, stash list, rev-parse, two rev-lists). One refusal
+therefore serialised every other mutation in the process behind ~5N child processes, each queued
+call then refused identically and repeated the scan, and the convoy sustained itself for as long as
+the volume stayed full — with waiters timing out at `mutationLockAcquireMs`, or refused `queue-full`
+once the bound above landed. The pre-existing refusal in `ensure()` runs the same scan under one
+declaration's materialisation lock only; this branch was the regression, and it arrived in the same
+commit as the bound that amplifies it.
+Chosen: the check moves ahead of `acquireMutation`, still inside the `try` so the `finally` releases
+the materialisation lock and the pin that `ensure()` took. A refused call now costs nothing it had
+not already spent, and skips the `observeGitState` subprocess it used to run first. The reading is
+up to one operation stale by construction, so nothing about the decision needed the lock.
+Rejected: **Cache the blockers alongside `lastObservedUsage`** — removes the fan-out from the
+refusal path entirely rather than merely moving it out of the lock, and is probably where this ends
+up; rejected here because a cached blocker set has its own staleness contract to state, and the
+findings are what an operator acts on. **Return the refusal with no findings** — cheapest, and it
+guts S27.2's "naming which of the five consumers holds the volume", which is the whole reason the
+refusal is actionable.
+Reversibility: cheap — the branch moved, it did not change.
+---
+
+### 2026-08-14 — Post-S27 review: the queue bound is the mutation lock's alone
+Context: The queue-depth decision below argued entirely about the global mutation lock — "the only
+bound on waiter growth behind a slow transfer" — but the implementation threaded
+`mutationQueueDepth` into every mutex `createLocks` builds, per-declaration materialisation mutexes
+included. That is not a symmetric tightening. **Every dispatch acquires the materialisation mutex,
+reads included** (through `CloneStore.ensure`; a read releases it immediately after, but still
+queues for it), while a push or fetch holds it for the whole transfer. So a 300-second push plus 33
+concurrent `git_status` calls on one declaration hard-refused the 33rd with `conflict`, where before
+it waited a few milliseconds. A read being refused because a *write* is slow is a new failure mode
+the contract does not describe, and `DeploymentConfig.admission` names the field for the mutation
+queue.
+Chosen: materialisation mutexes are constructed unbounded; `mutationQueueDepth` bounds the global
+mutation mutex only. The global lock is held for that same slow transfer, so its own bound already
+covers the waiter growth the decision below protects against.
+Rejected: **A second configuration field for the materialisation queue** — the honest shape if a
+bound is genuinely wanted per declaration, but it adds a `DeploymentConfig` member to solve a
+problem nothing has yet exhibited, and a contract amendment is `/contract`'s to make, not a review
+fix's. **Bound it but exempt reads** — the mutex cannot see execution class, so this means a second
+acquire path and a caller that self-declares, which is the sort of flag that gets passed wrong once
+and silently unbounds the thing it was protecting.
+Reversibility: cheap — one argument, and a test that states the behaviour either way.
+---
+
+### 2026-08-14 — Post-S27 review: `readVolumeUsage`'s new consumers must not block the event loop, nor follow symlinks
+Context: The reconciliation that closed the last three permanent zeros in `VolumeUsage.byConsumer`
+generalised `clone-store.ts`'s private directory walk into `shared/retention.ts` and pointed three
+new callers at it. Two consequences neither the decision nor the implementation noticed. First, the
+walk is synchronous, and `readVolumeUsage` now folds three of them in while running from the
+mutating path's `finally` on **every** commit, push and stage — ninety days of audit segments plus
+every declaration's inbox tree, `statSync` by `statSync`, on the main thread, stalling every other
+in-flight response. `void`-ing the call buys nothing when the work inside it never yields. Second,
+the walk used `stat`, which follows symlinks, and one of its new roots is the watcher inbox tree —
+which is populated by operators, and which the watcher's own scan deliberately refuses to follow
+with `lstatSync` (S17.4). Following one counted a target elsewhere on the volume against
+`watcher-files`; a link to its own parent made the walk push the same subtree until the OS returned
+`ELOOP`, wildly over-counting on the way.
+Chosen: `directoryBytes` is asynchronous (`fs/promises`), and stats with `lstat`, counting only
+regular files — symlinks are skipped rather than resolved, matching the guard the watcher already
+applies to the same directory. Both regression tests were confirmed by reverting the fix.
+Rejected: **Cache the three cold readings behind a TTL** — the cheapest fix for the hot-path cost
+and probably right eventually, but it changes how fresh a reported byte figure is, which is a
+contract-visible property and so not a review fix's to decide. **Keep the walk synchronous and only
+fix the symlink half** — leaves the event-loop stall, which is the half that degrades every request
+rather than only a misconfigured volume. **A second, async-only copy of the walk for the new
+callers** — reintroduces exactly the duplicate this reconciliation removed.
+Reversibility: cheap — the callers were already `async`; only four call sites gained an `await`.
+---
+
+### 2026-08-14 — Post-S27 review: a gate states its own coverage, or it is a description
+Context: `check-layer-direction.ts` classified twelve top-level `src/` directories and returned
+`null` for everything else, skipping unclassified files silently. Of the 107 modules it reported
+walking, 29 were actually subject to B1. So renaming `src/surfaces`, or adding a new L4 or L5
+directory, disabled the check for it while the run still printed OK — the failure mode a
+drift-detection gate least tolerates, since the reassuring number stays reassuring. This is the same
+class of defect the gate was written to catch, one level up: an artifact describing an invariant
+rather than enforcing it.
+Chosen: every top-level entry under `src/` is either given a layer or listed in
+`UNLAYERED_TOP_ENTRIES` with the reason it has none (the composition root's two files; the
+cross-cutting primitives `shared`, `result`, `clock`). Anything in neither fails the build. Verified
+by adding a directory and confirming the non-zero exit, then removing it. Coverage rose from 29
+modules to 30 — `mcp-proxy` is L5 ("MCP transport", `10-design.md`'s module table) and had been
+unchecked.
+Rejected: **Classify every directory and drop the exemption set** — tidier, but it means asserting
+layers for `shared`, `result` and `clock` that the design's module table does not state, and an
+invented classification in a gate is worse than a named absence. **Warn rather than fail** — a
+warning in a build that prints OK is the status quo with extra text.
+Reversibility: cheap — the map and the set are data.
+---
+
 ### 2026-08-13 — Post-S27 reconciliation: the refuse watermark gates every mutation, not only materialisation
 Context: `/reconcile` found `refuseAtPercent` read in exactly one place — `clone-store.ts`'s
 fresh-clone branch inside `ensure()`. A declaration whose clone is already `ready` never meets it, so
@@ -74,7 +168,10 @@ returns `conflict` and is what a caller sees today; rejected because it removes 
 waiter growth behind a slow transfer, and the union is expensive to change once a consumer branches
 on it. **Leave it and file a bug issue** — leaves the contract stating a refusal the service never
 performs, which is the shape the `agent.md` lesson added today exists to catch.
-Reversibility: cheap — one guard.
+Reversibility: cheap — one guard. *(Amended 2026-08-14 — this landed threading the bound through
+`createMutex` for **every** mutex, materialisation mutexes included, which this entry neither argued
+for nor noticed. See "the queue bound is the mutation lock's alone" below, which corrects it. The
+mutation-lock half stands exactly as recorded.)*
 ---
 
 ### 2026-08-13 — Post-S27 reconciliation: invariant B1 gets a real check, in the build rather than in CI

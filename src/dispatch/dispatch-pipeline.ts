@@ -552,6 +552,31 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
     };
 
     try {
+      // 2026-08-13 post-S27 reconciliation: the refuse watermark gates every
+      // mutation, not only materialisation. `CloneStore.ensure` above only
+      // ever refuses a *fresh* clone; a declaration whose clone is already
+      // `ready` reaches this point unchecked at any usage percentage. Checked
+      // against `lastObservedUsage` (the post-mutation reading, up to one
+      // operation stale) rather than a fresh read, so the check itself never
+      // taxes the hot path with disk I/O of its own.
+      //
+      // **Before `acquireMutation`, not after `observeGitState`** (review of
+      // PR #112). `diskFullFindings` walks every materialised declaration and
+      // runs five git subprocesses against each, so holding the *global*
+      // mutation lock across it made one refusal serialise every other
+      // mutation in the process behind ~5N child processes — and since each
+      // of those calls then refused identically, the convoy sustained itself
+      // for exactly as long as the volume stayed full. Refusing here costs a
+      // refused call nothing but its materialisation lock, which `ensure`
+      // already took, and the `finally` below still releases.
+      if (lastObservedUsage !== null && lastObservedUsage.usedPercent >= watermarks.refuseAtPercent) {
+        const findings = cloneStore.diskFullFindings ? await cloneStore.diskFullFindings(lastObservedUsage) : [];
+        return precondition(
+          `the volume is at ${lastObservedUsage.usedPercent.toFixed(1)}% — refusing '${entry.name}' for '${declaration.id}'`,
+          findings,
+        );
+      }
+
       const mutationAcquired = await locks.acquireMutation(holder, mutationLockAcquireMs, effective.signal);
       if (!mutationAcquired.ok) {
         // `20-contract.md` § Error semantics › Locks: every `LockError`
@@ -576,22 +601,6 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
         indexDigest: observed.value.indexDigest,
         worktreeDigest: observed.value.worktreeDigest,
       };
-
-      // 2026-08-13 post-S27 reconciliation: the refuse watermark gates every
-      // mutation, not only materialisation. `CloneStore.ensure` above only
-      // ever refuses a *fresh* clone; a declaration whose clone is already
-      // `ready` reaches this point unchecked at any usage percentage. Checked
-      // against `lastObservedUsage` (the post-mutation reading, up to one
-      // operation stale) rather than a fresh read, and after pre-state
-      // capture rather than before it, so the check itself never taxes the
-      // hot path with disk I/O of its own.
-      if (lastObservedUsage !== null && lastObservedUsage.usedPercent >= watermarks.refuseAtPercent) {
-        const findings = cloneStore.diskFullFindings ? await cloneStore.diskFullFindings(lastObservedUsage) : [];
-        return precondition(
-          `the volume is at ${lastObservedUsage.usedPercent.toFixed(1)}% — refusing '${entry.name}' for '${declaration.id}'`,
-          findings,
-        );
-      }
 
       // `input` is scrubbed by `Exec.scrubJson` before it reaches the
       // journal (`20-contract.md` § Operation journal) — a commit message

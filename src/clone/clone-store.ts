@@ -638,7 +638,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
           materialisationLock.release();
           return identitySet;
         }
-        const bytes = directoryBytes(clonePath);
+        const bytes = await directoryBytes(clonePath);
         const now = clock.now();
         const written = upsertRow({ declaration_id: declaration.id, generation: declarationRecord.generation, state: 'ready', path: clonePath, size_bytes: bytes, last_operation_at: now, observed_remote: observed, attention_reason: null });
         if (!written.ok) {
@@ -719,7 +719,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
         return identitySet;
       }
 
-      const bytes = directoryBytes(clonePath);
+      const bytes = await directoryBytes(clonePath);
       const now = clock.now();
       const written = upsertRow({
         declaration_id: declaration.id,
@@ -783,7 +783,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
         // mean the parked reason (e.g. an unresolved journal entry, S7/S8) no
         // longer applies.
         const nextState: CloneState = row.state === 'needs-attention' ? 'needs-attention' : 'ready';
-        const bytes = directoryBytes(clonePath);
+        const bytes = await directoryBytes(clonePath);
         upsertRow({ ...row, state: nextState, size_bytes: bytes });
         derived.push({ ...toClone(row), state: nextState, sizeBytes: bytes });
       }
@@ -853,7 +853,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
         if (blockers === 'corrupt' || blockers.length > 0) {
           return ok({ declarationId, evicted: false, freedBytes: 0, blockers: blockers === 'corrupt' ? [{ kind: 'corrupt-tree' }] : blockers });
         }
-        const freedBytes = directoryBytes(row.value.path);
+        const freedBytes = await directoryBytes(row.value.path);
         removePartial(row.value.path);
         const updated = upsertRow({ ...row.value, state: 'evicted', size_bytes: 0, observed_remote: null });
         if (!updated.ok) return err(cloneStoreError({ code: 'store-failed', cause: updated.error }, updated.error.summary));

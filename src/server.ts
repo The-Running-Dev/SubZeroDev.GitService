@@ -40,7 +40,12 @@ import { createComposites } from './composites/composites.ts';
 import { createWatcher } from './watcher/watcher.ts';
 import { COMPOSITE_RECOVERY_DESCRIPTORS } from './composites/recovery-descriptors.ts';
 import { createHttpAdapter } from './http/http-adapter.ts';
-import { createAuthorization } from './authorization/authorization.ts';
+import {
+  createAuthorization,
+  MCP_ACCESS_TOKEN_TTL_SECONDS_DEFAULT,
+  MCP_REFRESH_TOKEN_TTL_SECONDS_DEFAULT,
+  OPERATOR_API_TOKEN_TTL_SECONDS_DEFAULT,
+} from './authorization/authorization.ts';
 import { createScheduler, createSchedulerOperations, type Scheduler } from './scheduler/scheduler.ts';
 import type { Session } from './shared/session.ts';
 import type { GrantEpoch, SessionId, Subject } from './shared/brands.ts';
@@ -249,6 +254,17 @@ function resolveWatcherPollIntervalSeconds(watcherEnabled: boolean): number {
 }
 
 /**
+ * A hundred years. Not a policy limit — no deployment wants a token this
+ * long-lived — but the point past which `issueTokenPair`'s
+ * `new Date(now + ttl * 1000).toISOString()` leaves the representable date
+ * range and throws `RangeError: Invalid time value`. Without this bound the
+ * validator below checked only the low end, so an over-large lifetime booted
+ * cleanly and then failed every OAuth token exchange with a 500 (review of
+ * PR #112). Fatal at boot is what the comment beneath already promised.
+ */
+const TOKEN_LIFETIME_SECONDS_MAX = 100 * 365 * 24 * 60 * 60;
+
+/**
  * `DeploymentConfig.tokens` (`20-contract.md` § Deployment configuration) —
  * the three token lifetimes `authorization.ts` fixed as hardcoded constants
  * until the 2026-08-13 post-S27 reconciliation, none overridable and only
@@ -260,8 +276,8 @@ function resolveTokenLifetimeSeconds(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined || raw.trim().length === 0) return fallback;
   const value = Number(raw);
-  if (!Number.isInteger(value) || value < 1) {
-    console.error(`server: ${name} must be an integer of at least 1 (got '${raw}')`);
+  if (!Number.isInteger(value) || value < 1 || value > TOKEN_LIFETIME_SECONDS_MAX) {
+    console.error(`server: ${name} must be an integer between 1 and ${TOKEN_LIFETIME_SECONDS_MAX} (got '${raw}')`);
     process.exit(1);
   }
   return value;
@@ -486,9 +502,9 @@ async function main(): Promise<void> {
     ceiling,
     declarations,
     audit,
-    mcpAccessTokenTtlSeconds: resolveTokenLifetimeSeconds('MCP_ACCESS_TOKEN_TTL_SECONDS', 60 * 60),
-    mcpRefreshTokenTtlSeconds: resolveTokenLifetimeSeconds('MCP_REFRESH_TOKEN_TTL_SECONDS', 30 * 24 * 60 * 60),
-    operatorApiTokenTtlSeconds: resolveTokenLifetimeSeconds('OPERATOR_API_TOKEN_TTL_SECONDS', 365 * 24 * 60 * 60),
+    mcpAccessTokenTtlSeconds: resolveTokenLifetimeSeconds('MCP_ACCESS_TOKEN_TTL_SECONDS', MCP_ACCESS_TOKEN_TTL_SECONDS_DEFAULT),
+    mcpRefreshTokenTtlSeconds: resolveTokenLifetimeSeconds('MCP_REFRESH_TOKEN_TTL_SECONDS', MCP_REFRESH_TOKEN_TTL_SECONDS_DEFAULT),
+    operatorApiTokenTtlSeconds: resolveTokenLifetimeSeconds('OPERATOR_API_TOKEN_TTL_SECONDS', OPERATOR_API_TOKEN_TTL_SECONDS_DEFAULT),
   });
 
   // S8 — the recovery catalogue, populated here from L2 and read by L1. A

@@ -77,7 +77,7 @@ export interface AuthorizationDependencies {
  * configuration) — deployment-overridable since the 2026-08-13 post-S27
  * reconciliation; this is only the documented default.
  */
-const OPERATOR_API_TOKEN_TTL_SECONDS_DEFAULT = 365 * 24 * 60 * 60;
+export const OPERATOR_API_TOKEN_TTL_SECONDS_DEFAULT = 365 * 24 * 60 * 60;
 
 /**
  * An hour and thirty days — the same pair `SubZeroDev.Blog/tools/blog-mcp`'s
@@ -88,9 +88,17 @@ const OPERATOR_API_TOKEN_TTL_SECONDS_DEFAULT = 365 * 24 * 60 * 60;
  * in-memory `Map`. `DeploymentConfig.tokens.mcpAccessSeconds` /
  * `.mcpRefreshSeconds` — deployment-overridable defaults, same as the operator
  * token TTL above.
+ *
+ * All three are exported because the composition root resolves the same three
+ * lifetimes from the environment and needs a fallback for each. It wrote the
+ * literals out a second time until the review of PR #112: the `??` fallbacks
+ * below are dead once `server.ts` always passes a value, so the second copy
+ * was the one actually governing production, and shortening a lifetime here —
+ * a security-relevant edit — would have left the deployment minting the old
+ * one with every test still green.
  */
-const MCP_ACCESS_TOKEN_TTL_SECONDS_DEFAULT = 60 * 60;
-const MCP_REFRESH_TOKEN_TTL_SECONDS_DEFAULT = 30 * 24 * 60 * 60;
+export const MCP_ACCESS_TOKEN_TTL_SECONDS_DEFAULT = 60 * 60;
+export const MCP_REFRESH_TOKEN_TTL_SECONDS_DEFAULT = 30 * 24 * 60 * 60;
 
 const TOKEN_RETENTION_DAYS_DEFAULT = 7;
 const REVOKED_GRANT_RETENTION_DAYS_DEFAULT = 180;
