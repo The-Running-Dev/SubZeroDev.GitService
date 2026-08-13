@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, truncateSync, statSync, rmSync, utimesSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, truncateSync, statSync, rmSync, utimesSync, existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { systemClock } from '../clock/clock.ts';
@@ -31,6 +31,14 @@ function leaseTakeoverInput(overrides: Partial<AuditAppendInput> = {}): AuditApp
     },
     ...overrides,
   } as AuditAppendInput;
+}
+
+function listSegmentFiles(volume: string): readonly string[] {
+  const dir = path.join(volume, 'audit');
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => name.endsWith('.jsonl'))
+    .map((name) => path.join(dir, name));
 }
 
 async function migratedVolume(volume: string): Promise<void> {
@@ -429,5 +437,25 @@ test('query() filters by form and paginates by cursor', async () => {
     if (!page2.ok) return;
     assert.equal(page2.value.records.length, 1);
     assert.equal(page2.value.nextCursor, null, 'no more pages');
+  });
+});
+
+test('2026-08-13 post-S27 reconciliation — usageBytes reports the real segment-directory total, growing with each append and rotation', async () => {
+  await withVolumeAsync(async (volume) => {
+    await migratedVolume(volume);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock, segmentBytes: 350 });
+
+    assert.equal(await audit.usageBytes(), 0, 'nothing appended yet');
+
+    for (let i = 0; i < 10; i += 1) {
+      const outcome = await audit.append(leaseTakeoverInput());
+      assert.equal(outcome.appended, true);
+    }
+
+    const segments = listSegmentFiles(volume);
+    assert.ok(segments.length >= 2, 'small segmentBytes rotated across at least two files');
+    const expected = segments.reduce((sum, file) => sum + statSync(file).size, 0);
+    assert.equal(await audit.usageBytes(), expected, 'usageBytes matches the real total across every segment file');
+    assert.ok(expected > 0);
   });
 });

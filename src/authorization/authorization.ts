@@ -62,9 +62,21 @@ export interface AuthorizationDependencies {
   readonly tokenDays?: number;
   /** `RetentionWindows.revokedGrantDays` (default 180). Same reasoning as `tokenDays`. */
   readonly revokedGrantDays?: number;
+  /** `DeploymentConfig.tokens.mcpAccessSeconds` (`20-contract.md` § Deployment configuration, default 3600). */
+  readonly mcpAccessTokenTtlSeconds?: number;
+  /** `DeploymentConfig.tokens.mcpRefreshSeconds` (default 2592000, 30 days). */
+  readonly mcpRefreshTokenTtlSeconds?: number;
+  /** `DeploymentConfig.tokens.operatorApiSeconds` (default 31536000, 365 days). */
+  readonly operatorApiTokenTtlSeconds?: number;
 }
 
-/** A year — long enough that a script's credential outlives ordinary use, short enough that an abandoned token does not stay live forever. Not fixed by the contract (`design/90-decisions.md` follows S4's `sessionAbsoluteSeconds` precedent: a number this interface cannot exist without). */
+/**
+ * A year — long enough that a script's credential outlives ordinary use,
+ * short enough that an abandoned token does not stay live forever.
+ * `DeploymentConfig.tokens.operatorApiSeconds` (`20-contract.md` § Deployment
+ * configuration) — deployment-overridable since the 2026-08-13 post-S27
+ * reconciliation; this is only the documented default.
+ */
 const OPERATOR_API_TOKEN_TTL_SECONDS_DEFAULT = 365 * 24 * 60 * 60;
 
 /**
@@ -73,10 +85,12 @@ const OPERATOR_API_TOKEN_TTL_SECONDS_DEFAULT = 365 * 24 * 60 * 60;
  * worth; the refresh token is what carries S14.7's "reconnects after a
  * container restart without re-authorising" — durable, unlike blog-mcp's
  * process-local version, because it is a real row in `token` rather than an
- * in-memory `Map`.
+ * in-memory `Map`. `DeploymentConfig.tokens.mcpAccessSeconds` /
+ * `.mcpRefreshSeconds` — deployment-overridable defaults, same as the operator
+ * token TTL above.
  */
-const MCP_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
-const MCP_REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
+const MCP_ACCESS_TOKEN_TTL_SECONDS_DEFAULT = 60 * 60;
+const MCP_REFRESH_TOKEN_TTL_SECONDS_DEFAULT = 30 * 24 * 60 * 60;
 
 const TOKEN_RETENTION_DAYS_DEFAULT = 7;
 const REVOKED_GRANT_RETENTION_DAYS_DEFAULT = 180;
@@ -142,10 +156,10 @@ function sha256Digest(value: string): string {
 }
 
 /** Both halves of a token pair, written as two `token` rows under the same grant. Shared by `issueMcpGrant` and `refresh`, since the pair they mint is identical in shape. */
-function issueTokenPair(db: DatabaseSync, grantId: string, now: string): { readonly access: IssuedToken; readonly refresh: IssuedToken } {
+function issueTokenPair(db: DatabaseSync, grantId: string, now: string, accessTtlSeconds: number, refreshTtlSeconds: number): { readonly access: IssuedToken; readonly refresh: IssuedToken } {
   const accessJti = randomUUID() as TokenId;
   const accessValue = randomBytes(32).toString('hex') as BearerToken;
-  const accessExpiresAt = new Date(new Date(now).getTime() + MCP_ACCESS_TOKEN_TTL_SECONDS * 1000).toISOString() as IsoUtcTimestamp;
+  const accessExpiresAt = new Date(new Date(now).getTime() + accessTtlSeconds * 1000).toISOString() as IsoUtcTimestamp;
   db.prepare('INSERT INTO token (jti, grant_id, kind, verifier_hash, issued_at, expires_at, revoked_at) VALUES (?, ?, \'access\', ?, ?, ?, NULL)').run(
     accessJti,
     grantId,
@@ -156,7 +170,7 @@ function issueTokenPair(db: DatabaseSync, grantId: string, now: string): { reado
 
   const refreshJti = randomUUID() as TokenId;
   const refreshValue = randomBytes(32).toString('hex') as BearerToken;
-  const refreshExpiresAt = new Date(new Date(now).getTime() + MCP_REFRESH_TOKEN_TTL_SECONDS * 1000).toISOString() as IsoUtcTimestamp;
+  const refreshExpiresAt = new Date(new Date(now).getTime() + refreshTtlSeconds * 1000).toISOString() as IsoUtcTimestamp;
   db.prepare('INSERT INTO token (jti, grant_id, kind, verifier_hash, issued_at, expires_at, revoked_at) VALUES (?, ?, \'refresh\', ?, ?, ?, NULL)').run(
     refreshJti,
     grantId,
@@ -231,6 +245,9 @@ function expandScopes(scopes: readonly OperatorScope[], contractCapabilitySet: C
 export function createAuthorization(deps: AuthorizationDependencies): Authorization {
   const tokenDays = deps.tokenDays ?? TOKEN_RETENTION_DAYS_DEFAULT;
   const revokedGrantDays = deps.revokedGrantDays ?? REVOKED_GRANT_RETENTION_DAYS_DEFAULT;
+  const mcpAccessTokenTtlSeconds = deps.mcpAccessTokenTtlSeconds ?? MCP_ACCESS_TOKEN_TTL_SECONDS_DEFAULT;
+  const mcpRefreshTokenTtlSeconds = deps.mcpRefreshTokenTtlSeconds ?? MCP_REFRESH_TOKEN_TTL_SECONDS_DEFAULT;
+  const operatorApiTokenTtlSeconds = deps.operatorApiTokenTtlSeconds ?? OPERATOR_API_TOKEN_TTL_SECONDS_DEFAULT;
 
   /**
    * One audit line per credential mutation that actually reached the store.
@@ -307,7 +324,7 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
           `INSERT INTO "grant" (grant_id, kind, client_id, subject, resource, declaration_id, generation, scopes, created_at, last_used_at, revoked_at)
            VALUES (?, 'mcp', ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
         ).run(grantId, input.clientId, input.subject, input.resource, input.declarationId, input.generation, JSON.stringify(input.scopes), now);
-        const pair = issueTokenPair(db, grantId, now);
+        const pair = issueTokenPair(db, grantId, now, mcpAccessTokenTtlSeconds, mcpRefreshTokenTtlSeconds);
         const grantRow = db.prepare('SELECT * FROM "grant" WHERE grant_id = ?').get(grantId) as unknown as GrantRow;
         return { grant: toGrant(grantRow), access: pair.access, refresh: pair.refresh } satisfies IssuedMcpGrant;
       });
@@ -417,7 +434,7 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
         }
 
         db.prepare('UPDATE token SET revoked_at = ? WHERE jti = ?').run(now, tokenRow.jti);
-        return issueTokenPair(db, grantRow.grant_id, now);
+        return issueTokenPair(db, grantRow.grant_id, now, mcpAccessTokenTtlSeconds, mcpRefreshTokenTtlSeconds);
       });
       return result;
     },
@@ -428,7 +445,7 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
       const jti = randomUUID() as TokenId;
       const rawValue = randomBytes(32).toString('hex') as BearerToken;
       const verifierHash = sha256Digest(rawValue) as SaltedHash;
-      const expiresAt = new Date(new Date(now).getTime() + OPERATOR_API_TOKEN_TTL_SECONDS_DEFAULT * 1000).toISOString() as IsoUtcTimestamp;
+      const expiresAt = new Date(new Date(now).getTime() + operatorApiTokenTtlSeconds * 1000).toISOString() as IsoUtcTimestamp;
 
       const result = withDb(deps.volumeRoot, (db) => {
         db.prepare(

@@ -7,7 +7,7 @@ import { sha256Hex, type IsoUtcTimestamp, type Sha256Hex } from '../shared/brand
 import type { Outcome } from '../shared/outcome.ts';
 import { ok, err } from '../shared/outcome.ts';
 import type { Clock } from '../clock/clock.ts';
-import { unlinkAndCountBytes, type RetentionReport } from '../shared/retention.ts';
+import { directoryBytes, unlinkAndCountBytes, type RetentionReport } from '../shared/retention.ts';
 import { computeAuditRecordHash } from './hash.ts';
 import type { AuditError } from './errors.ts';
 import type {
@@ -27,6 +27,13 @@ export interface Audit {
   verify(): Promise<AuditChainState>;
   chainState(): Promise<AuditChainState>;
   runRetention(): Promise<RetentionReport>;
+  /**
+   * `VolumeUsage.byConsumer['audit-log']` (2026-08-13 post-S27
+   * reconciliation) — the real byte total of every segment on disk, closed or
+   * current. Was a permanent zero: `10-design.md`'s own missing-consumer
+   * example is exactly this trail.
+   */
+  usageBytes(): Promise<number>;
   close(): Promise<void>;
 }
 
@@ -542,6 +549,10 @@ export function createAudit(options: AuditOptions): Audit {
       } catch {
         return { module: 'audit', deletedRows: 0, freedBytes: 0, skipped: ['retention pass failed'] };
       }
+    },
+
+    async usageBytes(): Promise<number> {
+      return directoryBytes(path.join(volumeRoot, AUDIT_DIR));
     },
 
     async close(): Promise<void> {

@@ -1107,6 +1107,13 @@ interface WatcherConfig {
   readonly pollIntervalSeconds: number;
 }
 
+/** The three durable-credential lifetimes `authorization.ts` mints. Joined 2026-08-13 — previously two were hardcoded constants with no override, and the third had only a code comment. */
+interface TokenLifetimes {
+  readonly mcpAccessSeconds: number;
+  readonly mcpRefreshSeconds: number;
+  readonly operatorApiSeconds: number;
+}
+
 interface DeploymentConfig {
   readonly ceiling: DeploymentCeiling;
   readonly remoteHostAllowlist: readonly RemoteHost[];
@@ -1116,6 +1123,9 @@ interface DeploymentConfig {
   readonly watermarks: DiskWatermarks;
   readonly timeouts: TimeoutBudget;
   readonly admission: AdmissionLimits;
+  readonly tokens: TokenLifetimes;
+  readonly notifierIntervalSeconds: number;
+  readonly maintenanceIntervalSeconds: number;
   readonly notifierWebhook: HttpsUrl | null;
   readonly oidcIssuer: HttpsUrl | null;
   readonly oidcSubjectAllowlist: readonly Subject[];
@@ -1131,9 +1141,11 @@ Defaults the design fixes: `auditSegmentBytes` 67108864, `auditDays` 90, `journa
 `fetchSeconds` 300, `pushSeconds` 300, `hatchSeconds` 60, `monitoringWaitCapSeconds` 1800,
 `mutationLockAcquireMs` 30000, `materialisationLockAcquireMs` 30000, `mutationQueueDepth` 32,
 `concurrentWaitsPerSession` 4, `concurrentLockFreeOperations` 16, `pollIntervalSeconds` 15,
-`watcher.enabled` false, `remoteOperationsPermitted` false, `sessionIdleSeconds` 3600 and
-`sessionAbsoluteSeconds` 43200. Configuration-backed values stay deployment-overridable; these are
-the values the service uses when it is not told otherwise. The session bounds are additionally
+`watcher.enabled` false, `remoteOperationsPermitted` false, `sessionIdleSeconds` 3600,
+`sessionAbsoluteSeconds` 43200, `mcpAccessSeconds` 3600, `mcpRefreshSeconds` 2592000 (30 days),
+`operatorApiSeconds` 31536000 (365 days), `notifierIntervalSeconds` 30 and
+`maintenanceIntervalSeconds` 86400. Configuration-backed values stay deployment-overridable; these
+are the values the service uses when it is not told otherwise. The session bounds are additionally
 bounded by `operatorSessionDays`, which retention fixes at 7.
 
 Notifier delivery makes at most five attempts. Each attempt has a 10-second timeout. After failed

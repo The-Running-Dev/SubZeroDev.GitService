@@ -248,6 +248,25 @@ function resolveWatcherPollIntervalSeconds(watcherEnabled: boolean): number {
   return value;
 }
 
+/**
+ * `DeploymentConfig.tokens` (`20-contract.md` § Deployment configuration) —
+ * the three token lifetimes `authorization.ts` fixed as hardcoded constants
+ * until the 2026-08-13 post-S27 reconciliation, none overridable and only
+ * the operator-api one recorded anywhere outside a code comment. Resolved
+ * the same way every other cadence/limit above is: an unset variable takes
+ * the documented default, a malformed one is fatal.
+ */
+function resolveTokenLifetimeSeconds(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim().length === 0) return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    console.error(`server: ${name} must be an integer of at least 1 (got '${raw}')`);
+    process.exit(1);
+  }
+  return value;
+}
+
 function resolveCommitSha(): GitSha {
   const fromEnv = process.env.GIT_COMMIT_SHA;
   const raw = fromEnv ?? execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim();
@@ -307,6 +326,13 @@ async function main(): Promise<void> {
   // a cycle. `orphan` only ever calls this after boot, well after
   // `schedulerRef` below is set.
   let schedulerRef: Pick<Scheduler, 'cancelForDeclaration'> | null = null;
+  // 2026-08-13 post-S27 reconciliation — the same forward-reference shape,
+  // for the same reason: `Watcher` is L2 and `CloneStore` (which needs its
+  // usage figure for `byConsumer['watcher-files']`) is L1, so `CloneStore`
+  // cannot take `Watcher` itself without an upward edge in the layering.
+  // Set once `watcher` exists below, well before boot succeeds and any real
+  // volume-usage read can reach it.
+  let watcherUsageBytesRef: (() => Promise<number>) | null = null;
   const declarations = createDeclarations({
     volumeRoot,
     clock: systemClock,
@@ -351,6 +377,11 @@ async function main(): Promise<void> {
     declarations,
     journal,
     store,
+    audit,
+    watcherUsageBytes: () => {
+      if (!watcherUsageBytesRef) throw new Error('watcher accessed before composition finished');
+      return watcherUsageBytesRef();
+    },
     watermarks,
     onMaintenanceRequested: (reason) => requestMaintenanceRef?.(reason),
   });
@@ -448,7 +479,17 @@ async function main(): Promise<void> {
   // hash, and the revocation cascade. Replaces the shared-secret bearer
   // stand-in `http-server.ts` carried since S2: a script's credential is now
   // issued from the grants view (`/grants/tokens`), not a static env var.
-  const authorization = createAuthorization({ volumeRoot, clock: systemClock, contractCapabilitySet, ceiling, declarations, audit });
+  const authorization = createAuthorization({
+    volumeRoot,
+    clock: systemClock,
+    contractCapabilitySet,
+    ceiling,
+    declarations,
+    audit,
+    mcpAccessTokenTtlSeconds: resolveTokenLifetimeSeconds('MCP_ACCESS_TOKEN_TTL_SECONDS', 60 * 60),
+    mcpRefreshTokenTtlSeconds: resolveTokenLifetimeSeconds('MCP_REFRESH_TOKEN_TTL_SECONDS', 30 * 24 * 60 * 60),
+    operatorApiTokenTtlSeconds: resolveTokenLifetimeSeconds('OPERATOR_API_TOKEN_TTL_SECONDS', 365 * 24 * 60 * 60),
+  });
 
   // S8 — the recovery catalogue, populated here from L2 and read by L1. A
   // duplicate registration is a wiring defect and fatal at composition time,
@@ -529,6 +570,7 @@ async function main(): Promise<void> {
     watcherEnabled,
     pollIntervalSeconds: resolveWatcherPollIntervalSeconds(watcherEnabled),
   });
+  watcherUsageBytesRef = () => watcher.usageBytes();
 
   // The session a resume runs under. `operator`'s `ActorProfile` is the
   // widest of the four (`declarations/types.ts`'s `OPERATOR_PROFILE`), and

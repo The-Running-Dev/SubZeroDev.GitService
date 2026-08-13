@@ -18,6 +18,7 @@ import type { CapabilityName, ContractCapabilitySet, DeploymentCeiling } from '.
 import type { CompiledRegistry, ToolDeclaration } from '../contract/tool-declaration.ts';
 import type { JsonValue } from '../contract/json.ts';
 import { validateAgainstSchema } from '../contract/json-schema.ts';
+import type { VolumeUsage } from '../store/volume-usage.ts';
 import { authorization, conflict, infrastructure, precondition, timeout as timeoutResult, upstream, validation, type ToolResult } from '../result/envelope.ts';
 import { OPERATOR_PROFILE, MCP_PROFILE, SCHEDULER_PROFILE, WATCHER_PROFILE, type Declaration } from '../declarations/types.ts';
 import type { ActorProfile } from '../declarations/types.ts';
@@ -56,7 +57,7 @@ export interface DispatchPipelineDependencies {
    */
   readonly httpAdapter?: Pick<HttpAdapter, 'invoke'>;
   readonly declarations: Pick<Declarations, 'get' | 'effectiveGrant' | 'effectiveWritablePrefixes'>;
-  readonly cloneStore: Pick<CloneStore, 'ensure' | 'observeGitState' | 'describe'> & Partial<Pick<CloneStore, 'markAttention' | 'readVolumeUsage' | 'requestMaintenance'>>;
+  readonly cloneStore: Pick<CloneStore, 'ensure' | 'observeGitState' | 'describe'> & Partial<Pick<CloneStore, 'markAttention' | 'readVolumeUsage' | 'requestMaintenance' | 'diskFullFindings'>>;
   readonly locks: Pick<Locks, 'pinActiveOperation' | 'acquireMutation'> & Partial<Pick<Locks, 'admitLockFreeWait'>>;
   /** `20-contract.md` § Deployment configuration. Only `maintenanceAtPercent` governs the post-mutation watermark check below — `refuseAtPercent` is `CloneStore.ensure`'s own threshold. */
   readonly watermarks?: DiskWatermarks;
@@ -170,6 +171,20 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
   const watermarks = deps.watermarks ?? DISK_WATERMARKS_DEFAULT;
 
   /**
+   * The last usage reading `checkWatermarkAfterMutation` observed, in
+   * process memory. The pre-`Journal.begin` refuse check below reads this
+   * rather than taking a fresh reading itself — deliberately one operation
+   * stale rather than current, per the 2026-08-13 post-S27 reconciliation
+   * decision: a fresh `statfs` plus a `SUM` over the clone table inside the
+   * global mutation lock on every commit is the cost the design's own
+   * control-flow step 10 avoided by making the post-mutation reading
+   * advisory in the first place. `null` until the first mutation completes —
+   * a mutation before then is not gated, the same gap "last observed" already
+   * accepts.
+   */
+  let lastObservedUsage: VolumeUsage | null = null;
+
+  /**
    * `10-design.md` § control flow #1, step 10: "A disk-pressure watermark
    * reading taken here only *requests* a maintenance pass; eviction never
    * runs on this path, because it would acquire a materialisation lock after
@@ -182,8 +197,11 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
     if (!cloneStore.readVolumeUsage || !cloneStore.requestMaintenance) return;
     try {
       const usage = await cloneStore.readVolumeUsage();
-      if (usage.ok && usage.value.usedPercent >= watermarks.maintenanceAtPercent) {
-        cloneStore.requestMaintenance('watermark');
+      if (usage.ok) {
+        lastObservedUsage = usage.value;
+        if (usage.value.usedPercent >= watermarks.maintenanceAtPercent) {
+          cloneStore.requestMaintenance('watermark');
+        }
       }
     } catch (cause) {
       // Called fire-and-forget from the mutating path's own `finally`
@@ -558,6 +576,22 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
         indexDigest: observed.value.indexDigest,
         worktreeDigest: observed.value.worktreeDigest,
       };
+
+      // 2026-08-13 post-S27 reconciliation: the refuse watermark gates every
+      // mutation, not only materialisation. `CloneStore.ensure` above only
+      // ever refuses a *fresh* clone; a declaration whose clone is already
+      // `ready` reaches this point unchecked at any usage percentage. Checked
+      // against `lastObservedUsage` (the post-mutation reading, up to one
+      // operation stale) rather than a fresh read, and after pre-state
+      // capture rather than before it, so the check itself never taxes the
+      // hot path with disk I/O of its own.
+      if (lastObservedUsage !== null && lastObservedUsage.usedPercent >= watermarks.refuseAtPercent) {
+        const findings = cloneStore.diskFullFindings ? await cloneStore.diskFullFindings(lastObservedUsage) : [];
+        return precondition(
+          `the volume is at ${lastObservedUsage.usedPercent.toFixed(1)}% — refusing '${entry.name}' for '${declaration.id}'`,
+          findings,
+        );
+      }
 
       // `input` is scrubbed by `Exec.scrubJson` before it reaches the
       // journal (`20-contract.md` § Operation journal) — a commit message

@@ -41,8 +41,14 @@ interface Waiter {
  * "There is no priority and no fairness beyond arrival order"). Shared by the
  * global mutation lock and every per-declaration materialisation lock — the
  * two differ only in how many instances exist, not in behaviour.
+ *
+ * `maxQueueDepth` bounds the waiter array — the design's stated reason for
+ * rejecting reject-on-contention (`10-design.md` § Boundaries: "Queue depth
+ * exceeded → Immediate refusal → `conflict`"). A waiter beyond the bound is
+ * refused outright rather than queued, never counting the one currently
+ * holding the lock.
  */
-function createMutex() {
+function createMutex(maxQueueDepth: number) {
   let current: LockHolder | null = null;
   const queue: Waiter[] = [];
 
@@ -72,6 +78,11 @@ function createMutex() {
     return new Promise((resolve) => {
       if (signal.aborted) {
         resolve(err(lockError({ code: 'cancelled' }, 'the wait was cancelled before it began')));
+        return;
+      }
+
+      if (current !== null && queue.length >= maxQueueDepth) {
+        resolve(err(lockError({ code: 'queue-full', depth: queue.length }, `the wait queue is already at its ${maxQueueDepth}-deep limit`)));
         return;
       }
 
@@ -106,7 +117,7 @@ function createMutex() {
 }
 
 export function createLocks(admission: AdmissionLimits = ADMISSION_DEFAULTS): Locks {
-  const mutationMutex = createMutex();
+  const mutationMutex = createMutex(admission.mutationQueueDepth);
   const materialisationMutexes = new Map<DeclarationId, ReturnType<typeof createMutex>>();
   const activeOperationCounts = new Map<DeclarationId, number>();
   const waitsPerSession = new Map<SessionId, number>();
@@ -115,7 +126,7 @@ export function createLocks(admission: AdmissionLimits = ADMISSION_DEFAULTS): Lo
   function materialisationMutexFor(declarationId: DeclarationId): ReturnType<typeof createMutex> {
     const existing = materialisationMutexes.get(declarationId);
     if (existing) return existing;
-    const created = createMutex();
+    const created = createMutex(admission.mutationQueueDepth);
     materialisationMutexes.set(declarationId, created);
     return created;
   }

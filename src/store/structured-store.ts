@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { err, ok, type Outcome } from '../shared/outcome.ts';
 import { isoUtcTimestamp, type IsoUtcTimestamp } from '../shared/brands.ts';
 import type { Clock } from '../clock/clock.ts';
-import { unlinkAndCountBytes, type RetentionReport } from '../shared/retention.ts';
+import { directoryBytes, unlinkAndCountBytes, type RetentionReport } from '../shared/retention.ts';
 import { storeError, type BackupStamp, type StoreError } from './errors.ts';
 import { MIGRATION_0001_SQL } from './migration-0001.ts';
 
@@ -84,6 +84,13 @@ export interface StructuredStore {
   snapshot(): Promise<Outcome<IsoUtcTimestamp, StoreError>>;
   incrementalVacuum(): Promise<Outcome<number, StoreError>>;
   usageByTable(): Promise<Outcome<Readonly<Record<StoreTableName, number>>, StoreError>>;
+  /**
+   * `VolumeUsage.byConsumer['backups-and-snapshots']` (2026-08-13 post-S27
+   * reconciliation) — the real byte total of `backups/`: pre-migration
+   * copies and daily snapshots together, "plausibly the largest consumer on
+   * the volume" per the decision this closes.
+   */
+  backupBytes(): Promise<number>;
   newestSnapshot(): Promise<BackupStamp | null>;
   newestPreMigrationBackup(): Promise<BackupStamp | null>;
   runRetention(): Promise<RetentionReport>;
@@ -352,6 +359,10 @@ export function createStructuredStore(options: StructuredStoreOptions): Structur
 
     async snapshot(): Promise<Outcome<IsoUtcTimestamp, StoreError>> {
       return copyTo(SNAPSHOT_PREFIX);
+    },
+
+    async backupBytes(): Promise<number> {
+      return directoryBytes(backupDir);
     },
 
     /**

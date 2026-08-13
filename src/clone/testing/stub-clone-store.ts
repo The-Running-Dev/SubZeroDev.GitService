@@ -49,6 +49,9 @@ export function createStubCloneStore(): CloneStore {
     async readVolumeUsage() {
       return ok(NO_VOLUME_USAGE);
     },
+    async diskFullFindings() {
+      return [];
+    },
     requestMaintenance() {
       // no-op
     },

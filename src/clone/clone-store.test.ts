@@ -6,6 +6,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { systemClock } from '../clock/clock.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
+import { createAudit } from '../audit/audit.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
 import { createExec, type Exec, type ExecRequest, type ExecResult } from '../exec/exec.ts';
 import { execError, type ExecError } from '../exec/errors.ts';
@@ -638,6 +639,64 @@ test('S27.2 — at the refuse watermark, ensure() refuses a fresh materialisatio
       assert.ok(result.error.usage.usedPercent >= 96, 'the reported usage reflects the forced reading');
       assert.ok(result.error.evictionBlockers.length > 0);
     }
+  });
+});
+
+test('2026-08-13 post-S27 reconciliation — audit-log, backups-and-snapshots and watcher-files carry real bytes once their owning module is wired, honest zeros otherwise', async () => {
+  await withMigratedVolume(async (volume) => {
+    const exec = createExec({ volumeRoot: volume });
+    const locks = createLocks();
+    const declaration = fixtureDeclaration('repo-usage', createBareGitRemote());
+    const declarations = declarationsStubFor(declaration);
+
+    const unwired = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations });
+    const beforeWiring = await unwired.readVolumeUsage();
+    assert.equal(beforeWiring.ok, true);
+    if (!beforeWiring.ok) return;
+    assert.equal(beforeWiring.value.byConsumer['audit-log'], 0, 'unwired: audit-log stays an honest zero');
+    assert.equal(beforeWiring.value.byConsumer['backups-and-snapshots'], 0, 'unwired: backups-and-snapshots stays an honest zero');
+    assert.equal(beforeWiring.value.byConsumer['watcher-files'], 0, 'unwired: watcher-files stays an honest zero');
+
+    // Real bytes on disk for each of the three: an audit segment, a
+    // structured-store backup, and a watcher inbox file.
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    await audit.append({
+      at: systemClock.now(),
+      operationId: null,
+      declarationId: null,
+      generation: null,
+      tool: null,
+      actorRef: { kind: 'operator', subject: 'ben' as never, clientId: null, grantId: null },
+      context: 'recovery',
+      form: 'lease-takeover',
+      previousHolder: { instanceId: 'prev', bootId: 'prev', hostName: 'prev', startedAt: '2026-01-01T00:00:00.000Z' as never },
+    } as never);
+
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    await store.open();
+    await store.migrate(); // takes its own insurance pre-migration backup
+
+    mkdirSync(path.join(volume, 'watcher-inboxes', 'repo-usage'), { recursive: true });
+    writeFileSync(path.join(volume, 'watcher-inboxes', 'repo-usage', 'plan.md'), 'hello', 'utf8');
+
+    const wired = createCloneStore({
+      volumeRoot: volume,
+      clock: systemClock,
+      exec,
+      locks,
+      declarations,
+      audit,
+      store,
+      watcherUsageBytes: async () => Buffer.byteLength('hello', 'utf8'),
+    });
+    const afterWiring = await wired.readVolumeUsage();
+    assert.equal(afterWiring.ok, true);
+    if (!afterWiring.ok) return;
+    assert.ok(afterWiring.value.byConsumer['audit-log'] > 0, 'wired: audit-log is the real segment-directory total');
+    assert.ok(afterWiring.value.byConsumer['backups-and-snapshots'] > 0, 'wired: backups-and-snapshots is the real backups/ total');
+    assert.equal(afterWiring.value.byConsumer['watcher-files'], Buffer.byteLength('hello', 'utf8'), 'wired: watcher-files is exactly what the callback reported');
+
+    await store.close();
   });
 });
 

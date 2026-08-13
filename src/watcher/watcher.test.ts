@@ -806,3 +806,23 @@ test('runRetention() reports an empty pass when no watcher-inboxes directory exi
     assert.equal(report.deletedRows, 0);
   });
 });
+
+test('2026-08-13 post-S27 reconciliation — usageBytes reports the real byte total across every declaration\'s inbox', async () => {
+  await withVolumeAsync(async (volume) => {
+    const { deps } = baseDeps(volume);
+    const watcher = createWatcher(deps);
+
+    assert.equal(await watcher.usageBytes(), 0, 'no watcher-inboxes directory exists yet');
+
+    const rootA = inboxRoot(volume, 'repo-a');
+    mkdirSync(rootA, { recursive: true });
+    writeFileSync(path.join(rootA, 'plan.md'), 'hello world');
+
+    const processedB = path.join(inboxRoot(volume, 'repo-b'), 'processed');
+    mkdirSync(processedB, { recursive: true });
+    writeFileSync(path.join(processedB, '2026-08-13-old.md'), 'already delivered');
+
+    const expected = Buffer.byteLength('hello world', 'utf8') + Buffer.byteLength('already delivered', 'utf8');
+    assert.equal(await watcher.usageBytes(), expected, 'sums bytes across every declaration\'s inbox, inbox and processed alike');
+  });
+});

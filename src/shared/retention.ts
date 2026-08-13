@@ -1,4 +1,5 @@
-import { statSync, unlinkSync } from 'node:fs';
+import { existsSync, readdirSync, statSync, unlinkSync } from 'node:fs';
+import path from 'node:path';
 import { err, ok, type Outcome } from './outcome.ts';
 
 /**
@@ -57,4 +58,41 @@ export function unlinkAndCountBytes(file: string): Outcome<number, void> {
   } catch {
     return err(undefined);
   }
+}
+
+/**
+ * The recursive byte total of every regular file under `root`, or `0` when
+ * `root` does not exist yet. Shared by every module `VolumeUsage.byConsumer`
+ * folds a real reading in for (`clone-store.ts`'s clones, and — since the
+ * 2026-08-13 post-S27 reconciliation — audit segments, the structured
+ * store's `backups/`, and the watcher's per-declaration inboxes) rather than
+ * each walking its own directory tree the same way independently. Best-effort
+ * per entry: a file or directory that disappears mid-walk (a concurrent
+ * delete, a retention pass) is skipped rather than failing the whole total.
+ */
+export function directoryBytes(root: string): number {
+  if (!existsSync(root)) return 0;
+  let total = 0;
+  const stack = [root];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    let stat;
+    try {
+      stat = statSync(current);
+    } catch {
+      continue;
+    }
+    if (stat.isDirectory()) {
+      let entries: string[] = [];
+      try {
+        entries = readdirSync(current);
+      } catch {
+        entries = [];
+      }
+      for (const entry of entries) stack.push(path.join(current, entry));
+    } else {
+      total += stat.size;
+    }
+  }
+  return total;
 }
