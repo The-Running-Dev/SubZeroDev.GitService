@@ -851,7 +851,7 @@ L0  Contract        contract types  |  compiler  |  generated registry
 | **Recovery catalogue** (L1) | A registry of per-tool recovery descriptors — expected post-state predicate and optional resume step — keyed by registry tool name. **Populated by registration at composition time, never by importing a domain module.** | Nothing. | Register, look up. |
 | **Audit** (L1) | The append-only scrubbed log, its hash chain, its single-writer append queue, and the read query the console view uses. | Exec's scrubber, clock, and the structured store — for the advisory `audit_chain_head` mirror and the retained anchors only. The segment files are the trail, and every read of the store here is best-effort, so the log survives that store's corruption. | Append (never throws), query, verify, `runRetention`. |
 | **Notifier** (L1) | Terminal-state notification, bounded retry, the outbox, and the `attention` / `info` severity split. **One transport: an HTTP webhook**, which is what Slack, Discord, Teams and most else accept; no second transport ships. **At L1, not L2** — see the notifier's placement below. | Structured store, clock. | Notify. Never blocks a caller. `runRetention`. |
-| **Lifecycle** (L1) | The boot sequence, the maintenance-pass schedule and the order it drives each module's `runRetention` in, and the snapshot cadence. Receives every collaborator by injection. **A checked module, not part of the composition root** — these are ordering decisions with failure modes, not wiring. | Whatever it is handed. | Boot, run-maintenance, shutdown. |
+| **Lifecycle** (L1) | The boot sequence, and the order the maintenance pass drives each module's `runRetention` in. Receives every collaborator by injection. **A checked module, not part of the composition root** — these are ordering decisions with failure modes, not wiring. **Not the cadences**: it exposes a `runMaintenance` the composition root's timer calls, and the snapshot interval belongs to the structured store, which owns the copies — see the retention-owners table above and the composition root below. | Whatever it is handed. | Boot, run-maintenance, shutdown. |
 | **Git operations** (L2) | Every repository-generic git behaviour: status, log, branches, health, diff, stage, commit, restore-paths, push, and the seven protected-base invariants. | L1. | Domain functions returning `ToolResult`. |
 | **Composites** (L2) | Handwritten, fixed-sequence transactional operations — branch preparation, reconcile-after-merge. Each declares its journal steps and its recovery descriptor. | Git operations, host adapter, journal. | Domain functions, and a recovery descriptor per operation. |
 | **Host adapter** (L2) | Pull requests, checks, merges, deploy monitoring; the per-credential request budget and backoff. One implementation, GitHub via `gh`. | Exec, credentials. | A host-shaped interface a second implementation could satisfy. |
@@ -915,14 +915,23 @@ watcher, constructs the lifecycle module and hands it its collaborators, and sta
 It is the only file exempt from the dependency-direction check, and the exemption is by path, so
 widening it is a visible diff rather than a habit.
 
-**What it does not own is ordering.** The boot sequence, the order the maintenance pass drives
-each module's retention in, and the snapshot cadence are decisions with failure modes rather than
-wiring, and they live in the lifecycle module, which the dependency check examines like anything
+**What it does not own is ordering.** The boot sequence and the order the maintenance pass drives
+each module's retention in are decisions with failure modes rather than wiring, and they live in
+the lifecycle module, which the dependency check examines like anything
 else. An earlier draft put them in the root, which made the code most able to create illegal edges
 the code no check looks at — and turned the exemption from a file into a subsystem, which this
 document had already rejected as an alternative before doing it by accretion. Everything above L2 therefore reaches
 the domain through a name resolved at startup instead of a symbol resolved at compile time, which
 is the same mechanism already chosen for the scheduler's identical problem.
+
+**Driving a periodic pass is wiring, and the root does own that.** Three modules need calling on an
+interval — the scheduler's tick, the notifier's delivery pass, and the maintenance pass — and none
+of their interfaces exposes a start or a stop, deliberately: a module that owns its own timer cannot
+be driven deterministically by a test. The root holds all three timers, each reentrancy-guarded and
+joined into shutdown before the lease is released. What it must not absorb is what the pass *does*
+once called, which is why `runMaintenance`'s retention order stays in the lifecycle module above.
+The watcher is the one exception and states its own reason: its poll loop is the delivery state
+machine rather than a schedule over it, so `start`/`stop` are on its interface.
 
 With those cuts every edge points strictly downward, so the graph is acyclic by construction.
 

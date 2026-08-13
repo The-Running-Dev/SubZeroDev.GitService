@@ -12,6 +12,154 @@ Append-only. Newest at the top. The rejected alternatives are the point — with
 - **Repository config must stay descriptive.** Settled for now (see the decision below), and it holds only while the format carries no permission-shaped field. Worth a check at `/contract` rather than trusting anyone to remember. **The design states the test in checkable form** (`10-design.md` § `RepositoryConfig`): any field a caller could set that widens what the service will do lives in the declaration instead. **Checked at `/contract` 2026-08-03 and clean:** `RepositoryConfig` declares `baseBranch`, `requiredChecks`, `deployWorkflow` and `branchPrefixes` and nothing else; no capability, scope, path prefix, credential reference, remote, host, timeout or limit has drifted into it. The test is now invariant A8 in `20-contract.md`, so the next check is a re-read of one table row rather than a re-derivation.
 ---
 
+### 2026-08-13 — Post-S27 reconciliation: the refuse watermark gates every mutation, not only materialisation
+Context: `/reconcile` found `refuseAtPercent` read in exactly one place — `clone-store.ts`'s
+fresh-clone branch inside `ensure()`. A declaration whose clone is already `ready` never meets it, so
+`git_commit`, `git_fetch`, `git_push` and `git_raw` all run at 97 % full. The post-mutation check in
+the dispatch pipeline only fires `requestMaintenance`, fire-and-forget, after the operation has
+already completed. `10-design.md` says "at 95 % operations needing space are refused" and its
+disk-full failure row names "before clone **and after each mutation**" as the check points, with "the
+operation that needed the space is refused" as the outcome; neither had an implementation for a
+mutation against a materialised clone, and S27.2 had been read as satisfied by the materialisation
+path alone.
+Chosen: the mutating dispatch path checks `refuseAtPercent` before `Journal.begin`, against the usage
+reading the post-mutation check already takes, and returns `precondition` carrying the same
+`diskFullFindings` shape `CloneStore.ensure` already produces. Deliberately the last observed reading
+rather than a fresh one: the design keeps volume reads off the pre-mutation path on purpose, and a
+reading one operation stale is the difference between refusing at 95 % and refusing at 95 % plus one
+commit — which is what the 5 % headroom above the maintenance watermark exists to absorb.
+Rejected: **Read usage fresh on every mutation** — strictly correct, and it puts a `statfs` plus a
+`SUM` over the clone table inside the global mutation lock on every commit, which is the cost the
+design's own control-flow step 10 avoided by making the post-mutation reading advisory.
+**Narrow the design to materialisation only** — one cheap edit, and it means nothing stops the volume
+reaching 100 %; the 95 % watermark would stop meaning what it says, and S27.2 would be retro-narrowed
+to whatever happened to ship.
+Reversibility: cheap — one guard in the mutating path; deleting it restores today's behaviour.
+---
+
+### 2026-08-13 — Post-S27 reconciliation: every volume consumer reports real bytes, or the refusal blames the wrong one
+Context: `VolumeUsage.byConsumer` was only ever populated for `clones` and `structured-store`.
+`audit-log`, `backups-and-snapshots` and `watcher-files` were permanent zeros, documented as such in
+`store/volume-usage.ts` and scoped out of S27's `Touches` on the grounds that Audit, Structured store
+and Watcher own those directories. The consequence is the failure the consumer list was added to
+prevent, one file over: `10-design.md` records that the store was missing from an earlier draft,
+"which is precisely the case where eviction frees nothing and the refusal blames innocent
+declarations." Audit segments are 64 MB apiece retained 90 days, and backups are three pre-migration
+copies plus seven daily snapshots of the whole store — plausibly the largest consumer on the volume.
+No slice, landed or remaining, ever filled them: S26 gave those three owners a per-pass `freedBytes`,
+which answers a different question.
+Chosen: each owning module gains a bytes reader over the directory it already manages, and
+`computeVolumeUsage` folds all three in the way `structured-store` is already folded in. The cost
+lands on the refuse path and the maintenance pass only, never the hot path — the same placement
+`evictionBlockersAcrossDeclarations` already argues for.
+Rejected: **Amend the design to two measured consumers** — cheap, and it reinstates exactly the
+failure `10-design.md` line 128 was written to close, and would be expensive to reverse once the
+refusal's shape is documented as two. **Leave it and file a bug issue** — costs nothing today and
+leaves a refusal that reports three consumers as holding nothing while they hold the volume.
+Reversibility: cheap — the readers are additive and the overlay is one spread.
+---
+
+### 2026-08-13 — Post-S27 reconciliation: `mutationQueueDepth` is enforced, closing the last declared-and-dead admission member
+Context: `LockError`'s `queue-full` variant carries a `depth` field, `AdmissionLimits` carries
+`mutationQueueDepth`, `server.ts` resolves it from the environment, and nothing anywhere read it —
+`createMutex` pushes waiters into an unbounded array. `10-design.md`'s Boundaries table promises
+"Queue depth exceeded → Immediate refusal → `conflict`", and the bounded queue is the design's stated
+reason for rejecting reject-on-contention. This is the last surviving member of the set `20-contract.md`
+itself named when S10 added `admitLockFreeWait`: "fixed from the outset with nothing that raised or
+read them".
+Chosen: `acquire` refuses with `queue-full` when the waiter array is already at `mutationQueueDepth`,
+and `createLocks` threads the limit through as it already does for the two lock-free counters.
+Rejected: **Remove the variant and the config field** — defensible, since `acquire-timeout` already
+returns `conflict` and is what a caller sees today; rejected because it removes the only bound on
+waiter growth behind a slow transfer, and the union is expensive to change once a consumer branches
+on it. **Leave it and file a bug issue** — leaves the contract stating a refusal the service never
+performs, which is the shape the `agent.md` lesson added today exists to catch.
+Reversibility: cheap — one guard.
+---
+
+### 2026-08-13 — Post-S27 reconciliation: invariant B1 gets a real check, in the build rather than in CI
+Context: `20-contract.md` names "CI dependency-direction check" as B1's responsible party and
+`10-design.md` says the L2 boundary "is enforced by a dependency-direction check in CI, not by
+intent." There is no CI in this repository — `.github/` holds only issue templates — and
+`npm run check:layering` implements B8, the compiler's absence from the runtime, not B1. No slice
+owns building it. Three source files carry comments citing B1 as their reason for a structural
+choice, which is precisely the "by intent" the design says is not enough. No live violation: the only
+L2 edge from an upper layer is `dispatch-pipeline.test.ts` importing `createGitOperations`.
+Chosen: a `scripts/check-layer-direction.ts` beside the existing B8 check, walking the same
+TypeScript program and failing on any L0/L3/L4/L5 module that imports an L2 path, with
+`src/server.ts` exempt by path so widening the exemption is a visible diff. Wired into `npm run
+build`, so it runs wherever the gates run rather than waiting on a CI that does not exist. Test files
+are excluded from the walk and the reason is recorded in the script: a test composes the layers on
+purpose, and treating that as a violation would make the check's first finding a false one.
+Rejected: **Reword B1's responsible party to name the build** — cheap, and it would have written down
+that a named invariant has no enforcement, which is the state the sentence exists to deny.
+**Write the check and file a story for CI** — the wider gap (no CI at all, which B1, B3, B5 and
+`/verify` all assume) is real, but it is a separate piece of work and filing it is `/track`'s.
+Reversibility: cheap — one script and one line in `build`.
+---
+
+### 2026-08-13 — Post-S27 reconciliation: the composition root owns the three periodic timers; Lifecycle owns what a pass does
+Context: `10-design.md`'s module table gave Lifecycle "the maintenance-pass schedule … and the
+snapshot cadence". The tree has the 24-hour timer in `server.ts` beside the scheduler and notifier
+timers, and the snapshot interval inside the structured store's own `runRetention`. The design
+contradicted itself: its retention-owners table eleven lines earlier already gives "its own
+pre-migration copies and daily snapshots" to the structured store. And `Lifecycle`'s contract
+interface is `boot / runMaintenance / recoverDeclaration / shutdown` — no member could hold a
+schedule, so the sentence was never implementable as written. This is the second time the shape has
+been hit; the 2026-08-13 `Scheduler.tick` entry below reached the same conclusion and logged it,
+while the maintenance timer took the same route without one.
+Chosen: correct `10-design.md` to match the tree. Lifecycle's Owns column keeps the boot sequence and
+the retention order and explicitly disclaims the cadences; a new paragraph under the composition root
+states that driving a periodic pass is wiring, names all three timers and the reentrancy and shutdown
+requirements on them, and records the watcher as the deliberate exception whose poll loop is the
+delivery state machine rather than a schedule over it.
+Rejected: **Move the schedule into Lifecycle** — honours the design's sentence, and it is a new public
+interface, so it needs a contract amendment at `/contract`'s tier rather than this command's; it also
+gives up the deterministic-test property the 2026-08-13 `Scheduler.tick` decision chose the current
+shape for. **Record the divergence and change neither** — cheapest, and it leaves a reader of the
+module table briefed on an ownership the tree does not have.
+Reversibility: cheap as prose; the rejected alternative is expensive, since it is an interface change.
+---
+
+### 2026-08-13 — Post-S27 reconciliation: the dispatch pipeline and the http adapter are terminal and declare no error union
+Context: `20-contract.md` declared `DispatchError` and `HttpAdapterError` and neither existed in any
+source file. Both modules construct `ToolResult` envelopes directly, and every variant's mapped kind
+matched the contract's own tables in each case checked — `tool-not-found` to an audited
+`authorization`, `declaration-required` to `validation`, `result-too-large` to `infrastructure`,
+`unexpected-commit` to `precondition`. What was false was the section's opening claim that "the
+envelope's generating rule is applied once rather than per call site": for these two it is applied
+per call site, because there is nothing above them to apply it.
+Chosen: amend the contract. A *Terminal modules* paragraph at the head of *Error semantics* names the
+exception, says there are exactly two, and gives the reason — a union either module declared would be
+a value constructed solely to be translated on the next line, with the translation still written per
+call site. Both sections keep their tables as the fixed mapping, restated as refusal-to-envelope
+rather than variant-to-`ResultKind`, so a refusal added without a row there is still checkable drift.
+Rejected: **Add the two unions to the code** — makes the opening claim true everywhere, at the cost of
+an indirection in the one place nothing consumes it, touching every return in the pipeline for no
+behavioural change. **Leave it and file a bug issue** — leaves the contract's own opening rule stating
+something false about two of its modules.
+Reversibility: cheap as prose.
+---
+
+### 2026-08-13 — Post-S27 reconciliation: five loose operational numbers join `DeploymentConfig`
+Context: U6 declared operational numbers resolved on 2026-08-11 and fixed every one under
+`### Deployment configuration`. Five were not there. Three token lifetimes are hardcoded constants in
+`authorization.ts` with no override at all — MCP access 1 h, MCP refresh 30 d, and an operator-api
+token at **one year** — and two cadences read the environment but appear in no document: the
+notifier's 30 s delivery pass and the maintenance pass's 86 400 s. Their sibling, the scheduler's 15 s
+tick, has a decision entry from earlier today; these do not. A one-year durable credential for the
+scripting surface is the one that most needed a recorded reason and had only a code comment.
+Chosen: all five join `DeploymentConfig` with their current values as documented defaults, and the
+three TTLs become deployment-overridable like everything else. `DeploymentConfig` is then the complete
+list U6 says it is, rather than the list minus whatever a slice happened to define locally.
+Rejected: **Record them in the decision log only** — cheapest, and `DeploymentConfig` stops being
+complete, so the next reader looking for the token lifetime finds nothing in `design/` and has to read
+`authorization.ts`. **Add the cadences and log the TTLs** — smaller, and it leaves a one-year
+credential nobody can shorten without a rebuild, which is the wrong half to leave fixed.
+Reversibility: contract table and defaults are cheap; the three TTLs becoming configurable is
+expensive to reverse once a deployment sets one.
+---
+
 ### 2026-08-13 — S25 code review: `migrate()` runs a one-time `VACUUM` to actually enable incremental vacuum
 Context: `/code-review` on S25 found that `PRAGMA auto_vacuum = INCREMENTAL` (added to `migrate()` for
 `incrementalVacuum`, S25.6) only takes effect on a database with no schema yet, or immediately after a
