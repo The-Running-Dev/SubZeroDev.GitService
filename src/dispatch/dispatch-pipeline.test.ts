@@ -2312,3 +2312,51 @@ test('S23.4 — file-watcher apply checks malformed, declaration, and plan path 
     if (rejectionRecords.ok) assert.ok(rejectionRecords.value.records.length >= 2, 'both declaration-bound and plan-bound authorization refusals were audited');
   });
 });
+
+test('S16.6 — a mutating call carrying a scheduledJobId has it stamped onto its journal entry, never on the job itself', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, locks, fixture, volume }) => {
+    grantWrite(fixture, []);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const moduleAdapter = createModuleAdapter();
+    moduleAdapter.register('fixture.noop' as never, async (ctx) =>
+      success('noop', {}, { operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation, durationMs: 0 }));
+    const NOOP_ENTRY = fixtureTool({
+      name: 'noop_mutation',
+      capabilities: ['git.local.write'],
+      scopes: ['write'],
+      executionClass: 'mutating',
+      target: { kind: 'module', target: 'fixture.noop' as never },
+    });
+
+    const pipeline = createDispatchPipeline({
+      registry: mutatingRegistryOf([NOOP_ENTRY]),
+      ceiling: MUTATION_CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      journal,
+      clock: systemClock,
+    });
+
+    const result = await pipeline.dispatch({
+      toolName: 'noop_mutation' as never,
+      input: {},
+      session: sessionWith(['repo.read', 'git.local.write']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: 'job-xyz' as never,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+    assert.equal(result.kind, 'success');
+
+    const found = await journal.findByScheduledJob('job-xyz' as never);
+    assert.equal(found.ok, true);
+    if (!found.ok) return;
+    assert.ok(found.value, 'the journal entry the pipeline wrote carries the scheduled job id');
+    assert.equal(found.value!.scheduledJobId, 'job-xyz');
+    assert.equal(found.value!.state, 'settled');
+  });
+});

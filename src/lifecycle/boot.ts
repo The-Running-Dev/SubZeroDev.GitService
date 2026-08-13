@@ -11,7 +11,7 @@ import { storeError, type StoreError } from '../store/errors.ts';
 import { NO_VOLUME_USAGE, type VolumeUsage } from '../store/volume-usage.ts';
 import type { OperatorIdentity } from '../operator-identity/operator-identity.ts';
 import type { HttpOperationName, ModuleTargetName } from '../shared/brands.ts';
-import type { ToolDeclaration } from '../contract/tool-declaration.ts';
+import type { CompiledRegistry, ToolDeclaration } from '../contract/tool-declaration.ts';
 import type { RecoveryClassification } from '../recovery/types.ts';
 import type { Journal } from '../journal/journal.ts';
 import type { MaintenanceSummary, NotificationRequest } from '../journal/types.ts';
@@ -19,6 +19,8 @@ import type { RetentionReport } from '../shared/retention.ts';
 import type { Notifier } from '../notifier/notifier.ts';
 import type { Authorization } from '../authorization/authorization.ts';
 import type { DeclarationError } from '../declarations/errors.ts';
+import type { Scheduler } from '../scheduler/scheduler.ts';
+import type { BootJobReport } from '../scheduler/types.ts';
 import { acquireLease, type InstanceLease, type LeaseGuard, type LockAcquirer } from './lease.ts';
 import { verifyRegistryArtifact } from './registry-integrity.ts';
 import { declarationsWithUnsettledEntries, recoverDeclaration as runRecoveryLadder, type RecoveryDependencies } from './recovery.ts';
@@ -52,17 +54,14 @@ function bootError<T extends { readonly code: BootError['code'] }>(variant: T, s
  * `BootReport` members still belong to subsystems that do not exist yet, and
  * are reported at their empty values rather than invented:
  *
- *   jobsResolved        — the scheduler, S16
- *   revalidation        — needs both of the above
  *   recoveryPending     — recovery, S8
+ *
+ * S16 delivers `jobsResolved` (boot step 6, `Scheduler.resolveRunningAtBoot`)
+ * and the job half of `revalidation` (boot step 7, `Scheduler.revalidatePending`).
+ * `BootJobReport` itself is declared in `scheduler/types.ts`, alongside the
+ * module that produces it, and imported here type-only — the same pattern
+ * `RecoveryDependencies.dispatch` already uses for an L4 shape.
  */
-export interface BootJobReport {
-  readonly markedDone: readonly ScheduledJobId[];
-  readonly markedNeedsAttention: readonly ScheduledJobId[];
-  readonly returnedToPending: readonly ScheduledJobId[];
-  readonly leftRunning: readonly ScheduledJobId[];
-}
-
 export interface RevalidationReport {
   readonly jobsParked: readonly ScheduledJobId[];
   readonly entriesParked: readonly OperationId[];
@@ -169,6 +168,13 @@ export interface LifecycleDependencies {
    * drive.
    */
   readonly journal?: Pick<Journal, 'runRetention'>;
+  /**
+   * S16 — boot steps 6 and 7's job half. Optional so a `Lifecycle` built
+   * before the scheduler existed still compiles: without it, `jobsResolved`
+   * and `revalidation.jobsParked` report their honest empty values rather
+   * than a fabricated clean sweep.
+   */
+  readonly scheduler?: Pick<Scheduler, 'resolveRunningAtBoot' | 'revalidatePending'>;
   /** S25. Same reasoning as `journal` above. */
   readonly authorization?: Pick<Authorization, 'runRetention'>;
   /**
@@ -354,6 +360,44 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       const auditChain = await deps.audit.verify();
       const provisioningPending = (await deps.operatorIdentity.provisioningState()) === 'pending';
 
+      // Step 6 — resolve every scheduled job left `running` by a killed
+      // process, from the journal alone, before anything else touches the
+      // scheduler (`10-design.md` § Boot and recovery, step 6). Ahead of the
+      // watcher's own B6 revalidation below: both are re-validation against
+      // the freshly loaded registry, and the scheduler's job classification
+      // reads only the journal (no git or host I/O), so nothing here is
+      // ordered behind it — it runs first only because it is named first.
+      //
+      // Step 7's job half — an image upgrade can rename, remove or
+      // re-schema a tool a pending job still references; caught here rather
+      // than at fire time. `registryEntries` is the production declaration
+      // set this same boot already verified every executor exists for
+      // (invariant B5 above), assembled into the `CompiledRegistry` shape
+      // `revalidatePending` takes rather than re-deriving it from the build
+      // artifact a second time. **Only run when `registryEntries` was
+      // actually supplied** — defaulting a missing registry to an empty
+      // array here would make `revalidatePending` see every tool as gone
+      // and park every pending job `needs-attention` naming an "image
+      // upgrade" that never happened (review finding). `registryEntries`
+      // absent means "this `Lifecycle` was not given one", not "the
+      // registry is empty" — those are different facts, and only the
+      // second one is revalidation's to act on. Steps 6 and 7 run
+      // concurrently: both re-validate against state loaded earlier in
+      // this same boot (the journal; the registry), and neither depends on
+      // the other's result.
+      const compiledRegistryForRevalidation: CompiledRegistry | null = deps.registryEntries
+        ? {
+            fingerprint: registry.value.contractFingerprint,
+            compiledAt: deps.clock.now(),
+            entries: deps.registryEntries,
+            contractCapabilitySet: registry.value.contractCapabilitySet,
+          }
+        : null;
+      const [jobsResolved, jobsParked] = await Promise.all([
+        deps.scheduler ? deps.scheduler.resolveRunningAtBoot() : Promise.resolve(NO_JOBS),
+        deps.scheduler && compiledRegistryForRevalidation ? deps.scheduler.revalidatePending(compiledRegistryForRevalidation) : Promise.resolve([]),
+      ]);
+
       // Invariant B6 — an image upgrade may remove or change a tool named by
       // an active declaration's file-watcher pair. The declarations store is
       // readable only after migration, and this check must finish before
@@ -433,8 +477,8 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         migrationsApplied: migrated.value,
         provisioningPending,
         auditChain,
-        jobsResolved: NO_JOBS,
-        revalidation: { jobsParked: [], entriesParked: [] },
+        jobsResolved,
+        revalidation: { jobsParked, entriesParked: [] },
         clones,
         recoveryPending,
       });

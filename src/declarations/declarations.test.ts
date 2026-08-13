@@ -43,7 +43,13 @@ async function withMigratedVolume<T>(fn: (volume: string) => Promise<T>): Promis
  */
 function declarationsFor(
   volume: string,
-  opts: { readonly remoteHostAllowlist?: readonly RemoteHost[]; readonly ceiling?: DeploymentCeiling; readonly adoptionCheck?: CloneAdoptionCheck; readonly registryEntries?: readonly ToolDeclaration[] } = {},
+  opts: {
+    readonly remoteHostAllowlist?: readonly RemoteHost[];
+    readonly ceiling?: DeploymentCeiling;
+    readonly adoptionCheck?: CloneAdoptionCheck;
+    readonly registryEntries?: readonly ToolDeclaration[];
+    readonly cancelScheduledJobsForDeclaration?: Parameters<typeof createDeclarations>[0]['cancelScheduledJobsForDeclaration'];
+  } = {},
 ) {
   const adoptionCheck: CloneAdoptionCheck = opts.adoptionCheck ?? {
     observedRemote: async () => ({ cloneExists: false }),
@@ -56,6 +62,7 @@ function declarationsFor(
     ceiling: opts.ceiling ?? ceilingOf('repo.read', 'git.local.write', 'git.remote.write'),
     registryEntry: (name) => opts.registryEntries?.find((entry) => entry.name === name) ?? null,
     cloneAdoptionCheck: () => adoptionCheck,
+    ...(opts.cancelScheduledJobsForDeclaration ? { cancelScheduledJobsForDeclaration: opts.cancelScheduledJobsForDeclaration } : {}),
   });
 }
 
@@ -367,6 +374,43 @@ test('S24.4 — orphan() reports fileWatcherStopped only when the declaration na
     const orphanedWatcher = await declarations.orphan('repo-9b' as DeclareInput['id'], OPERATOR);
     assert.equal(orphanedWatcher.ok, true);
     if (orphanedWatcher.ok) assert.equal(orphanedWatcher.value.fileWatcherStopped, true);
+  });
+});
+
+test('S16.5 — orphan() cancels pending scheduled jobs through the injected cascade, inside its own transaction, and reports what was cancelled', async () => {
+  await withMigratedVolume(async (volume) => {
+    const calls: { declarationId: string; reason: string }[] = [];
+    const declarations = declarationsFor(volume, {
+      cancelScheduledJobsForDeclaration: (declarationId, reason, tx) => {
+        calls.push({ declarationId: declarationId as unknown as string, reason });
+        // Runs inside the caller's own transaction: a write through `tx`
+        // here must commit or roll back with `orphan`'s own state flip.
+        tx.run("UPDATE declaration SET updated_at = updated_at WHERE id = ?", declarationId as unknown as string);
+        return ['job-1' as never, 'job-2' as never];
+      },
+    });
+    const declared = await declarations.declare(declareInputFor('repo-11'), OPERATOR);
+    assert.equal(declared.ok, true);
+
+    const orphaned = await declarations.orphan('repo-11' as DeclareInput['id'], OPERATOR);
+    assert.equal(orphaned.ok, true);
+    if (!orphaned.ok) return;
+    assert.deepEqual(orphaned.value.cancelledJobs, ['job-1', 'job-2']);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.declarationId, 'repo-11');
+    assert.match(calls[0]!.reason, /orphan/);
+  });
+});
+
+test('orphan() reports no cancelled jobs when no scheduler cascade is wired', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declarations = declarationsFor(volume);
+    const declared = await declarations.declare(declareInputFor('repo-12'), OPERATOR);
+    assert.equal(declared.ok, true);
+
+    const orphaned = await declarations.orphan('repo-12' as DeclareInput['id'], OPERATOR);
+    assert.equal(orphaned.ok, true);
+    if (orphaned.ok) assert.deepEqual(orphaned.value.cancelledJobs, []);
   });
 });
 

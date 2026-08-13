@@ -35,6 +35,7 @@ import type { Audit } from '../audit/audit.ts';
 import type { CapabilityName, DeploymentCeiling } from '../contract/capabilities.ts';
 import { fixtureTool, httpTarget } from '../contract/fixtures.ts';
 import { createLifecycle, type LifecycleDependencies } from './boot.ts';
+import type { BootJobReport } from '../scheduler/types.ts';
 import type { LeaseAcquisition, LockAcquirer } from './lease.ts';
 
 /**
@@ -88,6 +89,8 @@ function lifecycleFor(
     readonly notifier?: Pick<Notifier, 'redriveUndelivered' | 'runRetention' | 'enqueue'>;
     readonly recovery?: RecoveryDependencies;
     readonly revalidateFileWatchers?: LifecycleDependencies['revalidateFileWatchers'];
+    readonly scheduler?: LifecycleDependencies['scheduler'];
+    readonly registryEntries?: LifecycleDependencies['registryEntries'];
   } = {},
 ) {
   const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
@@ -105,6 +108,8 @@ function lifecycleFor(
     ...(acquirer ? { acquirer } : {}),
     ...(options.notifier ? { notifier: options.notifier } : {}),
     ...(options.recovery ? { recovery: options.recovery } : {}),
+    ...(options.scheduler ? { scheduler: options.scheduler } : {}),
+    ...(options.registryEntries ? { registryEntries: options.registryEntries } : {}),
   });
   return { store, audit, lifecycle };
 }
@@ -824,6 +829,72 @@ test('S25.7 — a maintenance-pass notification that fails to enqueue is recorde
       after.close();
       const summaries = outboxRows.filter((row) => (JSON.parse(row.payload) as { subject?: { kind?: string } }).subject?.kind === 'maintenance-pass');
       assert.equal(summaries.length, 0, 'the failed transaction really did leave no row behind');
+    } finally {
+      await lifecycle.shutdown('operator');
+    }
+  });
+});
+
+test('S16 — boot steps 6 and 7 report the scheduler\'s job resolution and revalidation when one is wired', async () => {
+  await withVolumeAsync(async (volume) => {
+    const jobsResolved: BootJobReport = { markedDone: ['job-1' as never], markedNeedsAttention: [], returnedToPending: [], leftRunning: [] };
+    let seenEntryCount: number | null = null;
+    const { lifecycle } = lifecycleFor(volume, undefined, {
+      registryEntries: [],
+      scheduler: {
+        resolveRunningAtBoot: async () => jobsResolved,
+        revalidatePending: async (registry) => {
+          seenEntryCount = registry.entries.length;
+          return ['job-2' as never];
+        },
+      },
+    });
+    try {
+      const booted = await lifecycle.boot();
+      assert.equal(booted.ok, true);
+      if (!booted.ok) return;
+      assert.deepEqual(booted.value.jobsResolved, jobsResolved, 'step 6 reports exactly what the scheduler returned');
+      assert.deepEqual(booted.value.revalidation.jobsParked, ['job-2'], 'step 7 reports exactly what revalidatePending parked');
+      assert.equal(seenEntryCount, 0, 'this boot genuinely declares an empty registry');
+    } finally {
+      await lifecycle.shutdown('operator');
+    }
+  });
+});
+
+test('S16 — a scheduler wired without registryEntries never revalidates against a fabricated empty registry', async () => {
+  await withVolumeAsync(async (volume) => {
+    let revalidateCalls = 0;
+    const { lifecycle } = lifecycleFor(volume, undefined, {
+      scheduler: {
+        resolveRunningAtBoot: async () => ({ markedDone: [], markedNeedsAttention: [], returnedToPending: [], leftRunning: [] }) as BootJobReport,
+        revalidatePending: async () => {
+          revalidateCalls += 1;
+          return ['job-parked-by-mistake' as never];
+        },
+      },
+    });
+    try {
+      const booted = await lifecycle.boot();
+      assert.equal(booted.ok, true);
+      if (!booted.ok) return;
+      assert.equal(revalidateCalls, 0, 'no registryEntries were supplied, so revalidatePending must not run against a fabricated empty one');
+      assert.deepEqual(booted.value.revalidation.jobsParked, [], 'nothing is falsely parked when the registry is simply absent from this boot');
+    } finally {
+      await lifecycle.shutdown('operator');
+    }
+  });
+});
+
+test('boot without a scheduler wired reports the honest empty jobsResolved/revalidation, not a fabricated clean sweep', async () => {
+  await withVolumeAsync(async (volume) => {
+    const { lifecycle } = lifecycleFor(volume);
+    try {
+      const booted = await lifecycle.boot();
+      assert.equal(booted.ok, true);
+      if (!booted.ok) return;
+      assert.deepEqual(booted.value.jobsResolved, { markedDone: [], markedNeedsAttention: [], returnedToPending: [], leftRunning: [] });
+      assert.deepEqual(booted.value.revalidation, { jobsParked: [], entriesParked: [] });
     } finally {
       await lifecycle.shutdown('operator');
     }
