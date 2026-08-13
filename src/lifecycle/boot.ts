@@ -603,7 +603,15 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         for (const candidate of candidates) {
           if (totalBytes <= 0 || (runningUsedBytes / totalBytes) * 100 < watermarks.maintenanceAtPercent) break;
           const outcome = await deps.evictIfSafe(candidate.declarationId);
-          if (!outcome.ok) continue;
+          if (!outcome.ok) {
+            // Surfaced rather than silently dropped: an attempt that errors
+            // is exactly the state most worth an operator seeing, and
+            // dropping it made a pass that tried and failed indistinguishable
+            // from one that never found anything to evict.
+            console.error(`lifecycle: eviction attempt for '${candidate.declarationId}' failed: ${outcome.error.summary}`);
+            evictions.push({ declarationId: candidate.declarationId, evicted: false, freedBytes: 0, blockers: [] });
+            continue;
+          }
           evictions.push(outcome.value);
           if (outcome.value.evicted) runningUsedBytes = Math.max(0, runningUsedBytes - outcome.value.freedBytes);
         }

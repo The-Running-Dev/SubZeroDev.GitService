@@ -24,7 +24,7 @@ import { GIT_RAW_RECOVERY, LOCAL_MUTATION_RECOVERY_DESCRIPTORS, REMOTE_OPERATION
 import { createCredentialResolver } from './credentials/credentials.ts';
 import { prepareDeclarationCredential } from './credentials/declaration-credential.ts';
 import { ok, err } from './shared/outcome.ts';
-import { NO_VOLUME_USAGE } from './store/volume-usage.ts';
+import { DISK_WATERMARKS_DEFAULT, NO_VOLUME_USAGE, type DiskWatermarks } from './store/volume-usage.ts';
 import type { MaintenanceReason } from './shared/retention.ts';
 import { createGitHubAdapter } from './host/github-adapter.ts';
 import { createHostOperations } from './host/host-operations.ts';
@@ -198,6 +198,33 @@ function resolveRemoteOperationsPermitted(): boolean {
   return process.env.REMOTE_OPERATIONS_PERMITTED === 'true';
 }
 
+/**
+ * `DeploymentConfig.watermarks` (`20-contract.md` § Deployment configuration)
+ * — contract defaults 85 / 95 (`DISK_WATERMARKS_DEFAULT`). Resolved once
+ * here and passed to `CloneStore`, `DispatchPipeline` and `Lifecycle` alike,
+ * so the three cannot independently default and silently disagree about
+ * where the watermark is.
+ */
+function resolveWatermarks(): DiskWatermarks {
+  const rawMaintenance = process.env.DISK_WATERMARK_MAINTENANCE_PERCENT;
+  const rawRefuse = process.env.DISK_WATERMARK_REFUSE_PERCENT;
+  const maintenanceAtPercent = rawMaintenance === undefined || rawMaintenance.trim().length === 0 ? DISK_WATERMARKS_DEFAULT.maintenanceAtPercent : Number(rawMaintenance);
+  const refuseAtPercent = rawRefuse === undefined || rawRefuse.trim().length === 0 ? DISK_WATERMARKS_DEFAULT.refuseAtPercent : Number(rawRefuse);
+  if (!Number.isFinite(maintenanceAtPercent) || maintenanceAtPercent <= 0 || maintenanceAtPercent >= 100) {
+    console.error(`server: DISK_WATERMARK_MAINTENANCE_PERCENT must be a number between 0 and 100 (got '${rawMaintenance}')`);
+    process.exit(1);
+  }
+  if (!Number.isFinite(refuseAtPercent) || refuseAtPercent <= 0 || refuseAtPercent >= 100) {
+    console.error(`server: DISK_WATERMARK_REFUSE_PERCENT must be a number between 0 and 100 (got '${rawRefuse}')`);
+    process.exit(1);
+  }
+  if (refuseAtPercent <= maintenanceAtPercent) {
+    console.error(`server: DISK_WATERMARK_REFUSE_PERCENT (${refuseAtPercent}) must be greater than DISK_WATERMARK_MAINTENANCE_PERCENT (${maintenanceAtPercent})`);
+    process.exit(1);
+  }
+  return { maintenanceAtPercent, refuseAtPercent };
+}
+
 /** `DeploymentConfig.watcher.enabled` — default off, the same direction as `remoteOperationsPermitted`. */
 function resolveWatcherEnabled(): boolean {
   return process.env.WATCHER_ENABLED === 'true';
@@ -241,6 +268,7 @@ async function main(): Promise<void> {
   const credentialMountRoot = process.env.CREDENTIAL_MOUNT_ROOT ?? path.join(repoRoot, 'credentials');
   const commitSha = resolveCommitSha();
   const port = resolvePort();
+  const watermarks = resolveWatermarks();
 
   const store = createStructuredStore({ volumeRoot, clock: systemClock });
   const audit = createAudit({ volumeRoot, clock: systemClock });
@@ -322,6 +350,8 @@ async function main(): Promise<void> {
     locks,
     declarations,
     journal,
+    store,
+    watermarks,
     onMaintenanceRequested: (reason) => requestMaintenanceRef?.(reason),
   });
   cloneStoreRef = cloneStore;
@@ -565,6 +595,7 @@ async function main(): Promise<void> {
       return usage.ok ? usage.value : NO_VOLUME_USAGE;
     },
     evictIfSafe: (declarationId) => cloneStore.evictIfSafe(declarationId),
+    watermarks,
     onTakeover: (previous, current) => {
       // The durable `lease-takeover` audit record is written by boot itself
       // (S3); this is operator-visible defense in depth, so a takeover is
@@ -585,8 +616,30 @@ async function main(): Promise<void> {
   // documents for `Notifier.deliverPending`. Tracked so shutdown can wait
   // for it, same as `deliveryInFlight`.
   let maintenanceInFlight: Promise<unknown> | null = null;
+  // Disarmed by `shutdown` below, before it awaits `maintenanceInFlight` —
+  // without this, a mutation's fire-and-forget `checkWatermarkAfterMutation`
+  // (`dispatch-pipeline.ts`) can still call `triggerMaintenance` after that
+  // wait has already resolved, starting a pass against store/audit/journal
+  // handles `lifecycle.shutdown()` is in the middle of closing.
+  let shuttingDown = false;
+  // Every mutating dispatch checks the watermark and, while still above it,
+  // requests another pass — with no cooldown this reruns a full retention
+  // pass (plus one `notification_outbox` row) on every single mutation while
+  // pressure persists and nothing is evictable (e.g. every clone `pinned`).
+  // Bounded to at most once per `resolveMaintenanceIntervalSeconds()`, the
+  // same cadence the schedule itself already runs at — a watermark crossing
+  // gets the next pass sooner than the schedule alone would, never more
+  // often than the schedule's own interval.
+  let lastWatermarkTriggerAt = 0;
+  const maintenanceIntervalSeconds = resolveMaintenanceIntervalSeconds();
   function triggerMaintenance(reason: MaintenanceReason): void {
+    if (shuttingDown) return;
     if (maintenanceInFlight) return;
+    if (reason === 'watermark') {
+      const now = Date.now();
+      if (now - lastWatermarkTriggerAt < maintenanceIntervalSeconds * 1000) return;
+      lastWatermarkTriggerAt = now;
+    }
     maintenanceInFlight = lifecycle
       .runMaintenance(reason)
       .catch((error: unknown) => {
@@ -633,6 +686,7 @@ async function main(): Promise<void> {
     journal,
     exec,
     clock: systemClock,
+    watermarks,
     recoverDeclaration: (declarationId) => lifecycle.recoverDeclaration(declarationId),
   });
   // Closes the forward reference `recovery.dispatch` opened above — set well
@@ -798,12 +852,17 @@ async function main(): Promise<void> {
   // watermark crossing share one in-flight guard rather than two.
   const maintenanceTimer = setInterval(() => {
     triggerMaintenance('scheduled');
-  }, resolveMaintenanceIntervalSeconds() * 1000);
+  }, maintenanceIntervalSeconds * 1000);
   // Unreferenced, so a pending timer never keeps the process alive on its own.
   maintenanceTimer.unref();
 
   const shutdown = (signal: NodeJS.Signals): void => {
     ready = false;
+    // Set before anything is awaited below: a post-mutation watermark check
+    // still in flight from a request that finished just as shutdown began
+    // must not start a fresh maintenance pass after `maintenanceInFlight`
+    // has already been waited out — `triggerMaintenance` checks this first.
+    shuttingDown = true;
     clearInterval(deliveryTimer);
     clearInterval(schedulerTimer);
     clearInterval(maintenanceTimer);

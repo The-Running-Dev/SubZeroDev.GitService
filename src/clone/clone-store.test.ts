@@ -21,12 +21,12 @@ import type { MaintenanceReason } from '../shared/retention.ts';
 import { createCloneStore } from './clone-store.ts';
 import { createBareGitRemote } from './testing/git-fixture.ts';
 
-/** A `statfsSync`-shaped reading that reports `usedPercent` above `pct`, for a volume small enough that `bavail` stays an integer. */
-function diskStatsAtPercent(pct: number): () => { readonly blocks: number; readonly bsize: number; readonly bavail: number } {
+/** A `statfsSync`-shaped reading that reports `usedPercent` above `pct`, for a volume small enough that `bfree`/`bavail` stay integers. No reserved blocks on this fixture, so `bfree` equals `bavail`. */
+function diskStatsAtPercent(pct: number): () => { readonly blocks: number; readonly bsize: number; readonly bfree: number; readonly bavail: number } {
   const blocks = 1000;
   const bsize = 1;
   const bavail = Math.max(0, Math.round(blocks * (1 - pct / 100)));
-  return () => ({ blocks, bsize, bavail });
+  return () => ({ blocks, bsize, bfree: bavail, bavail });
 }
 
 const OPERATOR = { kind: 'operator' as const, subject: 'op' as never, clientId: null, grantId: null };

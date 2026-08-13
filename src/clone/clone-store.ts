@@ -14,7 +14,7 @@ import type { Finding } from '../shared/result-kind.ts';
 import { type MaintenanceReason, type RetentionReport } from '../shared/retention.ts';
 import { storeError, type StoreError } from '../store/errors.ts';
 import { DISK_WATERMARKS_DEFAULT, NO_VOLUME_USAGE, type DiskWatermarks, type VolumeConsumer, type VolumeUsage } from '../store/volume-usage.ts';
-import type { StoreTableName } from '../store/structured-store.ts';
+import type { StoreTableName, StructuredStore } from '../store/structured-store.ts';
 import type { Journal } from '../journal/journal.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import type { Declaration } from '../declarations/types.ts';
@@ -72,8 +72,23 @@ export interface CloneStoreDependencies {
    * so a test can force a watermark crossing deterministically rather than
    * filling an actual disk — the same "swap the real thing for a test double
    * at the dependency boundary" shape `exec`/`clock`/`locks` already take.
+   * `bfree` (blocks free, including those reserved for the filesystem's own
+   * superuser reservation) is what `usedBytes` is computed from — `bavail`
+   * (blocks available to this process) undercounts free space by that
+   * reservation and would overstate `usedPercent` against what `df` reports
+   * on the same volume.
    */
-  readonly readDiskStats?: (volumeRoot: string) => { readonly blocks: number; readonly bsize: number; readonly bavail: number };
+  readonly readDiskStats?: (volumeRoot: string) => { readonly blocks: number; readonly bsize: number; readonly bfree: number; readonly bavail: number };
+  /**
+   * The structured store's own per-table byte breakdown, folded into
+   * `storeByTable`/`byConsumer['structured-store']` here the same way
+   * `Lifecycle.runMaintenance` already overlays it onto its own usage
+   * reading. Without this, `disk-full`'s findings (S27.2) would report every
+   * one of the sixteen tables at a fabricated zero — `computeVolumeUsage`
+   * only otherwise has the real figure for `clones`. Optional so every
+   * pre-S27 test keeps compiling.
+   */
+  readonly store?: Pick<StructuredStore, 'usageByTable'>;
 }
 
 const CLONE_SECONDS_DEFAULT = 300;
@@ -199,17 +214,16 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
    * `totalBytes`/`usedBytes`/`usedPercent` are real, read from the volume's
    * own filesystem statistics — the watermark machinery is meaningless
    * against a fabricated percentage. `clones` is real (summed from the
-   * `clone` table). `structured-store` is left at its honest zero here;
-   * `Lifecycle.runMaintenance` overlays the real figure from
-   * `StructuredStore.usageByTable`, and the dispatch pipeline's post-mutation
-   * watermark check only ever needs `usedPercent`, which does not depend on
-   * that overlay. `audit-log`, `backups-and-snapshots` and `watcher-files`
-   * stay honest zeros — outside this slice's `Touches` list, same reasoning
-   * as `store/volume-usage.ts`'s own doc comment.
+   * `clone` table). `structured-store`/`storeByTable` are real when
+   * `deps.store` is wired (folded in from `StructuredStore.usageByTable`,
+   * the same figure `Lifecycle.runMaintenance` overlays onto its own
+   * reading) and honest zeros otherwise. `audit-log`, `backups-and-snapshots`
+   * and `watcher-files` stay honest zeros — outside this slice's `Touches`
+   * list, same reasoning as `store/volume-usage.ts`'s own doc comment.
    */
   const readDiskStats = deps.readDiskStats ?? statfsSync;
 
-  function computeVolumeUsage(): VolumeUsage {
+  async function computeVolumeUsage(): Promise<VolumeUsage> {
     const rowsResult = withDb(volumeRoot, (db) => db.prepare('SELECT size_bytes FROM clone').all() as unknown as { size_bytes: number }[]);
     const clonesBytes = rowsResult.ok ? rowsResult.value.reduce((sum, r) => sum + r.size_bytes, 0) : 0;
 
@@ -218,7 +232,11 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
     try {
       const stats = readDiskStats(volumeRoot);
       totalBytes = stats.blocks * stats.bsize;
-      const freeBytes = stats.bavail * stats.bsize;
+      // `bfree`, not `bavail`: `bavail` excludes the filesystem's own
+      // superuser reservation, which this process does not consume — using
+      // it would count that reservation as "used" and overstate `usedPercent`
+      // against what `df` reports on the same volume.
+      const freeBytes = stats.bfree * stats.bsize;
       usedBytes = Math.max(0, totalBytes - freeBytes);
     } catch {
       // The volume's filesystem stats are unreadable on this platform/mount —
@@ -226,12 +244,22 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
       // than fabricating a percentage nothing has measured.
     }
 
+    let storeByTable = NO_VOLUME_USAGE.storeByTable;
+    let structuredStoreBytes = 0;
+    if (deps.store) {
+      const byTable = await deps.store.usageByTable();
+      if (byTable.ok) {
+        storeByTable = byTable.value;
+        structuredStoreBytes = Object.values(byTable.value).reduce((sum, bytes) => sum + bytes, 0);
+      }
+    }
+
     return {
       totalBytes,
       usedBytes,
       usedPercent: totalBytes > 0 ? (usedBytes / totalBytes) * 100 : 0,
-      byConsumer: { ...NO_VOLUME_USAGE.byConsumer, clones: clonesBytes },
-      storeByTable: NO_VOLUME_USAGE.storeByTable,
+      byConsumer: { ...NO_VOLUME_USAGE.byConsumer, clones: clonesBytes, 'structured-store': structuredStoreBytes },
+      storeByTable,
     };
   }
 
@@ -503,12 +531,13 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
     // S27.4's `open-journal-entry` blocker: an entry not yet `settled` for
     // this declaration's current era. Optional dependency — an honest
     // absence when no journal is wired, per `CloneStoreDependencies.journal`'s
-    // doc comment, never a silent "nothing open".
+    // doc comment, never a silent "nothing open". A failed read fails closed
+    // like every other probe above (this function's own doc comment): a
+    // journal read that could not run is not evidence the entry is settled.
     if (deps.journal) {
       const unsettled = await deps.journal.unsettled(declarationId, generation);
-      if (unsettled.ok) {
-        for (const entry of unsettled.value) blockers.push({ kind: 'open-journal-entry', operationId: entry.operationId });
-      }
+      if (!unsettled.ok) return 'corrupt';
+      for (const entry of unsettled.value) blockers.push({ kind: 'open-journal-entry', operationId: entry.operationId });
     }
 
     return blockers;
@@ -617,7 +646,17 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
       // needing space are refused", not evicted inline — this refuses
       // outright rather than attempting an eviction under the materialisation
       // lock this call already holds, which invariant C4/rule 3 forbid.
-      const usageBeforeClone = computeVolumeUsage();
+      let usageBeforeClone: VolumeUsage;
+      try {
+        usageBeforeClone = await computeVolumeUsage();
+      } catch (cause) {
+        // `computeVolumeUsage` reads through `withDb`, whose `mkdirSync` and
+        // `db.close()` are not themselves guarded — a throw here must not
+        // leak the materialisation lock this call is still holding.
+        materialisationLock.release();
+        const message = cause instanceof Error ? cause.message : String(cause);
+        return err(cloneStoreError({ code: 'store-failed', cause: storeError({ code: 'io-failed' }, message) }, message));
+      }
       if (usageBeforeClone.usedPercent >= watermarks.refuseAtPercent) {
         materialisationLock.release();
         const blockersByDeclaration = await evictionBlockersAcrossDeclarations();
@@ -702,10 +741,19 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
       for (const row of rowsResult.value) {
         const clonePath = row.path;
         if (!existsSync(clonePath)) {
-          if (row.state !== 'absent') {
+          // `evicted` is left alone, the same as `needs-attention` further
+          // down: a missing directory is what eviction itself produces, and
+          // downgrading it to `absent` here would erase the distinction
+          // `EvictionOutcome`/the maintenance summary rely on between
+          // "released under disk pressure" and "never materialised" — this
+          // routine runs mid-service now (S27's maintenance pass), not only
+          // at boot, so a row this same pass just evicted is routinely seen
+          // here.
+          if (row.state !== 'absent' && row.state !== 'evicted') {
             upsertRow({ ...row, state: 'absent', size_bytes: 0, observed_remote: null, attention_reason: null });
           }
-          derived.push({ ...toClone(row), state: 'absent', sizeBytes: 0, observedRemote: null, attentionReason: null });
+          const missingState = row.state === 'evicted' ? 'evicted' : 'absent';
+          derived.push({ ...toClone(row), state: missingState, sizeBytes: 0, observedRemote: null, attentionReason: null });
           continue;
         }
         const readable = await gitDirReadable(clonePath, new AbortController().signal);
@@ -777,9 +825,13 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
       if (!lockResult.ok) {
         // Held by a concurrent `ensure()` — something is actively
         // materialising or mutating this declaration right now, even though
-        // the counter above had not yet been pinned (`ensure()` pins only
-        // once materialisation completes).
-        return ok({ declarationId, evicted: false, freedBytes: 0, blockers: [{ kind: 'active-operations', count: 1 }] });
+        // the counter above may not yet reflect it (`ensure()` pins only
+        // once materialisation completes). Re-read the counter rather than
+        // reporting a fixed number: it may since have been pinned, and a
+        // floor of 1 reflects the one thing this branch does know for
+        // certain — the lock is held by someone.
+        const recount = Math.max(1, locks.activeOperationCount(declarationId));
+        return ok({ declarationId, evicted: false, freedBytes: 0, blockers: [{ kind: 'active-operations', count: recount }] });
       }
       try {
         const blockers = await computeBlockers(declarationId, row.value.generation as Generation, row.value.path, new AbortController().signal);
@@ -857,7 +909,12 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
     },
 
     async readVolumeUsage(): Promise<Outcome<VolumeUsage, CloneStoreError>> {
-      return ok(computeVolumeUsage());
+      try {
+        return ok(await computeVolumeUsage());
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        return err(cloneStoreError({ code: 'store-failed', cause: storeError({ code: 'io-failed' }, message) }, message));
+      }
     },
 
     requestMaintenance(reason): void {

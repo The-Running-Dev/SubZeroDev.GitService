@@ -180,9 +180,18 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
    */
   async function checkWatermarkAfterMutation(): Promise<void> {
     if (!cloneStore.readVolumeUsage || !cloneStore.requestMaintenance) return;
-    const usage = await cloneStore.readVolumeUsage();
-    if (usage.ok && usage.value.usedPercent >= watermarks.maintenanceAtPercent) {
-      cloneStore.requestMaintenance('watermark');
+    try {
+      const usage = await cloneStore.readVolumeUsage();
+      if (usage.ok && usage.value.usedPercent >= watermarks.maintenanceAtPercent) {
+        cloneStore.requestMaintenance('watermark');
+      }
+    } catch (cause) {
+      // Called fire-and-forget from the mutating path's own `finally`
+      // (`void checkWatermarkAfterMutation()`) — a rejection here must not
+      // become an unhandled rejection that takes the process down over a
+      // volume-usage reading nobody is waiting on.
+      const message = cause instanceof Error ? cause.message : String(cause);
+      console.error(`dispatch: post-mutation watermark check failed: ${message}`);
     }
   }
 
