@@ -143,6 +143,35 @@ test('S2.5 — backupBeforeMigration writes a timestamped copy before migrate ru
   });
 });
 
+test('S26.2 and S26.3 — retention keeps three pre-migration copies, takes no more than one daily snapshot, and keeps seven snapshots', async () => {
+  await withVolumeAsync(async (volume) => {
+    let now = '2026-08-13T12:00:00.000Z' as never;
+    const clock = { now: () => now, monotonicMs: () => 0 };
+    const store = createStructuredStore({ volumeRoot: volume, clock });
+    await store.open();
+    await store.migrate();
+    for (let index = 0; index < 4; index += 1) {
+      now = `2026-08-0${index + 1}T12:00:00.000Z` as never;
+      await store.backupBeforeMigration();
+    }
+    for (let index = 0; index < 7; index += 1) {
+      now = `2026-08-0${index + 1}T13:00:00.000Z` as never;
+      await store.snapshot();
+    }
+
+    now = '2026-08-13T12:00:00.000Z' as never;
+    const report = await store.runRetention();
+    assert.equal(report.deletedRows, 3, 'two excess pre-migration copies and one excess snapshot are removed');
+    const names = readdirSync(path.join(volume, 'backups'));
+    assert.equal(names.filter((name) => name.startsWith('pre-migration-')).length, 3);
+    assert.equal(names.filter((name) => name.startsWith('snapshot-')).length, 7, 'the day receives one fresh snapshot while the oldest is pruned');
+
+    await store.runRetention();
+    assert.equal(readdirSync(path.join(volume, 'backups')).filter((name) => name.startsWith('snapshot-')).length, 7, 'a second pass on the same day adds no snapshot');
+    await store.close();
+  });
+});
+
 test('S2.5 — an induced migration failure leaves the pre-migration copy intact and reports migration-failed', async () => {
   await withVolumeAsync(async (volume) => {
     const store = createStructuredStore({

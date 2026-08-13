@@ -175,6 +175,23 @@ function resolveSchedulerIntervalSeconds(): number {
   return value;
 }
 
+/**
+ * How often the composition root drives `Lifecycle.runMaintenance('scheduled')`.
+ * No contract knob exists for this, same reasoning as
+ * `resolveSchedulerIntervalSeconds` above. Default matches the interval S26
+ * originally hardcoded (24h).
+ */
+function resolveMaintenanceIntervalSeconds(): number {
+  const raw = process.env.MAINTENANCE_INTERVAL_SECONDS;
+  if (raw === undefined || raw.trim().length === 0) return 86_400;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    console.error(`server: MAINTENANCE_INTERVAL_SECONDS must be an integer of at least 1 (got '${raw}')`);
+    process.exit(1);
+  }
+  return value;
+}
+
 /** `DeploymentConfig.remoteOperationsPermitted` (`20-contract.md` § Deployment configuration) — default off, so an unset variable never grants it. */
 function resolveRemoteOperationsPermitted(): boolean {
   return process.env.REMOTE_OPERATIONS_PERMITTED === 'true';
@@ -435,6 +452,32 @@ async function main(): Promise<void> {
   moduleAdapter.register('scheduler.list' as ModuleTargetName, toModuleHandler(schedulerOperations.list));
   moduleAdapter.register('scheduler.cancel' as ModuleTargetName, toModuleHandler(schedulerOperations.cancel));
 
+  // S17 — the watcher, constructed here (ahead of `createLifecycle`, which
+  // needs it as an S26 maintenance-retention owner) using the same dispatch
+  // forward-reference `scheduler` above already uses: `tick`/`runRetention`
+  // only ever fire after `dispatchPipeline` exists and `watcher.start()` is
+  // called further down, well after `dispatchRef` is set. Both deployment
+  // switches default off (`not-permitted` is the expected, ordinary shape of
+  // `start()`'s refusal on a deployment that never opted in).
+  const watcherEnabled = resolveWatcherEnabled();
+  const watcher = createWatcher({
+    volumeRoot,
+    clock: systemClock,
+    dispatch: (request) => {
+      if (!dispatchRef) throw new Error('server: watcher dispatch accessed before composition finished');
+      return dispatchRef(request);
+    },
+    declarations,
+    cloneStore,
+    audit,
+    notifier,
+    store,
+    contractCapabilitySet,
+    remoteOperationsPermitted: resolveRemoteOperationsPermitted(),
+    watcherEnabled,
+    pollIntervalSeconds: resolveWatcherPollIntervalSeconds(watcherEnabled),
+  });
+
   // The session a resume runs under. `operator`'s `ActorProfile` is the
   // widest of the four (`declarations/types.ts`'s `OPERATOR_PROFILE`), and
   // `contractCapabilitySet` grants every declaration-scoped capability a
@@ -488,10 +531,12 @@ async function main(): Promise<void> {
     notifier,
     // S25 — the maintenance pass's retention owners, plus a real
     // structured-store-and-clones volume reading for `usageBefore`/`usageAfter`.
-    // Nothing currently calls `lifecycle.runMaintenance` on a schedule: the
-    // natural trigger (the 85% watermark) is S27, not this slice.
+    // S26 adds `watcher` as an owner and a `maintenanceTimer` below that
+    // drives this pass on a schedule; the watermark trigger (S27) is still
+    // not wired.
     journal,
     authorization,
+    watcher,
     readVolumeUsage: async () => {
       const usage = await cloneStore.readVolumeUsage();
       return usage.ok ? usage.value : NO_VOLUME_USAGE;
@@ -570,26 +615,10 @@ async function main(): Promise<void> {
   // Unreferenced, so a pending timer never keeps the process alive on its own.
   schedulerTimer.unref();
 
-  // S17 — the watcher. Both deployment switches default off (`not-permitted`
-  // is the expected, ordinary shape of `start()`'s refusal on a deployment
-  // that never opted in), so a refusal here is logged, not fatal — unlike
-  // `lifecycle.boot()` above, nothing about serving MCP or console traffic
-  // depends on the watcher running.
-  const watcherEnabled = resolveWatcherEnabled();
-  const watcher = createWatcher({
-    volumeRoot,
-    clock: systemClock,
-    dispatch: dispatchPipeline.dispatch,
-    declarations,
-    cloneStore,
-    audit,
-    notifier,
-    store,
-    contractCapabilitySet,
-    remoteOperationsPermitted: resolveRemoteOperationsPermitted(),
-    watcherEnabled,
-    pollIntervalSeconds: resolveWatcherPollIntervalSeconds(watcherEnabled),
-  });
+  // S17 — start the watcher constructed above, now that `dispatchRef` is
+  // wired: a refusal here is logged, not fatal — unlike `lifecycle.boot()`
+  // above, nothing about serving MCP or console traffic depends on the
+  // watcher running.
   const watcherStarted = await watcher.start();
   if (!watcherStarted.ok) {
     console.log(`server: watcher not started (${watcherStarted.error.summary})`);
@@ -711,10 +740,31 @@ async function main(): Promise<void> {
   // Unreferenced, so a pending timer never keeps the process alive on its own.
   deliveryTimer.unref();
 
+  // S26 — what drives `Lifecycle.runMaintenance` on a schedule. Owned here
+  // rather than inside `Lifecycle` for the same reason `schedulerTimer` above
+  // is: the contract's `Lifecycle` interface has no start/stop, and a pass
+  // driven from inside the module could not be paced deterministically by a
+  // test. Tracked so shutdown can wait for it, same as `deliveryInFlight`.
+  let maintenanceInFlight: Promise<unknown> | null = null;
+  const maintenanceTimer = setInterval(() => {
+    if (maintenanceInFlight) return;
+    maintenanceInFlight = lifecycle
+      .runMaintenance('scheduled')
+      .catch((error: unknown) => {
+        console.error(`server: maintenance pass failed: ${error instanceof Error ? error.message : String(error)}`);
+      })
+      .finally(() => {
+        maintenanceInFlight = null;
+      });
+  }, resolveMaintenanceIntervalSeconds() * 1000);
+  // Unreferenced, so a pending timer never keeps the process alive on its own.
+  maintenanceTimer.unref();
+
   const shutdown = (signal: NodeJS.Signals): void => {
     ready = false;
     clearInterval(deliveryTimer);
     clearInterval(schedulerTimer);
+    clearInterval(maintenanceTimer);
     // `watcher.stop()` itself waits out any tick already in flight (a tick
     // does the same class of writes as a delivery pass — git push, PR open,
     // store/audit transactions), so it is awaited alongside `deliveryInFlight`
@@ -726,11 +776,14 @@ async function main(): Promise<void> {
       // process keep writing after a replacement has taken the volume —
       // two writers, which is the single invariant the lease exists for.
       // Bounded because every attempt now carries a timeout. `schedulerTickInFlight`
-      // joins the same wait: a tick mid-dispatch holds the identical class of
-      // store/audit/journal connections.
+      // and `maintenanceInFlight` join the same wait: a scheduler tick or a
+      // maintenance pass mid-flight holds the identical class of
+      // store/audit/journal connections, and `lifecycle.shutdown()` below
+      // closes both handles.
       void Promise.resolve(deliveryInFlight)
         .catch(() => undefined)
         .then(() => Promise.resolve(schedulerTickInFlight).catch(() => undefined))
+        .then(() => Promise.resolve(maintenanceInFlight).catch(() => undefined))
         .then(() => watcherStopped.catch(() => undefined))
         .then(() => lifecycle.shutdown('signal'))
         .then(() => process.exit(0));

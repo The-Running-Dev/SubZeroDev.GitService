@@ -704,7 +704,7 @@ test('S6 — boot succeeds when every registry entry has a registered executor',
   });
 });
 
-test('S25.1/S25.7 — runMaintenance drives every wired owner in order, ends in incrementalVacuum, and enqueues exactly one info summary', async () => {
+test('S25.1/S25.7/S26.5 — runMaintenance drives every owner, reports filesystem bytes, and enqueues exactly one info summary', async () => {
   await withVolumeAsync(async (volume) => {
     const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
     const audit = createAudit({ volumeRoot: volume, clock: systemClock });
@@ -748,6 +748,7 @@ test('S25.1/S25.7 — runMaintenance drives every wired owner in order, ends in 
       notifier,
       authorization,
       scheduler,
+      watcher: { runRetention: async () => ({ module: 'watcher', deletedRows: 1, freedBytes: 42, skipped: [] }) },
     });
 
     try {
@@ -774,13 +775,15 @@ test('S25.1/S25.7 — runMaintenance drives every wired owner in order, ends in 
       assert.equal(report.evictions.length, 0, 'clone eviction is S27, not wired here');
 
       const moduleNames = report.perModule.map((r) => r.module).sort();
-      assert.deepEqual(moduleNames, ['authorization', 'journal', 'notifier', 'operator-identity', 'scheduler', 'structured-store']);
+      assert.deepEqual(moduleNames, ['audit', 'authorization', 'journal', 'notifier', 'operator-identity', 'scheduler', 'structured-store', 'watcher']);
 
       const journalReport = report.perModule.find((r) => r.module === 'journal')!;
       assert.equal(journalReport.deletedRows, 1, 'the old settled entry qualifies');
 
       const schedulerReport = report.perModule.find((r) => r.module === 'scheduler')!;
       assert.equal(schedulerReport.deletedRows, 2, 'runMaintenance must actually call the wired scheduler.runRetention, not skip it');
+      const watcherReport = report.perModule.find((r) => r.module === 'watcher')!;
+      assert.equal(watcherReport.freedBytes, 42, 'the one summary carries filesystem-owner bytes, not just SQLite vacuum bytes');
 
       // Exactly one `info` maintenance-pass row, never one per module or per row.
       const after = new DatabaseSync(path.join(volume, 'store.sqlite'));

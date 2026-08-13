@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, utimesSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { err, ok, type Outcome } from '../shared/outcome.ts';
 import { watchedFileName, type DeclarationId, type IsoUtcTimestamp, type RegistryToolName, type SessionId, type Subject } from '../shared/brands.ts';
@@ -19,7 +19,7 @@ import type { JsonValue } from '../contract/json.ts';
 import type { ToolResult } from '../result/envelope.ts';
 import { isError, type ResultKind } from '../shared/result-kind.ts';
 import type { OperationContextKind } from '../shared/actor.ts';
-import type { RetentionReport } from '../shared/retention.ts';
+import { unlinkAndCountBytes, type RetentionReport } from '../shared/retention.ts';
 import type { RepoStatusData } from '../git/types.ts';
 import type { PrOpenData, PrStatusData } from '../host/types.ts';
 import { watcherError, type WatcherError } from './errors.ts';
@@ -51,9 +51,11 @@ export interface WatcherDependencies {
   readonly watcherEnabled: boolean;
   /** `DeploymentConfig.watcher.pollIntervalSeconds`. Contract default 15. */
   readonly pollIntervalSeconds?: number;
+  readonly processedFileDays?: number;
 }
 
 const POLL_INTERVAL_SECONDS_DEFAULT = 15;
+const PROCESSED_FILE_DAYS_DEFAULT = 14;
 const RESERVED_INBOX_ENTRIES = new Set(['processing', 'processed', 'failed']);
 
 function rejectedOutcome(step: string, result: ResultKind, reason: string): WatchedFileOutcome {
@@ -105,6 +107,7 @@ function readStrictUtf8(fullPath: string): { readonly ok: true; readonly value: 
 export function createWatcher(deps: WatcherDependencies): Watcher {
   const { volumeRoot, clock, dispatch, declarations, cloneStore, audit, notifier, store, contractCapabilitySet, remoteOperationsPermitted, watcherEnabled } = deps;
   const pollIntervalSeconds = deps.pollIntervalSeconds ?? POLL_INTERVAL_SECONDS_DEFAULT;
+  const processedFileDays = deps.processedFileDays ?? PROCESSED_FILE_DAYS_DEFAULT;
 
   let pollHandle: ReturnType<typeof setInterval> | null = null;
   let tickInFlight: Promise<readonly WatchTickReport[]> | null = null;
@@ -295,7 +298,15 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
   function moveToProcessed(declarationId: DeclarationId, sourcePath: string, file: string): void {
     const processedDir = processedDirFor(declarationId);
     mkdirSync(processedDir, { recursive: true });
-    renameSync(sourcePath, path.join(processedDir, `${timestampPrefix(clock.now())}-${file}`));
+    const target = path.join(processedDir, `${timestampPrefix(clock.now())}-${file}`);
+    renameSync(sourcePath, target);
+    // `renameSync` never updates mtime, and `runRetention` ages files in
+    // `processed/` off their mtime — left alone, a file that sat unclaimed in
+    // the inbox for close to `processedFileDays` would carry that original
+    // drop-time mtime through delivery and become eligible for deletion right
+    // after landing here.
+    const deliveredAt = new Date(clock.now());
+    utimesSync(target, deliveredAt, deliveredAt);
   }
 
   /** The candidate the next claim should try, or null when the inbox holds no eligible file — a symlink (S17.4) or a subdirectory never qualifies. */
@@ -571,10 +582,33 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     },
 
     async runRetention(): Promise<RetentionReport> {
-      // `30-slices.md` § S17 out of scope: "deleting processed files or any
-      // other retention (S25–S26)". The directory state machine (S17.6)
-      // never deletes; the later retention slices own the timer that does.
-      return { module: 'watcher', deletedRows: 0, freedBytes: 0, skipped: ['processed/failed watched-file retention lands in S25/S26'] };
+      try {
+        const cutoff = Date.parse(clock.now()) - processedFileDays * 86_400_000;
+        let deletedRows = 0;
+        let freedBytes = 0;
+        const skipped: string[] = [];
+        const root = watcherInboxesRoot();
+        if (!existsSync(root)) return { module: 'watcher', deletedRows, freedBytes, skipped };
+        for (const declarationDir of readdirSync(root)) {
+          const processed = path.join(root, declarationDir, 'processed');
+          if (!existsSync(processed)) continue;
+          for (const name of readdirSync(processed)) {
+            const file = path.join(processed, name);
+            const stat = lstatSync(file);
+            if (!stat.isFile() || stat.mtimeMs >= cutoff) continue;
+            const removed = unlinkAndCountBytes(file);
+            if (removed.ok) {
+              deletedRows += 1;
+              freedBytes += removed.value;
+            } else {
+              skipped.push(`could not remove processed/${name}`);
+            }
+          }
+        }
+        return { module: 'watcher', deletedRows, freedBytes, skipped };
+      } catch {
+        return { module: 'watcher', deletedRows: 0, freedBytes: 0, skipped: ['retention pass failed'] };
+      }
     },
   };
 }

@@ -1,3 +1,6 @@
+import { statSync, unlinkSync } from 'node:fs';
+import { err, ok, type Outcome } from './outcome.ts';
+
 /**
  * Shared by every module that owns a retention window (`runRetention`).
  * Declared once here rather than in whichever module happened to need it
@@ -26,4 +29,22 @@ export function retentionCutoff(now: string, days: number): string {
 export function toRetentionReport(module: string, result: { readonly ok: true; readonly value: number } | { readonly ok: false; readonly summary: string }): RetentionReport {
   if (!result.ok) return { module, deletedRows: 0, freedBytes: 0, skipped: [`retention pass failed: ${result.summary}`] };
   return { module, deletedRows: result.value, freedBytes: 0, skipped: [] };
+}
+
+/**
+ * Deletes a file already selected for removal, returning the bytes freed —
+ * the stat-then-unlink shape every filesystem-owning `runRetention` repeats
+ * (audit segments, store backups/snapshots, watcher processed files).
+ * Declared once here for the same reason `toRetentionReport` is; the caller
+ * still builds its own skip-message text, since that names the
+ * module-specific thing being pruned.
+ */
+export function unlinkAndCountBytes(file: string): Outcome<number, void> {
+  try {
+    const bytes = statSync(file).size;
+    unlinkSync(file);
+    return ok(bytes);
+  } catch {
+    return err(undefined);
+  }
 }

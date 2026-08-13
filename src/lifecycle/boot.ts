@@ -21,6 +21,7 @@ import type { Authorization } from '../authorization/authorization.ts';
 import type { DeclarationError } from '../declarations/errors.ts';
 import type { Scheduler } from '../scheduler/scheduler.ts';
 import type { BootJobReport } from '../scheduler/types.ts';
+import type { Watcher } from '../watcher/watcher.ts';
 import { acquireLease, type InstanceLease, type LeaseGuard, type LockAcquirer } from './lease.ts';
 import { verifyRegistryArtifact } from './registry-integrity.ts';
 import { declarationsWithUnsettledEntries, recoverDeclaration as runRecoveryLadder, type RecoveryDependencies } from './recovery.ts';
@@ -111,8 +112,11 @@ export interface Lifecycle {
    * fixed order, with no mutation lock held, ends with the structured
    * store's `incrementalVacuum`, and enqueues exactly one `info` maintenance
    * summary — never one notification per module or per row. Clone eviction
-   * (S27) and watermark scheduling (S27) are not wired here yet: `evictions`
-   * is always empty and nothing currently calls this on a schedule.
+   * and watermark scheduling (both S27) are not wired here yet: `evictions`
+   * is always empty. S26 drives this on a schedule from the composition
+   * root (`server.ts`'s `maintenanceTimer`, the same pattern already used
+   * for `Scheduler.tick` and `Notifier.deliverPending`) rather than from
+   * inside `Lifecycle` — this interface itself still has no start/stop.
    */
   runMaintenance(reason: MaintenanceReason): Promise<MaintenanceReport>;
   shutdown(reason: ShutdownReason): Promise<void>;
@@ -179,6 +183,8 @@ export interface LifecycleDependencies {
   readonly scheduler?: Pick<Scheduler, 'resolveRunningAtBoot' | 'revalidatePending' | 'runRetention'>;
   /** S25. Same reasoning as `journal` above. */
   readonly authorization?: Pick<Authorization, 'runRetention'>;
+  /** S26 — watcher files are a separate filesystem owner from the store. */
+  readonly watcher?: Pick<Watcher, 'runRetention'>;
   /**
    * S25. The clone store's own volume figures, folded into
    * `MaintenanceReport.usageBefore`/`usageAfter` alongside the structured
@@ -201,7 +207,7 @@ const NO_JOBS: BootJobReport = {
 export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
   let guard: LeaseGuard | null = null;
 
-  return {
+  const lifecycle: Lifecycle = {
     async boot(): Promise<Outcome<BootReport, BootError>> {
       // Step 1 — the instance lease, and the child-process self-test.
       const leaseResult = acquireLease({
@@ -517,8 +523,8 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
 
       const usageBefore = await computeUsage();
 
-      // Fixed order (journal, authorization, notifier, scheduler, then the
-      // mandatory operator-identity owner below): an array here, rather than
+      // Fixed order (journal, authorization, notifier, scheduler, audit,
+      // watcher, then the mandatory operator-identity owner below): an array here, rather than
       // one `if` line per owner, keeps a future owner's retention window one
       // entry away instead of one more copy-pasted guard.
       const perModule: RetentionReport[] = [];
@@ -527,31 +533,44 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         deps.authorization,
         deps.notifier,
         deps.scheduler,
+        deps.audit,
+        deps.watcher,
       ];
       for (const owner of optionalOwners) {
         if (owner) perModule.push(await owner.runRetention());
       }
       perModule.push(await deps.operatorIdentity.runRetention());
 
+      // The store owns backup/snapshot retention as well as its table bytes.
+      // Run it before the vacuum, then fold both byte figures into its one
+      // report so the summary names each filesystem owner exactly once.
+      const storeRetention = await deps.store.runRetention();
+
       // Ends in the vacuum, deliberately last: every owner above has already
       // deleted its rows, so this is the step that actually returns pages to
       // the filesystem (S25.6) rather than one more row-level pass.
       const vacuumed = await deps.store.incrementalVacuum();
-      const releasedBytes = vacuumed.ok ? vacuumed.value : 0;
+      const vacuumBytes = vacuumed.ok ? vacuumed.value : 0;
       perModule.push({
-        module: 'structured-store',
-        deletedRows: 0,
-        freedBytes: releasedBytes,
-        skipped: vacuumed.ok ? [] : [`incremental vacuum failed: ${vacuumed.error.summary}`],
+        ...storeRetention,
+        freedBytes: storeRetention.freedBytes + vacuumBytes,
+        skipped: vacuumed.ok ? storeRetention.skipped : [...storeRetention.skipped, `incremental vacuum failed: ${vacuumed.error.summary}`],
       });
 
       const usageAfter = await computeUsage();
 
       // One `info` summary for the whole pass, never one per module or per
       // row (`10-design.md` § Notification). `evictedDeclarations` is always
-      // empty here — clone eviction is S27.
+      // empty here — clone eviction is S27. Summed across every module's own
+      // `freedBytes` (the vacuum's bytes are already folded into the
+      // structured-store entry above) rather than just `vacuumBytes`: before
+      // S26 every non-vacuum owner reported `freedBytes: 0`, so the vacuum
+      // figure alone was the honest total; now that audit/watcher/store
+      // report real file-deletion bytes, the vacuum figure alone would
+      // understate what the pass actually returned to the volume.
       if (deps.notifier) {
         const totalDeleted = perModule.reduce((sum, report) => sum + report.deletedRows, 0);
+        const releasedBytes = perModule.reduce((sum, report) => sum + report.freedBytes, 0);
         const summary: MaintenanceSummary = { kind: 'maintenance-pass', releasedBytes, evictedDeclarations: [], prunedByModule: perModule };
         const request: NotificationRequest = {
           severity: 'info',
@@ -597,4 +616,5 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       }
     },
   };
+  return lifecycle;
 }

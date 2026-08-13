@@ -7,7 +7,7 @@ import { sha256Hex, type IsoUtcTimestamp, type Sha256Hex } from '../shared/brand
 import type { Outcome } from '../shared/outcome.ts';
 import { ok, err } from '../shared/outcome.ts';
 import type { Clock } from '../clock/clock.ts';
-import type { RetentionReport } from '../shared/retention.ts';
+import { unlinkAndCountBytes, type RetentionReport } from '../shared/retention.ts';
 import { computeAuditRecordHash } from './hash.ts';
 import type { AuditError } from './errors.ts';
 import type {
@@ -37,6 +37,7 @@ export interface AuditOptions {
   readonly volumeRoot: string;
   readonly clock: Clock;
   readonly segmentBytes?: number;
+  readonly auditDays?: number;
 }
 
 const SEGMENT_DIGITS = 6;
@@ -299,6 +300,7 @@ function verifyFromDisk(
 export function createAudit(options: AuditOptions): Audit {
   const { volumeRoot, clock } = options;
   const segmentBytes = options.segmentBytes ?? AUDIT_SEGMENT_BYTES_DEFAULT;
+  const auditDays = options.auditDays ?? 90;
   const dbPath = path.join(volumeRoot, 'store.sqlite');
 
   let db: DatabaseSync | null = null;
@@ -495,8 +497,51 @@ export function createAudit(options: AuditOptions): Audit {
     },
 
     async runRetention(): Promise<RetentionReport> {
-      // S17 owns retention and the anchors it writes. Nothing prunes yet.
-      return { module: 'audit', deletedRows: 0, freedBytes: 0, skipped: ['retention lands in S17'] };
+      try {
+        ensureInitialized();
+        const closedSegments = listSegments(volumeRoot).slice(0, -1);
+        const cutoff = Date.parse(clock.now()) - auditDays * 86_400_000;
+        const anchorDb = chainHeadDb();
+        if (!anchorDb) return { module: 'audit', deletedRows: 0, freedBytes: 0, skipped: ['retention skipped: audit anchor store is unavailable'] };
+        let deletedRows = 0;
+        let freedBytes = 0;
+        const skipped: string[] = [];
+        for (const segment of closedSegments) {
+          const file = segmentPath(volumeRoot, segment);
+          // The whole per-segment body — including the cutoff stat — is one
+          // try/catch: a failure on this segment (a concurrent delete, a
+          // permission error) must only skip this segment, never discard the
+          // deletedRows/freedBytes already accumulated from segments earlier
+          // in this same loop that were genuinely anchored and unlinked.
+          try {
+            if (statSync(file).mtimeMs >= cutoff) continue;
+            let terminal: AuditRecord | null = null;
+            for (const line of streamSegmentLines(file)) {
+              try {
+                const candidate = JSON.parse(line) as AuditRecord;
+                if (typeof candidate.sequence === 'number' && typeof candidate.hash === 'string') terminal = candidate;
+              } catch {
+                terminal = null;
+                break;
+              }
+            }
+            if (!terminal) {
+              skipped.push(`segment ${segment} is unreadable and was retained`);
+              continue;
+            }
+            anchorDb.prepare('INSERT INTO audit_retained_anchor (segment, terminal_sequence, terminal_hash, retained_at) VALUES (?, ?, ?, ?) ON CONFLICT(segment) DO NOTHING').run(segment, terminal.sequence, terminal.hash, clock.now());
+            const removed = unlinkAndCountBytes(file);
+            if (!removed.ok) throw new Error(`segment ${segment} could not be removed`);
+            deletedRows += 1;
+            freedBytes += removed.value;
+          } catch {
+            skipped.push(`segment ${segment} could not be anchored and deleted`);
+          }
+        }
+        return { module: 'audit', deletedRows, freedBytes, skipped };
+      } catch {
+        return { module: 'audit', deletedRows: 0, freedBytes: 0, skipped: ['retention pass failed'] };
+      }
     },
 
     async close(): Promise<void> {

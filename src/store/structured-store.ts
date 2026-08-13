@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { err, ok, type Outcome } from '../shared/outcome.ts';
 import { isoUtcTimestamp, type IsoUtcTimestamp } from '../shared/brands.ts';
 import type { Clock } from '../clock/clock.ts';
-import type { RetentionReport } from '../shared/retention.ts';
+import { unlinkAndCountBytes, type RetentionReport } from '../shared/retention.ts';
 import { storeError, type BackupStamp, type StoreError } from './errors.ts';
 import { MIGRATION_0001_SQL } from './migration-0001.ts';
 
@@ -111,6 +111,8 @@ export interface StructuredStoreOptions {
    * the `StructuredStore` interface, so no contract signature widens.
    */
   readonly migrations?: readonly Migration[];
+  readonly preMigrationBackupsRetained?: number;
+  readonly storeSnapshotsRetained?: number;
 }
 
 function isAlreadyApplied(database: DatabaseSync, version: number): boolean {
@@ -137,6 +139,8 @@ function isoFromFilename(name: string, prefix: string): IsoUtcTimestamp | null {
 export function createStructuredStore(options: StructuredStoreOptions): StructuredStore {
   const { volumeRoot, clock } = options;
   const migrations = options.migrations ?? MIGRATIONS;
+  const preMigrationBackupsRetained = options.preMigrationBackupsRetained ?? 3;
+  const storeSnapshotsRetained = options.storeSnapshotsRetained ?? 7;
   const storePath = path.join(volumeRoot, 'store.sqlite');
   const backupDir = path.join(volumeRoot, 'backups');
 
@@ -160,6 +164,14 @@ export function createStructuredStore(options: StructuredStoreOptions): Structur
       if (at && (newest === null || at > newest)) newest = at;
     }
     return newest === null ? null : { at: newest, ageSeconds: ageSeconds(newest) };
+  }
+
+  function copiesWithPrefix(prefix: string): readonly { readonly name: string; readonly at: IsoUtcTimestamp }[] {
+    if (!existsSync(backupDir)) return [];
+    return readdirSync(backupDir)
+      .map((name) => ({ name, at: isoFromFilename(name, prefix) }))
+      .filter((entry): entry is { name: string; at: IsoUtcTimestamp } => entry.at !== null)
+      .sort((left, right) => left.at.localeCompare(right.at));
   }
 
   function copyTo(prefix: string): Outcome<IsoUtcTimestamp, StoreError> {
@@ -405,11 +417,31 @@ export function createStructuredStore(options: StructuredStoreOptions): Structur
     },
 
     async runRetention(): Promise<RetentionReport> {
-      // S26 owns this member's real work — pruning pre-migration backups and
-      // periodic snapshots. Nothing here has rows of its own to prune before
-      // then; the maintenance pass's real bytes-returned figure for this
-      // slice comes from `incrementalVacuum` (S25.6), not from this member.
-      return { module: 'structured-store', deletedRows: 0, freedBytes: 0, skipped: ['backup/snapshot retention lands in S26'] };
+      try {
+        let deletedRows = 0;
+        let freedBytes = 0;
+        const skipped: string[] = [];
+        const newestSnapshot = copiesWithPrefix(SNAPSHOT_PREFIX).at(-1);
+        if (!newestSnapshot || Date.parse(clock.now()) - Date.parse(newestSnapshot.at) >= 86_400_000) {
+          const snapshot = await this.snapshot();
+          if (!snapshot.ok) skipped.push(`snapshot failed: ${snapshot.error.summary}`);
+        }
+        for (const [prefix, retained] of [[PRE_MIGRATION_PREFIX, preMigrationBackupsRetained], [SNAPSHOT_PREFIX, storeSnapshotsRetained]] as const) {
+          for (const copy of copiesWithPrefix(prefix).slice(0, -retained)) {
+            const file = path.join(backupDir, copy.name);
+            const removed = unlinkAndCountBytes(file);
+            if (removed.ok) {
+              deletedRows += 1;
+              freedBytes += removed.value;
+            } else {
+              skipped.push(`could not remove ${copy.name}`);
+            }
+          }
+        }
+        return { module: 'structured-store', deletedRows, freedBytes, skipped };
+      } catch {
+        return { module: 'structured-store', deletedRows: 0, freedBytes: 0, skipped: ['retention pass failed'] };
+      }
     },
 
     async close(): Promise<void> {
