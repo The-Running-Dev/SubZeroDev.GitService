@@ -229,6 +229,21 @@ export function createStructuredStore(options: StructuredStoreOptions): Structur
       const database = requireDb();
       let applied = 0;
 
+      // `incrementalVacuum` (S25.6) only returns pages to the filesystem
+      // under `auto_vacuum = INCREMENTAL`, and SQLite only honours a mode
+      // change made before the schema exists. Set here, ahead of the
+      // migration loop rather than in `open()`, for two reasons: it must run
+      // after `integrityCheck` so a corrupt file is still reported as
+      // `corrupt` rather than tripped over by this pragma first, and reading
+      // page 1 to change the mode is itself a no-op once a schema already
+      // exists, so repeating it on every boot costs nothing.
+      try {
+        database.exec('PRAGMA auto_vacuum = INCREMENTAL;');
+      } catch {
+        // Best-effort: a store this pragma cannot touch fails the migration
+        // loop below for the same reason, with a real cause attached there.
+      }
+
       // A migration must never run without a rollback target on disk, because
       // `migration-failed` promises one and definition-of-done item 18 restores
       // it. Boot always calls `backupBeforeMigration` first, so this is a
@@ -318,10 +333,23 @@ export function createStructuredStore(options: StructuredStoreOptions): Structur
       return copyTo(SNAPSHOT_PREFIX);
     },
 
+    /**
+     * Bytes actually returned to the filesystem — file-size delta, not page
+     * arithmetic, since that is the question S25.6 asks and `open()` already
+     * puts the store in `auto_vacuum = INCREMENTAL` mode. Run in autocommit
+     * (no transaction open), which is what lets SQLite move pages at all.
+     */
     async incrementalVacuum(): Promise<Outcome<number, StoreError>> {
-      // Retention and vacuuming are S17. Reporting zero bytes returned is the
-      // honest answer while nothing prunes yet.
-      return ok(0);
+      const database = requireDb();
+      try {
+        const before = existsSync(storePath) ? statSync(storePath).size : 0;
+        database.exec('PRAGMA incremental_vacuum;');
+        const after = existsSync(storePath) ? statSync(storePath).size : 0;
+        return ok(Math.max(0, before - after));
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        return err(storeError({ code: 'io-failed' }, `incremental vacuum failed: ${message}`));
+      }
     },
 
     async usageByTable(): Promise<Outcome<Readonly<Record<StoreTableName, number>>, StoreError>> {
@@ -368,9 +396,11 @@ export function createStructuredStore(options: StructuredStoreOptions): Structur
     },
 
     async runRetention(): Promise<RetentionReport> {
-      // S17 owns retention windows. Nothing is pruned here yet, and the report
-      // says so rather than implying a pass ran.
-      return { module: 'structured-store', deletedRows: 0, freedBytes: 0, skipped: ['retention lands in S17'] };
+      // S26 owns this member's real work — pruning pre-migration backups and
+      // periodic snapshots. Nothing here has rows of its own to prune before
+      // then; the maintenance pass's real bytes-returned figure for this
+      // slice comes from `incrementalVacuum` (S25.6), not from this member.
+      return { module: 'structured-store', deletedRows: 0, freedBytes: 0, skipped: ['backup/snapshot retention lands in S26'] };
     },
 
     async close(): Promise<void> {

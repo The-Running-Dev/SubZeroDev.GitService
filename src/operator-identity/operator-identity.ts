@@ -83,6 +83,7 @@ export const TOTP_SEALING_KEY_FILENAME = '_totp-sealing-key';
 
 export const SESSION_IDLE_SECONDS_DEFAULT = 3600;
 export const SESSION_ABSOLUTE_SECONDS_DEFAULT = 43200;
+const OPERATOR_SESSION_RETENTION_DAYS_DEFAULT = 7;
 
 export interface OperatorIdentityDependencies {
   readonly volumeRoot: string;
@@ -91,6 +92,8 @@ export interface OperatorIdentityDependencies {
   readonly audit: Audit;
   readonly sessionIdleSeconds?: number;
   readonly sessionAbsoluteSeconds?: number;
+  /** `RetentionWindows.operatorSessionDays` (`20-contract.md` § Deployment configuration, default 7). Local, overridable default — no `DeploymentConfig` is wired yet. */
+  readonly operatorSessionDays?: number;
 }
 
 interface CredentialRow {
@@ -177,6 +180,7 @@ export function createOperatorIdentity(deps: OperatorIdentityDependencies): Oper
   const { volumeRoot, credentialMountRoot, clock, audit } = deps;
   const sessionIdleSeconds = deps.sessionIdleSeconds ?? SESSION_IDLE_SECONDS_DEFAULT;
   const sessionAbsoluteSeconds = deps.sessionAbsoluteSeconds ?? SESSION_ABSOLUTE_SECONDS_DEFAULT;
+  const operatorSessionDays = deps.operatorSessionDays ?? OPERATOR_SESSION_RETENTION_DAYS_DEFAULT;
 
   const provisioningFile = path.join(volumeRoot, PROVISIONING_FILENAME);
   const breakGlassFile = path.join(volumeRoot, BREAK_GLASS_FILENAME);
@@ -558,10 +562,19 @@ export function createOperatorIdentity(deps: OperatorIdentityDependencies): Oper
       return result.ok ? result.value : [];
     },
 
+    /**
+     * `operator_session_retention` indexes exactly this predicate. "Expired"
+     * reads as `absolute_expires_at` — the hard cap `touch` cannot extend —
+     * on the same window `Token`s use and for the same reason
+     * (`10-design.md` § retention table).
+     */
     async runRetention(): Promise<RetentionReport> {
-      // S17 owns retention windows and the pass that runs them. Nothing
-      // prunes yet, reported honestly rather than implying a pass ran.
-      return { module: 'operator-identity', deletedRows: 0, freedBytes: 0, skipped: ['retention lands in S17'] };
+      const cutoff = new Date(Date.parse(clock.now()) - operatorSessionDays * 86_400_000).toISOString();
+      const result = withDb(volumeRoot, (db) =>
+        Number(db.prepare('DELETE FROM operator_session WHERE (revoked_at IS NOT NULL AND revoked_at < ?) OR (absolute_expires_at < ?)').run(cutoff, cutoff).changes),
+      );
+      if (!result.ok) return { module: 'operator-identity', deletedRows: 0, freedBytes: 0, skipped: [`retention pass failed: ${result.error.summary}`] };
+      return { module: 'operator-identity', deletedRows: result.value, freedBytes: 0, skipped: [] };
     },
   };
 }

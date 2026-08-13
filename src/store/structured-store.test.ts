@@ -300,3 +300,39 @@ test('tx.all reads the transaction it belongs to, including writes not yet commi
     }
   });
 });
+
+test('S25.6 — incrementalVacuum returns real bytes to the filesystem once enough rows are deleted to release pages', async () => {
+  await withVolumeAsync(async (volume) => {
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    try {
+      await store.open();
+      await store.migrate();
+
+      // Enough rows, each with a large payload, to occupy several pages —
+      // one small row cannot demonstrate a page actually being released.
+      const payload = JSON.stringify({ blob: 'x'.repeat(2000) });
+      const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+      const insert = db.prepare(
+        `INSERT INTO notification_outbox (id, severity, declaration_id, payload, status, attempts, last_attempt_at, last_error, created_at, delivered_at)
+         VALUES (?, 'info', NULL, ?, 'delivered', 0, NULL, NULL, ?, ?)`,
+      );
+      for (let i = 0; i < 200; i += 1) insert.run(`row-${i}`, payload, systemClock.now(), systemClock.now());
+      db.prepare('DELETE FROM notification_outbox').run();
+      db.close();
+
+      const vacuumed = await store.incrementalVacuum();
+      assert.equal(vacuumed.ok, true);
+      if (!vacuumed.ok) return;
+      assert.ok(vacuumed.value > 0, `expected real bytes returned to the filesystem, got ${vacuumed.value}`);
+
+      // A second pass with nothing left to release reports honestly, not a
+      // repeat of the first call's figure.
+      const secondPass = await store.incrementalVacuum();
+      assert.equal(secondPass.ok, true);
+      if (!secondPass.ok) return;
+      assert.equal(secondPass.value, 0);
+    } finally {
+      await store.close();
+    }
+  });
+});

@@ -33,6 +33,8 @@ export interface Journal {
 export interface JournalDependencies {
   readonly volumeRoot: string;
   readonly clock: Clock;
+  /** `RetentionWindows.journalSettledDays` (`20-contract.md` § Deployment configuration, default 30). Not sourced from a `DeploymentConfig` — none is wired yet — so this is a local, overridable default, the same pattern `authorization.ts`'s token TTL constants already use. */
+  readonly journalSettledDays?: number;
 }
 
 interface JournalEntryRow {
@@ -167,6 +169,8 @@ function rowsToEntries(db: DatabaseSync, rows: readonly JournalEntryRow[]): read
   return rows.map((row) => toEntry(row, loadSteps(db, row.operation_id as OperationId)));
 }
 
+const JOURNAL_SETTLED_DAYS_DEFAULT = 30;
+
 /**
  * `20-contract.md` § L1 — journal. One `store.sqlite` connection per call,
  * opened and closed around it — the same seam `clone-store.ts` and
@@ -177,6 +181,7 @@ function rowsToEntries(db: DatabaseSync, rows: readonly JournalEntryRow[]): read
  */
 export function createJournal(deps: JournalDependencies): Journal {
   const { volumeRoot, clock } = deps;
+  const journalSettledDays = deps.journalSettledDays ?? JOURNAL_SETTLED_DAYS_DEFAULT;
 
   return {
     async begin(input: JournalBeginInput): Promise<Outcome<OperationJournalEntry, JournalError>> {
@@ -366,9 +371,39 @@ export function createJournal(deps: JournalDependencies): Journal {
       );
     },
 
+    /**
+     * `journal_retention` indexes exactly this predicate. `attention` entries
+     * are never selected regardless of age — they are the ones an operator
+     * still has to resolve (`10-design.md` § retention table). Deletes
+     * `journal_step` children first: `journal_step.operation_id` has no
+     * cascade, and `PRAGMA foreign_keys = ON` (set by `withDb`) would refuse
+     * the parent delete otherwise.
+     */
     async runRetention(): Promise<RetentionReport> {
-      // S17 owns retention (`journal_retention`'s index exists for it). Nothing prunes yet.
-      return { module: 'journal', deletedRows: 0, freedBytes: 0, skipped: ['retention lands in S17'] };
+      const cutoff = new Date(Date.parse(clock.now()) - journalSettledDays * 86_400_000).toISOString();
+      const result = withDb(volumeRoot, (db) => {
+        const rows = db.prepare(`SELECT operation_id FROM journal_entry WHERE state = 'settled' AND updated_at < ?`).all(cutoff) as { operation_id: string }[];
+        if (rows.length === 0) return 0;
+        db.exec('BEGIN;');
+        try {
+          for (const row of rows) db.prepare('DELETE FROM journal_step WHERE operation_id = ?').run(row.operation_id);
+          const placeholders = rows.map(() => '?').join(',');
+          const info = db.prepare(`DELETE FROM journal_entry WHERE operation_id IN (${placeholders})`).run(...rows.map((r) => r.operation_id));
+          db.exec('COMMIT;');
+          return Number(info.changes);
+        } catch (cause) {
+          try {
+            db.exec('ROLLBACK;');
+          } catch {
+            // Already rolled back by the failure itself.
+          }
+          throw cause;
+        }
+      });
+      if (!result.ok) {
+        return { module: 'journal', deletedRows: 0, freedBytes: 0, skipped: [`retention pass failed: ${result.error.summary}`] };
+      }
+      return { module: 'journal', deletedRows: result.value, freedBytes: 0, skipped: [] };
     },
   };
 }

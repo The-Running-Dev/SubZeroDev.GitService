@@ -332,3 +332,37 @@ test('S8.1 — classify is pure: repeat calls return identical verdicts, and it 
     assert.deepEqual(unusable.classify(entry, observed, descriptor), first);
   });
 });
+
+test('S25.2 — runRetention deletes a settled entry (and its steps) once past the window, and never touches an attention entry regardless of age', async () => {
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock, journalSettledDays: 1 });
+
+    await journal.begin(beginInputFor('op-old-settled'));
+    await journal.appendStep('op-old-settled' as never, 'git_stage');
+    await journal.settle('op-old-settled' as never, null);
+
+    await journal.begin(beginInputFor('op-recent-settled'));
+    await journal.settle('op-recent-settled' as never, null);
+
+    await journal.begin(beginInputFor('op-old-attention'));
+    await journal.park('op-old-attention' as never, 'left behind by the previous process');
+
+    const old = new Date(Date.now() - 5 * 86_400_000).toISOString();
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    db.prepare('UPDATE journal_entry SET updated_at = ? WHERE operation_id IN (?, ?)').run(old, 'op-old-settled', 'op-old-attention');
+    db.close();
+
+    const report = await journal.runRetention();
+    assert.equal(report.module, 'journal');
+    assert.equal(report.deletedRows, 1, 'only the old settled entry qualifies');
+    assert.equal(report.skipped.length, 0);
+
+    const after = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    const remaining = (after.prepare('SELECT operation_id FROM journal_entry ORDER BY operation_id').all() as { operation_id: string }[]).map((r) => r.operation_id);
+    const orphanedSteps = after.prepare('SELECT COUNT(*) AS n FROM journal_step WHERE operation_id = ?').get('op-old-settled') as { n: number };
+    after.close();
+
+    assert.deepEqual(remaining, ['op-old-attention', 'op-recent-settled']);
+    assert.equal(orphanedSteps.n, 0, 'the deleted entry\'s steps are deleted with it');
+  });
+});

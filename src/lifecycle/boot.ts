@@ -1,18 +1,23 @@
 import { err, ok, type Outcome } from '../shared/outcome.ts';
-import type { DeclarationId, OperationId, RegistryToolName, ScheduledJobId, Sha256Hex, Subject } from '../shared/brands.ts';
+import type { DeclarationId, IsoUtcTimestamp, OperationId, RegistryToolName, ScheduledJobId, Sha256Hex, Subject } from '../shared/brands.ts';
 import type { ModuleErrorBase } from '../shared/result-kind.ts';
 import type { CapabilityName, DeploymentCeiling } from '../contract/capabilities.ts';
 import type { Clock } from '../clock/clock.ts';
-import type { Clone } from '../clone/types.ts';
+import type { Clone, EvictionOutcome } from '../clone/types.ts';
 import type { AuditChainState } from '../audit/types.ts';
 import type { Audit } from '../audit/audit.ts';
 import type { StructuredStore } from '../store/structured-store.ts';
 import { storeError, type StoreError } from '../store/errors.ts';
+import { NO_VOLUME_USAGE, type VolumeUsage } from '../store/volume-usage.ts';
 import type { OperatorIdentity } from '../operator-identity/operator-identity.ts';
 import type { HttpOperationName, ModuleTargetName } from '../shared/brands.ts';
 import type { ToolDeclaration } from '../contract/tool-declaration.ts';
 import type { RecoveryClassification } from '../recovery/types.ts';
+import type { Journal } from '../journal/journal.ts';
+import type { MaintenanceSummary, NotificationRequest } from '../journal/types.ts';
+import type { RetentionReport } from '../shared/retention.ts';
 import type { Notifier } from '../notifier/notifier.ts';
+import type { Authorization } from '../authorization/authorization.ts';
 import type { DeclarationError } from '../declarations/errors.ts';
 import { acquireLease, type InstanceLease, type LeaseGuard, type LockAcquirer } from './lease.ts';
 import { verifyRegistryArtifact } from './registry-integrity.ts';
@@ -79,6 +84,18 @@ export interface BootReport {
 
 export type ShutdownReason = 'signal' | 'fatal' | 'operator';
 
+export type MaintenanceReason = 'scheduled' | 'watermark' | 'operator-requested';
+
+export interface MaintenanceReport {
+  readonly reason: MaintenanceReason;
+  readonly startedAt: IsoUtcTimestamp;
+  readonly finishedAt: IsoUtcTimestamp;
+  readonly perModule: readonly RetentionReport[];
+  readonly evictions: readonly EvictionOutcome[];
+  readonly usageBefore: VolumeUsage;
+  readonly usageAfter: VolumeUsage;
+}
+
 export interface Lifecycle {
   boot(): Promise<Outcome<BootReport, BootError>>;
   /**
@@ -89,6 +106,16 @@ export interface Lifecycle {
    * rather than holding the whole service down.
    */
   recoverDeclaration(declarationId: DeclarationId): Promise<Outcome<readonly RecoveryClassification[], BootError>>;
+  /**
+   * S25 (`20-contract.md` § L1 — lifecycle, § Volume, retention and
+   * maintenance). Drives every currently-wired owner's `runRetention` in a
+   * fixed order, with no mutation lock held, ends with the structured
+   * store's `incrementalVacuum`, and enqueues exactly one `info` maintenance
+   * summary — never one notification per module or per row. Clone eviction
+   * (S27) and watermark scheduling (S27) are not wired here yet: `evictions`
+   * is always empty and nothing currently calls this on a schedule.
+   */
+  runMaintenance(reason: MaintenanceReason): Promise<MaintenanceReport>;
   shutdown(reason: ShutdownReason): Promise<void>;
 }
 
@@ -129,10 +156,29 @@ export interface LifecycleDependencies {
    */
   readonly recovery?: RecoveryDependencies;
   /**
-   * S11. Optional so a `Lifecycle` built before the notifier existed still
-   * compiles: without it, boot simply has nothing to re-drive.
+   * S11 (`redriveUndelivered`); S25 (`runRetention`, `enqueue`) widens the
+   * same optional dependency rather than adding a second one. Optional as a
+   * whole so a `Lifecycle` built before the notifier existed still compiles:
+   * without it, boot has nothing to re-drive and `runMaintenance` has
+   * nowhere to enqueue its summary.
    */
-  readonly notifier?: Pick<Notifier, 'redriveUndelivered'>;
+  readonly notifier?: Pick<Notifier, 'redriveUndelivered' | 'runRetention' | 'enqueue'>;
+  /**
+   * S25. Optional so a `Lifecycle` built before the journal existed still
+   * compiles: without it, `runMaintenance` simply has one fewer owner to
+   * drive.
+   */
+  readonly journal?: Pick<Journal, 'runRetention'>;
+  /** S25. Same reasoning as `journal` above. */
+  readonly authorization?: Pick<Authorization, 'runRetention'>;
+  /**
+   * S25. The clone store's own volume figures, folded into
+   * `MaintenanceReport.usageBefore`/`usageAfter` alongside the structured
+   * store's real per-table bytes. Optional; defaults to the same honest zero
+   * `CloneStore.readVolumeUsage` itself reports before disk-wide accounting
+   * exists (S27).
+   */
+  readonly readVolumeUsage?: () => Promise<VolumeUsage>;
 }
 
 const SYSTEM_ACTOR = { kind: 'recovery', subject: 'system' as Subject, clientId: null, grantId: null } as const;
@@ -402,6 +448,75 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         return err(bootError({ code: 'store-failed', cause: storeError({ code: 'io-failed' }, 'no journal is wired into this lifecycle') }, 'recovery is not wired into this lifecycle'));
       }
       return ok(await runRecoveryLadder(deps.recovery, declarationId));
+    },
+
+    /**
+     * S25. Every owner runs in a fixed order, with no mutation lock taken
+     * anywhere in this method — the pass never touches `Locks` at all. Each
+     * owner's own `runRetention` never throws (`journal.ts`, `notifier.ts`,
+     * `operator-identity.ts`, `authorization.ts` each catch their own store
+     * failures into a `RetentionReport` with `skipped` naming the failure),
+     * so one owner's failure never stops the rest from running.
+     */
+    async runMaintenance(reason: MaintenanceReason): Promise<MaintenanceReport> {
+      const startedAt = deps.clock.now();
+
+      async function computeUsage(): Promise<VolumeUsage> {
+        const byTable = await deps.store.usageByTable();
+        const storeByTable = byTable.ok ? byTable.value : NO_VOLUME_USAGE.storeByTable;
+        const storeBytes = Object.values(storeByTable).reduce((sum, bytes) => sum + bytes, 0);
+        const base = deps.readVolumeUsage ? await deps.readVolumeUsage() : NO_VOLUME_USAGE;
+        return { ...base, byConsumer: { ...base.byConsumer, 'structured-store': storeBytes }, storeByTable };
+      }
+
+      const usageBefore = await computeUsage();
+
+      const perModule: RetentionReport[] = [];
+      if (deps.journal) perModule.push(await deps.journal.runRetention());
+      if (deps.authorization) perModule.push(await deps.authorization.runRetention());
+      if (deps.notifier) perModule.push(await deps.notifier.runRetention());
+      perModule.push(await deps.operatorIdentity.runRetention());
+
+      // Ends in the vacuum, deliberately last: every owner above has already
+      // deleted its rows, so this is the step that actually returns pages to
+      // the filesystem (S25.6) rather than one more row-level pass.
+      const vacuumed = await deps.store.incrementalVacuum();
+      const releasedBytes = vacuumed.ok ? vacuumed.value : 0;
+      perModule.push({
+        module: 'structured-store',
+        deletedRows: 0,
+        freedBytes: releasedBytes,
+        skipped: vacuumed.ok ? [] : [`incremental vacuum failed: ${vacuumed.error.summary}`],
+      });
+
+      const usageAfter = await computeUsage();
+
+      // One `info` summary for the whole pass, never one per module or per
+      // row (`10-design.md` § Notification). `evictedDeclarations` is always
+      // empty here — clone eviction is S27.
+      if (deps.notifier) {
+        const totalDeleted = perModule.reduce((sum, report) => sum + report.deletedRows, 0);
+        const summary: MaintenanceSummary = { kind: 'maintenance-pass', releasedBytes, evictedDeclarations: [], prunedByModule: perModule };
+        const request: NotificationRequest = {
+          severity: 'info',
+          declarationId: null,
+          subject: summary,
+          summary: `maintenance pass (${reason}) pruned ${totalDeleted} row(s) and released ${releasedBytes} byte(s) across ${perModule.length} module(s)`,
+        };
+        await deps.store.transaction(async (tx) => {
+          deps.notifier?.enqueue(request, tx);
+        });
+      }
+
+      return {
+        reason,
+        startedAt,
+        finishedAt: deps.clock.now(),
+        perModule,
+        evictions: [],
+        usageBefore,
+        usageAfter,
+      };
     },
 
     async shutdown(_reason: ShutdownReason): Promise<void> {

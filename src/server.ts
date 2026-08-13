@@ -24,6 +24,7 @@ import { GIT_RAW_RECOVERY, LOCAL_MUTATION_RECOVERY_DESCRIPTORS, REMOTE_OPERATION
 import { createCredentialResolver } from './credentials/credentials.ts';
 import { prepareDeclarationCredential } from './credentials/declaration-credential.ts';
 import { ok, err } from './shared/outcome.ts';
+import { NO_VOLUME_USAGE } from './store/volume-usage.ts';
 import { createGitHubAdapter } from './host/github-adapter.ts';
 import { createHostOperations } from './host/host-operations.ts';
 import { PR_ENABLE_AUTO_MERGE_RECOVERY, PR_OPEN_RECOVERY } from './host/recovery-descriptors.ts';
@@ -424,6 +425,16 @@ async function main(): Promise<void> {
     revalidateFileWatchers: () => declarations.revalidateFileWatchers(),
     recovery,
     notifier,
+    // S25 — the maintenance pass's retention owners, plus a real
+    // structured-store-and-clones volume reading for `usageBefore`/`usageAfter`.
+    // Nothing currently calls `lifecycle.runMaintenance` on a schedule: the
+    // natural trigger (the 85% watermark) is S27, not this slice.
+    journal,
+    authorization,
+    readVolumeUsage: async () => {
+      const usage = await cloneStore.readVolumeUsage();
+      return usage.ok ? usage.value : NO_VOLUME_USAGE;
+    },
     onTakeover: (previous, current) => {
       // The durable `lease-takeover` audit record is written by boot itself
       // (S3); this is operator-visible defense in depth, so a takeover is

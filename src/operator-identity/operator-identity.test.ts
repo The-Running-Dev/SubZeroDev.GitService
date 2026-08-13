@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { systemClock } from '../clock/clock.ts';
@@ -398,5 +399,44 @@ test('a missing TOTP sealing key answers totp-key-unavailable rather than failin
     assert.equal(result.ok, false);
     if (result.ok) return;
     assert.equal(result.error.code, 'totp-key-unavailable');
+  });
+});
+
+test('S25.3 — runRetention deletes an expired-or-revoked session past the window, and never touches a live one', async () => {
+  await withVolumeAsync(async (volume) => {
+    const credentialMount = path.join(volume, '_credential-mount');
+    setUpMount(credentialMount);
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    await store.open();
+    await store.migrate();
+    await store.close();
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const identity = createOperatorIdentity({ volumeRoot: volume, credentialMountRoot: credentialMount, clock: systemClock, audit, operatorSessionDays: 1 });
+
+    const old = new Date(Date.now() - 5 * 86_400_000).toISOString();
+    const future = new Date(Date.now() + 86_400_000).toISOString();
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    db.prepare(
+      `INSERT INTO operator_session (id, subject, created_at, last_seen_at, idle_expires_at, absolute_expires_at, revoked_at)
+       VALUES ('old-expired', ?, ?, ?, ?, ?, NULL)`,
+    ).run(SUBJECT, old, old, old, old);
+    db.prepare(
+      `INSERT INTO operator_session (id, subject, created_at, last_seen_at, idle_expires_at, absolute_expires_at, revoked_at)
+       VALUES ('old-revoked', ?, ?, ?, ?, ?, ?)`,
+    ).run(SUBJECT, old, old, future, future, old);
+    db.prepare(
+      `INSERT INTO operator_session (id, subject, created_at, last_seen_at, idle_expires_at, absolute_expires_at, revoked_at)
+       VALUES ('still-live', ?, ?, ?, ?, ?, NULL)`,
+    ).run(SUBJECT, systemClock.now(), systemClock.now(), future, future);
+    db.close();
+
+    const report = await identity.runRetention();
+    assert.equal(report.module, 'operator-identity');
+    assert.equal(report.deletedRows, 2);
+
+    const after = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    const remaining = (after.prepare('SELECT id FROM operator_session').all() as { id: string }[]).map((r) => r.id);
+    after.close();
+    assert.deepEqual(remaining, ['still-live']);
   });
 });
