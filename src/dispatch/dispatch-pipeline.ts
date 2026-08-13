@@ -9,6 +9,7 @@ import type { HttpAdapter } from '../http/http-adapter.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import type { CloneStore } from '../clone/clone-store.ts';
 import type { PreState } from '../clone/types.ts';
+import { DISK_WATERMARKS_DEFAULT, type DiskWatermarks } from '../store/volume-usage.ts';
 import type { Locks } from '../locks/locks.ts';
 import type { Audit } from '../audit/audit.ts';
 import type { Exec } from '../exec/exec.ts';
@@ -55,8 +56,10 @@ export interface DispatchPipelineDependencies {
    */
   readonly httpAdapter?: Pick<HttpAdapter, 'invoke'>;
   readonly declarations: Pick<Declarations, 'get' | 'effectiveGrant' | 'effectiveWritablePrefixes'>;
-  readonly cloneStore: Pick<CloneStore, 'ensure' | 'observeGitState' | 'describe'> & Partial<Pick<CloneStore, 'markAttention'>>;
+  readonly cloneStore: Pick<CloneStore, 'ensure' | 'observeGitState' | 'describe'> & Partial<Pick<CloneStore, 'markAttention' | 'readVolumeUsage' | 'requestMaintenance'>>;
   readonly locks: Pick<Locks, 'pinActiveOperation' | 'acquireMutation'> & Partial<Pick<Locks, 'admitLockFreeWait'>>;
+  /** `20-contract.md` § Deployment configuration. Only `maintenanceAtPercent` governs the post-mutation watermark check below — `refuseAtPercent` is `CloneStore.ensure`'s own threshold. */
+  readonly watermarks?: DiskWatermarks;
   readonly audit: Pick<Audit, 'append'>;
   /** Required only once a `mutating` registry entry exists (S7); every S6-only registry never reaches the branch that calls it. */
   readonly journal?: Pick<Journal, 'begin' | 'markApplied' | 'settle'> & Partial<Pick<Journal, 'park'>>;
@@ -164,6 +167,24 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
   const exec: Pick<Exec, 'scrubJson'> = deps.exec ?? { scrubJson: (value) => value };
   const mutationLockAcquireMs = deps.mutationLockAcquireMs ?? MUTATION_LOCK_ACQUIRE_MS_DEFAULT;
   const monitoringWaitCapSeconds = deps.monitoringWaitCapSeconds ?? MONITORING_WAIT_CAP_SECONDS_DEFAULT;
+  const watermarks = deps.watermarks ?? DISK_WATERMARKS_DEFAULT;
+
+  /**
+   * `10-design.md` § control flow #1, step 10: "A disk-pressure watermark
+   * reading taken here only *requests* a maintenance pass; eviction never
+   * runs on this path, because it would acquire a materialisation lock after
+   * a mutation lock." Fire-and-forget, never awaited by the caller — invoked
+   * from the mutating path's own `finally`, so it always runs after both
+   * locks have released regardless of which return statement produced the
+   * result (S27.1).
+   */
+  async function checkWatermarkAfterMutation(): Promise<void> {
+    if (!cloneStore.readVolumeUsage || !cloneStore.requestMaintenance) return;
+    const usage = await cloneStore.readVolumeUsage();
+    if (usage.ok && usage.value.usedPercent >= watermarks.maintenanceAtPercent) {
+      cloneStore.requestMaintenance('watermark');
+    }
+  }
 
   /**
    * Declarations whose lazy recovery pass has already run in this process.
@@ -608,6 +629,10 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
       // `journal.settle`. Without this `finally`, a thrown error at any of
       // those points would leak the global mutation lock forever.
       release();
+      // S27.1 — after release, so the reading and the maintenance request it
+      // may trigger never run while this call's locks are held. Fired, not
+      // awaited: the caller's response must not wait on a volume-usage read.
+      void checkWatermarkAfterMutation();
     }
   }
 

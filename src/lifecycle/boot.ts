@@ -3,19 +3,20 @@ import type { DeclarationId, IsoUtcTimestamp, OperationId, RegistryToolName, Sch
 import type { ModuleErrorBase } from '../shared/result-kind.ts';
 import type { CapabilityName, DeploymentCeiling } from '../contract/capabilities.ts';
 import type { Clock } from '../clock/clock.ts';
-import type { Clone, EvictionOutcome } from '../clone/types.ts';
+import type { Clone, EvictionBlocker, EvictionOutcome } from '../clone/types.ts';
+import type { CloneStoreError } from '../clone/errors.ts';
 import type { AuditChainState } from '../audit/types.ts';
 import type { Audit } from '../audit/audit.ts';
 import type { StructuredStore } from '../store/structured-store.ts';
 import { storeError, type StoreError } from '../store/errors.ts';
-import { NO_VOLUME_USAGE, type VolumeUsage } from '../store/volume-usage.ts';
+import { DISK_WATERMARKS_DEFAULT, NO_VOLUME_USAGE, type DiskWatermarks, type VolumeUsage } from '../store/volume-usage.ts';
 import type { OperatorIdentity } from '../operator-identity/operator-identity.ts';
 import type { HttpOperationName, ModuleTargetName } from '../shared/brands.ts';
 import type { CompiledRegistry, ToolDeclaration } from '../contract/tool-declaration.ts';
 import type { RecoveryClassification } from '../recovery/types.ts';
 import type { Journal } from '../journal/journal.ts';
 import type { MaintenanceSummary, NotificationRequest } from '../journal/types.ts';
-import type { RetentionReport } from '../shared/retention.ts';
+import { type MaintenanceReason, type RetentionReport } from '../shared/retention.ts';
 import type { Notifier } from '../notifier/notifier.ts';
 import type { Authorization } from '../authorization/authorization.ts';
 import type { DeclarationError } from '../declarations/errors.ts';
@@ -84,7 +85,7 @@ export interface BootReport {
 
 export type ShutdownReason = 'signal' | 'fatal' | 'operator';
 
-export type MaintenanceReason = 'scheduled' | 'watermark' | 'operator-requested';
+export type { MaintenanceReason };
 
 export interface MaintenanceReport {
   readonly reason: MaintenanceReason;
@@ -111,12 +112,20 @@ export interface Lifecycle {
    * maintenance). Drives every currently-wired owner's `runRetention` in a
    * fixed order, with no mutation lock held, ends with the structured
    * store's `incrementalVacuum`, and enqueues exactly one `info` maintenance
-   * summary — never one notification per module or per row. Clone eviction
-   * and watermark scheduling (both S27) are not wired here yet: `evictions`
-   * is always empty. S26 drives this on a schedule from the composition
-   * root (`server.ts`'s `maintenanceTimer`, the same pattern already used
-   * for `Scheduler.tick` and `Notifier.deliverPending`) rather than from
-   * inside `Lifecycle` — this interface itself still has no start/stop.
+   * summary — never one notification per module or per row. S27 adds
+   * eviction: once every owner above has run, if usage is still at or above
+   * `watermarks.maintenanceAtPercent`, the least-recently-used materialised
+   * clones are evicted (`10-design.md` § disk pressure: "evicts safe clones
+   * only if that was not enough") until usage drops back below it or no more
+   * candidates remain — never under the global mutation lock (rule 3), and
+   * only through `CloneStore.evictIfSafe`, which takes the declaration's own
+   * materialisation lock in its own right. S26 drives this on a schedule
+   * from the composition root (`server.ts`'s `maintenanceTimer`, the same
+   * pattern already used for `Scheduler.tick` and `Notifier.deliverPending`)
+   * rather than from inside `Lifecycle` — this interface itself still has no
+   * start/stop. S27 additionally drives it from `CloneStore.requestMaintenance`
+   * when a post-mutation reading crosses `watermarks.maintenanceAtPercent`
+   * (`server.ts`'s `onMaintenanceRequested` wiring).
    */
   runMaintenance(reason: MaintenanceReason): Promise<MaintenanceReport>;
   shutdown(reason: ShutdownReason): Promise<void>;
@@ -188,11 +197,23 @@ export interface LifecycleDependencies {
   /**
    * S25. The clone store's own volume figures, folded into
    * `MaintenanceReport.usageBefore`/`usageAfter` alongside the structured
-   * store's real per-table bytes. Optional; defaults to the same honest zero
-   * `CloneStore.readVolumeUsage` itself reports before disk-wide accounting
-   * exists (S27).
+   * store's real per-table bytes. S27 makes this a real, disk-wide reading
+   * (`CloneStore.readVolumeUsage`'s own `computeVolumeUsage`) rather than the
+   * honest zero it was before that machinery existed.
    */
   readonly readVolumeUsage?: () => Promise<VolumeUsage>;
+  /** `20-contract.md` § Deployment configuration. Defaults to 85 / 95 (`DISK_WATERMARKS_DEFAULT`). Only `maintenanceAtPercent` governs eviction here — `refuseAtPercent` is `CloneStore.ensure`'s own threshold. */
+  readonly watermarks?: DiskWatermarks;
+  /**
+   * S27 — eviction's own entry point, injected the same way
+   * `deriveCloneStatesFromDisk` already is: `Lifecycle` cannot import
+   * `CloneStore` without the module cycle `server.ts`'s `cloneStoreRef`
+   * forward reference already exists to break. Optional so a `Lifecycle`
+   * built before S27 still compiles; without it, `evictions` stays empty
+   * regardless of usage, the same honest-absence shape every other optional
+   * owner here takes.
+   */
+  readonly evictIfSafe?: (declarationId: DeclarationId) => Promise<Outcome<EvictionOutcome, CloneStoreError>>;
 }
 
 const SYSTEM_ACTOR = { kind: 'recovery', subject: 'system' as Subject, clientId: null, grantId: null } as const;
@@ -509,6 +530,8 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
      * `operator-identity.ts`, `authorization.ts`, `scheduler.ts` each catch
      * their own store failures into a `RetentionReport` with `skipped` naming
      * the failure), so one owner's failure never stops the rest from running.
+     * S27 adds eviction after every owner above has finished — see the doc
+     * comment further down, at the point it runs.
      */
     async runMaintenance(reason: MaintenanceReason): Promise<MaintenanceReport> {
       const startedAt = deps.clock.now();
@@ -557,21 +580,55 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         skipped: vacuumed.ok ? storeRetention.skipped : [...storeRetention.skipped, `incremental vacuum failed: ${vacuumed.error.summary}`],
       });
 
-      const usageAfter = await computeUsage();
+      const usageAfterRetention = await computeUsage();
+
+      // S27.1: every retention owner above has already run, with no
+      // mutation lock held anywhere in this method — the pass evicts only
+      // once that is done, and only if usage is still at or above the
+      // maintenance watermark (`10-design.md` § disk pressure: "evicts safe
+      // clones only if that was not enough"). Least-recently-used first
+      // (`clone_eviction_order`'s own key, a null `lastOperationAt` sorting
+      // as oldest), stopping once usage recomputed locally from each
+      // eviction's own `freedBytes` drops back below the watermark or no
+      // more candidates remain. `evictIfSafe` takes the declaration's
+      // materialisation lock in its own right and never runs against one
+      // this method holds — it holds none.
+      const watermarks = deps.watermarks ?? DISK_WATERMARKS_DEFAULT;
+      const evictions: EvictionOutcome[] = [];
+      if (deps.evictIfSafe && deps.deriveCloneStatesFromDisk && usageAfterRetention.usedPercent >= watermarks.maintenanceAtPercent) {
+        const clones = await deps.deriveCloneStatesFromDisk();
+        const candidates = [...clones].filter((c) => c.state === 'ready').sort((a, b) => (a.lastOperationAt ?? '').localeCompare(b.lastOperationAt ?? ''));
+        let runningUsedBytes = usageAfterRetention.usedBytes;
+        const totalBytes = usageAfterRetention.totalBytes;
+        for (const candidate of candidates) {
+          if (totalBytes <= 0 || (runningUsedBytes / totalBytes) * 100 < watermarks.maintenanceAtPercent) break;
+          const outcome = await deps.evictIfSafe(candidate.declarationId);
+          if (!outcome.ok) continue;
+          evictions.push(outcome.value);
+          if (outcome.value.evicted) runningUsedBytes = Math.max(0, runningUsedBytes - outcome.value.freedBytes);
+        }
+      }
+
+      // Re-read only if eviction actually freed something — the ordinary
+      // case (nothing evicted, or eviction never ran) reuses the reading
+      // already taken, rather than a third disk-wide pass for no reason.
+      const usageAfter = evictions.some((e) => e.evicted) ? await computeUsage() : usageAfterRetention;
 
       // One `info` summary for the whole pass, never one per module or per
-      // row (`10-design.md` § Notification). `evictedDeclarations` is always
-      // empty here — clone eviction is S27. Summed across every module's own
-      // `freedBytes` (the vacuum's bytes are already folded into the
-      // structured-store entry above) rather than just `vacuumBytes`: before
-      // S26 every non-vacuum owner reported `freedBytes: 0`, so the vacuum
-      // figure alone was the honest total; now that audit/watcher/store
-      // report real file-deletion bytes, the vacuum figure alone would
-      // understate what the pass actually returned to the volume.
+      // row (`10-design.md` § Notification). Summed across every module's
+      // own `freedBytes` plus every eviction's `freedBytes` (the vacuum's
+      // bytes are already folded into the structured-store entry above)
+      // rather than just `vacuumBytes`: before S26 every non-vacuum owner
+      // reported `freedBytes: 0`, so the vacuum figure alone was the honest
+      // total; now that audit/watcher/store/eviction report real bytes, the
+      // vacuum figure alone would understate what the pass actually
+      // returned to the volume.
       if (deps.notifier) {
         const totalDeleted = perModule.reduce((sum, report) => sum + report.deletedRows, 0);
-        const releasedBytes = perModule.reduce((sum, report) => sum + report.freedBytes, 0);
-        const summary: MaintenanceSummary = { kind: 'maintenance-pass', releasedBytes, evictedDeclarations: [], prunedByModule: perModule };
+        const evictedBytes = evictions.reduce((sum, e) => sum + (e.evicted ? e.freedBytes : 0), 0);
+        const releasedBytes = perModule.reduce((sum, report) => sum + report.freedBytes, 0) + evictedBytes;
+        const evictedDeclarations = evictions.filter((e) => e.evicted).map((e) => e.declarationId);
+        const summary: MaintenanceSummary = { kind: 'maintenance-pass', releasedBytes, evictedDeclarations, prunedByModule: perModule };
         const request: NotificationRequest = {
           severity: 'info',
           declarationId: null,
@@ -599,7 +656,7 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         startedAt,
         finishedAt: deps.clock.now(),
         perModule,
-        evictions: [],
+        evictions,
         usageBefore,
         usageAfter,
       };

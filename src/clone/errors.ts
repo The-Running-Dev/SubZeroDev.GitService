@@ -1,4 +1,4 @@
-import type { ModuleErrorBase } from '../shared/result-kind.ts';
+import type { Finding, ModuleErrorBase } from '../shared/result-kind.ts';
 import type { CloneUrl } from '../shared/brands.ts';
 import type { StoreError } from '../store/errors.ts';
 import type { ExecError } from '../exec/errors.ts';
@@ -19,8 +19,14 @@ export type CloneStoreError = ModuleErrorBase &
     | { readonly code: 'store-failed'; readonly cause: StoreError }
   );
 
-/** `20-contract.md` § Error semantics › Clone store. */
-export function cloneStoreError<T extends { readonly code: CloneStoreError['code'] }>(variant: T, summary: string): CloneStoreError {
+/**
+ * `20-contract.md` § Error semantics › Clone store. `findings` is optional
+ * and only ever populated for `disk-full` — S27.2's "naming which of the
+ * five consumers holds the volume, with the store broken down by table, and
+ * the declarations blocking eviction", read generically by
+ * `moduleErrorToToolResult` off `ModuleErrorBase.findings`.
+ */
+export function cloneStoreError<T extends { readonly code: CloneStoreError['code'] }>(variant: T, summary: string, findings?: readonly Finding[]): CloneStoreError {
   const resultKind =
     variant.code === 'clone-failed'
       ? 'upstream'
@@ -29,5 +35,5 @@ export function cloneStoreError<T extends { readonly code: CloneStoreError['code
         : variant.code === 'store-failed'
           ? 'infrastructure'
           : 'precondition';
-  return { resultKind, retryable: false, summary, ...variant } as unknown as CloneStoreError;
+  return { resultKind, retryable: false, summary, ...(findings ? { findings } : {}), ...variant } as unknown as CloneStoreError;
 }
