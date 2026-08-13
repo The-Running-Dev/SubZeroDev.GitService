@@ -11,6 +11,7 @@ export type DeclarationScopedCapability =
   | 'host.pr.write'
   | 'host.checks.read'
   | 'scheduler.manage'
+  | 'scheduler.read'
   | ContentCapability;
 
 export type InstanceScopedCapability =
@@ -78,6 +79,7 @@ export function hostSupportedCapabilities(host: HostKind): CapabilitySet {
     'host.pr.write',
     'host.checks.read',
     'scheduler.manage',
+    'scheduler.read',
     'declaration.manage',
     'auth.manage',
     'audit.read',

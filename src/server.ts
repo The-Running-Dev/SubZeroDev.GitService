@@ -40,6 +40,7 @@ import { createWatcher } from './watcher/watcher.ts';
 import { COMPOSITE_RECOVERY_DESCRIPTORS } from './composites/recovery-descriptors.ts';
 import { createHttpAdapter } from './http/http-adapter.ts';
 import { createAuthorization } from './authorization/authorization.ts';
+import { createScheduler, createSchedulerOperations } from './scheduler/scheduler.ts';
 import type { Session } from './shared/session.ts';
 import type { GrantEpoch, SessionId, Subject } from './shared/brands.ts';
 
@@ -376,6 +377,29 @@ async function main(): Promise<void> {
   // uses to break the cycle: `dispatchRef` is set once `dispatchPipeline` is
   // constructed, well before boot's lazy recovery pass can ever call it.
   let dispatchRef: Dispatch | null = null;
+
+  // S16 — the scheduler, constructed with `dispatch` injected through the
+  // same forward reference `recovery.dispatch` below uses: `tick` only ever
+  // fires after `dispatchPipeline` exists, well after this closure is set.
+  const scheduler = createScheduler({
+    volumeRoot,
+    clock: systemClock,
+    dispatch: (request) => {
+      if (!dispatchRef) throw new Error('server: scheduler dispatch accessed before composition finished');
+      return dispatchRef(request);
+    },
+    declarations,
+    journal,
+    authorization,
+    registryEntry: (tool) => PRODUCTION_TOOL_DECLARATIONS.find((entry) => entry.name === tool) ?? null,
+    contractCapabilitySet,
+    ceiling,
+  });
+  const schedulerOperations = createSchedulerOperations(scheduler, systemClock);
+  moduleAdapter.register('scheduler.create' as ModuleTargetName, toModuleHandler(schedulerOperations.create));
+  moduleAdapter.register('scheduler.list' as ModuleTargetName, toModuleHandler(schedulerOperations.list));
+  moduleAdapter.register('scheduler.cancel' as ModuleTargetName, toModuleHandler(schedulerOperations.cancel));
+
   // The session a resume runs under. `operator`'s `ActorProfile` is the
   // widest of the four (`declarations/types.ts`'s `OPERATOR_PROFILE`), and
   // `contractCapabilitySet` grants every declaration-scoped capability a
@@ -424,6 +448,8 @@ async function main(): Promise<void> {
     registeredHttpOperations: httpAdapter.declaredOperations(),
     revalidateFileWatchers: () => declarations.revalidateFileWatchers(),
     recovery,
+    // S16 — boot steps 6 and 7's job half.
+    scheduler,
     notifier,
     // S25 — the maintenance pass's retention owners, plus a real
     // structured-store-and-clones volume reading for `usageBefore`/`usageAfter`.

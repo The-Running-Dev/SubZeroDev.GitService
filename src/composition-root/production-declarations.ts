@@ -432,6 +432,85 @@ const VERIFY_PUBLISHED_URL_OUTPUT_SCHEMA = {
   required: ['url', 'commitSha'],
 } as unknown as JsonSchema;
 
+// --- S16, the scheduler's three declaration-scoped management tools (`20-contract.md` § L2 — scheduler) ---
+
+const ON_MISSED_SCHEMA = {
+  type: 'object',
+  properties: { mode: { type: 'string', enum: ['catch_up', 'skip_if_older_than'] }, seconds: { type: 'number' } },
+  required: ['mode'],
+} as unknown as JsonSchema;
+
+const ACTOR_REF_SCHEMA = {
+  type: 'object',
+  properties: { kind: { type: 'string' }, subject: { type: 'string' }, clientId: { type: ['string', 'null'] }, grantId: { type: ['string', 'null'] } },
+  required: ['kind', 'subject', 'clientId', 'grantId'],
+} as unknown as JsonSchema;
+
+/** Embeds `input: {}` — no `type`, so any JSON value validates — mirroring `ScheduledJob.input`'s own caller-selected shape. */
+const SCHEDULED_JOB_SCHEMA = {
+  type: 'object',
+  properties: {
+    id: { type: 'string' },
+    declarationId: { type: 'string' },
+    generation: { type: 'number' },
+    tool: { type: 'string' },
+    input: {},
+    notBefore: { type: 'string' },
+    onMissed: ON_MISSED_SCHEMA,
+    frozenGrant: { type: 'array', items: { type: 'string' } },
+    status: { type: 'string', enum: ['pending', 'running', 'done', 'skipped', 'cancelled', 'needs-attention'] },
+    reason: { type: ['string', 'null'] },
+    createdBy: ACTOR_REF_SCHEMA,
+    createdAt: { type: 'string' },
+    updatedAt: { type: 'string' },
+  },
+  required: ['id', 'declarationId', 'generation', 'tool', 'input', 'notBefore', 'onMissed', 'frozenGrant', 'status', 'reason', 'createdBy', 'createdAt', 'updatedAt'],
+} as unknown as JsonSchema;
+
+const SCHEDULED_JOB_CREATE_INPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    tool: { type: 'string' },
+    input: {},
+    notBefore: { type: 'string' },
+    onMissed: ON_MISSED_SCHEMA,
+  },
+  required: ['tool', 'input', 'notBefore', 'onMissed'],
+  additionalProperties: false,
+} as unknown as JsonSchema;
+
+const SCHEDULED_JOB_CREATE_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: { job: SCHEDULED_JOB_SCHEMA },
+  required: ['job'],
+} as unknown as JsonSchema;
+
+const SCHEDULED_JOB_LIST_INPUT_SCHEMA = {
+  type: 'object',
+  properties: { status: { type: ['string', 'null'], enum: ['pending', 'running', 'done', 'skipped', 'cancelled', 'needs-attention', null] } },
+  required: ['status'],
+  additionalProperties: false,
+} as unknown as JsonSchema;
+
+const SCHEDULED_JOB_LIST_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: { jobs: { type: 'array', items: SCHEDULED_JOB_SCHEMA } },
+  required: ['jobs'],
+} as unknown as JsonSchema;
+
+const SCHEDULED_JOB_CANCEL_INPUT_SCHEMA = {
+  type: 'object',
+  properties: { id: { type: 'string' }, reason: { type: 'string' } },
+  required: ['id', 'reason'],
+  additionalProperties: false,
+} as unknown as JsonSchema;
+
+const SCHEDULED_JOB_CANCEL_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: { job: SCHEDULED_JOB_SCHEMA },
+  required: ['job'],
+} as unknown as JsonSchema;
+
 /**
  * The real, deployed tool inventory. S1 through S5 shipped none (U1 was
  * wholly open); S6 resolves U1 for the five read operations, S7 for the three
@@ -652,14 +731,14 @@ export const PRODUCTION_TOOL_DECLARATIONS: readonly ToolDeclaration[] = [
   },
   {
     name: toolName('pr_enable_auto_merge'),
-    description: 'Asks the host to merge a pull request once its required checks pass. This is the only merge path: no merge tool and no rebase tool exists.',
+    description: 'Asks the host to merge a pull request once its required checks pass. This is the only merge path: no merge tool and no rebase tool exists. The registry\'s only schedulable production operation.',
     inputSchema: PR_NUMBER_INPUT_SCHEMA,
     outputSchema: PR_ENABLE_AUTO_MERGE_OUTPUT_SCHEMA,
     scopes: ['write'],
     capabilities: ['host.pr.write'],
     capabilityScope: 'declaration',
     executionClass: 'mutating',
-    annotations: { schedulable: false, fileWatcher: false, untrustedOutput: false },
+    annotations: { schedulable: true, fileWatcher: false, untrustedOutput: false },
     limits: { timeoutSeconds: 120, maxResultBytes: 65_536 },
     target: moduleTarget('host.enableAutoMerge'),
   },
@@ -733,5 +812,47 @@ export const PRODUCTION_TOOL_DECLARATIONS: readonly ToolDeclaration[] = [
     annotations: { schedulable: false, fileWatcher: false, untrustedOutput: false },
     limits: { timeoutSeconds: 30, maxResultBytes: 4_096 },
     target: httpTarget(VERIFY_PUBLISHED_URL_OPERATION),
+  },
+
+  // --- S16, the scheduler's three declaration-scoped management tools ---
+
+  {
+    name: toolName('scheduled_job_create'),
+    description: 'Holds one registry-named, schedulable operation until a time, under the caller\'s effective grant frozen at creation.',
+    inputSchema: SCHEDULED_JOB_CREATE_INPUT_SCHEMA,
+    outputSchema: SCHEDULED_JOB_CREATE_OUTPUT_SCHEMA,
+    scopes: ['schedule'],
+    capabilities: ['scheduler.manage'],
+    capabilityScope: 'declaration',
+    executionClass: 'mutating',
+    annotations: { schedulable: false, fileWatcher: false, untrustedOutput: true },
+    limits: { timeoutSeconds: 30, maxResultBytes: 4_194_304 },
+    target: moduleTarget('scheduler.create'),
+  },
+  {
+    name: toolName('scheduled_job_list'),
+    description: 'Lists this declaration\'s held operations, optionally filtered to one status.',
+    inputSchema: SCHEDULED_JOB_LIST_INPUT_SCHEMA,
+    outputSchema: SCHEDULED_JOB_LIST_OUTPUT_SCHEMA,
+    scopes: ['schedule'],
+    capabilities: ['scheduler.read'],
+    capabilityScope: 'declaration',
+    executionClass: 'read',
+    annotations: { schedulable: false, fileWatcher: false, untrustedOutput: true },
+    limits: { timeoutSeconds: 30, maxResultBytes: 4_194_304 },
+    target: moduleTarget('scheduler.list'),
+  },
+  {
+    name: toolName('scheduled_job_cancel'),
+    description: 'Cancels a pending held operation, with a caller-supplied reason. Cancelling another declaration\'s job reports job-not-found rather than disclosing its existence.',
+    inputSchema: SCHEDULED_JOB_CANCEL_INPUT_SCHEMA,
+    outputSchema: SCHEDULED_JOB_CANCEL_OUTPUT_SCHEMA,
+    scopes: ['schedule'],
+    capabilities: ['scheduler.manage'],
+    capabilityScope: 'declaration',
+    executionClass: 'mutating',
+    annotations: { schedulable: false, fileWatcher: false, untrustedOutput: true },
+    limits: { timeoutSeconds: 30, maxResultBytes: 4_194_304 },
+    target: moduleTarget('scheduler.cancel'),
   },
 ];

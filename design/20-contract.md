@@ -136,6 +136,7 @@ type DeclarationScopedCapability =
   | 'host.pr.write'
   | 'host.checks.read'
   | 'scheduler.manage'
+  | 'scheduler.read'
   | ContentCapability;
 
 type InstanceScopedCapability =
@@ -2639,13 +2640,22 @@ classifies from the journal alone and runs no resume step and no git or host I/O
 | `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
 |---|---|---|---|---|---|---|
 | `scheduled_job_create` | `{ kind: 'module', target: 'scheduler.create' }` | `['scheduler.manage']` | `['schedule']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 4194304 }` |
-| `scheduled_job_list` | `{ kind: 'module', target: 'scheduler.list' }` | `['scheduler.manage']` | `['schedule']` | `read` | `{ schedulable: false, fileWatcher: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 4194304 }` |
+| `scheduled_job_list` | `{ kind: 'module', target: 'scheduler.list' }` | `['scheduler.read']` | `['schedule']` | `read` | `{ schedulable: false, fileWatcher: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 4194304 }` |
 | `scheduled_job_cancel` | `{ kind: 'module', target: 'scheduler.cancel' }` | `['scheduler.manage']` | `['schedule']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 4194304 }` |
 
 Every entry carries `capabilityScope: 'declaration'`. `SchedulerOperations` supplies the current
 declaration id from `CallContext` to `Scheduler.create` and `Scheduler.list`; a caller cannot create,
 list or cancel a job for another declaration. A cancellation naming another declaration's job is
 reported as `job-not-found`, so the operation does not disclose that job's existence.
+
+**`scheduled_job_list` carries `scheduler.read`, not `scheduler.manage`.** The compiler's own
+invariant (§ Compiler, `annotation-contradiction`) refuses a `read` execution class declaring a
+capability that is not itself `.read`-suffixed — the same rule every other read/write pair in this
+contract already satisfies (`repo.read`; `host.pr.read` next to `host.pr.write`). One shared
+`scheduler.manage` for all three tools would fail that check the moment the registry compiles, so
+listing gets its own read-scoped capability while creation and cancellation keep the mutating one.
+The `schedule` MCP/operator scope expands to both, so a session or token holding it can still reach
+all three.
 
 All three results are `untrustedOutput` because each returns caller-authored `ScheduledJob.input`
 as inert data. The 4 MiB result cap matches the largest existing caller-selected-data precedent and
@@ -3309,6 +3319,7 @@ type SchedulerError = ModuleErrorBase & (
   | { readonly code: 'job-not-pending'; readonly id: ScheduledJobId; readonly status: ScheduledJobStatus }
   | { readonly code: 'grant-revoked'; readonly grantId: GrantId }
   | { readonly code: 'grant-insufficient'; readonly missing: readonly CapabilityName[] }
+  | { readonly code: 'store-failed'; readonly cause: StoreError }
 );
 ```
 
@@ -3320,6 +3331,7 @@ type SchedulerError = ModuleErrorBase & (
 | `job-not-found`, `job-not-pending` | Cancelling a terminal job | no | `precondition` |
 | `grant-revoked` | The creating grant or its client is revoked, checked at fire time | no | Move the job to `cancelled` with a reason naming the revocation. Never fire it, never silently drop it |
 | `grant-insufficient` | Re-intersection at fire time lost a needed capability | no | `needs-attention` naming the missing capabilities |
+| `store-failed` | The structured store could not be opened or written to | no | `infrastructure`, the same shape `JournalError`/`DeclarationError`/`AuthorizationError` already carry for the identical failure |
 
 ### Watcher
 

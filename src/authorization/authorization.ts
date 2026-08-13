@@ -215,7 +215,7 @@ const SCOPE_CAPABILITIES: Readonly<Record<OperatorScope, readonly CapabilityName
   read: ['repo.read', 'host.pr.read', 'host.checks.read'],
   write: ['git.local.write', 'git.remote.write', 'host.pr.write'],
   raw: ['git.raw'],
-  schedule: ['scheduler.manage'],
+  schedule: ['scheduler.manage', 'scheduler.read'],
 };
 
 function expandScopes(scopes: readonly OperatorScope[], contractCapabilitySet: ContractCapabilitySet): Session['grant'] {
