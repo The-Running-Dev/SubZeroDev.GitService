@@ -23,6 +23,8 @@ export interface ModuleErrorBase {
   readonly resultKind: ResultKind;
   readonly retryable: boolean;
   readonly summary: string;
+  /** Optional structured detail, read generically by `moduleErrorToToolResult` (`dispatch-pipeline.ts`) regardless of which module's error carries it — e.g. `CloneStoreError`'s `disk-full`. */
+  readonly findings?: readonly Finding[];
 }
 
 /** `isError` is true exactly for `upstream`, `timeout` and `infrastructure` (invariant E2). */

@@ -10,13 +10,24 @@ import { withVolumeAsync } from '../store/volume-fixture.ts';
 import { createExec, type Exec, type ExecRequest, type ExecResult } from '../exec/exec.ts';
 import { execError, type ExecError } from '../exec/errors.ts';
 import { createLocks } from '../locks/locks.ts';
-import type { Outcome } from '../shared/outcome.ts';
-import type { DeclarationId } from '../shared/brands.ts';
+import { ok, type Outcome } from '../shared/outcome.ts';
+import type { DeclarationId, OperationId } from '../shared/brands.ts';
 import type { DeploymentCeiling } from '../contract/capabilities.ts';
 import { createDeclarations, type Declarations } from '../declarations/declarations.ts';
 import type { Declaration } from '../declarations/types.ts';
+import type { Journal } from '../journal/journal.ts';
+import type { OperationJournalEntry } from '../journal/types.ts';
+import type { MaintenanceReason } from '../shared/retention.ts';
 import { createCloneStore } from './clone-store.ts';
 import { createBareGitRemote } from './testing/git-fixture.ts';
+
+/** A `statfsSync`-shaped reading that reports `usedPercent` above `pct`, for a volume small enough that `bfree`/`bavail` stay integers. No reserved blocks on this fixture, so `bfree` equals `bavail`. */
+function diskStatsAtPercent(pct: number): () => { readonly blocks: number; readonly bsize: number; readonly bfree: number; readonly bavail: number } {
+  const blocks = 1000;
+  const bsize = 1;
+  const bavail = Math.max(0, Math.round(blocks * (1 - pct / 100)));
+  return () => ({ blocks, bsize, bfree: bavail, bavail });
+}
 
 const OPERATOR = { kind: 'operator' as const, subject: 'op' as never, clientId: null, grantId: null };
 
@@ -559,5 +570,204 @@ test('a preState captured before a change goes stale: a fresh observeGitState() 
       observedAfterKill.value.indexDigest,
       'the captured pre-state and the freshly observed state disagree — a boolean clean flag could not represent this',
     );
+  });
+});
+
+test('S27.2 — at the refuse watermark, ensure() refuses a fresh materialisation with disk-full naming all five consumers, the sixteen-table breakdown, and the blocking declaration', async () => {
+  await withMigratedVolume(async (volume) => {
+    const blockingRemote = createBareGitRemote();
+    const blockingDeclaration = fixtureDeclaration('repo-blocking', blockingRemote);
+    const exec = createExec({ volumeRoot: volume });
+    const locks = createLocks();
+    const declarationsMap = new Map<string, Declaration>([[blockingDeclaration.id, blockingDeclaration]]);
+    const declarationsView: Pick<Declarations, 'get'> = { async get(id) { return declarationsMap.get(id) ?? null; } };
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations: declarationsView });
+
+    // Materialise one clone with real unpushed work — the declaration S27.2's
+    // findings must name as a blocked-eviction candidate.
+    const ensuredBlocking = await cloneStore.ensure(blockingDeclaration, fixtureHolder(blockingDeclaration.id), noopSignal());
+    assert.equal(ensuredBlocking.ok, true);
+    if (!ensuredBlocking.ok) return;
+    ensuredBlocking.value.materialisationLock.release();
+    writeFileSync(path.join(ensuredBlocking.value.clone.path, 'unpushed.txt'), 'local only\n', 'utf8');
+    await exec.runGit({ argv: ['add', 'unpushed.txt'], cwd: ensuredBlocking.value.clone.path, timeoutSeconds: 30, credential: null, signal: noopSignal() });
+    await exec.runGit({
+      argv: ['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com', 'commit', '-m', 'unpushed work'],
+      cwd: ensuredBlocking.value.clone.path,
+      timeoutSeconds: 30,
+      credential: null,
+      signal: noopSignal(),
+    });
+
+    // A second declaration, not yet materialised — the one whose `ensure()`
+    // actually needs new space and is refused.
+    const newRemote = createBareGitRemote();
+    const newDeclaration = fixtureDeclaration('repo-new', newRemote);
+    declarationsMap.set(newDeclaration.id, newDeclaration);
+    const fullCloneStore = createCloneStore({
+      volumeRoot: volume,
+      clock: systemClock,
+      exec,
+      locks,
+      declarations: declarationsView,
+      readDiskStats: diskStatsAtPercent(96),
+    });
+
+    const result = await fullCloneStore.ensure(newDeclaration, fixtureHolder(newDeclaration.id), noopSignal());
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.error.code, 'disk-full');
+    assert.equal(existsSync(path.join(volume, 'clones', newDeclaration.id)), false, 'nothing was materialised for the refused declaration');
+
+    const findings = result.error.findings ?? [];
+    const consumerFindings = findings.filter((f) => f.path === 'volume.byConsumer');
+    assert.equal(consumerFindings.length, 5, 'all five volume consumers are named');
+    assert.deepEqual(
+      consumerFindings.map((f) => f.rule).sort(),
+      ['audit-log', 'backups-and-snapshots', 'clones', 'structured-store', 'watcher-files'].sort(),
+    );
+
+    const tableFindings = findings.filter((f) => f.path === 'volume.storeByTable');
+    assert.equal(tableFindings.length, 16, 'the structured-store breakdown names all sixteen tables');
+
+    const blockedFindings = findings.filter((f) => f.path === 'volume.evictionBlocked');
+    assert.ok(blockedFindings.some((f) => f.rule === blockingDeclaration.id), 'the declaration whose clone blockers prevented release is named');
+    assert.ok(blockedFindings.every((f) => f.rule !== newDeclaration.id), 'the never-materialised declaration is not itself reported as a blocker');
+
+    if (result.error.code === 'disk-full') {
+      assert.ok(result.error.usage.usedPercent >= 96, 'the reported usage reflects the forced reading');
+      assert.ok(result.error.evictionBlockers.length > 0);
+    }
+  });
+});
+
+test('S27.3 — evictIfSafe refuses while activeOperationCount is non-zero, and again while the materialisation lock is held, without touching the tree', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declaration = fixtureDeclaration('repo-evict-busy', createBareGitRemote());
+    const exec = createExec({ volumeRoot: volume });
+    const locks = createLocks();
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations: declarationsStubFor(declaration) });
+
+    const ensured = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(ensured.ok, true);
+    if (!ensured.ok) return;
+    ensured.value.materialisationLock.release();
+    const readmeStat = statSync(path.join(ensured.value.clone.path, 'README.md'));
+
+    // Rule 4: a non-zero active-operation count refuses without even
+    // attempting the materialisation lock.
+    const pin = locks.pinActiveOperation(declaration.id);
+    const blockedByCount = await cloneStore.evictIfSafe(declaration.id);
+    assert.equal(blockedByCount.ok, true);
+    if (blockedByCount.ok) {
+      assert.equal(blockedByCount.value.evicted, false);
+      assert.ok(blockedByCount.value.blockers.some((b) => b.kind === 'active-operations'));
+    }
+    pin.release();
+
+    // Rule 3: eviction takes the materialisation lock in its own right — held
+    // elsewhere (a concurrent `ensure()`/mutation), it refuses rather than
+    // waiting indefinitely or evicting regardless.
+    const externalLock = await locks.acquireMaterialisation(declaration.id, fixtureHolder(declaration.id), 30_000, noopSignal());
+    assert.equal(externalLock.ok, true);
+    const blockedByLock = await cloneStore.evictIfSafe(declaration.id);
+    assert.equal(blockedByLock.ok, true);
+    if (blockedByLock.ok) {
+      assert.equal(blockedByLock.value.evicted, false);
+      assert.ok(blockedByLock.value.blockers.some((b) => b.kind === 'active-operations'), 'a held materialisation lock is reported the same shape as an active operation');
+    }
+    if (externalLock.ok) externalLock.value.release();
+
+    assert.equal(existsSync(ensured.value.clone.path), true, 'the clone is untouched by either refused attempt');
+    const readmeStatAfter = statSync(path.join(ensured.value.clone.path, 'README.md'));
+    assert.equal(readmeStatAfter.mtimeMs, readmeStat.mtimeMs, 'byte-identical — never rewritten');
+  });
+});
+
+test('S27.4 — an open journal entry blocks eviction and leaves the clone byte-identical', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declaration = fixtureDeclaration('repo-evict-journal', createBareGitRemote());
+    const exec = createExec({ volumeRoot: volume });
+    const locks = createLocks();
+    const openEntry = { operationId: 'op-open' as OperationId } as OperationJournalEntry;
+    const journal: Pick<Journal, 'unsettled'> = { async unsettled() { return ok([openEntry]); } };
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations: declarationsStubFor(declaration), journal });
+
+    const ensured = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(ensured.ok, true);
+    if (!ensured.ok) return;
+    ensured.value.materialisationLock.release();
+    ensured.value.activePin.release();
+    const readmeStat = statSync(path.join(ensured.value.clone.path, 'README.md'));
+
+    const outcome = await cloneStore.evictIfSafe(declaration.id);
+    assert.equal(outcome.ok, true);
+    if (outcome.ok) {
+      assert.equal(outcome.value.evicted, false);
+      assert.deepEqual(
+        outcome.value.blockers.filter((b) => b.kind === 'open-journal-entry'),
+        [{ kind: 'open-journal-entry', operationId: openEntry.operationId }],
+      );
+    }
+    assert.equal(existsSync(ensured.value.clone.path), true);
+    assert.equal(statSync(path.join(ensured.value.clone.path, 'README.md')).mtimeMs, readmeStat.mtimeMs, 'byte-identical — never rewritten');
+  });
+});
+
+test('S27.5 — a safe clone is evicted with its real freed bytes, and the next ensure() rematerialises it from the declared remote', async () => {
+  await withMigratedVolume(async (volume) => {
+    const remote = createBareGitRemote();
+    const declaration = fixtureDeclaration('repo-evict-safe', remote);
+    const exec = createExec({ volumeRoot: volume });
+    const locks = createLocks();
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations: declarationsStubFor(declaration) });
+
+    const ensured = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(ensured.ok, true);
+    if (!ensured.ok) return;
+    ensured.value.materialisationLock.release();
+    ensured.value.activePin.release();
+    const clonePath = ensured.value.clone.path;
+    assert.ok(existsSync(path.join(clonePath, 'README.md')));
+
+    const outcome = await cloneStore.evictIfSafe(declaration.id);
+    assert.equal(outcome.ok, true);
+    if (outcome.ok) {
+      assert.equal(outcome.value.evicted, true);
+      assert.ok(outcome.value.freedBytes > 0, 'real bytes, not a placeholder zero');
+    }
+    assert.equal(existsSync(clonePath), false, 'the directory is actually gone');
+
+    const describedAfterEviction = await cloneStore.describe(declaration.id);
+    assert.equal(describedAfterEviction.ok, true);
+    if (describedAfterEviction.ok) assert.equal(describedAfterEviction.value.state, 'evicted');
+
+    const rematerialised = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(rematerialised.ok, true);
+    if (rematerialised.ok) {
+      assert.equal(rematerialised.value.clone.state, 'ready');
+      assert.ok(existsSync(path.join(rematerialised.value.clone.path, 'README.md')), 're-cloned from the declared remote');
+      rematerialised.value.materialisationLock.release();
+    }
+  });
+});
+
+test('requestMaintenance forwards the reason to onMaintenanceRequested without awaiting anything', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declaration = fixtureDeclaration('repo-req-maint', createBareGitRemote());
+    const exec = createExec({ volumeRoot: volume });
+    const locks = createLocks();
+    const requested: MaintenanceReason[] = [];
+    const cloneStore = createCloneStore({
+      volumeRoot: volume,
+      clock: systemClock,
+      exec,
+      locks,
+      declarations: declarationsStubFor(declaration),
+      onMaintenanceRequested: (reason) => requested.push(reason),
+    });
+
+    cloneStore.requestMaintenance('watermark');
+    assert.deepEqual(requested, ['watermark']);
   });
 });

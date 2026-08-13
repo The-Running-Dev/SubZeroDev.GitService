@@ -2,6 +2,16 @@ import { statSync, unlinkSync } from 'node:fs';
 import { err, ok, type Outcome } from './outcome.ts';
 
 /**
+ * `20-contract.md` § Volume, retention and maintenance. Declared once here
+ * rather than separately by `Lifecycle.runMaintenance` and
+ * `CloneStore.requestMaintenance` — both name the same reason a pass ran for,
+ * and a second, independently-maintained copy is exactly what drifted `S27`
+ * found (`clone-store.ts` had invented its own `'manual'` variant in place of
+ * the contract's `'operator-requested'`).
+ */
+export type MaintenanceReason = 'scheduled' | 'watermark' | 'operator-requested';
+
+/**
  * Shared by every module that owns a retention window (`runRetention`).
  * Declared once here rather than in whichever module happened to need it
  * first; the lifecycle module drives them all in a fixed order (invariant D5).

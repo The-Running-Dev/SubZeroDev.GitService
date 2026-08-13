@@ -2360,3 +2360,66 @@ test('S16.6 — a mutating call carrying a scheduledJobId has it stamped onto it
     assert.equal(found.value!.state, 'settled');
   });
 });
+
+test('S27.1 — crossing the maintenance watermark after a mutation requests a pass, once both locks have released, and never blocks the response', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, locks, fixture, volume }) => {
+    grantWrite(fixture, []);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const moduleAdapter = createModuleAdapter();
+    moduleAdapter.register('fixture.noop' as never, async (ctx) =>
+      success('noop', {}, { operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation, durationMs: 0 }));
+    const NOOP_ENTRY = fixtureTool({
+      name: 'noop_mutation',
+      capabilities: ['git.local.write'],
+      scopes: ['write'],
+      executionClass: 'mutating',
+      target: { kind: 'module', target: 'fixture.noop' as never },
+    });
+
+    const requested: string[] = [];
+    let readVolumeUsageCalledWhileMutationLockHeld = false;
+    const instrumentedCloneStore: typeof cloneStore = {
+      ...cloneStore,
+      async readVolumeUsage() {
+        if (locks.currentMutationHolder() !== null) readVolumeUsageCalledWhileMutationLockHeld = true;
+        return ok({ totalBytes: 1000, usedBytes: 900, usedPercent: 90, byConsumer: { clones: 900, 'audit-log': 0, 'structured-store': 0, 'backups-and-snapshots': 0, 'watcher-files': 0 }, storeByTable: {} as never });
+      },
+      requestMaintenance(reason) {
+        requested.push(reason);
+      },
+    };
+
+    const pipeline = createDispatchPipeline({
+      registry: mutatingRegistryOf([NOOP_ENTRY]),
+      ceiling: MUTATION_CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore: instrumentedCloneStore,
+      locks,
+      audit,
+      journal,
+      clock: systemClock,
+    });
+
+    const started = Date.now();
+    const result = await pipeline.dispatch({
+      toolName: 'noop_mutation' as never,
+      input: {},
+      session: sessionWith(['repo.read', 'git.local.write']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+    const elapsedMs = Date.now() - started;
+    assert.equal(result.kind, 'success');
+    assert.ok(elapsedMs < 1000, `dispatch returned in ${elapsedMs}ms — the watermark check must never be awaited by the caller`);
+
+    // The check itself is fired in a `finally`, so it may still be in flight
+    // a tick after `dispatch` resolves — wait one macrotask for it.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(requested, ['watermark'], 'crossing 85% requested exactly one maintenance pass, naming the watermark reason');
+    assert.equal(readVolumeUsageCalledWhileMutationLockHeld, false, 'the reading never happens while this call\'s mutation lock is held');
+  });
+});

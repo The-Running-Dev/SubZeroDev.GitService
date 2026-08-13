@@ -916,3 +916,104 @@ test('boot without a scheduler wired reports the honest empty jobsResolved/reval
     }
   });
 });
+
+test('S27.1/S27.5 — runMaintenance evicts least-recently-used clones only once retention has run, only until usage drops below the maintenance watermark, and reports it in the one info summary', async () => {
+  await withVolumeAsync(async (volume) => {
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const notifier = createNotifier({ volumeRoot: volume, clock: systemClock, webhookUrl: null });
+
+    const oldClone = { declarationId: 'repo-oldest' as never, generation: 1 as never, state: 'ready' as const, path: '/vol/clones/repo-oldest' as never, sizeBytes: 200, lastOperationAt: '2020-01-01T00:00:00.000Z' as never, observedRemote: null, attentionReason: null };
+    const newerClone = { declarationId: 'repo-newer' as never, generation: 1 as never, state: 'ready' as const, path: '/vol/clones/repo-newer' as never, sizeBytes: 300, lastOperationAt: '2024-01-01T00:00:00.000Z' as never, observedRemote: null, attentionReason: null };
+
+    const evictCalls: string[] = [];
+    const evictIfSafe: NonNullable<LifecycleDependencies['evictIfSafe']> = async (declarationId) => {
+      evictCalls.push(declarationId as string);
+      // Evicting just the oldest clone (200 bytes) is enough to drop usage
+      // from 90% to below the 85% default watermark on this fixture's
+      // 1000-byte total — the newer clone must never be reached.
+      return ok({ declarationId, evicted: true, freedBytes: 200, blockers: [] });
+    };
+
+    const lifecycle = createLifecycle({
+      volumeRoot: volume,
+      buildDir: writeBuildDir(volume),
+      clock: systemClock,
+      store,
+      audit,
+      operatorIdentity: operatorIdentityFor(volume, audit),
+      consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+      ceiling: EMPTY_CEILING,
+      revalidateFileWatchers: async () => ok(undefined),
+      notifier,
+      deriveCloneStatesFromDisk: async () => [newerClone, oldClone],
+      evictIfSafe,
+      readVolumeUsage: async () => ({ totalBytes: 1000, usedBytes: 900, usedPercent: 90, byConsumer: { clones: 500, 'audit-log': 0, 'structured-store': 0, 'backups-and-snapshots': 0, 'watcher-files': 0 }, storeByTable: {} as never }),
+    });
+
+    try {
+      const booted = await lifecycle.boot();
+      assert.equal(booted.ok, true);
+      if (!booted.ok) return;
+
+      const report = await lifecycle.runMaintenance('watermark');
+      assert.deepEqual(evictCalls, ['repo-oldest'], 'least-recently-used first, and stops once usage drops back below the watermark');
+      assert.equal(report.evictions.length, 1);
+      assert.equal(report.evictions[0]!.evicted, true);
+      assert.equal(report.evictions[0]!.freedBytes, 200);
+
+      const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+      const outboxRows = db.prepare(`SELECT payload FROM notification_outbox`).all() as { payload: string }[];
+      db.close();
+      const summaries = outboxRows.filter((row) => (JSON.parse(row.payload) as { subject?: { kind?: string } }).subject?.kind === 'maintenance-pass');
+      assert.equal(summaries.length, 1);
+      const subject = (JSON.parse(summaries[0]!.payload) as { subject: { evictedDeclarations: string[]; releasedBytes: number } }).subject;
+      assert.deepEqual(subject.evictedDeclarations, ['repo-oldest']);
+      assert.ok(subject.releasedBytes >= 200, 'the evicted bytes are folded into the one summary');
+    } finally {
+      await lifecycle.shutdown('operator');
+    }
+  });
+});
+
+test('S27.1 — runMaintenance never attempts eviction when usage stays below the maintenance watermark after retention', async () => {
+  await withVolumeAsync(async (volume) => {
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+
+    // Boot's own step 8 also calls `deriveCloneStatesFromDisk` once, so the
+    // count is compared before/after `runMaintenance` rather than asserted
+    // as zero outright.
+    let deriveCalls = 0;
+    const lifecycle = createLifecycle({
+      volumeRoot: volume,
+      buildDir: writeBuildDir(volume),
+      clock: systemClock,
+      store,
+      audit,
+      operatorIdentity: operatorIdentityFor(volume, audit),
+      consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+      ceiling: EMPTY_CEILING,
+      revalidateFileWatchers: async () => ok(undefined),
+      deriveCloneStatesFromDisk: async () => {
+        deriveCalls += 1;
+        return [];
+      },
+      evictIfSafe: async (declarationId) => ok({ declarationId, evicted: true, freedBytes: 1, blockers: [] }),
+      readVolumeUsage: async () => ({ totalBytes: 1000, usedBytes: 100, usedPercent: 10, byConsumer: { clones: 0, 'audit-log': 0, 'structured-store': 0, 'backups-and-snapshots': 0, 'watcher-files': 0 }, storeByTable: {} as never }),
+    });
+
+    try {
+      const booted = await lifecycle.boot();
+      assert.equal(booted.ok, true);
+      if (!booted.ok) return;
+      const callsAfterBoot = deriveCalls;
+
+      const report = await lifecycle.runMaintenance('scheduled');
+      assert.equal(report.evictions.length, 0);
+      assert.equal(deriveCalls, callsAfterBoot, 'usage is well under the watermark — eviction candidates are never even read');
+    } finally {
+      await lifecycle.shutdown('operator');
+    }
+  });
+});

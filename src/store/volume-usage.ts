@@ -1,14 +1,24 @@
 import type { StoreTableName } from './structured-store.ts';
 
 /**
- * Type only, plus one honest placeholder. Real disk-space accounting (total
- * bytes, per-consumer breakdown across clones/audit-log/structured-store/
- * backups/drop-directories) needs the clone store (S5) and watermark
- * machinery (S17), neither of which exists. `HealthReport` requires the
- * field regardless, so this reports genuine zeros rather than fabricating a
- * number nothing has measured.
+ * `20-contract.md` § Volume, retention and maintenance. `S27` wires real
+ * disk-wide accounting and the watermark machinery (`clones` and the total/
+ * used/percent figures, via `CloneStore.readVolumeUsage`) and real
+ * `structured-store` bytes (via `Lifecycle.runMaintenance`'s own overlay of
+ * `StructuredStore.usageByTable`). `audit-log`, `backups-and-snapshots` and
+ * `watcher-files` are outside this slice's `Touches` list (Audit, Structured
+ * store and Watcher own those directories) and stay honest zeros rather than
+ * fabricating a number nothing has measured yet.
  */
-export type VolumeConsumer = 'clones' | 'audit-log' | 'structured-store' | 'backups-and-snapshots' | 'drop-directories';
+export type VolumeConsumer = 'clones' | 'audit-log' | 'structured-store' | 'backups-and-snapshots' | 'watcher-files';
+
+/** `20-contract.md` § Deployment configuration. Defaults fixed there: 85 and 95. */
+export interface DiskWatermarks {
+  readonly maintenanceAtPercent: number;
+  readonly refuseAtPercent: number;
+}
+
+export const DISK_WATERMARKS_DEFAULT: DiskWatermarks = { maintenanceAtPercent: 85, refuseAtPercent: 95 };
 
 export interface VolumeUsage {
   readonly totalBytes: number;
@@ -23,7 +33,7 @@ const ZERO_BY_CONSUMER: Readonly<Record<VolumeConsumer, number>> = {
   'audit-log': 0,
   'structured-store': 0,
   'backups-and-snapshots': 0,
-  'drop-directories': 0,
+  'watcher-files': 0,
 };
 
 const ZERO_BY_TABLE: Readonly<Record<StoreTableName, number>> = {
