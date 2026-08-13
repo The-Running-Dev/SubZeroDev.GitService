@@ -36,7 +36,7 @@ import type { ModuleTargetName } from './shared/brands.ts';
 import type { ContractCapabilitySet } from './contract/capabilities.ts';
 import type { CompiledRegistry } from './contract/tool-declaration.ts';
 import { createComposites } from './composites/composites.ts';
-import { createWatcher } from './watcher/watcher.ts';
+import { createWatcher, type Watcher } from './watcher/watcher.ts';
 import { COMPOSITE_RECOVERY_DESCRIPTORS } from './composites/recovery-descriptors.ts';
 import { createHttpAdapter } from './http/http-adapter.ts';
 import { createAuthorization } from './authorization/authorization.ts';
@@ -468,6 +468,7 @@ async function main(): Promise<void> {
     recoverySession,
   };
 
+  let watcherRef: Watcher | null = null;
   const lifecycle = createLifecycle({
     volumeRoot,
     buildDir,
@@ -492,6 +493,7 @@ async function main(): Promise<void> {
     // natural trigger (the 85% watermark) is S27, not this slice.
     journal,
     authorization,
+    watcher: { runRetention: async () => watcherRef?.runRetention() ?? { module: 'watcher', deletedRows: 0, freedBytes: 0, skipped: ['watcher is not constructed'] } },
     readVolumeUsage: async () => {
       const usage = await cloneStore.readVolumeUsage();
       return usage.ok ? usage.value : NO_VOLUME_USAGE;
@@ -590,6 +592,7 @@ async function main(): Promise<void> {
     watcherEnabled,
     pollIntervalSeconds: resolveWatcherPollIntervalSeconds(watcherEnabled),
   });
+  watcherRef = watcher;
   const watcherStarted = await watcher.start();
   if (!watcherStarted.ok) {
     console.log(`server: watcher not started (${watcherStarted.error.summary})`);

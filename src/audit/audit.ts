@@ -1,4 +1,4 @@
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, unlinkSync } from 'node:fs';
 import { appendFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -37,6 +37,7 @@ export interface AuditOptions {
   readonly volumeRoot: string;
   readonly clock: Clock;
   readonly segmentBytes?: number;
+  readonly auditDays?: number;
 }
 
 const SEGMENT_DIGITS = 6;
@@ -299,6 +300,7 @@ function verifyFromDisk(
 export function createAudit(options: AuditOptions): Audit {
   const { volumeRoot, clock } = options;
   const segmentBytes = options.segmentBytes ?? AUDIT_SEGMENT_BYTES_DEFAULT;
+  const auditDays = options.auditDays ?? 90;
   const dbPath = path.join(volumeRoot, 'store.sqlite');
 
   let db: DatabaseSync | null = null;
@@ -495,8 +497,46 @@ export function createAudit(options: AuditOptions): Audit {
     },
 
     async runRetention(): Promise<RetentionReport> {
-      // S17 owns retention and the anchors it writes. Nothing prunes yet.
-      return { module: 'audit', deletedRows: 0, freedBytes: 0, skipped: ['retention lands in S17'] };
+      try {
+        ensureInitialized();
+        const closedSegments = listSegments(volumeRoot).slice(0, -1);
+        const cutoff = Date.parse(clock.now()) - auditDays * 86_400_000;
+        const anchorDb = chainHeadDb();
+        if (!anchorDb) return { module: 'audit', deletedRows: 0, freedBytes: 0, skipped: ['retention skipped: audit anchor store is unavailable'] };
+        let deletedRows = 0;
+        let freedBytes = 0;
+        const skipped: string[] = [];
+        for (const segment of closedSegments) {
+          const file = segmentPath(volumeRoot, segment);
+          if (statSync(file).mtimeMs >= cutoff) continue;
+          let terminal: AuditRecord | null = null;
+          for (const line of streamSegmentLines(file)) {
+            try {
+              const candidate = JSON.parse(line) as AuditRecord;
+              if (typeof candidate.sequence === 'number' && typeof candidate.hash === 'string') terminal = candidate;
+            } catch {
+              terminal = null;
+              break;
+            }
+          }
+          if (!terminal) {
+            skipped.push(`segment ${segment} is unreadable and was retained`);
+            continue;
+          }
+          try {
+            anchorDb.prepare('INSERT INTO audit_retained_anchor (segment, terminal_sequence, terminal_hash, retained_at) VALUES (?, ?, ?, ?) ON CONFLICT(segment) DO NOTHING').run(segment, terminal.sequence, terminal.hash, clock.now());
+            const bytes = statSync(file).size;
+            unlinkSync(file);
+            deletedRows += 1;
+            freedBytes += bytes;
+          } catch {
+            skipped.push(`segment ${segment} could not be anchored and deleted`);
+          }
+        }
+        return { module: 'audit', deletedRows, freedBytes, skipped };
+      } catch {
+        return { module: 'audit', deletedRows: 0, freedBytes: 0, skipped: ['retention pass failed'] };
+      }
     },
 
     async close(): Promise<void> {

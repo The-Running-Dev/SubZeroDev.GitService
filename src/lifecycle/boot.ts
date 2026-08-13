@@ -21,6 +21,7 @@ import type { Authorization } from '../authorization/authorization.ts';
 import type { DeclarationError } from '../declarations/errors.ts';
 import type { Scheduler } from '../scheduler/scheduler.ts';
 import type { BootJobReport } from '../scheduler/types.ts';
+import type { Watcher } from '../watcher/watcher.ts';
 import { acquireLease, type InstanceLease, type LeaseGuard, type LockAcquirer } from './lease.ts';
 import { verifyRegistryArtifact } from './registry-integrity.ts';
 import { declarationsWithUnsettledEntries, recoverDeclaration as runRecoveryLadder, type RecoveryDependencies } from './recovery.ts';
@@ -179,6 +180,8 @@ export interface LifecycleDependencies {
   readonly scheduler?: Pick<Scheduler, 'resolveRunningAtBoot' | 'revalidatePending' | 'runRetention'>;
   /** S25. Same reasoning as `journal` above. */
   readonly authorization?: Pick<Authorization, 'runRetention'>;
+  /** S26 — watcher files are a separate filesystem owner from the store. */
+  readonly watcher?: Pick<Watcher, 'runRetention'>;
   /**
    * S25. The clone store's own volume figures, folded into
    * `MaintenanceReport.usageBefore`/`usageAfter` alongside the structured
@@ -200,8 +203,9 @@ const NO_JOBS: BootJobReport = {
 
 export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
   let guard: LeaseGuard | null = null;
+  let maintenanceTimer: ReturnType<typeof setInterval> | null = null;
 
-  return {
+  const lifecycle: Lifecycle = {
     async boot(): Promise<Outcome<BootReport, BootError>> {
       // Step 1 — the instance lease, and the child-process self-test.
       const leaseResult = acquireLease({
@@ -471,6 +475,17 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         });
       }
 
+      // The maintenance pass is the daily snapshot cadence's driver. It is
+      // owned here rather than in the composition root: retention order and
+      // cadence are lifecycle decisions, and the unreferenced handle cannot
+      // keep an otherwise-idle service alive.
+      if (!maintenanceTimer) {
+        maintenanceTimer = setInterval(() => {
+          void lifecycle.runMaintenance('scheduled').catch(() => undefined);
+        }, 86_400_000);
+        maintenanceTimer.unref();
+      }
+
       return ok({
         lease: leaseResult.value.lease,
         leaseSelfTestPassed: leaseResult.value.selfTestPassed,
@@ -517,8 +532,8 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
 
       const usageBefore = await computeUsage();
 
-      // Fixed order (journal, authorization, notifier, scheduler, then the
-      // mandatory operator-identity owner below): an array here, rather than
+      // Fixed order (journal, authorization, notifier, scheduler, audit,
+      // watcher, then the mandatory operator-identity owner below): an array here, rather than
       // one `if` line per owner, keeps a future owner's retention window one
       // entry away instead of one more copy-pasted guard.
       const perModule: RetentionReport[] = [];
@@ -527,11 +542,18 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         deps.authorization,
         deps.notifier,
         deps.scheduler,
+        deps.audit,
+        deps.watcher,
       ];
       for (const owner of optionalOwners) {
         if (owner) perModule.push(await owner.runRetention());
       }
       perModule.push(await deps.operatorIdentity.runRetention());
+
+      // The store owns backup/snapshot retention as well as its table bytes.
+      // Run it before the vacuum, then fold both byte figures into its one
+      // report so the summary names each filesystem owner exactly once.
+      const storeRetention = await deps.store.runRetention();
 
       // Ends in the vacuum, deliberately last: every owner above has already
       // deleted its rows, so this is the step that actually returns pages to
@@ -539,10 +561,9 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       const vacuumed = await deps.store.incrementalVacuum();
       const releasedBytes = vacuumed.ok ? vacuumed.value : 0;
       perModule.push({
-        module: 'structured-store',
-        deletedRows: 0,
-        freedBytes: releasedBytes,
-        skipped: vacuumed.ok ? [] : [`incremental vacuum failed: ${vacuumed.error.summary}`],
+        ...storeRetention,
+        freedBytes: storeRetention.freedBytes + releasedBytes,
+        skipped: vacuumed.ok ? storeRetention.skipped : [...storeRetention.skipped, `incremental vacuum failed: ${vacuumed.error.summary}`],
       });
 
       const usageAfter = await computeUsage();
@@ -587,6 +608,10 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
     },
 
     async shutdown(_reason: ShutdownReason): Promise<void> {
+      if (maintenanceTimer) {
+        clearInterval(maintenanceTimer);
+        maintenanceTimer = null;
+      }
       // Audit before the store: both hold a handle on the same file, and the
       // module that opened one is the module that releases it.
       await deps.audit.close();
@@ -597,4 +622,5 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       }
     },
   };
+  return lifecycle;
 }

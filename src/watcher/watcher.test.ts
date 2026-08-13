@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync, utimesSync } from 'node:fs';
 import path from 'node:path';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
 import { systemClock } from '../clock/clock.ts';
@@ -86,6 +86,32 @@ function stubStore(): Pick<StructuredStore, 'transaction'> {
     },
   };
 }
+
+test('S26.4 — runRetention deletes only aged files in processed/, never inbox, processing, or failed files', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    const old = new Date('2026-01-01T00:00:00.000Z');
+    for (const dir of ['', 'processed', 'processing', 'failed']) mkdirSync(path.join(root, dir), { recursive: true });
+    for (const relative of ['inbox.md', 'processed/old.md', 'processed/new.md', 'processing/held.md', 'failed/failed.md']) {
+      const file = path.join(root, relative);
+      writeFileSync(file, relative, 'utf8');
+      if (relative !== 'processed/new.md') utimesSync(file, old, old);
+    }
+    const watcher = createWatcher({
+      volumeRoot: volume,
+      clock: systemClock,
+      declarations: stubDeclarations({ current: [] }),
+      cloneStore: stubCloneStore({ current: 'ready' }),
+      audit: stubAudit([]), notifier: stubNotifier([]), store: stubStore(),
+      dispatch: scriptedDispatch([], {}), contractCapabilitySet: CAPABILITY_SET,
+      remoteOperationsPermitted: false, watcherEnabled: false,
+    });
+    const report = await watcher.runRetention();
+    assert.equal(existsSync(path.join(root, 'processed', 'old.md')), false);
+    for (const relative of ['inbox.md', 'processed/new.md', 'processing/held.md', 'failed/failed.md']) assert.equal(existsSync(path.join(root, relative)), true, `${relative} is never deleted by retention`);
+    assert.equal(report.deletedRows, 1);
+  });
+});
 
 /** Every call is logged; a per-tool handler decides the response. Missing handlers fail the test loudly rather than hanging. */
 function scriptedDispatch(log: DispatchRequest[], handlers: Record<string, (req: DispatchRequest) => ToolResult<never> | Promise<ToolResult<never>>>): Dispatch {

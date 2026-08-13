@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, truncateSync, statSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, truncateSync, statSync, rmSync, utimesSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { systemClock } from '../clock/clock.ts';
@@ -88,6 +88,31 @@ test('S3.3 — 500 concurrent appends produce 500 lines, no duplicate sequence, 
     const state = await audit.verify();
     assert.equal(state.chainBreak, null, 'the chain verifies under concurrent overlap');
     assert.equal(state.verifiedThrough, 500);
+  });
+});
+
+test('S26.1 — retention anchors an aged closed segment before deleting it, and verification still detects a later break', async () => {
+  await withVolumeAsync(async (volume) => {
+    await migratedVolume(volume);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock, segmentBytes: 350 });
+    for (let index = 0; index < 8; index += 1) await audit.append(leaseTakeoverInput());
+
+    const first = path.join(volume, 'audit', '000001.jsonl');
+    utimesSync(first, new Date('2026-01-01T00:00:00.000Z'), new Date('2026-01-01T00:00:00.000Z'));
+    const report = await audit.runRetention();
+    assert.equal(existsSync(first), false, 'the aged closed segment is removed');
+    assert.equal(report.deletedRows, 1);
+
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    const anchors = db.prepare('SELECT segment FROM audit_retained_anchor').all() as { segment: number }[];
+    db.close();
+    assert.deepEqual(anchors.map((anchor) => anchor.segment), [1], 'the terminal hash is committed as an anchor first');
+
+    const second = path.join(volume, 'audit', '000002.jsonl');
+    const lines = readFileSync(second, 'utf8').trim().split('\n');
+    lines[0] = lines[0]!.replace('lease-takeover', 'tampered');
+    writeFileSync(second, `${lines.join('\n')}\n`, 'utf8');
+    assert.notEqual((await audit.verify()).chainBreak, null, 'verification resumes from the anchor and still detects a later break');
   });
 });
 
