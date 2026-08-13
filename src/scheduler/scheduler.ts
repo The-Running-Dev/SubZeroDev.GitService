@@ -21,7 +21,7 @@ import { success, validation, precondition, infrastructure, type ToolResult } fr
 import { diagnosticsFor } from '../shared/diagnostics.ts';
 import { storeError } from '../store/errors.ts';
 import type { StoreTransaction } from '../store/structured-store.ts';
-import type { RetentionReport } from '../shared/retention.ts';
+import { retentionCutoff, toRetentionReport, type RetentionReport } from '../shared/retention.ts';
 import { schedulerError, type SchedulerError } from './errors.ts';
 import type {
   BootJobReport,
@@ -65,7 +65,11 @@ export interface SchedulerDependencies {
   readonly registryEntry: (tool: RegistryToolName) => ToolDeclaration | null;
   readonly contractCapabilitySet: ContractCapabilitySet;
   readonly ceiling: DeploymentCeiling;
+  /** `RetentionWindows.terminalJobDays` (`20-contract.md` § Deployment configuration, default 30). Not sourced from a `DeploymentConfig` — none is wired yet — so this is a local, overridable default, the same pattern `journal.ts`'s `journalSettledDays` already uses. */
+  readonly terminalJobDays?: number;
 }
+
+const TERMINAL_JOB_DAYS_DEFAULT = 30;
 
 interface ScheduledJobRow {
   readonly id: string;
@@ -193,6 +197,7 @@ function claimForFiring(db: DatabaseSync, id: ScheduledJobId, now: IsoUtcTimesta
  */
 export function createScheduler(deps: SchedulerDependencies): Scheduler {
   const { volumeRoot, clock } = deps;
+  const terminalJobDays = deps.terminalJobDays ?? TERMINAL_JOB_DAYS_DEFAULT;
 
   return {
     async create(input: CreateJobInput, ctx: CallContext): Promise<Outcome<ScheduledJob, SchedulerError>> {
@@ -531,9 +536,16 @@ export function createScheduler(deps: SchedulerDependencies): Scheduler {
       return parked;
     },
 
-    /** `30-slices.md` § S25 out of scope for this slice — terminal-job retention (`S25.5`) lands with S25's own maintenance-pass wiring, once it depends on this module existing. */
+    /** `20-contract.md` § D5/S25.5 — a terminal job (`done`/`skipped`/`cancelled`) older than `terminalJobDays` is deleted; `needs-attention` is retained regardless of age, the same shape `journal.ts`'s `runRetention` already uses for `attention` entries. */
     async runRetention(): Promise<RetentionReport> {
-      return { module: 'scheduler', deletedRows: 0, freedBytes: 0, skipped: ['scheduled-job retention lands in S25 (S25.5)'] };
+      const cutoff = retentionCutoff(clock.now(), terminalJobDays);
+      const result = withDb(volumeRoot, (db) => {
+        const info = db
+          .prepare(`DELETE FROM scheduled_job WHERE status IN ('done', 'skipped', 'cancelled') AND updated_at < ?`)
+          .run(cutoff);
+        return Number(info.changes);
+      });
+      return toRetentionReport('scheduler', result.ok ? result : { ok: false, summary: result.error.summary });
     },
   };
 }

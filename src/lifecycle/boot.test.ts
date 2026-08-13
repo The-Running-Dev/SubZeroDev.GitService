@@ -36,6 +36,7 @@ import type { CapabilityName, DeploymentCeiling } from '../contract/capabilities
 import { fixtureTool, httpTarget } from '../contract/fixtures.ts';
 import { createLifecycle, type LifecycleDependencies } from './boot.ts';
 import type { BootJobReport } from '../scheduler/types.ts';
+import type { Scheduler } from '../scheduler/scheduler.ts';
 import type { LeaseAcquisition, LockAcquirer } from './lease.ts';
 
 /**
@@ -726,6 +727,12 @@ test('S25.1/S25.7 — runMaintenance drives every wired owner in order, ends in 
       tokenDays: 1,
       revokedGrantDays: 1,
     });
+    // Only `runRetention` is exercised by this test; `resolveRunningAtBoot`/`revalidatePending` are boot's S16 half, unrelated here.
+    const scheduler: Pick<Scheduler, 'resolveRunningAtBoot' | 'revalidatePending' | 'runRetention'> = {
+      resolveRunningAtBoot: async () => ({ markedDone: [], markedNeedsAttention: [], returnedToPending: [], leftRunning: [] }),
+      revalidatePending: async () => [],
+      runRetention: async () => ({ module: 'scheduler', deletedRows: 2, freedBytes: 0, skipped: [] }),
+    };
 
     const lifecycle = createLifecycle({
       volumeRoot: volume,
@@ -740,6 +747,7 @@ test('S25.1/S25.7 — runMaintenance drives every wired owner in order, ends in 
       journal,
       notifier,
       authorization,
+      scheduler,
     });
 
     try {
@@ -766,10 +774,13 @@ test('S25.1/S25.7 — runMaintenance drives every wired owner in order, ends in 
       assert.equal(report.evictions.length, 0, 'clone eviction is S27, not wired here');
 
       const moduleNames = report.perModule.map((r) => r.module).sort();
-      assert.deepEqual(moduleNames, ['authorization', 'journal', 'notifier', 'operator-identity', 'structured-store']);
+      assert.deepEqual(moduleNames, ['authorization', 'journal', 'notifier', 'operator-identity', 'scheduler', 'structured-store']);
 
       const journalReport = report.perModule.find((r) => r.module === 'journal')!;
       assert.equal(journalReport.deletedRows, 1, 'the old settled entry qualifies');
+
+      const schedulerReport = report.perModule.find((r) => r.module === 'scheduler')!;
+      assert.equal(schedulerReport.deletedRows, 2, 'runMaintenance must actually call the wired scheduler.runRetention, not skip it');
 
       // Exactly one `info` maintenance-pass row, never one per module or per row.
       const after = new DatabaseSync(path.join(volume, 'store.sqlite'));
@@ -847,6 +858,7 @@ test('S16 — boot steps 6 and 7 report the scheduler\'s job resolution and reva
           seenEntryCount = registry.entries.length;
           return ['job-2' as never];
         },
+        runRetention: async () => ({ module: 'scheduler', deletedRows: 0, freedBytes: 0, skipped: [] }),
       },
     });
     try {
@@ -872,6 +884,7 @@ test('S16 — a scheduler wired without registryEntries never revalidates agains
           revalidateCalls += 1;
           return ['job-parked-by-mistake' as never];
         },
+        runRetention: async () => ({ module: 'scheduler', deletedRows: 0, freedBytes: 0, skipped: [] }),
       },
     });
     try {
