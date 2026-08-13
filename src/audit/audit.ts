@@ -1,4 +1,4 @@
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, unlinkSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs';
 import { appendFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -7,7 +7,7 @@ import { sha256Hex, type IsoUtcTimestamp, type Sha256Hex } from '../shared/brand
 import type { Outcome } from '../shared/outcome.ts';
 import { ok, err } from '../shared/outcome.ts';
 import type { Clock } from '../clock/clock.ts';
-import type { RetentionReport } from '../shared/retention.ts';
+import { unlinkAndCountBytes, type RetentionReport } from '../shared/retention.ts';
 import { computeAuditRecordHash } from './hash.ts';
 import type { AuditError } from './errors.ts';
 import type {
@@ -508,27 +508,32 @@ export function createAudit(options: AuditOptions): Audit {
         const skipped: string[] = [];
         for (const segment of closedSegments) {
           const file = segmentPath(volumeRoot, segment);
-          if (statSync(file).mtimeMs >= cutoff) continue;
-          let terminal: AuditRecord | null = null;
-          for (const line of streamSegmentLines(file)) {
-            try {
-              const candidate = JSON.parse(line) as AuditRecord;
-              if (typeof candidate.sequence === 'number' && typeof candidate.hash === 'string') terminal = candidate;
-            } catch {
-              terminal = null;
-              break;
-            }
-          }
-          if (!terminal) {
-            skipped.push(`segment ${segment} is unreadable and was retained`);
-            continue;
-          }
+          // The whole per-segment body — including the cutoff stat — is one
+          // try/catch: a failure on this segment (a concurrent delete, a
+          // permission error) must only skip this segment, never discard the
+          // deletedRows/freedBytes already accumulated from segments earlier
+          // in this same loop that were genuinely anchored and unlinked.
           try {
+            if (statSync(file).mtimeMs >= cutoff) continue;
+            let terminal: AuditRecord | null = null;
+            for (const line of streamSegmentLines(file)) {
+              try {
+                const candidate = JSON.parse(line) as AuditRecord;
+                if (typeof candidate.sequence === 'number' && typeof candidate.hash === 'string') terminal = candidate;
+              } catch {
+                terminal = null;
+                break;
+              }
+            }
+            if (!terminal) {
+              skipped.push(`segment ${segment} is unreadable and was retained`);
+              continue;
+            }
             anchorDb.prepare('INSERT INTO audit_retained_anchor (segment, terminal_sequence, terminal_hash, retained_at) VALUES (?, ?, ?, ?) ON CONFLICT(segment) DO NOTHING').run(segment, terminal.sequence, terminal.hash, clock.now());
-            const bytes = statSync(file).size;
-            unlinkSync(file);
+            const removed = unlinkAndCountBytes(file);
+            if (!removed.ok) throw new Error(`segment ${segment} could not be removed`);
             deletedRows += 1;
-            freedBytes += bytes;
+            freedBytes += removed.value;
           } catch {
             skipped.push(`segment ${segment} could not be anchored and deleted`);
           }

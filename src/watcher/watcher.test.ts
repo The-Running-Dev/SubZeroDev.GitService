@@ -798,7 +798,7 @@ test('S24.2 — an entry resolved earlier in a tick is durably removed even when
   });
 });
 
-test('runRetention() reports without deleting — the retention window is a later slice', async () => {
+test('runRetention() reports an empty pass when no watcher-inboxes directory exists yet', async () => {
   await withVolumeAsync(async (volume) => {
     const { deps } = baseDeps(volume);
     const report = await createWatcher(deps).runRetention();

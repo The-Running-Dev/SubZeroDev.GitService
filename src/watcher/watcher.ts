@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, utimesSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { err, ok, type Outcome } from '../shared/outcome.ts';
 import { watchedFileName, type DeclarationId, type IsoUtcTimestamp, type RegistryToolName, type SessionId, type Subject } from '../shared/brands.ts';
@@ -19,7 +19,7 @@ import type { JsonValue } from '../contract/json.ts';
 import type { ToolResult } from '../result/envelope.ts';
 import { isError, type ResultKind } from '../shared/result-kind.ts';
 import type { OperationContextKind } from '../shared/actor.ts';
-import type { RetentionReport } from '../shared/retention.ts';
+import { unlinkAndCountBytes, type RetentionReport } from '../shared/retention.ts';
 import type { RepoStatusData } from '../git/types.ts';
 import type { PrOpenData, PrStatusData } from '../host/types.ts';
 import { watcherError, type WatcherError } from './errors.ts';
@@ -298,7 +298,15 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
   function moveToProcessed(declarationId: DeclarationId, sourcePath: string, file: string): void {
     const processedDir = processedDirFor(declarationId);
     mkdirSync(processedDir, { recursive: true });
-    renameSync(sourcePath, path.join(processedDir, `${timestampPrefix(clock.now())}-${file}`));
+    const target = path.join(processedDir, `${timestampPrefix(clock.now())}-${file}`);
+    renameSync(sourcePath, target);
+    // `renameSync` never updates mtime, and `runRetention` ages files in
+    // `processed/` off their mtime — left alone, a file that sat unclaimed in
+    // the inbox for close to `processedFileDays` would carry that original
+    // drop-time mtime through delivery and become eligible for deletion right
+    // after landing here.
+    const deliveredAt = new Date(clock.now());
+    utimesSync(target, deliveredAt, deliveredAt);
   }
 
   /** The candidate the next claim should try, or null when the inbox holds no eligible file — a symlink (S17.4) or a subdirectory never qualifies. */
@@ -588,12 +596,11 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
             const file = path.join(processed, name);
             const stat = lstatSync(file);
             if (!stat.isFile() || stat.mtimeMs >= cutoff) continue;
-            try {
-              const bytes = statSync(file).size;
-              unlinkSync(file);
+            const removed = unlinkAndCountBytes(file);
+            if (removed.ok) {
               deletedRows += 1;
-              freedBytes += bytes;
-            } catch {
+              freedBytes += removed.value;
+            } else {
               skipped.push(`could not remove processed/${name}`);
             }
           }

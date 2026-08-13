@@ -112,8 +112,11 @@ export interface Lifecycle {
    * fixed order, with no mutation lock held, ends with the structured
    * store's `incrementalVacuum`, and enqueues exactly one `info` maintenance
    * summary — never one notification per module or per row. Clone eviction
-   * (S27) and watermark scheduling (S27) are not wired here yet: `evictions`
-   * is always empty and nothing currently calls this on a schedule.
+   * and watermark scheduling (both S27) are not wired here yet: `evictions`
+   * is always empty. S26 drives this on a schedule from the composition
+   * root (`server.ts`'s `maintenanceTimer`, the same pattern already used
+   * for `Scheduler.tick` and `Notifier.deliverPending`) rather than from
+   * inside `Lifecycle` — this interface itself still has no start/stop.
    */
   runMaintenance(reason: MaintenanceReason): Promise<MaintenanceReport>;
   shutdown(reason: ShutdownReason): Promise<void>;
@@ -203,7 +206,6 @@ const NO_JOBS: BootJobReport = {
 
 export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
   let guard: LeaseGuard | null = null;
-  let maintenanceTimer: ReturnType<typeof setInterval> | null = null;
 
   const lifecycle: Lifecycle = {
     async boot(): Promise<Outcome<BootReport, BootError>> {
@@ -475,17 +477,6 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         });
       }
 
-      // The maintenance pass is the daily snapshot cadence's driver. It is
-      // owned here rather than in the composition root: retention order and
-      // cadence are lifecycle decisions, and the unreferenced handle cannot
-      // keep an otherwise-idle service alive.
-      if (!maintenanceTimer) {
-        maintenanceTimer = setInterval(() => {
-          void lifecycle.runMaintenance('scheduled').catch(() => undefined);
-        }, 86_400_000);
-        maintenanceTimer.unref();
-      }
-
       return ok({
         lease: leaseResult.value.lease,
         leaseSelfTestPassed: leaseResult.value.selfTestPassed,
@@ -559,10 +550,10 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       // deleted its rows, so this is the step that actually returns pages to
       // the filesystem (S25.6) rather than one more row-level pass.
       const vacuumed = await deps.store.incrementalVacuum();
-      const releasedBytes = vacuumed.ok ? vacuumed.value : 0;
+      const vacuumBytes = vacuumed.ok ? vacuumed.value : 0;
       perModule.push({
         ...storeRetention,
-        freedBytes: storeRetention.freedBytes + releasedBytes,
+        freedBytes: storeRetention.freedBytes + vacuumBytes,
         skipped: vacuumed.ok ? storeRetention.skipped : [...storeRetention.skipped, `incremental vacuum failed: ${vacuumed.error.summary}`],
       });
 
@@ -570,9 +561,16 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
 
       // One `info` summary for the whole pass, never one per module or per
       // row (`10-design.md` § Notification). `evictedDeclarations` is always
-      // empty here — clone eviction is S27.
+      // empty here — clone eviction is S27. Summed across every module's own
+      // `freedBytes` (the vacuum's bytes are already folded into the
+      // structured-store entry above) rather than just `vacuumBytes`: before
+      // S26 every non-vacuum owner reported `freedBytes: 0`, so the vacuum
+      // figure alone was the honest total; now that audit/watcher/store
+      // report real file-deletion bytes, the vacuum figure alone would
+      // understate what the pass actually returned to the volume.
       if (deps.notifier) {
         const totalDeleted = perModule.reduce((sum, report) => sum + report.deletedRows, 0);
+        const releasedBytes = perModule.reduce((sum, report) => sum + report.freedBytes, 0);
         const summary: MaintenanceSummary = { kind: 'maintenance-pass', releasedBytes, evictedDeclarations: [], prunedByModule: perModule };
         const request: NotificationRequest = {
           severity: 'info',
@@ -608,10 +606,6 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
     },
 
     async shutdown(_reason: ShutdownReason): Promise<void> {
-      if (maintenanceTimer) {
-        clearInterval(maintenanceTimer);
-        maintenanceTimer = null;
-      }
       // Audit before the store: both hold a handle on the same file, and the
       // module that opened one is the module that releases it.
       await deps.audit.close();

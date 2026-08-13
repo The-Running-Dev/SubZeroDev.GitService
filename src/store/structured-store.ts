@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { err, ok, type Outcome } from '../shared/outcome.ts';
 import { isoUtcTimestamp, type IsoUtcTimestamp } from '../shared/brands.ts';
 import type { Clock } from '../clock/clock.ts';
-import type { RetentionReport } from '../shared/retention.ts';
+import { unlinkAndCountBytes, type RetentionReport } from '../shared/retention.ts';
 import { storeError, type BackupStamp, type StoreError } from './errors.ts';
 import { MIGRATION_0001_SQL } from './migration-0001.ts';
 
@@ -429,12 +429,11 @@ export function createStructuredStore(options: StructuredStoreOptions): Structur
         for (const [prefix, retained] of [[PRE_MIGRATION_PREFIX, preMigrationBackupsRetained], [SNAPSHOT_PREFIX, storeSnapshotsRetained]] as const) {
           for (const copy of copiesWithPrefix(prefix).slice(0, -retained)) {
             const file = path.join(backupDir, copy.name);
-            try {
-              const bytes = statSync(file).size;
-              unlinkSync(file);
+            const removed = unlinkAndCountBytes(file);
+            if (removed.ok) {
               deletedRows += 1;
-              freedBytes += bytes;
-            } catch {
+              freedBytes += removed.value;
+            } else {
               skipped.push(`could not remove ${copy.name}`);
             }
           }
