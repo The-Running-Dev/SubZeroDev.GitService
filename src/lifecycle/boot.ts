@@ -503,9 +503,20 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
           subject: summary,
           summary: `maintenance pass (${reason}) pruned ${totalDeleted} row(s) and released ${releasedBytes} byte(s) across ${perModule.length} module(s)`,
         };
-        await deps.store.transaction(async (tx) => {
+        const enqueued = await deps.store.transaction(async (tx) => {
           deps.notifier?.enqueue(request, tx);
         });
+        // A failed enqueue must not vanish without a trace: there is nowhere
+        // else in `MaintenanceReport` to carry it, so it lands on the
+        // notifier's own retention entry — the module that owns delivery of
+        // this notification in the first place.
+        if (!enqueued.ok) {
+          const notifierIndex = perModule.findIndex((report) => report.module === 'notifier');
+          const notifierReport = notifierIndex === -1 ? undefined : perModule[notifierIndex];
+          if (notifierReport) {
+            perModule[notifierIndex] = { ...notifierReport, skipped: [...notifierReport.skipped, `maintenance-pass summary not enqueued: ${enqueued.error.summary}`] };
+          }
+        }
       }
 
       return {

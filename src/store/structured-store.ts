@@ -231,14 +231,23 @@ export function createStructuredStore(options: StructuredStoreOptions): Structur
 
       // `incrementalVacuum` (S25.6) only returns pages to the filesystem
       // under `auto_vacuum = INCREMENTAL`, and SQLite only honours a mode
-      // change made before the schema exists. Set here, ahead of the
-      // migration loop rather than in `open()`, for two reasons: it must run
-      // after `integrityCheck` so a corrupt file is still reported as
-      // `corrupt` rather than tripped over by this pragma first, and reading
-      // page 1 to change the mode is itself a no-op once a schema already
-      // exists, so repeating it on every boot costs nothing.
+      // change made against an empty database, or immediately followed by a
+      // `VACUUM`. Every store that already has a schema — which is every
+      // store that has booted even once before this pragma existed — needs
+      // that `VACUUM` to actually convert, or the mode change is a silent
+      // no-op forever. Checked first and skipped once already incremental,
+      // so this `VACUUM` (a full rewrite of the file) runs at most once per
+      // store rather than on every boot. Set here, ahead of the migration
+      // loop rather than in `open()`, so it runs after `integrityCheck` — a
+      // corrupt file is still reported as `corrupt` rather than tripped over
+      // by this pragma first — and before `BEGIN` opens for the first
+      // migration, since `VACUUM` cannot run inside a transaction.
       try {
-        database.exec('PRAGMA auto_vacuum = INCREMENTAL;');
+        const mode = database.prepare('PRAGMA auto_vacuum').get() as { auto_vacuum?: number } | undefined;
+        if (mode?.auto_vacuum !== 2) {
+          database.exec('PRAGMA auto_vacuum = INCREMENTAL;');
+          database.exec('VACUUM;');
+        }
       } catch {
         // Best-effort: a store this pragma cannot touch fails the migration
         // loop below for the same reason, with a real cause attached there.

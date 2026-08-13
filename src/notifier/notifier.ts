@@ -7,7 +7,7 @@ import { err, ok, type Outcome } from '../shared/outcome.ts';
 import type { HttpsUrl, IsoUtcTimestamp, OutboxRowId } from '../shared/brands.ts';
 import type { ActorRef } from '../shared/actor.ts';
 import type { JsonValue } from '../contract/json.ts';
-import type { RetentionReport } from '../shared/retention.ts';
+import { retentionCutoff, toRetentionReport, type RetentionReport } from '../shared/retention.ts';
 import type { NotificationRequest } from '../journal/types.ts';
 import type { StoreTransaction } from '../store/structured-store.ts';
 import { notifierError, type NotifierError } from './errors.ts';
@@ -495,10 +495,9 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
 
     /** `outbox_retention` indexes exactly this predicate. `failed` rows are never selected regardless of age — only `clearFailed` moves one, per an operator's own decision (`10-design.md` § retention table). */
     async runRetention(): Promise<RetentionReport> {
-      const cutoff = new Date(Date.parse(clock.now()) - outboxDeliveredDays * 86_400_000).toISOString();
+      const cutoff = retentionCutoff(clock.now(), outboxDeliveredDays);
       const result = withDb(volumeRoot, (db) => Number(db.prepare(`DELETE FROM notification_outbox WHERE status = 'delivered' AND delivered_at < ?`).run(cutoff).changes));
-      if (!result.ok) return { module: 'notifier', deletedRows: 0, freedBytes: 0, skipped: [`retention pass failed: ${result.reason}`] };
-      return { module: 'notifier', deletedRows: result.value, freedBytes: 0, skipped: [] };
+      return toRetentionReport('notifier', result.ok ? result : { ok: false, summary: result.reason });
     },
   };
 }

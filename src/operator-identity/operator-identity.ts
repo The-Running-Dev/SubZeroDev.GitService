@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import type { HttpsUrl, IsoUtcTimestamp, SessionId, Subject } from '../shared/brands.ts';
 import { ok, err, type Outcome } from '../shared/outcome.ts';
 import { timingSafeStringEqual } from '../shared/timing-safe.ts';
-import type { RetentionReport } from '../shared/retention.ts';
+import { retentionCutoff, toRetentionReport, type RetentionReport } from '../shared/retention.ts';
 import type { ActorRef } from '../shared/actor.ts';
 import type { Clock } from '../clock/clock.ts';
 import type { Audit } from '../audit/audit.ts';
@@ -569,12 +569,11 @@ export function createOperatorIdentity(deps: OperatorIdentityDependencies): Oper
      * (`10-design.md` § retention table).
      */
     async runRetention(): Promise<RetentionReport> {
-      const cutoff = new Date(Date.parse(clock.now()) - operatorSessionDays * 86_400_000).toISOString();
+      const cutoff = retentionCutoff(clock.now(), operatorSessionDays);
       const result = withDb(volumeRoot, (db) =>
         Number(db.prepare('DELETE FROM operator_session WHERE (revoked_at IS NOT NULL AND revoked_at < ?) OR (absolute_expires_at < ?)').run(cutoff, cutoff).changes),
       );
-      if (!result.ok) return { module: 'operator-identity', deletedRows: 0, freedBytes: 0, skipped: [`retention pass failed: ${result.error.summary}`] };
-      return { module: 'operator-identity', deletedRows: result.value, freedBytes: 0, skipped: [] };
+      return toRetentionReport('operator-identity', result.ok ? result : { ok: false, summary: result.error.summary });
     },
   };
 }

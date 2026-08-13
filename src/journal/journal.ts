@@ -9,7 +9,7 @@ import type { JsonValue } from '../contract/json.ts';
 import type { Clock } from '../clock/clock.ts';
 import type { ObservedGitState, PreState } from '../clone/types.ts';
 import type { RecoveryClassification, RecoveryDescriptor } from '../recovery/types.ts';
-import type { RetentionReport } from '../shared/retention.ts';
+import { retentionCutoff, toRetentionReport, type RetentionReport } from '../shared/retention.ts';
 import { storeError } from '../store/errors.ts';
 import { journalError, type JournalError } from './errors.ts';
 import type { JournalBeginInput, JournalEntryState, JournalStep, NotificationRequest, OperationJournalEntry } from './types.ts';
@@ -375,35 +375,22 @@ export function createJournal(deps: JournalDependencies): Journal {
      * `journal_retention` indexes exactly this predicate. `attention` entries
      * are never selected regardless of age — they are the ones an operator
      * still has to resolve (`10-design.md` § retention table). Deletes
-     * `journal_step` children first: `journal_step.operation_id` has no
+     * `journal_step` children first, by the same predicate via a subquery
+     * rather than a row-by-row loop: `journal_step.operation_id` has no
      * cascade, and `PRAGMA foreign_keys = ON` (set by `withDb`) would refuse
-     * the parent delete otherwise.
+     * the parent delete otherwise. Each `DELETE` is its own autocommit
+     * statement — no explicit transaction needed, because a crash between
+     * them only ever leaves a `journal_entry` still pointing at zero
+     * `journal_step` rows, which the next pass deletes for free.
      */
     async runRetention(): Promise<RetentionReport> {
-      const cutoff = new Date(Date.parse(clock.now()) - journalSettledDays * 86_400_000).toISOString();
+      const cutoff = retentionCutoff(clock.now(), journalSettledDays);
       const result = withDb(volumeRoot, (db) => {
-        const rows = db.prepare(`SELECT operation_id FROM journal_entry WHERE state = 'settled' AND updated_at < ?`).all(cutoff) as { operation_id: string }[];
-        if (rows.length === 0) return 0;
-        db.exec('BEGIN;');
-        try {
-          for (const row of rows) db.prepare('DELETE FROM journal_step WHERE operation_id = ?').run(row.operation_id);
-          const placeholders = rows.map(() => '?').join(',');
-          const info = db.prepare(`DELETE FROM journal_entry WHERE operation_id IN (${placeholders})`).run(...rows.map((r) => r.operation_id));
-          db.exec('COMMIT;');
-          return Number(info.changes);
-        } catch (cause) {
-          try {
-            db.exec('ROLLBACK;');
-          } catch {
-            // Already rolled back by the failure itself.
-          }
-          throw cause;
-        }
+        db.prepare(`DELETE FROM journal_step WHERE operation_id IN (SELECT operation_id FROM journal_entry WHERE state = 'settled' AND updated_at < ?)`).run(cutoff);
+        const info = db.prepare(`DELETE FROM journal_entry WHERE state = 'settled' AND updated_at < ?`).run(cutoff);
+        return Number(info.changes);
       });
-      if (!result.ok) {
-        return { module: 'journal', deletedRows: 0, freedBytes: 0, skipped: [`retention pass failed: ${result.error.summary}`] };
-      }
-      return { module: 'journal', deletedRows: result.value, freedBytes: 0, skipped: [] };
+      return toRetentionReport('journal', result.ok ? result : { ok: false, summary: result.error.summary });
     },
   };
 }

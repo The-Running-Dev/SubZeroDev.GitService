@@ -15,7 +15,7 @@ import { MCP_PROFILE, type Declaration } from '../declarations/types.ts';
 import type { ContractCapabilitySet, DeploymentCeiling, CapabilityName, McpScope, Scope, OperatorScope } from '../contract/capabilities.ts';
 import type { StoreTransaction } from '../store/structured-store.ts';
 import { storeError } from '../store/errors.ts';
-import type { RetentionReport } from '../shared/retention.ts';
+import { retentionCutoff, toRetentionReport, type RetentionReport } from '../shared/retention.ts';
 import { timingSafeStringEqual } from '../shared/timing-safe.ts';
 import { authorizationError, type AuthorizationError } from './errors.ts';
 import type { ClientRegistrationRequest, Grant, GrantKind, GrantView, IssuedMcpGrant, IssuedToken, McpGrantInput, OAuthClient, RefreshedTokens } from './types.ts';
@@ -635,26 +635,41 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
      */
     async runRetention(): Promise<RetentionReport> {
       const now = deps.clock.now();
-      const tokenCutoff = new Date(Date.parse(now) - tokenDays * 86_400_000).toISOString();
-      const grantCutoff = new Date(Date.parse(now) - revokedGrantDays * 86_400_000).toISOString();
+      const tokenCutoff = retentionCutoff(now, tokenDays);
+      const grantCutoff = retentionCutoff(now, revokedGrantDays);
+      // BEGIN/COMMIT around the cascade: without it, a crash between the
+      // token delete and the grant/client deletes that depend on it leaves a
+      // transient state on disk until the next pass catches up. Cheap to
+      // avoid outright since all three statements already run on one
+      // connection.
       const result = withDb(deps.volumeRoot, (db) => {
-        const tokenChanges = Number(
-          db.prepare('DELETE FROM token WHERE (revoked_at IS NOT NULL AND revoked_at < ?) OR (expires_at < ?)').run(tokenCutoff, tokenCutoff).changes,
-        );
-        const grantChanges = Number(
-          db
-            .prepare('DELETE FROM "grant" WHERE revoked_at IS NOT NULL AND revoked_at < ? AND NOT EXISTS (SELECT 1 FROM token WHERE token.grant_id = "grant".grant_id)')
-            .run(grantCutoff).changes,
-        );
-        const clientChanges = Number(
-          db
-            .prepare('DELETE FROM oauth_client WHERE revoked_at IS NOT NULL AND revoked_at < ? AND NOT EXISTS (SELECT 1 FROM "grant" WHERE "grant".client_id = oauth_client.client_id)')
-            .run(grantCutoff).changes,
-        );
-        return tokenChanges + grantChanges + clientChanges;
+        db.exec('BEGIN;');
+        try {
+          const tokenChanges = Number(
+            db.prepare('DELETE FROM token WHERE (revoked_at IS NOT NULL AND revoked_at < ?) OR (expires_at < ?)').run(tokenCutoff, tokenCutoff).changes,
+          );
+          const grantChanges = Number(
+            db
+              .prepare('DELETE FROM "grant" WHERE revoked_at IS NOT NULL AND revoked_at < ? AND NOT EXISTS (SELECT 1 FROM token WHERE token.grant_id = "grant".grant_id)')
+              .run(grantCutoff).changes,
+          );
+          const clientChanges = Number(
+            db
+              .prepare('DELETE FROM oauth_client WHERE revoked_at IS NOT NULL AND revoked_at < ? AND NOT EXISTS (SELECT 1 FROM "grant" WHERE "grant".client_id = oauth_client.client_id)')
+              .run(grantCutoff).changes,
+          );
+          db.exec('COMMIT;');
+          return tokenChanges + grantChanges + clientChanges;
+        } catch (cause) {
+          try {
+            db.exec('ROLLBACK;');
+          } catch {
+            // Already rolled back by the failure itself.
+          }
+          throw cause;
+        }
       });
-      if (!result.ok) return { module: 'authorization', deletedRows: 0, freedBytes: 0, skipped: [`retention pass failed: ${result.error.summary}`] };
-      return { module: 'authorization', deletedRows: result.value, freedBytes: 0, skipped: [] };
+      return toRetentionReport('authorization', result.ok ? result : { ok: false, summary: result.error.summary });
     },
   };
 }

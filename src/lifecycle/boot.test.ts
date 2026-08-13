@@ -21,6 +21,7 @@ import { createRecoveryCatalogue } from '../recovery/catalogue.ts';
 import { RECONCILE_AFTER_MERGE_RECOVERY } from '../composites/recovery-descriptors.ts';
 import { err, ok } from '../shared/outcome.ts';
 import { declarationError } from '../declarations/errors.ts';
+import { storeError } from '../store/errors.ts';
 import type { RecoveryDependencies } from './recovery.ts';
 
 /** The outbox as it stands on disk, for the redrive tests below. */
@@ -774,6 +775,55 @@ test('S25.1/S25.7 — runMaintenance drives every wired owner in order, ends in 
       assert.equal(summaries[0]!.severity, 'info');
       const subject = (JSON.parse(summaries[0]!.payload) as { subject: { prunedByModule: unknown[] } }).subject;
       assert.equal(subject.prunedByModule.length, report.perModule.length);
+    } finally {
+      await lifecycle.shutdown('operator');
+    }
+  });
+});
+
+test('S25.7 — a maintenance-pass notification that fails to enqueue is recorded on the notifier\'s own retention report, not silently dropped', async () => {
+  await withVolumeAsync(async (volume) => {
+    const realStore = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    // Every other member delegates to the real store; only `transaction` is
+    // overridden, so `runMaintenance`'s enqueue step sees a genuine store
+    // failure the way a lock-contention or I/O error would produce one.
+    const store = { ...realStore, transaction: async () => err(storeError({ code: 'io-failed' }, 'induced: enqueue transaction failed')) };
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const notifier = createNotifier({ volumeRoot: volume, clock: systemClock, webhookUrl: null });
+
+    const lifecycle = createLifecycle({
+      volumeRoot: volume,
+      buildDir: writeBuildDir(volume),
+      clock: systemClock,
+      store,
+      audit,
+      operatorIdentity: operatorIdentityFor(volume, audit),
+      consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+      ceiling: EMPTY_CEILING,
+      revalidateFileWatchers: async () => ok(undefined),
+      notifier,
+    });
+
+    try {
+      const booted = await lifecycle.boot();
+      assert.equal(booted.ok, true);
+      if (!booted.ok) return;
+
+      const report = await lifecycle.runMaintenance('scheduled');
+
+      const notifierReport = report.perModule.find((r) => r.module === 'notifier');
+      assert.ok(notifierReport, 'the notifier still ran its own retention pass');
+      assert.match(
+        notifierReport!.skipped.join(' | '),
+        /maintenance-pass summary not enqueued.*induced: enqueue transaction failed/,
+        'the enqueue failure must be visible in the report, not vanish once the transaction fails',
+      );
+
+      const after = new DatabaseSync(path.join(volume, 'store.sqlite'));
+      const outboxRows = after.prepare(`SELECT payload FROM notification_outbox`).all() as { payload: string }[];
+      after.close();
+      const summaries = outboxRows.filter((row) => (JSON.parse(row.payload) as { subject?: { kind?: string } }).subject?.kind === 'maintenance-pass');
+      assert.equal(summaries.length, 0, 'the failed transaction really did leave no row behind');
     } finally {
       await lifecycle.shutdown('operator');
     }
