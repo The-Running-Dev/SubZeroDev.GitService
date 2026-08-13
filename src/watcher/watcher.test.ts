@@ -625,6 +625,20 @@ test('S24.1 — a missing or unparseable pending pull-request list is treated as
   });
 });
 
+test('S24.1 — a structurally valid but malformed entry (missing fields) is dropped rather than dispatched with undefined input', async () => {
+  await withVolumeAsync(async (volume) => {
+    const full = pendingPullRequestsPath(volume, 'repo-a' as never);
+    mkdirSync(path.dirname(full), { recursive: true });
+    writeFileSync(full, JSON.stringify({ entries: [{}, pendingEntry({ number: 3 })] }), 'utf8');
+
+    assert.deepEqual(
+      readPendingPullRequests(volume, 'repo-a' as never).entries.map((e) => e.number),
+      [3],
+      'the well-formed entry survives; the malformed one is filtered out rather than reaching pr_status as { number: undefined }',
+    );
+  });
+});
+
 test('S24.2 — each tick re-reads host state: open and a transient status-read failure stay pending; closed is removed without reconciling; merged reconciles once and is removed whether it succeeds or fails', async () => {
   await withVolumeAsync(async (volume) => {
     const entries: PendingPullRequest[] = [
@@ -699,6 +713,62 @@ test('S24.3 — reconciliation is an independent dispatch, run even when the clo
       ['pr_status', 'reconcile_after_merge'],
     );
     assert.equal(readPendingPullRequests(volume, 'repo-a' as never).entries.length, 0);
+  });
+});
+
+test('S24.2 — a non-transient pr_status failure (e.g. authorization) is dropped rather than retried forever; a transient one stays pending', async () => {
+  await withVolumeAsync(async (volume) => {
+    const entries: PendingPullRequest[] = [pendingEntry({ number: 20 }), pendingEntry({ number: 21 })];
+    writePendingPullRequests(volume, 'repo-a' as never, { entries });
+
+    const dispatchLog: DispatchRequest[] = [];
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch(dispatchLog, {
+        repo_status: () => repoStatus(false),
+        pr_status: (req) => {
+          const number = (req.input as { number: number }).number;
+          return number === 20 ? authorization('the grant no longer includes host.pr.read', []) : infrastructure('transient host read failure');
+        },
+      }),
+    });
+
+    const reports = await createWatcher(deps).tick();
+    assert.deepEqual(reports[0]!.stillPending.map((e) => e.number), [21]);
+
+    const remaining = readPendingPullRequests(volume, 'repo-a' as never);
+    assert.deepEqual(
+      remaining.entries.map((e) => e.number),
+      [21],
+      'the authorization failure is dropped rather than retried; the infrastructure failure stays pending',
+    );
+  });
+});
+
+test('S24.2 — an entry resolved earlier in a tick is durably removed even when a later entry in the same tick throws', async () => {
+  await withVolumeAsync(async (volume) => {
+    const entries: PendingPullRequest[] = [pendingEntry({ number: 10 }), pendingEntry({ number: 11 })];
+    writePendingPullRequests(volume, 'repo-a' as never, { entries });
+
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch([], {
+        pr_status: (req) => {
+          const number = (req.input as { number: number }).number;
+          if (number === 10) return prStatusResult('closed', { number });
+          throw new Error('simulated crash mid-tick');
+        },
+      }),
+    });
+
+    await assert.rejects(() => createWatcher(deps).tick());
+
+    const remaining = readPendingPullRequests(volume, 'repo-a' as never);
+    assert.deepEqual(
+      remaining.entries.map((e) => e.number),
+      [11],
+      'entry 10 was already resolved (closed, removed) and persisted before entry 11 threw',
+    );
   });
 });
 

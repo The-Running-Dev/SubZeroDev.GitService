@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { ok, err, type Outcome } from '../shared/outcome.ts';
@@ -193,6 +193,24 @@ function countFiles(root: string): number {
     count += entry.isDirectory() ? countFiles(full) : 1;
   }
   return count;
+}
+
+/**
+ * `watcher/pending-pull-requests.ts`'s own path convention (`pendingPullRequestsPath`),
+ * inlined for the same reason `watcher-inboxes/<id>` is inlined above — Declarations
+ * is L1 and Watcher is L2. Keyed by declaration id alone, with no generation, so a
+ * re-declared id must have this cleared explicitly rather than let a new era read a
+ * previous era's entries: `10-design.md` § "Re-declaring the same `id` does not
+ * inherit any of it" would otherwise be silently violated by watcher state that
+ * lives outside `watcher-inboxes/` and outside this module's own store.
+ */
+function clearPendingPullRequests(volumeRoot: string, id: DeclarationId): void {
+  const full = path.join(volumeRoot, 'watcher-pending-pull-requests', `${id as string}.json`);
+  try {
+    unlinkSync(full);
+  } catch {
+    // Nothing to clear — the common case.
+  }
 }
 
 function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): Outcome<T, StoreError> {
@@ -435,6 +453,12 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
         }
         return err(declarationError({ code: 'store-failed', cause: written.error }, written.error.summary));
       }
+
+      // A fresh declare (generation 1) and an adopted one (generation N+1,
+      // above) both start this era with no pending pull requests of its own
+      // — clearing unconditionally is cheap and correct either way, and
+      // never fires on the common case where the file does not exist.
+      clearPendingPullRequests(volumeRoot, input.id);
 
       return ok(toDeclaration(written.value));
     },

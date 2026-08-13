@@ -2,9 +2,23 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { DeclarationId } from '../shared/brands.ts';
-import type { PendingPullRequestList } from './types.ts';
+import type { PendingPullRequest, PendingPullRequestList } from './types.ts';
 
 const EMPTY_LIST: PendingPullRequestList = { entries: [] };
+
+/** A structurally valid array element that is not itself a well-formed `PendingPullRequest` — e.g. `{}` — must not reach `pr_status` as `{ number: undefined }`; the "missing or unparseable list is treated as empty" guarantee is applied per entry, not just to the file as a whole. */
+function isWellFormedEntry(value: unknown): value is PendingPullRequest {
+  if (value === null || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.declarationId === 'string' &&
+    typeof record.number === 'number' &&
+    Number.isFinite(record.number) &&
+    typeof record.branch === 'string' &&
+    typeof record.openedAt === 'string' &&
+    typeof record.sourceFile === 'string'
+  );
+}
 
 /**
  * `20-contract.md` § Files on the volume: "Pending pull-request list, one per
@@ -25,7 +39,7 @@ export function readPendingPullRequests(volumeRoot: string, declarationId: Decla
   try {
     const parsed = JSON.parse(readFileSync(full, 'utf8')) as Partial<PendingPullRequestList> | null;
     if (!parsed || !Array.isArray(parsed.entries)) return EMPTY_LIST;
-    return { entries: parsed.entries };
+    return { entries: parsed.entries.filter(isWellFormedEntry) };
   } catch {
     return EMPTY_LIST;
   }

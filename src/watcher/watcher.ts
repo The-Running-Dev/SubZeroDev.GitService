@@ -17,7 +17,7 @@ import type { StructuredStore, StoreTransaction } from '../store/structured-stor
 import { capabilityScopeOf, type CapabilityName, type ContractCapabilitySet } from '../contract/capabilities.ts';
 import type { JsonValue } from '../contract/json.ts';
 import type { ToolResult } from '../result/envelope.ts';
-import type { ResultKind } from '../shared/result-kind.ts';
+import { isError, type ResultKind } from '../shared/result-kind.ts';
 import type { OperationContextKind } from '../shared/actor.ts';
 import type { RetentionReport } from '../shared/retention.ts';
 import type { RepoStatusData } from '../git/types.ts';
@@ -353,6 +353,13 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
    * through the ordinary pipeline, which already audits the call and, for a
    * timeout, parks and later notifies via boot recovery (`10-design.md` §
    * control flow #1) — no separate audit or notification is added here.
+   *
+   * The list is written after **each** entry is resolved, not once after the
+   * whole loop: a process killed mid-tick — the same event
+   * `recoverInterruptedClaims` exists to recover from — must not re-dispatch
+   * `reconcile_after_merge` for an entry this tick already reconciled. Each
+   * write reflects every decision made so far plus the entries not yet
+   * reached this tick.
    */
   async function reconcilePendingPullRequests(declaration: Declaration, session: Session): Promise<{ reconciled: readonly PendingPullRequest[]; stillPending: readonly PendingPullRequest[] }> {
     const list = readPendingPullRequests(volumeRoot, declaration.id);
@@ -361,26 +368,38 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     const reconciled: PendingPullRequest[] = [];
     const stillPending: PendingPullRequest[] = [];
 
-    for (const entry of list.entries) {
+    for (let index = 0; index < list.entries.length; index += 1) {
+      const entry = list.entries[index]!;
       const statusResult = await callTool('pr_status', { number: entry.number }, declaration, session);
       const statusData = statusResult.ok ? (statusResult.data as unknown as PrStatusData | undefined) : undefined;
+
       if (!statusResult.ok || statusData === undefined) {
-        stillPending.push(entry);
-        continue;
+        // `isError` (`upstream`/`timeout`/`infrastructure`) is a transient
+        // read failure and stays pending for the next tick. A non-transient
+        // one — `validation`/`authorization`/`precondition`/`conflict`, e.g.
+        // the declaration's grant no longer includes `host.pr.read` — will
+        // never succeed on retry either, so it is dropped here instead of
+        // retried forever. There is no `TerminalState` variant this can
+        // raise an `attention` notification through without widening the
+        // closed union in `20-contract.md`; the per-call audit record
+        // `dispatch` already wrote for this `pr_status` call is this entry's
+        // only trail until that contract amendment exists.
+        if (statusResult.ok || isError(statusResult.kind)) stillPending.push(entry);
+      } else {
+        const status = statusData.status;
+        if (status.state === 'open') {
+          stillPending.push(entry);
+        } else if (status.state === 'closed') {
+          // Removed without reconciliation (S24.2) — neither list.
+        } else {
+          await callTool('reconcile_after_merge', { pullRequestNumber: entry.number, expectedHeadSha: status.headSha }, declaration, session);
+          reconciled.push(entry);
+        }
       }
 
-      const status = statusData.status;
-      if (status.state === 'open') {
-        stillPending.push(entry);
-      } else if (status.state === 'closed') {
-        // Removed without reconciliation (S24.2) — neither list.
-      } else {
-        await callTool('reconcile_after_merge', { pullRequestNumber: entry.number, expectedHeadSha: status.headSha }, declaration, session);
-        reconciled.push(entry);
-      }
+      writePendingPullRequests(volumeRoot, declaration.id, { entries: [...stillPending, ...list.entries.slice(index + 1)] });
     }
 
-    writePendingPullRequests(volumeRoot, declaration.id, { entries: stillPending });
     return { reconciled, stillPending };
   }
 

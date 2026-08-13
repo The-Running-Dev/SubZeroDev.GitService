@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { systemClock } from '../clock/clock.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
@@ -430,6 +430,39 @@ test('S24.4 — an empty pending pull-request list file never blocks declaration
 
     const removed = await declarations.remove('repo-10c' as DeclareInput['id'], OPERATOR);
     assert.equal(removed.ok, true);
+  });
+});
+
+test('S24.4 — a re-declared id does not inherit the previous era\'s pending pull-request list, whether adopted from orphaned or declared fresh after remove', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declarations = declarationsFor(volume);
+
+    const pendingFile = path.join(volume, 'watcher-pending-pull-requests', 'repo-11.json');
+    mkdirSync(path.dirname(pendingFile), { recursive: true });
+
+    const declared = await declarations.declare(declareInputFor('repo-11'), OPERATOR);
+    assert.equal(declared.ok, true);
+    writeFileSync(pendingFile, JSON.stringify({ entries: [{ declarationId: 'repo-11', number: 7, branch: 'watcher/post-1', openedAt: systemClock.now(), sourceFile: 'post.md' }] }), 'utf8');
+
+    const orphaned = await declarations.orphan('repo-11' as DeclareInput['id'], OPERATOR);
+    assert.equal(orphaned.ok, true);
+
+    // Adoption path: re-declare over the still-orphaned row (no clone.remove in between).
+    const adopted = await declarations.declare(declareInputFor('repo-11'), OPERATOR);
+    assert.equal(adopted.ok, true);
+    if (adopted.ok) assert.equal(adopted.value.generation, 2);
+    assert.equal(existsSync(pendingFile), false, 'adoption clears the previous era\'s pending pull-request list');
+
+    writeFileSync(pendingFile, JSON.stringify({ entries: [{ declarationId: 'repo-11', number: 9, branch: 'watcher/post-2', openedAt: systemClock.now(), sourceFile: 'post-2.md' }] }), 'utf8');
+    const reorphaned = await declarations.orphan('repo-11' as DeclareInput['id'], OPERATOR);
+    assert.equal(reorphaned.ok, true);
+    const removed = await declarations.remove('repo-11' as DeclareInput['id'], OPERATOR);
+    assert.equal(removed.ok, true);
+
+    // Re-declare after `remove()` deleted the active generation's row.
+    const redeclared = await declarations.declare(declareInputFor('repo-11'), OPERATOR);
+    assert.equal(redeclared.ok, true);
+    assert.equal(existsSync(pendingFile), false, 'declare clears any pending pull-request list left on disk regardless of which generation it starts');
   });
 });
 
