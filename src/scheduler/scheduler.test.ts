@@ -633,23 +633,26 @@ test('S25.5 — runRetention deletes an old terminal job (done/skipped/cancelled
     });
     const ctx = ctxFor('repo-a', 1, ['host.pr.write'], { kind: 'mcp', subject: 'sub' as never, clientId: null, grantId: null });
 
-    const ids: Record<string, string> = {};
-    for (const label of ['old-done', 'recent-cancelled', 'old-attention']) {
+    async function createJob(): Promise<string> {
       const created = await scheduler.create(
         { declarationId: 'repo-a' as never, tool: SCHEDULABLE_TOOL.name, input: {}, notBefore: systemClock.now(), onMissed: { mode: 'catch_up' } },
         ctx,
       );
       assert.equal(created.ok, true);
-      if (!created.ok) return;
-      ids[label] = created.value.id;
+      if (!created.ok) throw new Error('unreachable');
+      return created.value.id;
     }
 
+    const oldDoneId = await createJob();
+    const recentCancelledId = await createJob();
+    const oldAttentionId = await createJob();
+
     const old = new Date(Date.now() - 5 * 86_400_000).toISOString();
-    const recent = systemClock.now();
+    const recent: string = systemClock.now();
     const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
-    db.prepare("UPDATE scheduled_job SET status = 'done', updated_at = ? WHERE id = ?").run(old, ids['old-done']);
-    db.prepare("UPDATE scheduled_job SET status = 'cancelled', updated_at = ? WHERE id = ?").run(recent, ids['recent-cancelled']);
-    db.prepare("UPDATE scheduled_job SET status = 'needs-attention', updated_at = ? WHERE id = ?").run(old, ids['old-attention']);
+    db.prepare("UPDATE scheduled_job SET status = 'done', updated_at = ? WHERE id = ?").run(old, oldDoneId);
+    db.prepare("UPDATE scheduled_job SET status = 'cancelled', updated_at = ? WHERE id = ?").run(recent, recentCancelledId);
+    db.prepare("UPDATE scheduled_job SET status = 'needs-attention', updated_at = ? WHERE id = ?").run(old, oldAttentionId);
     db.close();
 
     const report = await scheduler.runRetention();
@@ -659,6 +662,6 @@ test('S25.5 — runRetention deletes an old terminal job (done/skipped/cancelled
 
     const remaining = await scheduler.list('repo-a' as never, null);
     const remainingIds = remaining.map((job) => job.id).sort();
-    assert.deepEqual(remainingIds, [ids['recent-cancelled'], ids['old-attention']].sort());
+    assert.deepEqual(remainingIds, [recentCancelledId, oldAttentionId].sort());
   });
 });

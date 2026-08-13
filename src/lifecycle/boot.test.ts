@@ -858,6 +858,7 @@ test('S16 — boot steps 6 and 7 report the scheduler\'s job resolution and reva
           seenEntryCount = registry.entries.length;
           return ['job-2' as never];
         },
+        runRetention: async () => ({ module: 'scheduler', deletedRows: 0, freedBytes: 0, skipped: [] }),
       },
     });
     try {
@@ -883,6 +884,7 @@ test('S16 — a scheduler wired without registryEntries never revalidates agains
           revalidateCalls += 1;
           return ['job-parked-by-mistake' as never];
         },
+        runRetention: async () => ({ module: 'scheduler', deletedRows: 0, freedBytes: 0, skipped: [] }),
       },
     });
     try {
