@@ -500,9 +500,9 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
      * S25. Every owner runs in a fixed order, with no mutation lock taken
      * anywhere in this method — the pass never touches `Locks` at all. Each
      * owner's own `runRetention` never throws (`journal.ts`, `notifier.ts`,
-     * `operator-identity.ts`, `authorization.ts` each catch their own store
-     * failures into a `RetentionReport` with `skipped` naming the failure),
-     * so one owner's failure never stops the rest from running.
+     * `operator-identity.ts`, `authorization.ts`, `scheduler.ts` each catch
+     * their own store failures into a `RetentionReport` with `skipped` naming
+     * the failure), so one owner's failure never stops the rest from running.
      */
     async runMaintenance(reason: MaintenanceReason): Promise<MaintenanceReport> {
       const startedAt = deps.clock.now();
@@ -517,11 +517,20 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
 
       const usageBefore = await computeUsage();
 
+      // Fixed order (journal, authorization, notifier, scheduler, then the
+      // mandatory operator-identity owner below): an array here, rather than
+      // one `if` line per owner, keeps a future owner's retention window one
+      // entry away instead of one more copy-pasted guard.
       const perModule: RetentionReport[] = [];
-      if (deps.journal) perModule.push(await deps.journal.runRetention());
-      if (deps.authorization) perModule.push(await deps.authorization.runRetention());
-      if (deps.notifier) perModule.push(await deps.notifier.runRetention());
-      if (deps.scheduler) perModule.push(await deps.scheduler.runRetention());
+      const optionalOwners: readonly ({ runRetention(): Promise<RetentionReport> } | undefined)[] = [
+        deps.journal,
+        deps.authorization,
+        deps.notifier,
+        deps.scheduler,
+      ];
+      for (const owner of optionalOwners) {
+        if (owner) perModule.push(await owner.runRetention());
+      }
       perModule.push(await deps.operatorIdentity.runRetention());
 
       // Ends in the vacuum, deliberately last: every owner above has already
