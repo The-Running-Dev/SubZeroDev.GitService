@@ -169,12 +169,14 @@ export interface LifecycleDependencies {
    */
   readonly journal?: Pick<Journal, 'runRetention'>;
   /**
-   * S16 — boot steps 6 and 7's job half. Optional so a `Lifecycle` built
-   * before the scheduler existed still compiles: without it, `jobsResolved`
-   * and `revalidation.jobsParked` report their honest empty values rather
-   * than a fabricated clean sweep.
+   * S16 — boot steps 6 and 7's job half. S25 widens the same optional
+   * dependency with `runRetention` rather than adding a second one. Optional
+   * as a whole so a `Lifecycle` built before the scheduler existed still
+   * compiles: without it, `jobsResolved` and `revalidation.jobsParked` report
+   * their honest empty values rather than a fabricated clean sweep, and
+   * `runMaintenance` simply has one fewer owner to drive.
    */
-  readonly scheduler?: Pick<Scheduler, 'resolveRunningAtBoot' | 'revalidatePending'>;
+  readonly scheduler?: Pick<Scheduler, 'resolveRunningAtBoot' | 'revalidatePending' | 'runRetention'>;
   /** S25. Same reasoning as `journal` above. */
   readonly authorization?: Pick<Authorization, 'runRetention'>;
   /**
@@ -519,6 +521,7 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       if (deps.journal) perModule.push(await deps.journal.runRetention());
       if (deps.authorization) perModule.push(await deps.authorization.runRetention());
       if (deps.notifier) perModule.push(await deps.notifier.runRetention());
+      if (deps.scheduler) perModule.push(await deps.scheduler.runRetention());
       perModule.push(await deps.operatorIdentity.runRetention());
 
       // Ends in the vacuum, deliberately last: every owner above has already

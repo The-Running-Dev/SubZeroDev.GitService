@@ -613,3 +613,52 @@ test('a job cancelled between tick\'s due-job read and its firing write is never
     assert.equal(job!.reason, 'cancelled mid-tick');
   });
 });
+
+test('S25.5 — runRetention deletes an old terminal job (done/skipped/cancelled) and never touches a needs-attention job regardless of age', async () => {
+  await withMigratedVolume(async (volume) => {
+    const ceiling = ceilingOf('host.pr.write');
+    const contract = contractOf('host.pr.write');
+    const declarations = await createDeclaredRepo(volume, ceiling, ['host.pr.write']);
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const scheduler = createScheduler({
+      volumeRoot: volume,
+      clock: systemClock,
+      dispatch: refusingDispatch(),
+      declarations,
+      journal,
+      registryEntry: registryEntryFor([SCHEDULABLE_TOOL]),
+      contractCapabilitySet: contract,
+      ceiling,
+      terminalJobDays: 1,
+    });
+    const ctx = ctxFor('repo-a', 1, ['host.pr.write'], { kind: 'mcp', subject: 'sub' as never, clientId: null, grantId: null });
+
+    const ids: Record<string, string> = {};
+    for (const label of ['old-done', 'recent-cancelled', 'old-attention']) {
+      const created = await scheduler.create(
+        { declarationId: 'repo-a' as never, tool: SCHEDULABLE_TOOL.name, input: {}, notBefore: systemClock.now(), onMissed: { mode: 'catch_up' } },
+        ctx,
+      );
+      assert.equal(created.ok, true);
+      if (!created.ok) return;
+      ids[label] = created.value.id;
+    }
+
+    const old = new Date(Date.now() - 5 * 86_400_000).toISOString();
+    const recent = systemClock.now();
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    db.prepare("UPDATE scheduled_job SET status = 'done', updated_at = ? WHERE id = ?").run(old, ids['old-done']);
+    db.prepare("UPDATE scheduled_job SET status = 'cancelled', updated_at = ? WHERE id = ?").run(recent, ids['recent-cancelled']);
+    db.prepare("UPDATE scheduled_job SET status = 'needs-attention', updated_at = ? WHERE id = ?").run(old, ids['old-attention']);
+    db.close();
+
+    const report = await scheduler.runRetention();
+    assert.equal(report.module, 'scheduler');
+    assert.equal(report.deletedRows, 1, 'only the old terminal job qualifies');
+    assert.equal(report.skipped.length, 0);
+
+    const remaining = await scheduler.list('repo-a' as never, null);
+    const remainingIds = remaining.map((job) => job.id).sort();
+    assert.deepEqual(remainingIds, [ids['recent-cancelled'], ids['old-attention']].sort());
+  });
+});
