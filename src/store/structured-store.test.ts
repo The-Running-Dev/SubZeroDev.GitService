@@ -4,6 +4,7 @@ import { readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { systemClock } from '../clock/clock.ts';
+import { createHash } from 'node:crypto';
 import { createStructuredStore, MIGRATIONS, STORE_TABLE_NAMES } from './structured-store.ts';
 import { withVolumeAsync } from './volume-fixture.ts';
 
@@ -295,6 +296,96 @@ test('tx.all reads the transaction it belongs to, including writes not yet commi
         return 'done';
       });
       assert.equal(result.ok, true);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+test('S25.6 — incrementalVacuum returns real bytes to the filesystem once enough rows are deleted to release pages', async () => {
+  await withVolumeAsync(async (volume) => {
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    try {
+      await store.open();
+      await store.migrate();
+
+      // Enough rows, each with a large payload, to occupy several pages —
+      // one small row cannot demonstrate a page actually being released.
+      const payload = JSON.stringify({ blob: 'x'.repeat(2000) });
+      const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+      const insert = db.prepare(
+        `INSERT INTO notification_outbox (id, severity, declaration_id, payload, status, attempts, last_attempt_at, last_error, created_at, delivered_at)
+         VALUES (?, 'info', NULL, ?, 'delivered', 0, NULL, NULL, ?, ?)`,
+      );
+      for (let i = 0; i < 200; i += 1) insert.run(`row-${i}`, payload, systemClock.now(), systemClock.now());
+      db.prepare('DELETE FROM notification_outbox').run();
+      db.close();
+
+      const vacuumed = await store.incrementalVacuum();
+      assert.equal(vacuumed.ok, true);
+      if (!vacuumed.ok) return;
+      assert.ok(vacuumed.value > 0, `expected real bytes returned to the filesystem, got ${vacuumed.value}`);
+
+      // A second pass with nothing left to release reports honestly, not a
+      // repeat of the first call's figure.
+      const secondPass = await store.incrementalVacuum();
+      assert.equal(secondPass.ok, true);
+      if (!secondPass.ok) return;
+      assert.equal(secondPass.value, 0);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+test('S25.6 — migrate() converts an already-schema\'d store (one migrated before auto_vacuum=INCREMENTAL existed) to incremental, not just a fresh one', async () => {
+  await withVolumeAsync(async (volume) => {
+    // Applies migration 0001 by hand, exactly as an earlier boot under the
+    // pre-S25 code would have — schema created with no auto_vacuum pragma
+    // ever set, which is the one case `PRAGMA auto_vacuum = INCREMENTAL`
+    // alone cannot fix: SQLite only honours that pragma against an empty
+    // database or immediately after a `VACUUM`.
+    const storePath = path.join(volume, 'store.sqlite');
+    const pre = new DatabaseSync(storePath);
+    pre.exec(MIGRATIONS[0]!.sql);
+    pre.prepare('INSERT INTO schema_migration (version, applied_at, checksum) VALUES (?, ?, ?)').run(
+      MIGRATIONS[0]!.version,
+      systemClock.now(),
+      createHash('sha256').update(MIGRATIONS[0]!.sql, 'utf8').digest('hex'),
+    );
+    const modeBefore = pre.prepare('PRAGMA auto_vacuum').get() as { auto_vacuum: number };
+    assert.equal(modeBefore.auto_vacuum, 0, 'the schema was created under the default auto_vacuum mode, as any pre-S25 store was');
+    pre.close();
+
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    try {
+      await store.open();
+      const migrated = await store.migrate();
+      assert.equal(migrated.ok, true);
+      if (!migrated.ok) return;
+      assert.equal(migrated.value, 0, 'migration 0001 was already applied by hand; this boot applies nothing new');
+
+      const check = new DatabaseSync(storePath);
+      const modeAfter = check.prepare('PRAGMA auto_vacuum').get() as { auto_vacuum: number };
+      check.close();
+      assert.equal(modeAfter.auto_vacuum, 2, 'migrate() must convert an already-schema\'d store to incremental, not just skip a pragma that would otherwise no-op');
+
+      // Prove it functionally, not just by the pragma's value: real rows,
+      // real deletes, real bytes released.
+      const payload = JSON.stringify({ blob: 'x'.repeat(2000) });
+      const db = new DatabaseSync(storePath);
+      const insert = db.prepare(
+        `INSERT INTO notification_outbox (id, severity, declaration_id, payload, status, attempts, last_attempt_at, last_error, created_at, delivered_at)
+         VALUES (?, 'info', NULL, ?, 'delivered', 0, NULL, NULL, ?, ?)`,
+      );
+      for (let i = 0; i < 200; i += 1) insert.run(`row-${i}`, payload, systemClock.now(), systemClock.now());
+      db.prepare('DELETE FROM notification_outbox').run();
+      db.close();
+
+      const vacuumed = await store.incrementalVacuum();
+      assert.equal(vacuumed.ok, true);
+      if (!vacuumed.ok) return;
+      assert.ok(vacuumed.value > 0, `expected real bytes returned to the filesystem on a converted store, got ${vacuumed.value}`);
     } finally {
       await store.close();
     }

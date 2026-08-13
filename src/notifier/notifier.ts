@@ -7,7 +7,7 @@ import { err, ok, type Outcome } from '../shared/outcome.ts';
 import type { HttpsUrl, IsoUtcTimestamp, OutboxRowId } from '../shared/brands.ts';
 import type { ActorRef } from '../shared/actor.ts';
 import type { JsonValue } from '../contract/json.ts';
-import type { RetentionReport } from '../shared/retention.ts';
+import { retentionCutoff, toRetentionReport, type RetentionReport } from '../shared/retention.ts';
 import type { NotificationRequest } from '../journal/types.ts';
 import type { StoreTransaction } from '../store/structured-store.ts';
 import { notifierError, type NotifierError } from './errors.ts';
@@ -32,6 +32,8 @@ export interface NotifierDependencies {
   /** Injected for tests, so backoff does not really sleep. */
   readonly sleepFn?: (ms: number) => Promise<void>;
   readonly maxAttempts?: number;
+  /** `RetentionWindows.outboxDeliveredDays` (`20-contract.md` § Deployment configuration, default 14). Local, overridable default — no `DeploymentConfig` is wired yet. */
+  readonly outboxDeliveredDays?: number;
   /**
    * How long a single delivery attempt may take before it is abandoned.
    * Without a bound, an endpoint that accepts the connection and then never
@@ -44,6 +46,7 @@ export interface NotifierDependencies {
 const MAX_ATTEMPTS_DEFAULT = 5;
 const BACKOFF_CAP_MS = 30_000;
 const DELIVERY_TIMEOUT_SECONDS_DEFAULT = 10;
+const OUTBOX_DELIVERED_DAYS_DEFAULT = 14;
 
 function backoffMs(attempts: number): number {
   return Math.min(1000 * 2 ** attempts, BACKOFF_CAP_MS);
@@ -139,6 +142,7 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
   const sleepFn = deps.sleepFn ?? realSleep;
   const maxAttempts = deps.maxAttempts ?? MAX_ATTEMPTS_DEFAULT;
   const deliveryTimeoutSeconds = deps.deliveryTimeoutSeconds ?? DELIVERY_TIMEOUT_SECONDS_DEFAULT;
+  const outboxDeliveredDays = deps.outboxDeliveredDays ?? OUTBOX_DELIVERED_DAYS_DEFAULT;
 
   /**
    * Passes are serialised, and that is a correctness requirement rather than
@@ -489,9 +493,11 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
       return ok(undefined);
     },
 
+    /** `outbox_retention` indexes exactly this predicate. `failed` rows are never selected regardless of age — only `clearFailed` moves one, per an operator's own decision (`10-design.md` § retention table). */
     async runRetention(): Promise<RetentionReport> {
-      // S17 owns retention (`outbox_retention`'s index exists for it). Nothing prunes yet.
-      return { module: 'notifier', deletedRows: 0, freedBytes: 0, skipped: ['retention lands in S17'] };
+      const cutoff = retentionCutoff(clock.now(), outboxDeliveredDays);
+      const result = withDb(volumeRoot, (db) => Number(db.prepare(`DELETE FROM notification_outbox WHERE status = 'delivered' AND delivered_at < ?`).run(cutoff).changes));
+      return toRetentionReport('notifier', result.ok ? result : { ok: false, summary: result.reason });
     },
   };
 }

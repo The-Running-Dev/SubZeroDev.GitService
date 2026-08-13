@@ -731,3 +731,35 @@ test('two independent notifiers over the same volume send each row exactly once'
     assert.equal(rows.every((r) => r.status === 'delivered'), true);
   });
 });
+
+test('S25.3 — runRetention deletes a delivered row past the window, and never touches a failed row regardless of age', async () => {
+  await migratedVolume(async (volume) => {
+    const notifier = createNotifier({ volumeRoot: volume, clock: systemClock, webhookUrl: null, outboxDeliveredDays: 1 });
+
+    const old = new Date(Date.now() - 5 * 86_400_000).toISOString();
+    const recent = systemClock.now();
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    db.prepare(
+      `INSERT INTO notification_outbox (id, severity, declaration_id, payload, status, attempts, last_attempt_at, last_error, created_at, delivered_at)
+       VALUES ('old-delivered', 'info', NULL, '{}', 'delivered', 1, ?, NULL, ?, ?)`,
+    ).run(old, old, old);
+    db.prepare(
+      `INSERT INTO notification_outbox (id, severity, declaration_id, payload, status, attempts, last_attempt_at, last_error, created_at, delivered_at)
+       VALUES ('recent-delivered', 'info', NULL, '{}', 'delivered', 1, ?, NULL, ?, ?)`,
+    ).run(recent, recent, recent);
+    db.prepare(
+      `INSERT INTO notification_outbox (id, severity, declaration_id, payload, status, attempts, last_attempt_at, last_error, created_at, delivered_at)
+       VALUES ('old-failed', 'attention', NULL, '{}', 'failed', 5, ?, 'boom', ?, NULL)`,
+    ).run(old, old);
+    db.close();
+
+    const report = await notifier.runRetention();
+    assert.equal(report.module, 'notifier');
+    assert.equal(report.deletedRows, 1, 'only the old delivered row qualifies');
+
+    const after = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    const remaining = (after.prepare('SELECT id FROM notification_outbox ORDER BY id').all() as { id: string }[]).map((r) => r.id);
+    after.close();
+    assert.deepEqual(remaining, ['old-failed', 'recent-delivered']);
+  });
+});

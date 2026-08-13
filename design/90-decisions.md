@@ -12,6 +12,26 @@ Append-only. Newest at the top. The rejected alternatives are the point — with
 - **Repository config must stay descriptive.** Settled for now (see the decision below), and it holds only while the format carries no permission-shaped field. Worth a check at `/contract` rather than trusting anyone to remember. **The design states the test in checkable form** (`10-design.md` § `RepositoryConfig`): any field a caller could set that widens what the service will do lives in the declaration instead. **Checked at `/contract` 2026-08-03 and clean:** `RepositoryConfig` declares `baseBranch`, `requiredChecks`, `deployWorkflow` and `branchPrefixes` and nothing else; no capability, scope, path prefix, credential reference, remote, host, timeout or limit has drifted into it. The test is now invariant A8 in `20-contract.md`, so the next check is a re-read of one table row rather than a re-derivation.
 ---
 
+### 2026-08-13 — S25 code review: `migrate()` runs a one-time `VACUUM` to actually enable incremental vacuum
+Context: `/code-review` on S25 found that `PRAGMA auto_vacuum = INCREMENTAL` (added to `migrate()` for
+`incrementalVacuum`, S25.6) only takes effect on a database with no schema yet, or immediately after a
+`VACUUM` — SQLite's own documented behaviour. The original code set the pragma alone; its own comment
+conceded it was "a no-op once a schema already exists," but nothing then existing had a schema, so the
+gap went unnoticed. Any store that has booted even once before this pragma existed already has a
+schema by the time it boots under this code, so incremental vacuum would silently never actually turn
+on for it — `incrementalVacuum()` would report 0 released bytes forever, defeating S25.6's purpose
+exactly for the already-grown stores it exists to help.
+Chosen: `migrate()` now reads the current `auto_vacuum` mode first; if it is not already `INCREMENTAL`,
+it sets the pragma and runs `VACUUM;` before the migration loop's first `BEGIN` (`VACUUM` cannot run
+inside a transaction). The mode check means this full-file rewrite runs at most once per store, not on
+every boot.
+Rejected: **Run `VACUUM` unconditionally every boot** — correct but pays a full-file-rewrite cost on
+every boot forever, not once. **Leave it to an operator runbook step** — silent forever otherwise, and
+this repository's stores are provisioned and upgraded without an operator watching every boot.
+Reversibility: cheap — the check-then-VACUUM is a boot-time no-op once a store is already converted;
+reverting it just restores the original always-no-op-after-first-schema behaviour.
+---
+
 ### 2026-08-13 — /install found `freeze.md`/`unfreeze.md` stuck pre-companion-split despite `syncedCommit` claiming current
 Context: A re-install (kit still at `6bdd8dc`, the same sha already recorded as `syncedCommit`) found `.claude/commands/freeze.md` and `.claude/commands/unfreeze.md` still carrying their `af610a6` content — the commit that added the two commands, before `4f3d988` gave every core a `<!-- companion:start -->` block — plus mojibake em-dashes (`—` decoded as CP1252 and re-encoded, reading as `ΓÇö`). `tools/Sync-Kit.ps1 -DryRun` reported "nothing to sync" for both files; `tools/Test-Companion.ps1` independently caught them (exit 1, two `MissingBlock` findings). This is the same failure mode as the 2026-08-11 entry below (`done.md`, `Invoke-DoneHousekeeping.ps1`, `Measure-Session.ps1`) recurring on two different files — `Sync-Kit.ps1` advances `syncedCommit` without confirming the target's on-disk copy actually matches, so a file left behind at one sync reads as current at every sync after.
 Chosen: Took the kit's current `freeze.md`/`unfreeze.md` verbatim (cores — no reconciliation, same as any `Added`/`Updated` row). Verified `Test-Companion.ps1` now passes (21/21 cores, 0 findings). Logged the recurrence in the kit's own `design/90-decisions.md` rather than re-diagnosing it here a third time — the defect lives in `Sync-Kit.ps1`, not in this repository.

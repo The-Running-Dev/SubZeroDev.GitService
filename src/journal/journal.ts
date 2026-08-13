@@ -9,7 +9,7 @@ import type { JsonValue } from '../contract/json.ts';
 import type { Clock } from '../clock/clock.ts';
 import type { ObservedGitState, PreState } from '../clone/types.ts';
 import type { RecoveryClassification, RecoveryDescriptor } from '../recovery/types.ts';
-import type { RetentionReport } from '../shared/retention.ts';
+import { retentionCutoff, toRetentionReport, type RetentionReport } from '../shared/retention.ts';
 import { storeError } from '../store/errors.ts';
 import { journalError, type JournalError } from './errors.ts';
 import type { JournalBeginInput, JournalEntryState, JournalStep, NotificationRequest, OperationJournalEntry } from './types.ts';
@@ -33,6 +33,8 @@ export interface Journal {
 export interface JournalDependencies {
   readonly volumeRoot: string;
   readonly clock: Clock;
+  /** `RetentionWindows.journalSettledDays` (`20-contract.md` § Deployment configuration, default 30). Not sourced from a `DeploymentConfig` — none is wired yet — so this is a local, overridable default, the same pattern `authorization.ts`'s token TTL constants already use. */
+  readonly journalSettledDays?: number;
 }
 
 interface JournalEntryRow {
@@ -167,6 +169,8 @@ function rowsToEntries(db: DatabaseSync, rows: readonly JournalEntryRow[]): read
   return rows.map((row) => toEntry(row, loadSteps(db, row.operation_id as OperationId)));
 }
 
+const JOURNAL_SETTLED_DAYS_DEFAULT = 30;
+
 /**
  * `20-contract.md` § L1 — journal. One `store.sqlite` connection per call,
  * opened and closed around it — the same seam `clone-store.ts` and
@@ -177,6 +181,7 @@ function rowsToEntries(db: DatabaseSync, rows: readonly JournalEntryRow[]): read
  */
 export function createJournal(deps: JournalDependencies): Journal {
   const { volumeRoot, clock } = deps;
+  const journalSettledDays = deps.journalSettledDays ?? JOURNAL_SETTLED_DAYS_DEFAULT;
 
   return {
     async begin(input: JournalBeginInput): Promise<Outcome<OperationJournalEntry, JournalError>> {
@@ -366,9 +371,26 @@ export function createJournal(deps: JournalDependencies): Journal {
       );
     },
 
+    /**
+     * `journal_retention` indexes exactly this predicate. `attention` entries
+     * are never selected regardless of age — they are the ones an operator
+     * still has to resolve (`10-design.md` § retention table). Deletes
+     * `journal_step` children first, by the same predicate via a subquery
+     * rather than a row-by-row loop: `journal_step.operation_id` has no
+     * cascade, and `PRAGMA foreign_keys = ON` (set by `withDb`) would refuse
+     * the parent delete otherwise. Each `DELETE` is its own autocommit
+     * statement — no explicit transaction needed, because a crash between
+     * them only ever leaves a `journal_entry` still pointing at zero
+     * `journal_step` rows, which the next pass deletes for free.
+     */
     async runRetention(): Promise<RetentionReport> {
-      // S17 owns retention (`journal_retention`'s index exists for it). Nothing prunes yet.
-      return { module: 'journal', deletedRows: 0, freedBytes: 0, skipped: ['retention lands in S17'] };
+      const cutoff = retentionCutoff(clock.now(), journalSettledDays);
+      const result = withDb(volumeRoot, (db) => {
+        db.prepare(`DELETE FROM journal_step WHERE operation_id IN (SELECT operation_id FROM journal_entry WHERE state = 'settled' AND updated_at < ?)`).run(cutoff);
+        const info = db.prepare(`DELETE FROM journal_entry WHERE state = 'settled' AND updated_at < ?`).run(cutoff);
+        return Number(info.changes);
+      });
+      return toRetentionReport('journal', result.ok ? result : { ok: false, summary: result.error.summary });
     },
   };
 }

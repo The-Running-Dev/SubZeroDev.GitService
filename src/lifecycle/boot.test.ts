@@ -13,10 +13,15 @@ import { createOperatorIdentity } from '../operator-identity/operator-identity.t
 import { DatabaseSync } from 'node:sqlite';
 import { createJournal } from '../journal/journal.ts';
 import { createNotifier, type Notifier } from '../notifier/notifier.ts';
+import { createAuthorization } from '../authorization/authorization.ts';
+import { createDeclarations } from '../declarations/declarations.ts';
+import type { ContractCapabilitySet } from '../contract/capabilities.ts';
+import type { RemoteHost } from '../shared/brands.ts';
 import { createRecoveryCatalogue } from '../recovery/catalogue.ts';
 import { RECONCILE_AFTER_MERGE_RECOVERY } from '../composites/recovery-descriptors.ts';
 import { err, ok } from '../shared/outcome.ts';
 import { declarationError } from '../declarations/errors.ts';
+import { storeError } from '../store/errors.ts';
 import type { RecoveryDependencies } from './recovery.ts';
 
 /** The outbox as it stands on disk, for the redrive tests below. */
@@ -80,7 +85,7 @@ function lifecycleFor(
   options: {
     readonly ceiling?: DeploymentCeiling;
     readonly registryDeclarations?: Parameters<typeof compiler.compile>[0];
-    readonly notifier?: Pick<Notifier, 'redriveUndelivered'>;
+    readonly notifier?: Pick<Notifier, 'redriveUndelivered' | 'runRetention' | 'enqueue'>;
     readonly recovery?: RecoveryDependencies;
     readonly revalidateFileWatchers?: LifecycleDependencies['revalidateFileWatchers'];
   } = {},
@@ -225,7 +230,7 @@ test('S11 — a slow or unreachable webhook does not delay boot: readiness and t
         redriveStarted = true;
         return new Promise<never>(() => {});
       },
-    } as unknown as Pick<Notifier, 'redriveUndelivered'>;
+    } as unknown as Pick<Notifier, 'redriveUndelivered' | 'runRetention' | 'enqueue'>;
 
     const { lifecycle } = lifecycleFor(volume, undefined, { notifier: hangingNotifier });
     try {
@@ -687,6 +692,138 @@ test('S6 — boot succeeds when every registry entry has a registered executor',
     try {
       const booted = await lifecycle.boot();
       assert.equal(booted.ok, true, 'every entry has an executor');
+    } finally {
+      await lifecycle.shutdown('operator');
+    }
+  });
+});
+
+test('S25.1/S25.7 — runMaintenance drives every wired owner in order, ends in incrementalVacuum, and enqueues exactly one info summary', async () => {
+  await withVolumeAsync(async (volume) => {
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock, journalSettledDays: 1 });
+    const notifier = createNotifier({ volumeRoot: volume, clock: systemClock, webhookUrl: null });
+    const declarations = createDeclarations({
+      volumeRoot: volume,
+      clock: systemClock,
+      remoteHostAllowlist: [] as unknown as readonly RemoteHost[],
+      ceiling: EMPTY_CEILING,
+      cloneAdoptionCheck: () => ({ observedRemote: async () => ({ cloneExists: false }), isSafeToAdopt: async () => ({ safe: true }) }),
+    });
+    const authorization = createAuthorization({
+      volumeRoot: volume,
+      clock: systemClock,
+      contractCapabilitySet: new Set() as unknown as ContractCapabilitySet,
+      ceiling: EMPTY_CEILING,
+      declarations,
+      audit,
+      tokenDays: 1,
+      revokedGrantDays: 1,
+    });
+
+    const lifecycle = createLifecycle({
+      volumeRoot: volume,
+      buildDir: writeBuildDir(volume),
+      clock: systemClock,
+      store,
+      audit,
+      operatorIdentity: operatorIdentityFor(volume, audit),
+      consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+      ceiling: EMPTY_CEILING,
+      revalidateFileWatchers: async () => ok(undefined),
+      journal,
+      notifier,
+      authorization,
+    });
+
+    try {
+      const booted = await lifecycle.boot();
+      assert.equal(booted.ok, true);
+      if (!booted.ok) return;
+
+      // A settled journal entry old enough for this pass to actually prune,
+      // so `perModule`'s totals are not every owner reporting a trivial zero.
+      const old = new Date(Date.now() - 5 * 86_400_000).toISOString();
+      const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+      db.prepare(
+        `INSERT INTO journal_entry (
+          operation_id, declaration_id, generation, tool, input,
+          actor_kind, actor_subject, actor_client, actor_grant,
+          scheduled_job_id, context, pre_branch, pre_head_sha, pre_upstream_sha,
+          pre_index_digest, pre_worktree_digest, state, attention_reason, started_at, updated_at
+        ) VALUES ('op-old', 'repo-a', 1, 'git_stage', '{}', 'mcp', 'sub', NULL, NULL, NULL, 'normal', NULL, NULL, NULL, 'd', 'w', 'settled', NULL, ?, ?)`,
+      ).run(old, old);
+      db.close();
+
+      const report = await lifecycle.runMaintenance('scheduled');
+      assert.equal(report.reason, 'scheduled');
+      assert.equal(report.evictions.length, 0, 'clone eviction is S27, not wired here');
+
+      const moduleNames = report.perModule.map((r) => r.module).sort();
+      assert.deepEqual(moduleNames, ['authorization', 'journal', 'notifier', 'operator-identity', 'structured-store']);
+
+      const journalReport = report.perModule.find((r) => r.module === 'journal')!;
+      assert.equal(journalReport.deletedRows, 1, 'the old settled entry qualifies');
+
+      // Exactly one `info` maintenance-pass row, never one per module or per row.
+      const after = new DatabaseSync(path.join(volume, 'store.sqlite'));
+      const outboxRows = after.prepare(`SELECT severity, payload FROM notification_outbox`).all() as { severity: string; payload: string }[];
+      after.close();
+      const summaries = outboxRows.filter((row) => (JSON.parse(row.payload) as { subject?: { kind?: string } }).subject?.kind === 'maintenance-pass');
+      assert.equal(summaries.length, 1);
+      assert.equal(summaries[0]!.severity, 'info');
+      const subject = (JSON.parse(summaries[0]!.payload) as { subject: { prunedByModule: unknown[] } }).subject;
+      assert.equal(subject.prunedByModule.length, report.perModule.length);
+    } finally {
+      await lifecycle.shutdown('operator');
+    }
+  });
+});
+
+test('S25.7 — a maintenance-pass notification that fails to enqueue is recorded on the notifier\'s own retention report, not silently dropped', async () => {
+  await withVolumeAsync(async (volume) => {
+    const realStore = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    // Every other member delegates to the real store; only `transaction` is
+    // overridden, so `runMaintenance`'s enqueue step sees a genuine store
+    // failure the way a lock-contention or I/O error would produce one.
+    const store = { ...realStore, transaction: async () => err(storeError({ code: 'io-failed' }, 'induced: enqueue transaction failed')) };
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const notifier = createNotifier({ volumeRoot: volume, clock: systemClock, webhookUrl: null });
+
+    const lifecycle = createLifecycle({
+      volumeRoot: volume,
+      buildDir: writeBuildDir(volume),
+      clock: systemClock,
+      store,
+      audit,
+      operatorIdentity: operatorIdentityFor(volume, audit),
+      consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+      ceiling: EMPTY_CEILING,
+      revalidateFileWatchers: async () => ok(undefined),
+      notifier,
+    });
+
+    try {
+      const booted = await lifecycle.boot();
+      assert.equal(booted.ok, true);
+      if (!booted.ok) return;
+
+      const report = await lifecycle.runMaintenance('scheduled');
+
+      const notifierReport = report.perModule.find((r) => r.module === 'notifier');
+      assert.ok(notifierReport, 'the notifier still ran its own retention pass');
+      assert.match(
+        notifierReport!.skipped.join(' | '),
+        /maintenance-pass summary not enqueued.*induced: enqueue transaction failed/,
+        'the enqueue failure must be visible in the report, not vanish once the transaction fails',
+      );
+
+      const after = new DatabaseSync(path.join(volume, 'store.sqlite'));
+      const outboxRows = after.prepare(`SELECT payload FROM notification_outbox`).all() as { payload: string }[];
+      after.close();
+      const summaries = outboxRows.filter((row) => (JSON.parse(row.payload) as { subject?: { kind?: string } }).subject?.kind === 'maintenance-pass');
+      assert.equal(summaries.length, 0, 'the failed transaction really did leave no row behind');
     } finally {
       await lifecycle.shutdown('operator');
     }

@@ -15,6 +15,7 @@ import { MCP_PROFILE, type Declaration } from '../declarations/types.ts';
 import type { ContractCapabilitySet, DeploymentCeiling, CapabilityName, McpScope, Scope, OperatorScope } from '../contract/capabilities.ts';
 import type { StoreTransaction } from '../store/structured-store.ts';
 import { storeError } from '../store/errors.ts';
+import { retentionCutoff, toRetentionReport, type RetentionReport } from '../shared/retention.ts';
 import { timingSafeStringEqual } from '../shared/timing-safe.ts';
 import { authorizationError, type AuthorizationError } from './errors.ts';
 import type { ClientRegistrationRequest, Grant, GrantKind, GrantView, IssuedMcpGrant, IssuedToken, McpGrantInput, OAuthClient, RefreshedTokens } from './types.ts';
@@ -38,7 +39,7 @@ export interface Authorization {
   revokeToken(jti: TokenId, actor: ActorRef): Promise<Outcome<void, AuthorizationError>>;
   revokeGrantsForResource(declarationId: DeclarationId, generation: Generation, tx: StoreTransaction): readonly GrantId[];
   revokeBearerToken(bearer: BearerToken, actor: ActorRef): Promise<Outcome<void, AuthorizationError>>;
-  runRetention(): Promise<{ readonly module: string; readonly deletedRows: number; readonly freedBytes: number; readonly skipped: readonly string[] }>;
+  runRetention(): Promise<RetentionReport>;
 }
 
 export interface AuthorizationDependencies {
@@ -57,6 +58,10 @@ export interface AuthorizationDependencies {
    * then failed to perform. Append-only, and only on the success path.
    */
   readonly audit: Pick<Audit, 'append'>;
+  /** `RetentionWindows.tokenDays` (`20-contract.md` § Deployment configuration, default 7). Local, overridable default — no `DeploymentConfig` is wired yet. */
+  readonly tokenDays?: number;
+  /** `RetentionWindows.revokedGrantDays` (default 180). Same reasoning as `tokenDays`. */
+  readonly revokedGrantDays?: number;
 }
 
 /** A year — long enough that a script's credential outlives ordinary use, short enough that an abandoned token does not stay live forever. Not fixed by the contract (`design/90-decisions.md` follows S4's `sessionAbsoluteSeconds` precedent: a number this interface cannot exist without). */
@@ -72,6 +77,9 @@ const OPERATOR_API_TOKEN_TTL_SECONDS_DEFAULT = 365 * 24 * 60 * 60;
  */
 const MCP_ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const MCP_REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
+
+const TOKEN_RETENTION_DAYS_DEFAULT = 7;
+const REVOKED_GRANT_RETENTION_DAYS_DEFAULT = 180;
 
 interface ClientRow {
   readonly client_id: string;
@@ -221,6 +229,9 @@ function expandScopes(scopes: readonly OperatorScope[], contractCapabilitySet: C
 }
 
 export function createAuthorization(deps: AuthorizationDependencies): Authorization {
+  const tokenDays = deps.tokenDays ?? TOKEN_RETENTION_DAYS_DEFAULT;
+  const revokedGrantDays = deps.revokedGrantDays ?? REVOKED_GRANT_RETENTION_DAYS_DEFAULT;
+
   /**
    * One audit line per credential mutation that actually reached the store.
    * `operationId`/`declarationId`/`generation`/`tool` are all null: none of
@@ -613,10 +624,52 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
       return rows.map((row) => row.grant_id as GrantId);
     },
 
-    async runRetention() {
-      // S17 owns retention, the same as every other module's stub today
-      // (`journal.ts`'s own `runRetention`) — nothing prunes yet.
-      return { module: 'authorization', deletedRows: 0, freedBytes: 0, skipped: ['retention lands in S17'] };
+    /**
+     * `token_retention` indexes exactly the token predicate. Tokens are
+     * deleted first, deliberately: a revoked `grant`/`oauth_client` is only
+     * eligible once no `token` row still references it (both are FK parents
+     * under `PRAGMA foreign_keys = ON`), and every token this pass would
+     * otherwise strand has already expired or been revoked well inside its
+     * own 7-day window by the time a grant reaches 180 days revoked — access
+     * tokens live an hour, refresh tokens 30 days, both far short of 180.
+     */
+    async runRetention(): Promise<RetentionReport> {
+      const now = deps.clock.now();
+      const tokenCutoff = retentionCutoff(now, tokenDays);
+      const grantCutoff = retentionCutoff(now, revokedGrantDays);
+      // BEGIN/COMMIT around the cascade: without it, a crash between the
+      // token delete and the grant/client deletes that depend on it leaves a
+      // transient state on disk until the next pass catches up. Cheap to
+      // avoid outright since all three statements already run on one
+      // connection.
+      const result = withDb(deps.volumeRoot, (db) => {
+        db.exec('BEGIN;');
+        try {
+          const tokenChanges = Number(
+            db.prepare('DELETE FROM token WHERE (revoked_at IS NOT NULL AND revoked_at < ?) OR (expires_at < ?)').run(tokenCutoff, tokenCutoff).changes,
+          );
+          const grantChanges = Number(
+            db
+              .prepare('DELETE FROM "grant" WHERE revoked_at IS NOT NULL AND revoked_at < ? AND NOT EXISTS (SELECT 1 FROM token WHERE token.grant_id = "grant".grant_id)')
+              .run(grantCutoff).changes,
+          );
+          const clientChanges = Number(
+            db
+              .prepare('DELETE FROM oauth_client WHERE revoked_at IS NOT NULL AND revoked_at < ? AND NOT EXISTS (SELECT 1 FROM "grant" WHERE "grant".client_id = oauth_client.client_id)')
+              .run(grantCutoff).changes,
+          );
+          db.exec('COMMIT;');
+          return tokenChanges + grantChanges + clientChanges;
+        } catch (cause) {
+          try {
+            db.exec('ROLLBACK;');
+          } catch {
+            // Already rolled back by the failure itself.
+          }
+          throw cause;
+        }
+      });
+      return toRetentionReport('authorization', result.ok ? result : { ok: false, summary: result.error.summary });
     },
   };
 }

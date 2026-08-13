@@ -647,3 +647,62 @@ test('revokeBearerToken resolves the presented value to its token and revokes it
     assert.equal(unknown.ok, true);
   });
 });
+
+test('S25.4 — runRetention deletes an expired-or-revoked token past its window, and a revoked grant/client past theirs once no token references it', async () => {
+  await migratedVolume(async (volume) => {
+    const auth = createAuthorization({
+      volumeRoot: volume,
+      clock: systemClock,
+      contractCapabilitySet: FULL_CEILING,
+      ceiling: FULL_CEILING as unknown as DeploymentCeiling,
+      declarations: declarationsFor(volume),
+      audit: createAudit({ volumeRoot: volume, clock: systemClock }),
+      tokenDays: 1,
+      revokedGrantDays: 1,
+    });
+
+    const old = new Date(Date.now() - 5 * 86_400_000).toISOString();
+    const future = new Date(Date.now() + 86_400_000).toISOString();
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+
+    // A client and a grant, both revoked well past their window, with one
+    // stale expired token still parked under the grant — the grant/client
+    // must wait for that token to go first.
+    db.prepare(`INSERT INTO oauth_client (client_id, redirect_uris, registered_at, revoked_at) VALUES ('client-old', '[]', ?, ?)`).run(old, old);
+    db.prepare(
+      `INSERT INTO "grant" (grant_id, kind, client_id, subject, resource, declaration_id, generation, scopes, created_at, last_used_at, revoked_at)
+       VALUES ('grant-old', 'mcp', 'client-old', 'ben', 'urn:example', 'repo-a', 1, '[]', ?, NULL, ?)`,
+    ).run(old, old);
+    db.prepare(
+      `INSERT INTO token (jti, grant_id, kind, verifier_hash, issued_at, expires_at, revoked_at) VALUES ('token-old-expired', 'grant-old', 'access', 'h1', ?, ?, NULL)`,
+    ).run(old, old);
+
+    // A live grant with a token still inside its window — must survive.
+    db.prepare(
+      `INSERT INTO "grant" (grant_id, kind, client_id, subject, resource, declaration_id, generation, scopes, created_at, last_used_at, revoked_at)
+       VALUES ('grant-live', 'operator-api', NULL, 'ben', NULL, NULL, NULL, '[]', ?, NULL, NULL)`,
+    ).run(systemClock.now());
+    db.prepare(
+      `INSERT INTO token (jti, grant_id, kind, verifier_hash, issued_at, expires_at, revoked_at) VALUES ('token-live', 'grant-live', 'access', 'h2', ?, ?, NULL)`,
+    ).run(systemClock.now(), future);
+    db.close();
+
+    // One call, and the fixed token-then-grant-then-client order means the
+    // grant/client deletes see the token delete that ran just ahead of them
+    // in the same call, on the same connection — the stranding token and the
+    // grant/client it was blocking clear in a single pass, not two.
+    const report = await auth.runRetention();
+    assert.equal(report.module, 'authorization');
+    assert.equal(report.deletedRows, 3, 'the expired token, the now-token-free grant and the now-grant-free client all qualify');
+
+    const after = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    const grants = (after.prepare('SELECT grant_id FROM "grant"').all() as { grant_id: string }[]).map((r) => r.grant_id);
+    const clients = (after.prepare('SELECT client_id FROM oauth_client').all() as { client_id: string }[]).map((r) => r.client_id);
+    const tokens = (after.prepare('SELECT jti FROM token').all() as { jti: string }[]).map((r) => r.jti);
+    after.close();
+
+    assert.deepEqual(grants, ['grant-live']);
+    assert.deepEqual(clients, []);
+    assert.deepEqual(tokens, ['token-live']);
+  });
+});
