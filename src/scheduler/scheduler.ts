@@ -119,27 +119,68 @@ function loadJob(db: DatabaseSync, id: ScheduledJobId): ScheduledJob | null {
   return row ? toJob(row) : null;
 }
 
-/** Mirrors `journal.ts`'s own `withDb`: one connection per call, and a thrown already-shaped `SchedulerError` (`cancel`'s `job-not-found`/`job-not-pending`) passes through rather than being re-wrapped as a store failure it never was. */
-function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): Outcome<T, SchedulerError> {
-  let db: DatabaseSync;
+/** Mirrors `declarations.ts`'s own classification: a `CHECK`/`UNIQUE`/`FOREIGN KEY`/`NOT NULL` failure is a `constraint-violated` precondition, not an opaque `io-failed` infrastructure fault. */
+function classifyStoreFailure(message: string): SchedulerError {
+  const isConstraint = /CHECK constraint|UNIQUE constraint|FOREIGN KEY|NOT NULL constraint/i.test(message);
+  return schedulerError({ code: 'store-failed', cause: storeError(isConstraint ? { code: 'constraint-violated', constraint: message } : { code: 'io-failed' }, message) }, message);
+}
+
+function openDb(volumeRoot: string): Outcome<DatabaseSync, SchedulerError> {
   try {
     mkdirSync(volumeRoot, { recursive: true });
-    db = new DatabaseSync(path.join(volumeRoot, 'store.sqlite'));
+    const db = new DatabaseSync(path.join(volumeRoot, 'store.sqlite'));
     db.exec('PRAGMA foreign_keys = ON;');
+    return ok(db);
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
-    return err(schedulerError({ code: 'store-failed', cause: storeError({ code: 'io-failed' }, message) }, `could not open the structured store: ${message}`));
+    return err(classifyStoreFailure(`could not open the structured store: ${message}`));
   }
+}
+
+/** Mirrors `journal.ts`'s own `withDb`: one connection per call, and a thrown already-shaped `SchedulerError` (`cancel`'s `job-not-found`/`job-not-pending`) passes through rather than being re-wrapped as a store failure it never was. `tick`/`resolveRunningAtBoot`/`revalidatePending` open their own connection via `openDb` instead and hold it for their whole batch — a fresh connection per row was real, measured per-tick I/O (review finding). */
+function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): Outcome<T, SchedulerError> {
+  const opened = openDb(volumeRoot);
+  if (!opened.ok) return opened;
   try {
-    return ok(fn(db));
+    return ok(fn(opened.value));
   } catch (cause) {
     if (cause !== null && typeof cause === 'object' && 'resultKind' in cause && 'code' in cause) {
       return err(cause as SchedulerError);
     }
     const message = cause instanceof Error ? cause.message : String(cause);
-    return err(schedulerError({ code: 'store-failed', cause: storeError({ code: 'io-failed' }, message) }, message));
+    return err(classifyStoreFailure(message));
   } finally {
-    db.close();
+    opened.value.close();
+  }
+}
+
+/** Writes one row's status, swallowing a failure into a log line rather than aborting the whole batch — the same best-effort shape the old per-row `withDb` call already had, just against a connection the caller already holds open. */
+function writeStatus(db: DatabaseSync, id: ScheduledJobId, status: ScheduledJobStatus, reason: string | null, now: IsoUtcTimestamp): void {
+  try {
+    db.prepare('UPDATE scheduled_job SET status = ?, reason = ?, updated_at = ? WHERE id = ?').run(status, reason, now, id);
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    console.error(`scheduler: could not move job '${id}' to '${status}': ${message}`);
+  }
+}
+
+/**
+ * The claim that closes the race a bare `writeStatus(..., 'running', ...)`
+ * left open: between `tick`'s due-job read and this write, a concurrent
+ * `cancel()` (or a second, overlapping `tick`) may already have moved the
+ * row off `pending`. `WHERE status = 'pending'` is the whole mechanism, the
+ * same one `Notifier.claim` already uses for the identical shape of race —
+ * a job this call does not win is never fired, and the cancellation (or the
+ * other tick's claim) that beat it here stands.
+ */
+function claimForFiring(db: DatabaseSync, id: ScheduledJobId, now: IsoUtcTimestamp): boolean {
+  try {
+    const result = db.prepare("UPDATE scheduled_job SET status = 'running', reason = NULL, updated_at = ? WHERE id = ? AND status = 'pending'").run(now, id);
+    return Number(result.changes) === 1;
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    console.error(`scheduler: could not claim job '${id}' for firing: ${message}`);
+    return false;
   }
 }
 
@@ -152,15 +193,6 @@ function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): Outcome<T, 
  */
 export function createScheduler(deps: SchedulerDependencies): Scheduler {
   const { volumeRoot, clock } = deps;
-
-  async function setStatus(id: ScheduledJobId, status: ScheduledJobStatus, reason: string | null, now: IsoUtcTimestamp): Promise<void> {
-    const written = withDb(volumeRoot, (db) => {
-      db.prepare('UPDATE scheduled_job SET status = ?, reason = ?, updated_at = ? WHERE id = ?').run(status, reason, now, id);
-    });
-    if (!written.ok) {
-      console.error(`scheduler: could not move job '${id}' to '${status}': ${written.error.summary}`);
-    }
-  }
 
   return {
     async create(input: CreateJobInput, ctx: CallContext): Promise<Outcome<ScheduledJob, SchedulerError>> {
@@ -242,11 +274,28 @@ export function createScheduler(deps: SchedulerDependencies): Scheduler {
       });
     },
 
-    /** `20-contract.md`'s one `tx`-taking member — writes and reads back through the caller's own transaction, the same shape `Authorization.revokeGrantsForResource` and `Declarations.bumpGrantEpoch` already use (issue #50). No caller wires this into `Declarations.orphan` yet — that cascade is issue #66's, outside this slice's `Touches`. */
+    /**
+     * `20-contract.md`'s one `tx`-taking member — writes and reads back
+     * through the caller's own transaction, the same shape
+     * `Authorization.revokeGrantsForResource` and `Declarations.bumpGrantEpoch`
+     * already use (issue #50). Wired into `Declarations.orphan` (S16.5).
+     *
+     * `UPDATE ... RETURNING id` captures exactly the rows this call touched
+     * in the one statement — not a second `SELECT` matched on
+     * `(declaration_id, reason, updated_at)`, which would also match rows an
+     * *earlier* call with the same `reason` happened to cancel at the same
+     * `updated_at` (two orphanings of the same declaration racing, or a
+     * clock whose resolution collides), over-reporting which jobs this
+     * particular invocation cancelled.
+     */
     cancelForDeclaration(declarationId: DeclarationId, reason: string, tx: StoreTransaction): readonly ScheduledJobId[] {
       const now = clock.now();
-      tx.run("UPDATE scheduled_job SET status = 'cancelled', reason = ?, updated_at = ? WHERE declaration_id = ? AND status = 'pending'", reason, now, declarationId);
-      const rows = tx.all("SELECT id FROM scheduled_job WHERE declaration_id = ? AND status = 'cancelled' AND reason = ? AND updated_at = ?", declarationId, reason, now) as { id: string }[];
+      const rows = tx.all(
+        "UPDATE scheduled_job SET status = 'cancelled', reason = ?, updated_at = ? WHERE declaration_id = ? AND status = 'pending' RETURNING id",
+        reason,
+        now,
+        declarationId,
+      ) as { id: string }[];
       return rows.map((row) => row.id as ScheduledJobId);
     },
 
@@ -266,84 +315,106 @@ export function createScheduler(deps: SchedulerDependencies): Scheduler {
       const skipped: SkippedJob[] = [];
       const cancelledList: SkippedJob[] = [];
 
-      const due = withDb(volumeRoot, (db) => {
-        const rows = db.prepare("SELECT * FROM scheduled_job WHERE status = 'pending' AND not_before <= ? ORDER BY not_before ASC").all(now) as unknown as ScheduledJobRow[];
-        return rows.map(toJob);
-      });
-      if (!due.ok) return { fired, skipped, cancelled: cancelledList };
+      // One connection for the whole tick, not one per row: the due-job
+      // read plus every status write below share it, instead of each
+      // `setStatus` reopening the store (review finding — up to 2N+1
+      // connections for N due jobs). `writeStatus`/`claimForFiring` are
+      // themselves best-effort against this connection, matching the
+      // per-row error handling the old per-call `withDb` had.
+      const opened = openDb(volumeRoot);
+      if (!opened.ok) return { fired, skipped, cancelled: cancelledList };
+      const db = opened.value;
+      try {
+        let due: readonly ScheduledJob[];
+        try {
+          due = (db.prepare("SELECT * FROM scheduled_job WHERE status = 'pending' AND not_before <= ? ORDER BY not_before ASC").all(now) as unknown as ScheduledJobRow[]).map(toJob);
+        } catch (cause) {
+          const message = cause instanceof Error ? cause.message : String(cause);
+          console.error(`scheduler: tick could not read due jobs: ${message}`);
+          return { fired, skipped, cancelled: cancelledList };
+        }
 
-      for (const job of due.value) {
-        if (job.onMissed.mode === 'skip_if_older_than') {
-          const overdueMs = Date.parse(now) - Date.parse(job.notBefore as unknown as string);
-          if (overdueMs > job.onMissed.seconds * 1000) {
-            const reason = `missed its ${job.notBefore} window by ${Math.round(overdueMs / 1000)}s, exceeding the ${job.onMissed.seconds}s skip_if_older_than policy`;
-            await setStatus(job.id, 'skipped', reason, now);
+        for (const job of due) {
+          if (job.onMissed.mode === 'skip_if_older_than') {
+            const overdueMs = Date.parse(now) - Date.parse(job.notBefore as unknown as string);
+            if (overdueMs > job.onMissed.seconds * 1000) {
+              const reason = `missed its ${job.notBefore} window by ${Math.round(overdueMs / 1000)}s, exceeding the ${job.onMissed.seconds}s skip_if_older_than policy`;
+              writeStatus(db, job.id, 'skipped', reason, now);
+              skipped.push({ id: job.id, reason });
+              continue;
+            }
+          }
+
+          if (job.createdBy.grantId !== null && deps.authorization) {
+            const live = await deps.authorization.grantIsLive(job.createdBy.grantId);
+            if (!live) {
+              const reason = `the creating grant '${job.createdBy.grantId}' was revoked before this job's due time`;
+              writeStatus(db, job.id, 'cancelled', reason, now);
+              cancelledList.push({ id: job.id, reason });
+              continue;
+            }
+          }
+
+          const declaration = await deps.declarations.get(job.declarationId);
+          if (declaration === null) {
+            const reason = `declaration '${job.declarationId}' no longer exists`;
+            writeStatus(db, job.id, 'needs-attention', reason, now);
             skipped.push({ id: job.id, reason });
             continue;
           }
-        }
 
-        if (job.createdBy.grantId !== null && deps.authorization) {
-          const live = await deps.authorization.grantIsLive(job.createdBy.grantId);
-          if (!live) {
-            const reason = `the creating grant '${job.createdBy.grantId}' was revoked before this job's due time`;
-            await setStatus(job.id, 'cancelled', reason, now);
-            cancelledList.push({ id: job.id, reason });
+          const entry = deps.registryEntry(job.tool);
+          if (!entry || !entry.annotations.schedulable) {
+            const reason = `'${job.tool}' is no longer a schedulable registry tool`;
+            writeStatus(db, job.id, 'needs-attention', reason, now);
+            skipped.push({ id: job.id, reason });
             continue;
           }
-        }
 
-        const declaration = await deps.declarations.get(job.declarationId);
-        if (declaration === null) {
-          const reason = `declaration '${job.declarationId}' no longer exists`;
-          await setStatus(job.id, 'needs-attention', reason, now);
-          skipped.push({ id: job.id, reason });
-          continue;
-        }
+          const recomputedGrant = deps.declarations.effectiveGrant(deps.contractCapabilitySet, deps.ceiling, declaration, job.frozenGrant as unknown as SessionGrant);
+          const missing = entry.capabilities.filter((capability) => !recomputedGrant.has(capability));
+          if (missing.length > 0) {
+            const reason = `re-intersection at fire time lost: ${missing.join(', ')}`;
+            writeStatus(db, job.id, 'needs-attention', reason, now);
+            skipped.push({ id: job.id, reason });
+            continue;
+          }
 
-        const entry = deps.registryEntry(job.tool);
-        if (!entry || !entry.annotations.schedulable) {
-          const reason = `'${job.tool}' is no longer a schedulable registry tool`;
-          await setStatus(job.id, 'needs-attention', reason, now);
-          skipped.push({ id: job.id, reason });
-          continue;
-        }
+          // The claim, not a bare write: between the SELECT above and here,
+          // a concurrent `cancel()` (or a second, overlapping `tick`) may
+          // already have moved this row off `pending`. Losing the claim
+          // means someone else already decided this job's fate — it is
+          // neither fired nor reported into `skipped`/`cancelled`, which
+          // would double-report a job another actor already accounted for.
+          if (!claimForFiring(db, job.id, now)) continue;
+          fired.push(job.id);
 
-        const recomputedGrant = deps.declarations.effectiveGrant(deps.contractCapabilitySet, deps.ceiling, declaration, job.frozenGrant as unknown as SessionGrant);
-        const missing = entry.capabilities.filter((capability) => !recomputedGrant.has(capability));
-        if (missing.length > 0) {
-          const reason = `re-intersection at fire time lost: ${missing.join(', ')}`;
-          await setStatus(job.id, 'needs-attention', reason, now);
-          skipped.push({ id: job.id, reason });
-          continue;
+          const session: Session = {
+            id: randomUUID() as SessionId,
+            kind: 'scheduler',
+            actorRef: { kind: 'scheduler', subject: `scheduler:${job.id}` as Subject, clientId: null, grantId: null },
+            repositoryBinding: job.declarationId,
+            grant: recomputedGrant as unknown as SessionGrant,
+            writablePathPrefixes: deps.declarations.effectiveWritablePrefixes(declaration, SCHEDULER_PROFILE),
+            frozenAtEpoch: declaration.grantEpoch,
+          };
+          const result = await deps.dispatch({
+            toolName: job.tool,
+            input: job.input,
+            session,
+            declarationId: job.declarationId,
+            scheduledJobId: job.id,
+            context: 'normal',
+            signal: new AbortController().signal,
+          });
+          if (result.ok) {
+            writeStatus(db, job.id, 'done', null, clock.now());
+          } else {
+            writeStatus(db, job.id, 'needs-attention', `'${job.tool}' returned ${result.kind}: ${result.summary}`, clock.now());
+          }
         }
-
-        await setStatus(job.id, 'running', null, now);
-        fired.push(job.id);
-
-        const session: Session = {
-          id: randomUUID() as SessionId,
-          kind: 'scheduler',
-          actorRef: { kind: 'scheduler', subject: `scheduler:${job.id}` as Subject, clientId: null, grantId: null },
-          repositoryBinding: job.declarationId,
-          grant: recomputedGrant as unknown as SessionGrant,
-          writablePathPrefixes: deps.declarations.effectiveWritablePrefixes(declaration, SCHEDULER_PROFILE),
-          frozenAtEpoch: declaration.grantEpoch,
-        };
-        const result = await deps.dispatch({
-          toolName: job.tool,
-          input: job.input,
-          session,
-          declarationId: job.declarationId,
-          scheduledJobId: job.id,
-          context: 'normal',
-          signal: new AbortController().signal,
-        });
-        if (result.ok) {
-          await setStatus(job.id, 'done', null, clock.now());
-        } else {
-          await setStatus(job.id, 'needs-attention', `'${job.tool}' returned ${result.kind}: ${result.summary}`, clock.now());
-        }
+      } finally {
+        db.close();
       }
 
       return { fired, skipped, cancelled: cancelledList };
@@ -365,36 +436,47 @@ export function createScheduler(deps: SchedulerDependencies): Scheduler {
       const returnedToPending: ScheduledJobId[] = [];
       const leftRunning: ScheduledJobId[] = [];
 
-      const running = withDb(volumeRoot, (db) => {
-        const rows = db.prepare("SELECT id FROM scheduled_job WHERE status = 'running'").all() as unknown as { id: string }[];
-        return rows.map((row) => row.id as ScheduledJobId);
-      });
-      if (!running.ok) return { markedDone, markedNeedsAttention, returnedToPending, leftRunning };
+      // One connection for the whole boot pass, not one per running job.
+      const opened = openDb(volumeRoot);
+      if (!opened.ok) return { markedDone, markedNeedsAttention, returnedToPending, leftRunning };
+      const db = opened.value;
+      try {
+        let running: readonly ScheduledJobId[];
+        try {
+          running = (db.prepare("SELECT id FROM scheduled_job WHERE status = 'running'").all() as unknown as { id: string }[]).map((row) => row.id as ScheduledJobId);
+        } catch (cause) {
+          const message = cause instanceof Error ? cause.message : String(cause);
+          console.error(`scheduler: resolveRunningAtBoot could not read running jobs: ${message}`);
+          return { markedDone, markedNeedsAttention, returnedToPending, leftRunning };
+        }
 
-      const now = clock.now();
-      for (const id of running.value) {
-        const found = await deps.journal.findByScheduledJob(id);
-        if (!found.ok) {
-          // The journal could not be read — this job's outcome is unknown,
-          // not "nothing happened". Leaving it `running` is the honest
-          // answer, the same one a read failure gets everywhere else in
-          // recovery.
-          leftRunning.push(id);
-          continue;
+        const now = clock.now();
+        for (const id of running) {
+          const found = await deps.journal.findByScheduledJob(id);
+          if (!found.ok) {
+            // The journal could not be read — this job's outcome is unknown,
+            // not "nothing happened". Leaving it `running` is the honest
+            // answer, the same one a read failure gets everywhere else in
+            // recovery.
+            leftRunning.push(id);
+            continue;
+          }
+          const entry = found.value;
+          if (entry === null) {
+            writeStatus(db, id, 'pending', null, now);
+            returnedToPending.push(id);
+          } else if (entry.state === 'settled') {
+            writeStatus(db, id, 'done', null, now);
+            markedDone.push(id);
+          } else if (entry.state === 'attention') {
+            writeStatus(db, id, 'needs-attention', entry.attentionReason ?? 'parked during recovery', now);
+            markedNeedsAttention.push(id);
+          } else {
+            leftRunning.push(id);
+          }
         }
-        const entry = found.value;
-        if (entry === null) {
-          await setStatus(id, 'pending', null, now);
-          returnedToPending.push(id);
-        } else if (entry.state === 'settled') {
-          await setStatus(id, 'done', null, now);
-          markedDone.push(id);
-        } else if (entry.state === 'attention') {
-          await setStatus(id, 'needs-attention', entry.attentionReason ?? 'parked during recovery', now);
-          markedNeedsAttention.push(id);
-        } else {
-          leftRunning.push(id);
-        }
+      } finally {
+        db.close();
       }
 
       return { markedDone, markedNeedsAttention, returnedToPending, leftRunning };
@@ -409,30 +491,42 @@ export function createScheduler(deps: SchedulerDependencies): Scheduler {
      */
     async revalidatePending(registry: CompiledRegistry): Promise<readonly ScheduledJobId[]> {
       const parked: ScheduledJobId[] = [];
-      const pending = withDb(volumeRoot, (db) => {
-        const rows = db.prepare("SELECT * FROM scheduled_job WHERE status = 'pending'").all() as unknown as ScheduledJobRow[];
-        return rows.map(toJob);
-      });
-      if (!pending.ok) return parked;
 
-      const now = clock.now();
-      for (const job of pending.value) {
-        const entry = registry.entries.find((candidate) => candidate.name === job.tool);
-        let reason: string | null = null;
-        if (!entry) {
-          reason = `'${job.tool}' no longer exists in the compiled registry, following an image upgrade`;
-        } else if (!entry.annotations.schedulable) {
-          reason = `'${job.tool}' is no longer annotated schedulable, following an image upgrade`;
-        } else {
-          const findings = validateAgainstSchema(entry.inputSchema, job.input);
-          if (findings.length > 0) {
-            reason = `the stored input for '${job.tool}' no longer satisfies its schema, following an image upgrade`;
+      // One connection for the whole revalidation pass, not one per pending job.
+      const opened = openDb(volumeRoot);
+      if (!opened.ok) return parked;
+      const db = opened.value;
+      try {
+        let pending: readonly ScheduledJob[];
+        try {
+          pending = (db.prepare("SELECT * FROM scheduled_job WHERE status = 'pending'").all() as unknown as ScheduledJobRow[]).map(toJob);
+        } catch (cause) {
+          const message = cause instanceof Error ? cause.message : String(cause);
+          console.error(`scheduler: revalidatePending could not read pending jobs: ${message}`);
+          return parked;
+        }
+
+        const now = clock.now();
+        for (const job of pending) {
+          const entry = registry.entries.find((candidate) => candidate.name === job.tool);
+          let reason: string | null = null;
+          if (!entry) {
+            reason = `'${job.tool}' no longer exists in the compiled registry, following an image upgrade`;
+          } else if (!entry.annotations.schedulable) {
+            reason = `'${job.tool}' is no longer annotated schedulable, following an image upgrade`;
+          } else {
+            const findings = validateAgainstSchema(entry.inputSchema, job.input);
+            if (findings.length > 0) {
+              reason = `the stored input for '${job.tool}' no longer satisfies its schema, following an image upgrade`;
+            }
+          }
+          if (reason !== null) {
+            writeStatus(db, job.id, 'needs-attention', reason, now);
+            parked.push(job.id);
           }
         }
-        if (reason !== null) {
-          await setStatus(job.id, 'needs-attention', reason, now);
-          parked.push(job.id);
-        }
+      } finally {
+        db.close();
       }
       return parked;
     },

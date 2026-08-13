@@ -15,6 +15,7 @@ import {
   type PathPrefix,
   type RegistryToolName,
   type RemoteHost,
+  type ScheduledJobId,
 } from '../shared/brands.ts';
 import type { ActorRef } from '../shared/actor.ts';
 import {
@@ -97,6 +98,16 @@ export interface DeclarationsDependencies {
   readonly registryEntry?: (tool: RegistryToolName) => ToolDeclaration | null;
   /** Set once by the composition root after `CloneStore` exists; see `CloneAdoptionCheck` above. */
   readonly cloneAdoptionCheck: () => CloneAdoptionCheck;
+  /**
+   * Injected, never imported — Declarations is L1 and Scheduler is L2, so
+   * this module cannot depend on `Scheduler`'s own type; a plain function
+   * matching `Scheduler.cancelForDeclaration`'s shape is enough for `orphan`
+   * to fold the cascade into its own transaction. Optional so a
+   * `Declarations` built before the scheduler existed still compiles:
+   * without it, orphaning cancels no scheduled jobs, the same honest-empty
+   * direction `orphan`'s still-unwired grant revocation already takes.
+   */
+  readonly cancelScheduledJobsForDeclaration?: (declarationId: DeclarationId, reason: string, tx: StoreTransaction) => readonly ScheduledJobId[];
 }
 
 interface DeclarationRow {
@@ -557,17 +568,24 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
       }
 
       const now = clock.now();
-      const written = withDb(volumeRoot, (db) => {
-        db.prepare("UPDATE declaration SET state = 'orphaned', updated_at = ? WHERE id = ? AND generation = ?").run(now, id, existing.generation);
-      });
+      const written = withDb(volumeRoot, (db) =>
+        withLocalTransaction(db, (tx) => {
+          tx.run("UPDATE declaration SET state = 'orphaned', updated_at = ? WHERE id = ? AND generation = ?", now, id, existing.generation);
+          // S16.5 — orphaning moves this declaration's pending scheduled jobs
+          // to `cancelled` naming the orphaning, inside the same transaction
+          // as the state flip: a rolled-back orphan (the write above losing
+          // the generation race) must not have already cancelled jobs out
+          // from under it.
+          return deps.cancelScheduledJobsForDeclaration ? deps.cancelScheduledJobsForDeclaration(id, `declaration '${id}' was orphaned`, tx) : [];
+        }),
+      );
       if (!written.ok) return err(declarationError({ code: 'store-failed', cause: written.error }, written.error.summary));
 
-      // Grants and scheduled jobs are owned by modules that do not exist yet
-      // (Authorization/S13, Scheduler/S16) — `30-slices.md` § S5 "Out of
-      // scope": "the rest of the orphaning cascade... each is added by the
-      // slice that creates them." Empty here is the honest current answer,
-      // not a stub standing in for one: nothing has been cancelled or
-      // revoked because nothing existed to.
+      // Grant revocation is owned by a module this dependency group does not
+      // yet reach — `30-slices.md` § S5 "Out of scope": "the rest of the
+      // orphaning cascade... each is added by the slice that creates them."
+      // Empty here is the honest current answer, not a stub standing in for
+      // one: nothing has been revoked because nothing revoked it.
       //
       // `fileWatcherStopped` is true whenever this declaration named a file
       // watcher, because the state flip to `orphaned` above is itself what
@@ -578,7 +596,7 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
       return ok({
         declarationId: id,
         generation: existing.generation,
-        cancelledJobs: [],
+        cancelledJobs: written.value,
         revokedGrants: [],
         retainedJournalEntries: [],
         cloneLeftOnDisk: true,

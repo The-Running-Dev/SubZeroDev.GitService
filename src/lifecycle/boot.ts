@@ -367,22 +367,36 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       // the freshly loaded registry, and the scheduler's job classification
       // reads only the journal (no git or host I/O), so nothing here is
       // ordered behind it — it runs first only because it is named first.
-      const jobsResolved = deps.scheduler ? await deps.scheduler.resolveRunningAtBoot() : NO_JOBS;
-
+      //
       // Step 7's job half — an image upgrade can rename, remove or
       // re-schema a tool a pending job still references; caught here rather
       // than at fire time. `registryEntries` is the production declaration
       // set this same boot already verified every executor exists for
       // (invariant B5 above), assembled into the `CompiledRegistry` shape
       // `revalidatePending` takes rather than re-deriving it from the build
-      // artifact a second time.
-      const compiledRegistryForRevalidation: CompiledRegistry = {
-        fingerprint: registry.value.contractFingerprint,
-        compiledAt: deps.clock.now(),
-        entries: deps.registryEntries ?? [],
-        contractCapabilitySet: registry.value.contractCapabilitySet,
-      };
-      const jobsParked = deps.scheduler ? await deps.scheduler.revalidatePending(compiledRegistryForRevalidation) : [];
+      // artifact a second time. **Only run when `registryEntries` was
+      // actually supplied** — defaulting a missing registry to an empty
+      // array here would make `revalidatePending` see every tool as gone
+      // and park every pending job `needs-attention` naming an "image
+      // upgrade" that never happened (review finding). `registryEntries`
+      // absent means "this `Lifecycle` was not given one", not "the
+      // registry is empty" — those are different facts, and only the
+      // second one is revalidation's to act on. Steps 6 and 7 run
+      // concurrently: both re-validate against state loaded earlier in
+      // this same boot (the journal; the registry), and neither depends on
+      // the other's result.
+      const compiledRegistryForRevalidation: CompiledRegistry | null = deps.registryEntries
+        ? {
+            fingerprint: registry.value.contractFingerprint,
+            compiledAt: deps.clock.now(),
+            entries: deps.registryEntries,
+            contractCapabilitySet: registry.value.contractCapabilitySet,
+          }
+        : null;
+      const [jobsResolved, jobsParked] = await Promise.all([
+        deps.scheduler ? deps.scheduler.resolveRunningAtBoot() : Promise.resolve(NO_JOBS),
+        deps.scheduler && compiledRegistryForRevalidation ? deps.scheduler.revalidatePending(compiledRegistryForRevalidation) : Promise.resolve([]),
+      ]);
 
       // Invariant B6 — an image upgrade may remove or change a tool named by
       // an active declaration's file-watcher pair. The declarations store is

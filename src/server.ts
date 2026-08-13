@@ -40,7 +40,7 @@ import { createWatcher } from './watcher/watcher.ts';
 import { COMPOSITE_RECOVERY_DESCRIPTORS } from './composites/recovery-descriptors.ts';
 import { createHttpAdapter } from './http/http-adapter.ts';
 import { createAuthorization } from './authorization/authorization.ts';
-import { createScheduler, createSchedulerOperations } from './scheduler/scheduler.ts';
+import { createScheduler, createSchedulerOperations, type Scheduler } from './scheduler/scheduler.ts';
 import type { Session } from './shared/session.ts';
 import type { GrantEpoch, SessionId, Subject } from './shared/brands.ts';
 
@@ -154,6 +154,27 @@ function resolveNotifierIntervalSeconds(): number {
   return value;
 }
 
+/**
+ * How often the composition root drives `Scheduler.tick`. No contract knob
+ * exists for this — `20-contract.md`'s `Scheduler` interface has no
+ * start/stop, unlike `Watcher`'s (§ L2 — watcher), because a tick engine
+ * owning its own timer cannot be driven deterministically by a test; the
+ * composition root's job, the same reasoning `resolveNotifierIntervalSeconds`
+ * above already documents for the identical shape. 15 s matches the
+ * watcher's own default poll interval — the slack a caller's `notBefore`
+ * can be off by before firing.
+ */
+function resolveSchedulerIntervalSeconds(): number {
+  const raw = process.env.SCHEDULER_TICK_INTERVAL_SECONDS;
+  if (raw === undefined || raw.trim().length === 0) return 15;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    console.error(`server: SCHEDULER_TICK_INTERVAL_SECONDS must be an integer of at least 1 (got '${raw}')`);
+    process.exit(1);
+  }
+  return value;
+}
+
 /** `DeploymentConfig.remoteOperationsPermitted` (`20-contract.md` § Deployment configuration) — default off, so an unset variable never grants it. */
 function resolveRemoteOperationsPermitted(): boolean {
   return process.env.REMOTE_OPERATIONS_PERMITTED === 'true';
@@ -225,12 +246,22 @@ async function main(): Promise<void> {
   // mutable forward reference breaks the cycle without either module
   // depending on the other's factory function.
   let cloneStoreRef: CloneStore | null = null;
+  // S16.5 — the same forward-reference shape as `cloneStoreRef` above, for
+  // the same reason: `Scheduler` (L2) depends on `Declarations` (L1)
+  // already, so `Declarations` cannot import `Scheduler`'s own type without
+  // a cycle. `orphan` only ever calls this after boot, well after
+  // `schedulerRef` below is set.
+  let schedulerRef: Pick<Scheduler, 'cancelForDeclaration'> | null = null;
   const declarations = createDeclarations({
     volumeRoot,
     clock: systemClock,
     remoteHostAllowlist,
     ceiling,
     registryEntry: (tool) => PRODUCTION_TOOL_DECLARATIONS.find((entry) => entry.name === tool) ?? null,
+    cancelScheduledJobsForDeclaration: (declarationId, reason, tx) => {
+      if (!schedulerRef) throw new Error('server: declarations orphan cascade accessed before composition finished');
+      return schedulerRef.cancelForDeclaration(declarationId, reason, tx);
+    },
     cloneAdoptionCheck: () => {
       const store = cloneStoreRef;
       if (!store) throw new Error('cloneStore accessed before composition finished');
@@ -395,6 +426,10 @@ async function main(): Promise<void> {
     contractCapabilitySet,
     ceiling,
   });
+  // Closes the forward reference `declarations`'s `cancelScheduledJobsForDeclaration`
+  // opened above — set well before `orphan` can ever be called (boot has not
+  // even run yet at this point in composition).
+  schedulerRef = scheduler;
   const schedulerOperations = createSchedulerOperations(scheduler, systemClock);
   moduleAdapter.register('scheduler.create' as ModuleTargetName, toModuleHandler(schedulerOperations.create));
   moduleAdapter.register('scheduler.list' as ModuleTargetName, toModuleHandler(schedulerOperations.list));
@@ -512,6 +547,28 @@ async function main(): Promise<void> {
   // received (`10-design.md` § Boot and recovery: recovery is lazy, not a
   // boot step).
   dispatchRef = dispatchPipeline.dispatch;
+
+  // S16 — what actually drives `Scheduler.tick`. `Scheduler`'s own contract
+  // interface has no start/stop (unlike `Watcher`'s), so this is the
+  // composition root's job, the same reasoning and the same reentrancy-guard
+  // shape `deliveryTimer` below already uses for `Notifier.deliverPending`:
+  // a tick whose dispatched operation outlasts the interval must not let the
+  // next firing start a second, overlapping tick against the same rows.
+  // Tracked so shutdown can wait for it, same as `deliveryInFlight`.
+  let schedulerTickInFlight: Promise<unknown> | null = null;
+  const schedulerTimer = setInterval(() => {
+    if (schedulerTickInFlight) return;
+    schedulerTickInFlight = scheduler
+      .tick(systemClock.now())
+      .catch((error: unknown) => {
+        console.error(`server: scheduler tick failed: ${error instanceof Error ? error.message : String(error)}`);
+      })
+      .finally(() => {
+        schedulerTickInFlight = null;
+      });
+  }, resolveSchedulerIntervalSeconds() * 1000);
+  // Unreferenced, so a pending timer never keeps the process alive on its own.
+  schedulerTimer.unref();
 
   // S17 — the watcher. Both deployment switches default off (`not-permitted`
   // is the expected, ordinary shape of `start()`'s refusal on a deployment
@@ -657,6 +714,7 @@ async function main(): Promise<void> {
   const shutdown = (signal: NodeJS.Signals): void => {
     ready = false;
     clearInterval(deliveryTimer);
+    clearInterval(schedulerTimer);
     // `watcher.stop()` itself waits out any tick already in flight (a tick
     // does the same class of writes as a delivery pass — git push, PR open,
     // store/audit transactions), so it is awaited alongside `deliveryInFlight`
@@ -667,9 +725,12 @@ async function main(): Promise<void> {
       // releasing the lease while one is still running would let this
       // process keep writing after a replacement has taken the volume —
       // two writers, which is the single invariant the lease exists for.
-      // Bounded because every attempt now carries a timeout.
+      // Bounded because every attempt now carries a timeout. `schedulerTickInFlight`
+      // joins the same wait: a tick mid-dispatch holds the identical class of
+      // store/audit/journal connections.
       void Promise.resolve(deliveryInFlight)
         .catch(() => undefined)
+        .then(() => Promise.resolve(schedulerTickInFlight).catch(() => undefined))
         .then(() => watcherStopped.catch(() => undefined))
         .then(() => lifecycle.shutdown('signal'))
         .then(() => process.exit(0));

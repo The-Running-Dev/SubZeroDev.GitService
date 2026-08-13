@@ -555,3 +555,61 @@ test('cancel reports job-not-found for another declaration\'s job, and job-not-p
     if (!cancelledAgain.ok) assert.equal(cancelledAgain.error.code, 'job-not-pending');
   });
 });
+
+test('a job cancelled between tick\'s due-job read and its firing write is never fired — the cancellation stands', async () => {
+  await withMigratedVolume(async (volume) => {
+    const ceiling = ceilingOf('host.pr.write');
+    const contract = contractOf('host.pr.write');
+    const declarations = await createDeclaredRepo(volume, ceiling, ['host.pr.write']);
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const { dispatch, calls } = recordingDispatch();
+    const grantId = 'grant-1';
+    // `grantIsLive` runs early in `tick`'s per-job loop and is `await`ed —
+    // exactly the async gap a concurrent `cancel()` would land in between
+    // `tick`'s due-job SELECT and its firing write. Mutating the row
+    // directly here, from inside that gap, reproduces the race without
+    // needing real concurrency: by the time `tick` reaches its claim, the
+    // row is already `cancelled`, same as if another caller's `cancel()`
+    // had won it first.
+    const authorization: Pick<Authorization, 'grantIsLive'> = {
+      async grantIsLive() {
+        const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+        try {
+          db.prepare("UPDATE scheduled_job SET status = 'cancelled', reason = 'cancelled mid-tick' WHERE declaration_id = 'repo-a'").run();
+        } finally {
+          db.close();
+        }
+        return true;
+      },
+    };
+    const scheduler = createScheduler({
+      volumeRoot: volume,
+      clock: systemClock,
+      dispatch,
+      declarations,
+      journal,
+      authorization,
+      registryEntry: registryEntryFor([SCHEDULABLE_TOOL]),
+      contractCapabilitySet: contract,
+      ceiling,
+    });
+    const actorRef: ActorRef = { kind: 'mcp', subject: 'sub' as never, clientId: null, grantId: grantId as never };
+    const ctx = ctxFor('repo-a', 1, ['host.pr.write'], actorRef);
+    const created = await scheduler.create(
+      { declarationId: 'repo-a' as never, tool: SCHEDULABLE_TOOL.name, input: {}, notBefore: systemClock.now(), onMissed: { mode: 'catch_up' } },
+      ctx,
+    );
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+
+    const tick = await scheduler.tick(systemClock.now());
+    assert.deepEqual(tick.fired, [], 'the job was cancelled mid-tick; it must not be reported as fired');
+    assert.equal(calls.length, 0, 'a cancelled job must never reach dispatch');
+
+    const jobs = await scheduler.list('repo-a' as never, null);
+    const job = jobs.find((candidate) => candidate.id === created.value.id);
+    assert.ok(job);
+    assert.equal(job!.status, 'cancelled', 'the concurrent cancellation must survive tick\'s own write, not be overwritten back to running');
+    assert.equal(job!.reason, 'cancelled mid-tick');
+  });
+});
