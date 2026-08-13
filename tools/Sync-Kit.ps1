@@ -34,6 +34,25 @@
     .github/ISSUE_TEMPLATE/) stays target-wins and stays /install's, per that entry's
     "Narrows" note on 2026-08-02.
 
+    CORE COMMAND FILES ARE THE EXCEPTION TO THE THIRD ROW.
+
+    Per .claude/COMPANIONS.md, a command file is a *core* the consuming repository never edits;
+    per-repo behaviour lives in a companion at .claude/commands/<name>-local.md, which the kit
+    does not ship and which no path here ever reads, writes or deletes. So for a core the
+    third row splits in two:
+
+      companion present    The target has adopted the split, and the companion is where its
+                           local content belongs. The core is taken outright and the overwrite
+                           is reported as Superseded - never silently, because a core edit
+                           made before the companion existed is still real content going away.
+      companion absent     The target's edit has not been migrated. Unmigrated-Blocked: left
+                           alone, reported, and the fix is to move it into a companion. This is
+                           a one-time migration state, not an ongoing reconciliation - once the
+                           edit has moved, every later sync takes that core with no pass at all.
+
+    A companion that is missing, empty or frontmatter-only is absent; all three are one case,
+    and Test-Companion.ps1 owns that rule rather than this script carrying a second copy of it.
+
 .PARAMETER TargetRepo
     Repository to sync into. Defaults to the current directory.
 
@@ -122,6 +141,10 @@ function Invoke-GitRaw {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
+    # Without this, .NET picks the OS's OEM code page (e.g. ibm437) instead of the UTF-8
+    # git actually writes, so any non-ASCII byte (an em dash, for example) decodes to the
+    # wrong character and every comparison below reports a false divergence.
+    $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
     $proc = [System.Diagnostics.Process]::Start($psi)
     $stdout = $proc.StandardOutput.ReadToEnd()
     $proc.StandardError.ReadToEnd() | Out-Null
@@ -149,6 +172,42 @@ function Test-GitRefExists {
     param([string]$Sha, [string]$WorkingDir)
     & git -C $WorkingDir cat-file -e $Sha 2>$null
     return ($LASTEXITCODE -eq 0)
+}
+
+# Test-CompanionAbsent is COMPANIONS.md's *Absence* rule in code - missing, empty and
+# frontmatter-only as one case. Dot-sourced rather than reimplemented: two copies of that rule
+# would diverge, and the divergence would be invisible because both would still return $true
+# for the common case. The guard in that script means dot-sourcing defines its functions
+# without running its body or exiting.
+#
+# Dot-sourcing also re-runs the other script's `param()` block in *this* scope, so any
+# parameter the two share is silently reset to the other script's default - and both of them
+# quite reasonably call their input -TargetRepo. Snapshot this script's own parameters across
+# the call. The list is explicit rather than derived so that a parameter added to either script
+# later is a visible edit here, not a silent overwrite; Sync-Kit.Tests.ps1 guards it either way.
+$companionScript = Join-Path $PSScriptRoot 'Test-Companion.ps1'
+if (-not (Test-Path -LiteralPath $companionScript)) {
+    throw "'$companionScript' is missing. It owns the companion-absence rule this script needs; both ship together as kit-owned files in tools/."
+}
+$ownParams = @{}
+foreach ($name in @('TargetRepo', 'KitRoot', 'RecordedSha', 'Force', 'IncludeUnchanged', 'DryRun')) {
+    $ownParams[$name] = (Get-Variable -Name $name -ValueOnly)
+}
+. $companionScript
+foreach ($name in $ownParams.Keys) {
+    Set-Variable -Name $name -Value $ownParams[$name]
+}
+
+function Test-CoreCommandPath {
+    param([string]$RelPath)
+    $p = $RelPath -replace '\\', '/'
+    return ($p -like '.claude/commands/*.md') -and ($p -notlike '*-local.md')
+}
+
+function Get-CompanionPathFor {
+    param([string]$RelPath)
+    $p = $RelPath -replace '\\', '/'
+    return ($p -replace '\.md$', '-local.md')
 }
 
 $kitRootResolved = Resolve-KitRoot -Explicit $KitRoot
@@ -188,7 +247,11 @@ if (-not (Test-GitRefExists -Sha $RecordedSha -WorkingDir $kitRootResolved)) {
     throw "Recorded sha '$RecordedSha' is not reachable in '$kitRootResolved'. Fetch it, or pass -KitRoot at a checkout that has it."
 }
 
-$kitOwnedDirs = @('.claude/commands', 'tools')
+# `.claude/COMPANIONS.md` is a path rather than a directory; `git ls-tree -r -- <path>` treats
+# both the same way. It is kit-owned for the same reason the two directories are: it is the
+# mechanism, and COMPANIONS.md § *Never* forbids a companion from changing it, so there is no
+# per-repo variant of it to protect.
+$kitOwnedDirs = @('.claude/commands', 'tools', '.claude/COMPANIONS.md')
 
 function Get-TreePaths {
     param([string]$Sha, [string[]]$Dirs, [string]$WorkingDir)
@@ -233,16 +296,39 @@ foreach ($relPath in ($scopePaths | Sort-Object)) {
     $targetExists = Test-Path -LiteralPath $targetPath
     $targetContent = if ($targetExists) { Get-Content -LiteralPath $targetPath -Raw } else { $null }
 
-    $targetMatchesRecorded = ($targetExists -eq $recordedExists) -and ($targetContent -ceq $recordedContent)
+    # $targetContent preserves whatever line endings are on disk (CRLF under
+    # core.autocrlf=true); $recordedContent is the git blob, normally LF-only. Normalise
+    # both before comparing so a target that never touched the file's content - just
+    # checked it out with CRLF - isn't reported as a local edit.
+    $targetContentNormalized = if ($null -ne $targetContent) { $targetContent -replace "`r`n", "`n" } else { $targetContent }
+    $recordedContentNormalized = if ($null -ne $recordedContent) { $recordedContent -replace "`r`n", "`n" } else { $recordedContent }
+
+    $targetMatchesRecorded = ($targetExists -eq $recordedExists) -and ($targetContentNormalized -ceq $recordedContentNormalized)
+
+    $isCore = Test-CoreCommandPath -RelPath $relPath
+    $companionPresent = $isCore -and -not (Test-CompanionAbsent -Path (Join-Path $targetRepoResolved (Get-CompanionPathFor -RelPath $relPath)))
+    $supersede = $false
 
     if (-not $targetMatchesRecorded) {
         if (-not $recordedExists -and $targetExists) {
-            # New-to-the-kit path, but the target already has an unrelated file there.
+            # New-to-the-kit path, but the target already has an unrelated file there. Tested
+            # before the core branches below: a same-named file the kit never installed is not
+            # an unmigrated edit to a core, it is a different file that happens to collide.
             $report.Add((New-SyncReport $relPath 'Collision-Skipped' 'Target has an unrelated file at this new kit path.'))
-        } else {
-            $report.Add((New-SyncReport $relPath 'Divergent-Skipped' 'Target modified this file locally; never merged.'))
+            continue
         }
-        continue
+        if (-not $isCore) {
+            $report.Add((New-SyncReport $relPath 'Divergent-Skipped' 'Target modified this file locally; never merged.'))
+            continue
+        }
+        if (-not $companionPresent) {
+            $report.Add((New-SyncReport $relPath 'Unmigrated-Blocked' "Target edited this core and has no $(Get-CompanionPathFor -RelPath $relPath). Move the edit there, then re-sync."))
+            continue
+        }
+        # Companion present: the split is adopted here, so the core is the kit's outright. Falls
+        # through to the write below rather than skipping, reported as Superseded so an
+        # overwritten core edit is never lost silently.
+        $supersede = $true
     }
 
     if (-not $headExists) {
@@ -256,7 +342,7 @@ foreach ($relPath in ($scopePaths | Sort-Object)) {
         continue
     }
 
-    $verb = if ($targetExists) { 'Updated' } else { 'Added' }
+    $verb = if ($supersede) { 'Superseded' } elseif ($targetExists) { 'Updated' } else { 'Added' }
     $status = if ($DryRun) { "Would$verb" } else { $verb }
     if (-not $DryRun) {
         $parent = Split-Path -Parent $targetPath
@@ -280,6 +366,14 @@ if ($visible.Count -gt 0) {
 $divergentCount = @($report | Where-Object { $_.Status -in @('Divergent-Skipped', 'Collision-Skipped') }).Count
 if ($divergentCount -gt 0) {
     Write-Host "$divergentCount file(s) diverged locally and were left alone - hand these to /install for judgment."
+}
+$unmigratedCount = @($report | Where-Object Status -eq 'Unmigrated-Blocked').Count
+if ($unmigratedCount -gt 0) {
+    Write-Host "$unmigratedCount core command file(s) carry local edits with no companion beside them - see .claude/COMPANIONS.md. Move each edit into .claude/commands/<name>-local.md and re-run; nothing was overwritten."
+}
+$supersededCount = @($report | Where-Object { $_.Status -in @('Superseded', 'WouldSuperseded') }).Count
+if ($supersededCount -gt 0) {
+    Write-Host "$supersededCount core command file(s) had local edits overwritten by the kit's copy because a companion exists for them - the companion is where per-repo content belongs, and was not touched."
 }
 $removedCount = @($report | Where-Object Status -eq 'RemovedUpstream-Skipped').Count
 if ($removedCount -gt 0) {

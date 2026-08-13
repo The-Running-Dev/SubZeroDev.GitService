@@ -3,6 +3,13 @@ description: Turn a rough ask into a prompt carrying this repository's binding c
 argument-hint: <rough ask>
 ---
 
+<!-- companion:start -->
+**Per-repo companion:** `.claude/commands/refine-local.md`. Read it now, if it exists — an absent,
+empty, or frontmatter-only file is no companion, and this file then stands alone.
+It may override: `vocabulary`, `document-map`. It may never override anything in
+[`.claude/COMPANIONS.md`](../COMPANIONS.md) § *Never*, which is also where these categories are defined.
+<!-- companion:end -->
+
 Turn **$ARGUMENTS** into a prompt that carries the constraints this repository actually binds an agent to.
 
 The value here is not better wording. It is that you do not have to remember which decision, non-goal, or lesson applies before you ask for something. Generic prompt refinement is available elsewhere and is not what this is for.
@@ -93,3 +100,10 @@ Halt and say so rather than refining:
 - Never widen the ask. A vague request becomes precise, not larger.
 - Never write to `design/`, to `agent.md`, or to the tracker. This command emits text and nothing else.
 - Never emit more than about fifteen lines. A prompt long enough to need skimming has reproduced the problem it was meant to solve.
+
+## Re-run
+
+Stateless — nothing it emits is stored, so a re-run on the same ask re-derives the prompt from
+`AGENTS.md`, `design/`, and `agent.md` as they stand now, not from a remembered prior emission.
+A constraint lifted since the last run drops out of `Binding`; one added since shows up. It
+never treats a prior refinement of the same ask as already answered.

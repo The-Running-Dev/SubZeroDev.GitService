@@ -3,6 +3,13 @@ description: Clone or update the shared kit checkout at ~/.agent-kit, then run I
 argument-hint: [branch]
 ---
 
+<!-- companion:start -->
+**Per-repo companion:** `.claude/commands/kit-sync-local.md`. Read it now, if it exists — an absent,
+empty, or frontmatter-only file is no companion, and this file then stands alone.
+It may override: `extra-steps`, `tightened-authorization`. It may never override anything in
+[`.claude/COMPANIONS.md`](../COMPANIONS.md) § *Never*, which is also where these categories are defined.
+<!-- companion:end -->
+
 Get the kit itself onto disk, then reconcile it into this repository — the two steps `/install` needs, done back to back, without requiring the kit to already be checked out somewhere you point at.
 
 **This repository must be the target, not the kit.** If this tree contains `INSTALL.md` and `.claude/commands/design.md`, it is the kit itself; stop and say so rather than cloning the kit into itself.
@@ -55,9 +62,19 @@ Everything `INSTALL.md` phase 3 already requires, plus:
 
 - Branch synced, and whether `~/.agent-kit` was cloned fresh or fast-forwarded
 - If the fast-forward was refused: say so, and stop there — do not fall through to reconciliation against a checkout that may not hold the commits `origin` has
+- Any `Unmigrated-Blocked` core, naming the `-local.md` its edit belongs in. This is the one thing a routine sync now stops on for command files; everything else about them applies outright, per `.claude/COMPANIONS.md`
 
 ## Never
 
 - Force-push, reset, or discard uncommitted work in `~/.agent-kit`. It is shared across every repository that runs this command.
 - Hardcode a source URL as a fallback. Absent `kit.json` means asking, once.
+- Write, rewrite, or delete this repository's `.claude/commands/*-local.md`. They are the reason a routine sync can take every core outright; a sync that edited them would be reconciling the very thing the split moved out of its way.
 - Commit or push anything in *this* repository — same as `/install`, this stops at the phase 3 report, and applies only after sign-off.
+
+## Re-run
+
+Meant to be run routinely — that is why `~/.agent-kit` fast-forwards rather than being cloned
+fresh every time. A re-run against an already-current checkout is a fast-forward of zero
+commits, not an error, and reconciliation still runs against the target exactly as `/install`
+describes there: an artifact already reconciled reports identical, an unresolved fork is asked
+about again rather than assumed answered.

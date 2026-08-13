@@ -3,6 +3,13 @@ description: Where this repository is in the pipeline, and what to run next. Usa
 argument-hint: [all, or a stage or command name]
 ---
 
+<!-- companion:start -->
+**Per-repo companion:** `.claude/commands/kit-help-local.md`. Read it now, if it exists — an absent,
+empty, or frontmatter-only file is no companion, and this file then stands alone.
+It may override: `vocabulary`, `document-map`. It may never override anything in
+[`.claude/COMPANIONS.md`](../COMPANIONS.md) § *Never*, which is also where these categories are defined.
+<!-- companion:end -->
+
 Orient the user in this repository's pipeline. **$1** narrows it — `all` shows the whole flow, a stage or command name shows that step. With nothing, work out where the repository actually is and show the current step and the next one.
 
 **Do not dump this whole file back.** It is a map you read, not a message you echo. Reciting eleven steps to someone who needs the next one is the mechanical text work `AGENTS.md` says should not be a model's job at all — and here, unlike a script, you can tell which step they are on.
@@ -89,3 +96,10 @@ For something short-lived, the honest minimum is `00-brief.md` with real non-goa
 - **Where it needs a fresh session, say so as the banner defined in `AGENTS.md`, *Session boundaries*** — set off visibly, not folded into the same sentence as the orientation line. This is the one command whose entire job is telling the user what's next, so it is the last place that banner should be easy to miss.
 - **Do not run the next command.** This orients; it does not act. Ending a session may be the next step, and a command that starts work cannot tell the user to start a new session for it.
 - **Do not invent a step, a stage, or a tier.** If something here does not cover the situation, say so — an invented step in a help command is the one that gets followed.
+
+## Re-run
+
+Stateless and safe to run any time, including back to back. It writes nothing and remembers
+nothing between runs — every orientation is re-derived from `design/`, the current branch, and
+the tracker as they stand at the moment it runs, so the answer can legitimately change between
+two calls in the same conversation if something else moved the tree in between.
