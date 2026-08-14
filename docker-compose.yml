@@ -1,0 +1,41 @@
+# S28 — the deployment run configuration.
+#
+# The shape `10-design.md` and `20-contract.md` require: a container-managed
+# named volume for the data volume (never a bind mount of a host path —
+# advisory locking over a bind-mounted Windows path is the failure S28's own
+# boot self-test exists to catch), a read-only bind mount for the credential
+# mount, and one bind mount per watched declaration's inbox, each landing at
+# `<data volume>/watcher-inboxes/<declarationId>` (`watcher.ts`'s
+# `inboxRootFor`). Uncomment and repeat the inbox mount per declaration that
+# has a `fileWatcher` configured; a declaration with none needs no inbox
+# mount at all.
+#
+# Build with `docker build --build-arg GIT_COMMIT_SHA=$(git rev-parse HEAD) -t subzerodev-git .`
+# first, or point `image:` at a tag already built that way — `/healthz`'s
+# `commitSha` is only meaningful when it names the commit the image actually
+# came from.
+
+services:
+  git-service:
+    image: subzerodev-git:latest
+    build:
+      context: .
+      args:
+        GIT_COMMIT_SHA: ${GIT_COMMIT_SHA:-}
+    ports:
+      - '8080:8080'
+    volumes:
+      - data:/data
+      - ./credentials:/credentials:ro
+      # - ./watcher-inboxes/<declarationId>:/data/watcher-inboxes/<declarationId>
+    environment:
+      REMOTE_HOST_ALLOWLIST: ''
+      DEPLOYMENT_CEILING: ''
+      PUBLIC_ORIGIN: ''
+    restart: unless-stopped
+
+volumes:
+  # Named and driver-managed by Docker itself — never `driver_opts` naming a
+  # host bind path. That is the one substitution this compose file must
+  # never be edited to make (`10-design.md` § mutation lock; S28.4).
+  data:
