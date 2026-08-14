@@ -1,0 +1,12 @@
+node_modules
+build
+volume
+credentials
+.git
+.github
+.claude
+.track-ticks
+agent.md
+AGENTS.md
+CLAUDE.md
+*.md
