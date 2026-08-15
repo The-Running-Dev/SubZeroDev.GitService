@@ -12,6 +12,38 @@ Append-only. Newest at the top. The rejected alternatives are the point — with
 - **Repository config must stay descriptive.** Settled for now (see the decision below), and it holds only while the format carries no permission-shaped field. Worth a check at `/contract` rather than trusting anyone to remember. **The design states the test in checkable form** (`10-design.md` § `RepositoryConfig`): any field a caller could set that widens what the service will do lives in the declaration instead. **Checked at `/contract` 2026-08-03 and clean:** `RepositoryConfig` declares `baseBranch`, `requiredChecks`, `deployWorkflow` and `branchPrefixes` and nothing else; no capability, scope, path prefix, credential reference, remote, host, timeout or limit has drifted into it. The test is now invariant A8 in `20-contract.md`, so the next check is a re-read of one table row rather than a re-derivation.
 ---
 
+### 2026-08-14 — S28.4's bind-mount lease refusal does not reproduce on current Docker Desktop
+Context: `10-design.md` (§ mutation lock, restated at S28.4) asserts that "advisory locking over a
+bind-mounted Windows path has historically been unreliable enough that two instances can both
+believe they hold the lease," and S28.4 requires demonstrating boot exit `lease-not-exclusive`
+against a real bind-mounted Windows host path, on the real image. Run for real against Docker
+Desktop 4.86 (WSL2 backend, the only backend this version ships — the Hyper-V backend option has
+been removed from Docker Desktop's settings entirely): the lease self-test **passed** over a
+bind-mounted `C:\...` path, and a second container started against the same bind mount was
+correctly refused with `lease-held` (mutual exclusion held), not `lease-not-exclusive`. The
+self-test machinery itself is real (a spawned second process taking a real `fcntl`-backed
+`BEGIN EXCLUSIVE` SQLite lock) and is exercised correctly — this is not a code defect. The
+environmental premise the criterion is written against does not hold on this deployment target as
+it exists today.
+Chosen: Record the finding here rather than silently marking S28.4 met. S28's PR reports S28.4's
+first half (named volume boots, self-test passes) as met, and the bind-mount refusal half as
+**not reproducible as written** on current Docker Desktop, with this entry as the evidence. The
+`Done when` box for S28.4 is left unticked. No code, invariant, or acceptance-criterion text is
+changed here — `/slices` owns deciding whether S28.4 should be reworded, dropped, or reframed
+against a deployment configuration that still does exhibit the failure (if one exists), and that
+decision needs the design-level view `/design` or `/slices` brings, not a per-slice judgement call.
+Rejected: **Force a failure by fabricating one** (e.g. injecting a fake `LockAcquirer` at the
+service boundary rather than testing the real image) — S28's whole point is proving the property
+against the real container, and a fabricated failure would prove nothing about the actual
+deployment target. **Silently tick S28.4 as met** — the criterion asks for a demonstrated refusal,
+and none occurred; ticking it would be exactly the "assert what you have not checked" verification
+rules `AGENTS.md` forbids. **Switch Docker Desktop to Hyper-V and retest** — not possible on this
+installed version; the backend toggle no longer exists.
+Reversibility: cheap — a documentation/reporting decision, not a code change. Reopening it costs
+nothing more than re-running the same real test against a Docker Desktop version or configuration
+that still has a Hyper-V option, if one is ever needed.
+---
+
 ### 2026-08-14 — Post-S27 review: the disk-full refusal is decided before the global mutation lock, not after it
 Context: The new pre-`Journal.begin` refuse check landed after pre-state capture, inside the block
 that holds the **global** mutation lock. Its comment justified the position as keeping disk I/O off
