@@ -5,10 +5,13 @@ import type { StoreTableName } from './structured-store.ts';
  * disk-wide accounting and the watermark machinery (`clones` and the total/
  * used/percent figures, via `CloneStore.readVolumeUsage`) and real
  * `structured-store` bytes (via `Lifecycle.runMaintenance`'s own overlay of
- * `StructuredStore.usageByTable`). `audit-log`, `backups-and-snapshots` and
- * `watcher-files` are outside this slice's `Touches` list (Audit, Structured
- * store and Watcher own those directories) and stay honest zeros rather than
- * fabricating a number nothing has measured yet.
+ * `StructuredStore.usageByTable`). The 2026-08-13 post-S27 reconciliation
+ * wired the remaining three: `audit-log` (`Audit.usageBytes`),
+ * `backups-and-snapshots` (`StructuredStore.backupBytes`) and `watcher-files`
+ * (`Watcher.usageBytes`, folded into `CloneStore` by callback rather than
+ * import — `Watcher` is L2, `CloneStore` is L1). Every consumer here is real
+ * once its owning module is wired into `CloneStore`'s dependencies, and an
+ * honest zero when it is not.
  */
 export type VolumeConsumer = 'clones' | 'audit-log' | 'structured-store' | 'backups-and-snapshots' | 'watcher-files';
 

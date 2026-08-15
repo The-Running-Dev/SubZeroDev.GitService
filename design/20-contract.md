@@ -1107,6 +1107,13 @@ interface WatcherConfig {
   readonly pollIntervalSeconds: number;
 }
 
+/** The three durable-credential lifetimes `authorization.ts` mints. Joined 2026-08-13 — previously two were hardcoded constants with no override, and the third had only a code comment. */
+interface TokenLifetimes {
+  readonly mcpAccessSeconds: number;
+  readonly mcpRefreshSeconds: number;
+  readonly operatorApiSeconds: number;
+}
+
 interface DeploymentConfig {
   readonly ceiling: DeploymentCeiling;
   readonly remoteHostAllowlist: readonly RemoteHost[];
@@ -1116,6 +1123,9 @@ interface DeploymentConfig {
   readonly watermarks: DiskWatermarks;
   readonly timeouts: TimeoutBudget;
   readonly admission: AdmissionLimits;
+  readonly tokens: TokenLifetimes;
+  readonly notifierIntervalSeconds: number;
+  readonly maintenanceIntervalSeconds: number;
   readonly notifierWebhook: HttpsUrl | null;
   readonly oidcIssuer: HttpsUrl | null;
   readonly oidcSubjectAllowlist: readonly Subject[];
@@ -1131,9 +1141,11 @@ Defaults the design fixes: `auditSegmentBytes` 67108864, `auditDays` 90, `journa
 `fetchSeconds` 300, `pushSeconds` 300, `hatchSeconds` 60, `monitoringWaitCapSeconds` 1800,
 `mutationLockAcquireMs` 30000, `materialisationLockAcquireMs` 30000, `mutationQueueDepth` 32,
 `concurrentWaitsPerSession` 4, `concurrentLockFreeOperations` 16, `pollIntervalSeconds` 15,
-`watcher.enabled` false, `remoteOperationsPermitted` false, `sessionIdleSeconds` 3600 and
-`sessionAbsoluteSeconds` 43200. Configuration-backed values stay deployment-overridable; these are
-the values the service uses when it is not told otherwise. The session bounds are additionally
+`watcher.enabled` false, `remoteOperationsPermitted` false, `sessionIdleSeconds` 3600,
+`sessionAbsoluteSeconds` 43200, `mcpAccessSeconds` 3600, `mcpRefreshSeconds` 2592000 (30 days),
+`operatorApiSeconds` 31536000 (365 days), `notifierIntervalSeconds` 30 and
+`maintenanceIntervalSeconds` 86400. Configuration-backed values stay deployment-overridable; these
+are the values the service uses when it is not told otherwise. The session bounds are additionally
 bounded by `operatorSessionDays`, which retention fixes at 7.
 
 Notifier delivery makes at most five attempts. Each attempt has a 10-second timeout. After failed
@@ -3035,6 +3047,15 @@ interface ModuleErrorBase {
 }
 ```
 
+**Terminal modules are the exception, and there are exactly two.** The dispatch pipeline and the
+http adapter return a `ToolResult` rather than an error, because nothing sits above them to do the
+mapping — the pipeline is where the generating rule is *applied*, and the http adapter's one
+consumer reaches it only through the pipeline. A union for either would be a value constructed
+solely to be translated on the next line, and the translation would still be written per call site,
+so it buys the indirection without the property. Their failure sets are closed all the same, and
+each member's envelope is fixed in their sections below; a refusal added to either without a row
+there is the drift this exception makes checkable. Everything else on this page declares a union.
+
 ### Exec
 
 ```ts
@@ -3363,40 +3384,36 @@ type ModuleAdapterError = ModuleErrorBase & (
   | { readonly code: 'target-not-registered'; readonly target: ModuleTargetName }
   | { readonly code: 'duplicate-registration'; readonly target: ModuleTargetName }
 );
-
-type HttpAdapterError = ModuleErrorBase & (
-  | { readonly code: 'operation-not-declared'; readonly operation: HttpOperationName }
-  | { readonly code: 'unreachable-or-non-2xx'; readonly status: number | null }
-  | { readonly code: 'unexpected-commit'; readonly expected: GitSha; readonly served: GitSha }
-  | { readonly code: 'timed-out'; readonly limitSeconds: number }
-);
 ```
 
-`duplicate-registration`, `target-not-registered` and `operation-not-declared` are composition-time
-and boot-time faults and are fatal there — boot verifies every registry operation has exactly one
-executor. Reaching one at runtime is `infrastructure`.
+`duplicate-registration` and `target-not-registered` are composition-time and boot-time faults and
+are fatal there — boot verifies every registry operation has exactly one executor. Reaching one at
+runtime is `infrastructure`.
 
-The http adapter's other three variants are the complete failure set an unauthenticated GET can
-distinguish: `unreachable-or-non-2xx` maps to `upstream`, `unexpected-commit` to `precondition`
-naming both SHAs, `timed-out` to `timeout`. The four classifications of definition-of-done item 15
-belong to the companion check and are not reachable here.
+**The http adapter is terminal and declares no union**, for the reason given under *Terminal
+modules* at the head of this section: `invoke` returns a `ToolResult`, and there is no layer above
+it to map an error into one. Its failure set is nonetheless closed, because it is the complete set
+an unauthenticated GET can distinguish, and each member's kind is fixed here rather than left to a
+call site:
+
+| Failure | Envelope | Notes |
+|---|---|---|
+| The operation is not declared | `infrastructure` | Boot-time fault reached at runtime, exactly as the module adapter's is |
+| Unreachable, or a non-2xx, or a 200 whose body carries no readable commit | `upstream` | |
+| A 200 serving a commit other than the expected one | `precondition` | Naming both SHAs |
+| The declared timeout elapsed | `timeout` | |
+
+The four classifications of definition-of-done item 15 belong to the companion check and are not
+reachable here.
 
 ### Dispatch pipeline
 
-```ts
-type DispatchError = ModuleErrorBase & (
-  | { readonly code: 'tool-not-found'; readonly tool: RegistryToolName }
-  | { readonly code: 'capability-insufficient'; readonly missing: readonly CapabilityName[] }
-  | { readonly code: 'scope-insufficient'; readonly missing: readonly Scope[] }
-  | { readonly code: 'declaration-required' }
-  | { readonly code: 'input-invalid'; readonly findings: readonly Finding[] }
-  | { readonly code: 'output-invalid'; readonly findings: readonly Finding[] }
-  | { readonly code: 'result-too-large'; readonly bytes: number; readonly limit: number }
-  | { readonly code: 'grant-revoked' }
-);
-```
+**Terminal, and declares no union**, for the reason given under *Terminal modules* at the head of
+this section. The pipeline *is* the thing that produces the envelope, so an error type here would be
+a value it constructs only to map to itself one line later. Its refusals are still a closed set, and
+each one's envelope is fixed here rather than left to the call site that writes it:
 
-| Variant | Raised when | Retryable | Caller does |
+| Refusal | Raised when | Retryable | Envelope |
 |---|---|---|---|
 | `tool-not-found` | A by-name call for a tool that does not exist | no | `authorization`, audited. A stale catalogue is worth seeing |
 | `capability-insufficient` | The recomputed grant no longer admits the call | no | `authorization`, audited, no handler runs |

@@ -44,6 +44,251 @@ nothing more than re-running the same real test against a Docker Desktop version
 that still has a Hyper-V option, if one is ever needed.
 ---
 
+### 2026-08-14 — Post-S27 review: the disk-full refusal is decided before the global mutation lock, not after it
+Context: The new pre-`Journal.begin` refuse check landed after pre-state capture, inside the block
+that holds the **global** mutation lock. Its comment justified the position as keeping disk I/O off
+the hot path, which is true of reading `lastObservedUsage` and false of what the branch then does:
+`CloneStore.diskFullFindings` walks every materialised declaration and runs five git subprocesses
+against each (`computeBlockers` — status, stash list, rev-parse, two rev-lists). One refusal
+therefore serialised every other mutation in the process behind ~5N child processes, each queued
+call then refused identically and repeated the scan, and the convoy sustained itself for as long as
+the volume stayed full — with waiters timing out at `mutationLockAcquireMs`, or refused `queue-full`
+once the bound above landed. The pre-existing refusal in `ensure()` runs the same scan under one
+declaration's materialisation lock only; this branch was the regression, and it arrived in the same
+commit as the bound that amplifies it.
+Chosen: the check moves ahead of `acquireMutation`, still inside the `try` so the `finally` releases
+the materialisation lock and the pin that `ensure()` took. A refused call now costs nothing it had
+not already spent, and skips the `observeGitState` subprocess it used to run first. The reading is
+up to one operation stale by construction, so nothing about the decision needed the lock.
+Rejected: **Cache the blockers alongside `lastObservedUsage`** — removes the fan-out from the
+refusal path entirely rather than merely moving it out of the lock, and is probably where this ends
+up; rejected here because a cached blocker set has its own staleness contract to state, and the
+findings are what an operator acts on. **Return the refusal with no findings** — cheapest, and it
+guts S27.2's "naming which of the five consumers holds the volume", which is the whole reason the
+refusal is actionable.
+Reversibility: cheap — the branch moved, it did not change.
+---
+
+### 2026-08-14 — Post-S27 review: the queue bound is the mutation lock's alone
+Context: The queue-depth decision below argued entirely about the global mutation lock — "the only
+bound on waiter growth behind a slow transfer" — but the implementation threaded
+`mutationQueueDepth` into every mutex `createLocks` builds, per-declaration materialisation mutexes
+included. That is not a symmetric tightening. **Every dispatch acquires the materialisation mutex,
+reads included** (through `CloneStore.ensure`; a read releases it immediately after, but still
+queues for it), while a push or fetch holds it for the whole transfer. So a 300-second push plus 33
+concurrent `git_status` calls on one declaration hard-refused the 33rd with `conflict`, where before
+it waited a few milliseconds. A read being refused because a *write* is slow is a new failure mode
+the contract does not describe, and `DeploymentConfig.admission` names the field for the mutation
+queue.
+Chosen: materialisation mutexes are constructed unbounded; `mutationQueueDepth` bounds the global
+mutation mutex only. The global lock is held for that same slow transfer, so its own bound already
+covers the waiter growth the decision below protects against.
+Rejected: **A second configuration field for the materialisation queue** — the honest shape if a
+bound is genuinely wanted per declaration, but it adds a `DeploymentConfig` member to solve a
+problem nothing has yet exhibited, and a contract amendment is `/contract`'s to make, not a review
+fix's. **Bound it but exempt reads** — the mutex cannot see execution class, so this means a second
+acquire path and a caller that self-declares, which is the sort of flag that gets passed wrong once
+and silently unbounds the thing it was protecting.
+Reversibility: cheap — one argument, and a test that states the behaviour either way.
+---
+
+### 2026-08-14 — Post-S27 review: `readVolumeUsage`'s new consumers must not block the event loop, nor follow symlinks
+Context: The reconciliation that closed the last three permanent zeros in `VolumeUsage.byConsumer`
+generalised `clone-store.ts`'s private directory walk into `shared/retention.ts` and pointed three
+new callers at it. Two consequences neither the decision nor the implementation noticed. First, the
+walk is synchronous, and `readVolumeUsage` now folds three of them in while running from the
+mutating path's `finally` on **every** commit, push and stage — ninety days of audit segments plus
+every declaration's inbox tree, `statSync` by `statSync`, on the main thread, stalling every other
+in-flight response. `void`-ing the call buys nothing when the work inside it never yields. Second,
+the walk used `stat`, which follows symlinks, and one of its new roots is the watcher inbox tree —
+which is populated by operators, and which the watcher's own scan deliberately refuses to follow
+with `lstatSync` (S17.4). Following one counted a target elsewhere on the volume against
+`watcher-files`; a link to its own parent made the walk push the same subtree until the OS returned
+`ELOOP`, wildly over-counting on the way.
+Chosen: `directoryBytes` is asynchronous (`fs/promises`), and stats with `lstat`, counting only
+regular files — symlinks are skipped rather than resolved, matching the guard the watcher already
+applies to the same directory. Both regression tests were confirmed by reverting the fix.
+Rejected: **Cache the three cold readings behind a TTL** — the cheapest fix for the hot-path cost
+and probably right eventually, but it changes how fresh a reported byte figure is, which is a
+contract-visible property and so not a review fix's to decide. **Keep the walk synchronous and only
+fix the symlink half** — leaves the event-loop stall, which is the half that degrades every request
+rather than only a misconfigured volume. **A second, async-only copy of the walk for the new
+callers** — reintroduces exactly the duplicate this reconciliation removed.
+Reversibility: cheap — the callers were already `async`; only four call sites gained an `await`.
+---
+
+### 2026-08-14 — Post-S27 review: a gate states its own coverage, or it is a description
+Context: `check-layer-direction.ts` classified twelve top-level `src/` directories and returned
+`null` for everything else, skipping unclassified files silently. Of the 107 modules it reported
+walking, 29 were actually subject to B1. So renaming `src/surfaces`, or adding a new L4 or L5
+directory, disabled the check for it while the run still printed OK — the failure mode a
+drift-detection gate least tolerates, since the reassuring number stays reassuring. This is the same
+class of defect the gate was written to catch, one level up: an artifact describing an invariant
+rather than enforcing it.
+Chosen: every top-level entry under `src/` is either given a layer or listed in
+`UNLAYERED_TOP_ENTRIES` with the reason it has none (the composition root's two files; the
+cross-cutting primitives `shared`, `result`, `clock`). Anything in neither fails the build. Verified
+by adding a directory and confirming the non-zero exit, then removing it. Coverage rose from 29
+modules to 30 — `mcp-proxy` is L5 ("MCP transport", `10-design.md`'s module table) and had been
+unchecked.
+Rejected: **Classify every directory and drop the exemption set** — tidier, but it means asserting
+layers for `shared`, `result` and `clock` that the design's module table does not state, and an
+invented classification in a gate is worse than a named absence. **Warn rather than fail** — a
+warning in a build that prints OK is the status quo with extra text.
+Reversibility: cheap — the map and the set are data.
+---
+
+### 2026-08-13 — Post-S27 reconciliation: the refuse watermark gates every mutation, not only materialisation
+Context: `/reconcile` found `refuseAtPercent` read in exactly one place — `clone-store.ts`'s
+fresh-clone branch inside `ensure()`. A declaration whose clone is already `ready` never meets it, so
+`git_commit`, `git_fetch`, `git_push` and `git_raw` all run at 97 % full. The post-mutation check in
+the dispatch pipeline only fires `requestMaintenance`, fire-and-forget, after the operation has
+already completed. `10-design.md` says "at 95 % operations needing space are refused" and its
+disk-full failure row names "before clone **and after each mutation**" as the check points, with "the
+operation that needed the space is refused" as the outcome; neither had an implementation for a
+mutation against a materialised clone, and S27.2 had been read as satisfied by the materialisation
+path alone.
+Chosen: the mutating dispatch path checks `refuseAtPercent` before `Journal.begin`, against the usage
+reading the post-mutation check already takes, and returns `precondition` carrying the same
+`diskFullFindings` shape `CloneStore.ensure` already produces. Deliberately the last observed reading
+rather than a fresh one: the design keeps volume reads off the pre-mutation path on purpose, and a
+reading one operation stale is the difference between refusing at 95 % and refusing at 95 % plus one
+commit — which is what the 5 % headroom above the maintenance watermark exists to absorb.
+Rejected: **Read usage fresh on every mutation** — strictly correct, and it puts a `statfs` plus a
+`SUM` over the clone table inside the global mutation lock on every commit, which is the cost the
+design's own control-flow step 10 avoided by making the post-mutation reading advisory.
+**Narrow the design to materialisation only** — one cheap edit, and it means nothing stops the volume
+reaching 100 %; the 95 % watermark would stop meaning what it says, and S27.2 would be retro-narrowed
+to whatever happened to ship.
+Reversibility: cheap — one guard in the mutating path; deleting it restores today's behaviour.
+---
+
+### 2026-08-13 — Post-S27 reconciliation: every volume consumer reports real bytes, or the refusal blames the wrong one
+Context: `VolumeUsage.byConsumer` was only ever populated for `clones` and `structured-store`.
+`audit-log`, `backups-and-snapshots` and `watcher-files` were permanent zeros, documented as such in
+`store/volume-usage.ts` and scoped out of S27's `Touches` on the grounds that Audit, Structured store
+and Watcher own those directories. The consequence is the failure the consumer list was added to
+prevent, one file over: `10-design.md` records that the store was missing from an earlier draft,
+"which is precisely the case where eviction frees nothing and the refusal blames innocent
+declarations." Audit segments are 64 MB apiece retained 90 days, and backups are three pre-migration
+copies plus seven daily snapshots of the whole store — plausibly the largest consumer on the volume.
+No slice, landed or remaining, ever filled them: S26 gave those three owners a per-pass `freedBytes`,
+which answers a different question.
+Chosen: each owning module gains a bytes reader over the directory it already manages, and
+`computeVolumeUsage` folds all three in the way `structured-store` is already folded in. The cost
+lands on the refuse path and the maintenance pass only, never the hot path — the same placement
+`evictionBlockersAcrossDeclarations` already argues for.
+Rejected: **Amend the design to two measured consumers** — cheap, and it reinstates exactly the
+failure `10-design.md` line 128 was written to close, and would be expensive to reverse once the
+refusal's shape is documented as two. **Leave it and file a bug issue** — costs nothing today and
+leaves a refusal that reports three consumers as holding nothing while they hold the volume.
+Reversibility: cheap — the readers are additive and the overlay is one spread.
+---
+
+### 2026-08-13 — Post-S27 reconciliation: `mutationQueueDepth` is enforced, closing the last declared-and-dead admission member
+Context: `LockError`'s `queue-full` variant carries a `depth` field, `AdmissionLimits` carries
+`mutationQueueDepth`, `server.ts` resolves it from the environment, and nothing anywhere read it —
+`createMutex` pushes waiters into an unbounded array. `10-design.md`'s Boundaries table promises
+"Queue depth exceeded → Immediate refusal → `conflict`", and the bounded queue is the design's stated
+reason for rejecting reject-on-contention. This is the last surviving member of the set `20-contract.md`
+itself named when S10 added `admitLockFreeWait`: "fixed from the outset with nothing that raised or
+read them".
+Chosen: `acquire` refuses with `queue-full` when the waiter array is already at `mutationQueueDepth`,
+and `createLocks` threads the limit through as it already does for the two lock-free counters.
+Rejected: **Remove the variant and the config field** — defensible, since `acquire-timeout` already
+returns `conflict` and is what a caller sees today; rejected because it removes the only bound on
+waiter growth behind a slow transfer, and the union is expensive to change once a consumer branches
+on it. **Leave it and file a bug issue** — leaves the contract stating a refusal the service never
+performs, which is the shape the `agent.md` lesson added today exists to catch.
+Reversibility: cheap — one guard. *(Amended 2026-08-14 — this landed threading the bound through
+`createMutex` for **every** mutex, materialisation mutexes included, which this entry neither argued
+for nor noticed. See "the queue bound is the mutation lock's alone" below, which corrects it. The
+mutation-lock half stands exactly as recorded.)*
+---
+
+### 2026-08-13 — Post-S27 reconciliation: invariant B1 gets a real check, in the build rather than in CI
+Context: `20-contract.md` names "CI dependency-direction check" as B1's responsible party and
+`10-design.md` says the L2 boundary "is enforced by a dependency-direction check in CI, not by
+intent." There is no CI in this repository — `.github/` holds only issue templates — and
+`npm run check:layering` implements B8, the compiler's absence from the runtime, not B1. No slice
+owns building it. Three source files carry comments citing B1 as their reason for a structural
+choice, which is precisely the "by intent" the design says is not enough. No live violation: the only
+L2 edge from an upper layer is `dispatch-pipeline.test.ts` importing `createGitOperations`.
+Chosen: a `scripts/check-layer-direction.ts` beside the existing B8 check, walking the same
+TypeScript program and failing on any L0/L3/L4/L5 module that imports an L2 path, with
+`src/server.ts` exempt by path so widening the exemption is a visible diff. Wired into `npm run
+build`, so it runs wherever the gates run rather than waiting on a CI that does not exist. Test files
+are excluded from the walk and the reason is recorded in the script: a test composes the layers on
+purpose, and treating that as a violation would make the check's first finding a false one.
+Rejected: **Reword B1's responsible party to name the build** — cheap, and it would have written down
+that a named invariant has no enforcement, which is the state the sentence exists to deny.
+**Write the check and file a story for CI** — the wider gap (no CI at all, which B1, B3, B5 and
+`/verify` all assume) is real, but it is a separate piece of work and filing it is `/track`'s.
+Reversibility: cheap — one script and one line in `build`.
+---
+
+### 2026-08-13 — Post-S27 reconciliation: the composition root owns the three periodic timers; Lifecycle owns what a pass does
+Context: `10-design.md`'s module table gave Lifecycle "the maintenance-pass schedule … and the
+snapshot cadence". The tree has the 24-hour timer in `server.ts` beside the scheduler and notifier
+timers, and the snapshot interval inside the structured store's own `runRetention`. The design
+contradicted itself: its retention-owners table eleven lines earlier already gives "its own
+pre-migration copies and daily snapshots" to the structured store. And `Lifecycle`'s contract
+interface is `boot / runMaintenance / recoverDeclaration / shutdown` — no member could hold a
+schedule, so the sentence was never implementable as written. This is the second time the shape has
+been hit; the 2026-08-13 `Scheduler.tick` entry below reached the same conclusion and logged it,
+while the maintenance timer took the same route without one.
+Chosen: correct `10-design.md` to match the tree. Lifecycle's Owns column keeps the boot sequence and
+the retention order and explicitly disclaims the cadences; a new paragraph under the composition root
+states that driving a periodic pass is wiring, names all three timers and the reentrancy and shutdown
+requirements on them, and records the watcher as the deliberate exception whose poll loop is the
+delivery state machine rather than a schedule over it.
+Rejected: **Move the schedule into Lifecycle** — honours the design's sentence, and it is a new public
+interface, so it needs a contract amendment at `/contract`'s tier rather than this command's; it also
+gives up the deterministic-test property the 2026-08-13 `Scheduler.tick` decision chose the current
+shape for. **Record the divergence and change neither** — cheapest, and it leaves a reader of the
+module table briefed on an ownership the tree does not have.
+Reversibility: cheap as prose; the rejected alternative is expensive, since it is an interface change.
+---
+
+### 2026-08-13 — Post-S27 reconciliation: the dispatch pipeline and the http adapter are terminal and declare no error union
+Context: `20-contract.md` declared `DispatchError` and `HttpAdapterError` and neither existed in any
+source file. Both modules construct `ToolResult` envelopes directly, and every variant's mapped kind
+matched the contract's own tables in each case checked — `tool-not-found` to an audited
+`authorization`, `declaration-required` to `validation`, `result-too-large` to `infrastructure`,
+`unexpected-commit` to `precondition`. What was false was the section's opening claim that "the
+envelope's generating rule is applied once rather than per call site": for these two it is applied
+per call site, because there is nothing above them to apply it.
+Chosen: amend the contract. A *Terminal modules* paragraph at the head of *Error semantics* names the
+exception, says there are exactly two, and gives the reason — a union either module declared would be
+a value constructed solely to be translated on the next line, with the translation still written per
+call site. Both sections keep their tables as the fixed mapping, restated as refusal-to-envelope
+rather than variant-to-`ResultKind`, so a refusal added without a row there is still checkable drift.
+Rejected: **Add the two unions to the code** — makes the opening claim true everywhere, at the cost of
+an indirection in the one place nothing consumes it, touching every return in the pipeline for no
+behavioural change. **Leave it and file a bug issue** — leaves the contract's own opening rule stating
+something false about two of its modules.
+Reversibility: cheap as prose.
+---
+
+### 2026-08-13 — Post-S27 reconciliation: five loose operational numbers join `DeploymentConfig`
+Context: U6 declared operational numbers resolved on 2026-08-11 and fixed every one under
+`### Deployment configuration`. Five were not there. Three token lifetimes are hardcoded constants in
+`authorization.ts` with no override at all — MCP access 1 h, MCP refresh 30 d, and an operator-api
+token at **one year** — and two cadences read the environment but appear in no document: the
+notifier's 30 s delivery pass and the maintenance pass's 86 400 s. Their sibling, the scheduler's 15 s
+tick, has a decision entry from earlier today; these do not. A one-year durable credential for the
+scripting surface is the one that most needed a recorded reason and had only a code comment.
+Chosen: all five join `DeploymentConfig` with their current values as documented defaults, and the
+three TTLs become deployment-overridable like everything else. `DeploymentConfig` is then the complete
+list U6 says it is, rather than the list minus whatever a slice happened to define locally.
+Rejected: **Record them in the decision log only** — cheapest, and `DeploymentConfig` stops being
+complete, so the next reader looking for the token lifetime finds nothing in `design/` and has to read
+`authorization.ts`. **Add the cadences and log the TTLs** — smaller, and it leaves a one-year
+credential nobody can shorten without a rebuild, which is the wrong half to leave fixed.
+Reversibility: contract table and defaults are cheap; the three TTLs becoming configurable is
+expensive to reverse once a deployment sets one.
+---
+
 ### 2026-08-13 — S25 code review: `migrate()` runs a one-time `VACUUM` to actually enable incremental vacuum
 Context: `/code-review` on S25 found that `PRAGMA auto_vacuum = INCREMENTAL` (added to `migrate()` for
 `incrementalVacuum`, S25.6) only takes effect on a database with no schema yet, or immediately after a

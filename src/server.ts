@@ -40,7 +40,12 @@ import { createComposites } from './composites/composites.ts';
 import { createWatcher } from './watcher/watcher.ts';
 import { COMPOSITE_RECOVERY_DESCRIPTORS } from './composites/recovery-descriptors.ts';
 import { createHttpAdapter } from './http/http-adapter.ts';
-import { createAuthorization } from './authorization/authorization.ts';
+import {
+  createAuthorization,
+  MCP_ACCESS_TOKEN_TTL_SECONDS_DEFAULT,
+  MCP_REFRESH_TOKEN_TTL_SECONDS_DEFAULT,
+  OPERATOR_API_TOKEN_TTL_SECONDS_DEFAULT,
+} from './authorization/authorization.ts';
 import { createScheduler, createSchedulerOperations, type Scheduler } from './scheduler/scheduler.ts';
 import type { Session } from './shared/session.ts';
 import type { GrantEpoch, SessionId, Subject } from './shared/brands.ts';
@@ -248,6 +253,36 @@ function resolveWatcherPollIntervalSeconds(watcherEnabled: boolean): number {
   return value;
 }
 
+/**
+ * A hundred years. Not a policy limit — no deployment wants a token this
+ * long-lived — but the point past which `issueTokenPair`'s
+ * `new Date(now + ttl * 1000).toISOString()` leaves the representable date
+ * range and throws `RangeError: Invalid time value`. Without this bound the
+ * validator below checked only the low end, so an over-large lifetime booted
+ * cleanly and then failed every OAuth token exchange with a 500 (review of
+ * PR #112). Fatal at boot is what the comment beneath already promised.
+ */
+const TOKEN_LIFETIME_SECONDS_MAX = 100 * 365 * 24 * 60 * 60;
+
+/**
+ * `DeploymentConfig.tokens` (`20-contract.md` § Deployment configuration) —
+ * the three token lifetimes `authorization.ts` fixed as hardcoded constants
+ * until the 2026-08-13 post-S27 reconciliation, none overridable and only
+ * the operator-api one recorded anywhere outside a code comment. Resolved
+ * the same way every other cadence/limit above is: an unset variable takes
+ * the documented default, a malformed one is fatal.
+ */
+function resolveTokenLifetimeSeconds(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim().length === 0) return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1 || value > TOKEN_LIFETIME_SECONDS_MAX) {
+    console.error(`server: ${name} must be an integer between 1 and ${TOKEN_LIFETIME_SECONDS_MAX} (got '${raw}')`);
+    process.exit(1);
+  }
+  return value;
+}
+
 function resolveCommitSha(): GitSha {
   const fromEnv = process.env.GIT_COMMIT_SHA;
   const raw = fromEnv ?? execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim();
@@ -307,6 +342,13 @@ async function main(): Promise<void> {
   // a cycle. `orphan` only ever calls this after boot, well after
   // `schedulerRef` below is set.
   let schedulerRef: Pick<Scheduler, 'cancelForDeclaration'> | null = null;
+  // 2026-08-13 post-S27 reconciliation — the same forward-reference shape,
+  // for the same reason: `Watcher` is L2 and `CloneStore` (which needs its
+  // usage figure for `byConsumer['watcher-files']`) is L1, so `CloneStore`
+  // cannot take `Watcher` itself without an upward edge in the layering.
+  // Set once `watcher` exists below, well before boot succeeds and any real
+  // volume-usage read can reach it.
+  let watcherUsageBytesRef: (() => Promise<number>) | null = null;
   const declarations = createDeclarations({
     volumeRoot,
     clock: systemClock,
@@ -351,6 +393,11 @@ async function main(): Promise<void> {
     declarations,
     journal,
     store,
+    audit,
+    watcherUsageBytes: () => {
+      if (!watcherUsageBytesRef) throw new Error('watcher accessed before composition finished');
+      return watcherUsageBytesRef();
+    },
     watermarks,
     onMaintenanceRequested: (reason) => requestMaintenanceRef?.(reason),
   });
@@ -448,7 +495,17 @@ async function main(): Promise<void> {
   // hash, and the revocation cascade. Replaces the shared-secret bearer
   // stand-in `http-server.ts` carried since S2: a script's credential is now
   // issued from the grants view (`/grants/tokens`), not a static env var.
-  const authorization = createAuthorization({ volumeRoot, clock: systemClock, contractCapabilitySet, ceiling, declarations, audit });
+  const authorization = createAuthorization({
+    volumeRoot,
+    clock: systemClock,
+    contractCapabilitySet,
+    ceiling,
+    declarations,
+    audit,
+    mcpAccessTokenTtlSeconds: resolveTokenLifetimeSeconds('MCP_ACCESS_TOKEN_TTL_SECONDS', MCP_ACCESS_TOKEN_TTL_SECONDS_DEFAULT),
+    mcpRefreshTokenTtlSeconds: resolveTokenLifetimeSeconds('MCP_REFRESH_TOKEN_TTL_SECONDS', MCP_REFRESH_TOKEN_TTL_SECONDS_DEFAULT),
+    operatorApiTokenTtlSeconds: resolveTokenLifetimeSeconds('OPERATOR_API_TOKEN_TTL_SECONDS', OPERATOR_API_TOKEN_TTL_SECONDS_DEFAULT),
+  });
 
   // S8 — the recovery catalogue, populated here from L2 and read by L1. A
   // duplicate registration is a wiring defect and fatal at composition time,
@@ -529,6 +586,7 @@ async function main(): Promise<void> {
     watcherEnabled,
     pollIntervalSeconds: resolveWatcherPollIntervalSeconds(watcherEnabled),
   });
+  watcherUsageBytesRef = () => watcher.usageBytes();
 
   // The session a resume runs under. `operator`'s `ActorProfile` is the
   // widest of the four (`declarations/types.ts`'s `OPERATOR_PROFILE`), and

@@ -19,7 +19,7 @@ import type { JsonValue } from '../contract/json.ts';
 import type { ToolResult } from '../result/envelope.ts';
 import { isError, type ResultKind } from '../shared/result-kind.ts';
 import type { OperationContextKind } from '../shared/actor.ts';
-import { unlinkAndCountBytes, type RetentionReport } from '../shared/retention.ts';
+import { directoryBytes, unlinkAndCountBytes, type RetentionReport } from '../shared/retention.ts';
 import type { RepoStatusData } from '../git/types.ts';
 import type { PrOpenData, PrStatusData } from '../host/types.ts';
 import { watcherError, type WatcherError } from './errors.ts';
@@ -33,6 +33,13 @@ export interface Watcher {
   recoverInterruptedClaims(): Promise<readonly WatchTickReport[]>;
   tick(): Promise<readonly WatchTickReport[]>;
   runRetention(): Promise<RetentionReport>;
+  /**
+   * `VolumeUsage.byConsumer['watcher-files']` (2026-08-13 post-S27
+   * reconciliation) — the real byte total across every declaration's inbox
+   * (`inbox/`, `processing/`, `processed/`, `failed/` alike), not only the
+   * `processed/` window `runRetention` above already ages out.
+   */
+  usageBytes(): Promise<number>;
 }
 
 export interface WatcherDependencies {
@@ -609,6 +616,10 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
       } catch {
         return { module: 'watcher', deletedRows: 0, freedBytes: 0, skipped: ['retention pass failed'] };
       }
+    },
+
+    async usageBytes(): Promise<number> {
+      return directoryBytes(watcherInboxesRoot());
     },
   };
 }

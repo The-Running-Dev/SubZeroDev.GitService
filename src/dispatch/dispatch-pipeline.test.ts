@@ -2423,3 +2423,95 @@ test('S27.1 — crossing the maintenance watermark after a mutation requests a p
     assert.equal(readVolumeUsageCalledWhileMutationLockHeld, false, 'the reading never happens while this call\'s mutation lock is held');
   });
 });
+
+test('2026-08-13 post-S27 reconciliation — the refuse watermark gates a mutation against an already-ready clone, not only materialisation', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, locks, fixture, volume }) => {
+    grantWrite(fixture, []);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const moduleAdapter = createModuleAdapter();
+    let handlerCalls = 0;
+    moduleAdapter.register('fixture.noop' as never, async (ctx) => {
+      handlerCalls += 1;
+      return success('noop', {}, { operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation, durationMs: 0 });
+    });
+    const NOOP_ENTRY = fixtureTool({
+      name: 'noop_mutation',
+      capabilities: ['git.local.write'],
+      scopes: ['write'],
+      executionClass: 'mutating',
+      target: { kind: 'module', target: 'fixture.noop' as never },
+    });
+
+    const diskFullFindingsRequests: number[] = [];
+    let readingsTaken = 0;
+    let mutationHolderDuringFindings: unknown = 'never called';
+    const instrumentedCloneStore: typeof cloneStore = {
+      ...cloneStore,
+      async readVolumeUsage() {
+        readingsTaken += 1;
+        return ok({ totalBytes: 1000, usedBytes: 960, usedPercent: 96, byConsumer: { clones: 960, 'audit-log': 0, 'structured-store': 0, 'backups-and-snapshots': 0, 'watcher-files': 0 }, storeByTable: {} as never });
+      },
+      requestMaintenance() {
+        // no-op
+      },
+      async diskFullFindings(usage) {
+        diskFullFindingsRequests.push(usage.usedPercent);
+        // The real `diskFullFindings` walks every materialised declaration
+        // and runs five git subprocesses against each. Holding the *global*
+        // mutation lock across that made one refusal serialise every other
+        // mutation in the process behind ~5N child processes, and since each
+        // of those then refused identically, the convoy sustained itself for
+        // as long as the volume stayed full (review of PR #112).
+        mutationHolderDuringFindings = locks.currentMutationHolder();
+        return [{ path: 'volume.byConsumer', rule: 'clones', message: '960 bytes' }];
+      },
+    };
+
+    const pipeline = createDispatchPipeline({
+      registry: mutatingRegistryOf([NOOP_ENTRY]),
+      ceiling: MUTATION_CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore: instrumentedCloneStore,
+      locks,
+      audit,
+      journal,
+      clock: systemClock,
+    });
+
+    const request = {
+      toolName: 'noop_mutation' as never,
+      input: {},
+      session: sessionWith(['repo.read', 'git.local.write']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal' as const,
+      signal: new AbortController().signal,
+    };
+
+    // First mutation: no reading observed yet, so it is not gated — this is
+    // also what takes the reading that seeds the check for the next call.
+    const first = await pipeline.dispatch(request);
+    assert.equal(first.kind, 'success');
+    assert.equal(handlerCalls, 1);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(readingsTaken, 1);
+
+    // Second mutation: gated against the 96% reading the first mutation's
+    // post-mutation check just took, entirely without a fresh read.
+    const second = await pipeline.dispatch(request);
+    assert.equal(second.kind, 'precondition', 'a mutation against an already-materialised clone is refused at the watermark');
+    assert.equal(handlerCalls, 1, 'the refused mutation never reached the handler — journal.begin was never called');
+    assert.deepEqual(second.findings, [{ path: 'volume.byConsumer', rule: 'clones', message: '960 bytes' }]);
+    assert.deepEqual(diskFullFindingsRequests, [96]);
+    assert.equal(
+      mutationHolderDuringFindings,
+      null,
+      'the refusal is decided before acquireMutation — the global mutation lock is never held while findings are built',
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(readingsTaken, 2, 'the refused call still takes its own post-mutation reading in its own finally');
+  });
+});

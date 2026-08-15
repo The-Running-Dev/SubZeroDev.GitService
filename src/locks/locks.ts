@@ -41,8 +41,15 @@ interface Waiter {
  * "There is no priority and no fairness beyond arrival order"). Shared by the
  * global mutation lock and every per-declaration materialisation lock — the
  * two differ only in how many instances exist, not in behaviour.
+ *
+ * `maxQueueDepth` bounds the waiter array — the design's stated reason for
+ * rejecting reject-on-contention (`10-design.md` § Boundaries: "Queue depth
+ * exceeded → Immediate refusal → `conflict`"). A waiter beyond the bound is
+ * refused outright rather than queued, never counting the one currently
+ * holding the lock. `Infinity` leaves a mutex unbounded, which is what every
+ * materialisation mutex takes — see `createLocks` below for why.
  */
-function createMutex() {
+function createMutex(maxQueueDepth: number) {
   let current: LockHolder | null = null;
   const queue: Waiter[] = [];
 
@@ -72,6 +79,11 @@ function createMutex() {
     return new Promise((resolve) => {
       if (signal.aborted) {
         resolve(err(lockError({ code: 'cancelled' }, 'the wait was cancelled before it began')));
+        return;
+      }
+
+      if (current !== null && queue.length >= maxQueueDepth) {
+        resolve(err(lockError({ code: 'queue-full', depth: queue.length }, `the wait queue is already at its ${maxQueueDepth}-deep limit`)));
         return;
       }
 
@@ -106,7 +118,7 @@ function createMutex() {
 }
 
 export function createLocks(admission: AdmissionLimits = ADMISSION_DEFAULTS): Locks {
-  const mutationMutex = createMutex();
+  const mutationMutex = createMutex(admission.mutationQueueDepth);
   const materialisationMutexes = new Map<DeclarationId, ReturnType<typeof createMutex>>();
   const activeOperationCounts = new Map<DeclarationId, number>();
   const waitsPerSession = new Map<SessionId, number>();
@@ -115,7 +127,19 @@ export function createLocks(admission: AdmissionLimits = ADMISSION_DEFAULTS): Lo
   function materialisationMutexFor(declarationId: DeclarationId): ReturnType<typeof createMutex> {
     const existing = materialisationMutexes.get(declarationId);
     if (existing) return existing;
-    const created = createMutex();
+    // Unbounded, deliberately. `mutationQueueDepth` is the *mutation* queue's
+    // bound — the name is the contract's (`DeploymentConfig.admission`) and
+    // the decision that enforced it argued only about waiter growth behind a
+    // slow transfer on the global lock. Applying it here as well made reads
+    // refusable: every dispatch acquires this mutex through `CloneStore.ensure`,
+    // reads included (they release it immediately after, but still queue for
+    // it), while a push or fetch holds it for its whole duration. A 300-second
+    // push plus 33 concurrent `git_status` calls on the same declaration then
+    // hard-refused the 33rd with `conflict`, where before it waited a few
+    // milliseconds for the transfer to finish. The global mutation lock is
+    // held for that same transfer, so its own bound already covers the growth
+    // the decision was protecting against.
+    const created = createMutex(Number.POSITIVE_INFINITY);
     materialisationMutexes.set(declarationId, created);
     return created;
   }

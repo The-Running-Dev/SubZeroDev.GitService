@@ -806,3 +806,56 @@ test('runRetention() reports an empty pass when no watcher-inboxes directory exi
     assert.equal(report.deletedRows, 0);
   });
 });
+
+test('2026-08-13 post-S27 reconciliation — usageBytes reports the real byte total across every declaration\'s inbox', async () => {
+  await withVolumeAsync(async (volume) => {
+    const { deps } = baseDeps(volume);
+    const watcher = createWatcher(deps);
+
+    assert.equal(await watcher.usageBytes(), 0, 'no watcher-inboxes directory exists yet');
+
+    const rootA = inboxRoot(volume, 'repo-a');
+    mkdirSync(rootA, { recursive: true });
+    writeFileSync(path.join(rootA, 'plan.md'), 'hello world');
+
+    const processedB = path.join(inboxRoot(volume, 'repo-b'), 'processed');
+    mkdirSync(processedB, { recursive: true });
+    writeFileSync(path.join(processedB, '2026-08-13-old.md'), 'already delivered');
+
+    const expected = Buffer.byteLength('hello world', 'utf8') + Buffer.byteLength('already delivered', 'utf8');
+    assert.equal(await watcher.usageBytes(), expected, 'sums bytes across every declaration\'s inbox, inbox and processed alike');
+  });
+});
+
+test('usageBytes never follows a symlink — not to a file outside the inbox, and not into a loop', async () => {
+  // The candidate scan already refuses symlinks with a link-preserving stat
+  // (S17.4 above), so a symlink in an inbox is anticipated input rather than
+  // a hypothetical. The usage walk used `statSync`, which follows: it counted
+  // a target living elsewhere on the volume against `watcher-files`, and a
+  // link to its own parent made the walk push the same subtree forever —
+  // an unbounded synchronous loop that wedged the process, since
+  // `readVolumeUsage` runs on the post-mutation path (review of PR #112).
+  await withVolumeAsync(async (volume) => {
+    const { deps } = baseDeps(volume);
+    const watcher = createWatcher(deps);
+
+    const rootA = inboxRoot(volume, 'repo-a');
+    mkdirSync(rootA, { recursive: true });
+    writeFileSync(path.join(rootA, 'plan.md'), 'hello world');
+
+    // A file that lives outside the inboxes entirely, linked from inside one.
+    const outside = path.join(volume, 'not-a-watcher-file.bin');
+    writeFileSync(outside, 'x'.repeat(10_000));
+    symlinkSync(outside, path.join(rootA, 'link-to-outside.md'));
+
+    // And a directory symlink pointing back at its own parent.
+    symlinkSync(rootA, path.join(rootA, 'loop'), 'dir');
+
+    const total = await watcher.usageBytes();
+    assert.equal(
+      total,
+      Buffer.byteLength('hello world', 'utf8'),
+      'only the one real file counts — the link target is not watcher usage, and the loop terminates',
+    );
+  });
+});

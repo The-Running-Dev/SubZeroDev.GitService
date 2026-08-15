@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync, writeFileSync } from 'node:fs';
+import { readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { systemClock } from '../clock/clock.ts';
@@ -168,6 +168,28 @@ test('S26.2 and S26.3 — retention keeps three pre-migration copies, takes no m
 
     await store.runRetention();
     assert.equal(readdirSync(path.join(volume, 'backups')).filter((name) => name.startsWith('snapshot-')).length, 7, 'a second pass on the same day adds no snapshot');
+    await store.close();
+  });
+});
+
+test('2026-08-13 post-S27 reconciliation — backupBytes reports the real byte total of backups/, zero before anything is written', async () => {
+  await withVolumeAsync(async (volume) => {
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    await store.open();
+    assert.equal(await store.backupBytes(), 0, 'no backup or snapshot has been written yet');
+
+    // `migrate()` itself takes an automatic pre-migration backup when none
+    // was taken first (its own "insurance" copy) — so `backups/` is already
+    // non-empty afterwards, before this test ever calls `snapshot()`.
+    await store.migrate();
+    assert.ok(await store.backupBytes() > 0, 'migrate()\'s own insurance backup already grew the total');
+
+    await store.snapshot();
+
+    const files = readdirSync(path.join(volume, 'backups')).map((name) => path.join(volume, 'backups', name));
+    const expected = files.reduce((sum, file) => sum + statSync(file).size, 0);
+    assert.equal(await store.backupBytes(), expected);
+    assert.ok(expected > 0);
     await store.close();
   });
 });

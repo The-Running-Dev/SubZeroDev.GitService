@@ -55,7 +55,12 @@ function declarationsFor(volume: string, ceiling: ContractCapabilitySet = FULL_C
   });
 }
 
-function authFor(volume: string, contractCapabilitySet: ContractCapabilitySet = FULL_CEILING, declarations: Declarations = declarationsFor(volume, contractCapabilitySet)) {
+function authFor(
+  volume: string,
+  contractCapabilitySet: ContractCapabilitySet = FULL_CEILING,
+  declarations: Declarations = declarationsFor(volume, contractCapabilitySet),
+  tokenTtls: { readonly mcpAccessTokenTtlSeconds?: number; readonly mcpRefreshTokenTtlSeconds?: number; readonly operatorApiTokenTtlSeconds?: number } = {},
+) {
   return createAuthorization({
     volumeRoot: volume,
     clock: systemClock,
@@ -63,6 +68,7 @@ function authFor(volume: string, contractCapabilitySet: ContractCapabilitySet = 
     ceiling: contractCapabilitySet as unknown as DeploymentCeiling,
     declarations,
     audit: createAudit({ volumeRoot: volume, clock: systemClock }),
+    ...tokenTtls,
   });
 }
 
@@ -480,6 +486,46 @@ test('S14.7 (module half) — issueMcpGrant mints a durable grant, and its refre
     // The original refresh token is now single-use and spent.
     const replay = await restarted.refresh(issued.value.refresh.value);
     assert.equal(replay.ok, false);
+  });
+});
+
+test('2026-08-13 post-S27 reconciliation — the MCP access/refresh and operator-api token lifetimes are deployment-overridable, not fixed constants', async () => {
+  await migratedVolume(async (volume) => {
+    const declarations = declarationsFor(volume);
+    const repo = await declaredRepo(declarations, 'repo-ttl', ['repo.read']);
+    const now = systemClock.now();
+
+    const auth = authFor(volume, FULL_CEILING, declarations, {
+      mcpAccessTokenTtlSeconds: 120,
+      mcpRefreshTokenTtlSeconds: 240,
+      operatorApiTokenTtlSeconds: 360,
+    });
+    const client = await registeredClient(auth);
+    const issuedMcp = await auth.issueMcpGrant(
+      { clientId: client.clientId, subject: client.subject, resource: `/mcp/${repo.id}` as never, declarationId: repo.id, generation: repo.generation, scopes: ['read'] },
+      ACTOR,
+    );
+    assert.equal(issuedMcp.ok, true, issuedMcp.ok ? '' : issuedMcp.error.summary);
+    if (!issuedMcp.ok) return;
+
+    const accessSeconds = (new Date(issuedMcp.value.access.expiresAt).getTime() - new Date(now).getTime()) / 1000;
+    const refreshSeconds = (new Date(issuedMcp.value.refresh.expiresAt).getTime() - new Date(now).getTime()) / 1000;
+    assert.ok(Math.abs(accessSeconds - 120) < 5, `access token TTL should be ~120s, got ${accessSeconds}s`);
+    assert.ok(Math.abs(refreshSeconds - 240) < 5, `refresh token TTL should be ~240s, got ${refreshSeconds}s`);
+
+    const issuedOperator = await auth.issueOperatorApiToken('ben' as Subject, ['read'], ACTOR);
+    assert.equal(issuedOperator.ok, true, issuedOperator.ok ? '' : issuedOperator.error.summary);
+    if (!issuedOperator.ok) return;
+    const operatorSeconds = (new Date(issuedOperator.value.expiresAt).getTime() - new Date(now).getTime()) / 1000;
+    assert.ok(Math.abs(operatorSeconds - 360) < 5, `operator-api token TTL should be ~360s, got ${operatorSeconds}s`);
+
+    // The documented defaults still hold when nothing overrides them.
+    const defaultAuth = authFor(volume, FULL_CEILING, declarations);
+    const defaultOperator = await defaultAuth.issueOperatorApiToken('ben' as Subject, ['read'], ACTOR);
+    assert.equal(defaultOperator.ok, true);
+    if (!defaultOperator.ok) return;
+    const defaultOperatorSeconds = (new Date(defaultOperator.value.expiresAt).getTime() - new Date(now).getTime()) / 1000;
+    assert.ok(Math.abs(defaultOperatorSeconds - 365 * 24 * 60 * 60) < 5, 'default operator-api TTL is still one year when nothing overrides it');
   });
 });
 

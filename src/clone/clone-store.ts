@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, statfsSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, statfsSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { ok, err, type Outcome } from '../shared/outcome.ts';
@@ -11,13 +11,14 @@ import type { Exec } from '../exec/exec.ts';
 import type { Locks } from '../locks/locks.ts';
 import type { LockHolder } from '../locks/types.ts';
 import type { Finding } from '../shared/result-kind.ts';
-import { type MaintenanceReason, type RetentionReport } from '../shared/retention.ts';
+import { directoryBytes, type MaintenanceReason, type RetentionReport } from '../shared/retention.ts';
 import { storeError, type StoreError } from '../store/errors.ts';
 import { DISK_WATERMARKS_DEFAULT, NO_VOLUME_USAGE, type DiskWatermarks, type VolumeConsumer, type VolumeUsage } from '../store/volume-usage.ts';
 import type { StoreTableName, StructuredStore } from '../store/structured-store.ts';
 import type { Journal } from '../journal/journal.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import type { Declaration } from '../declarations/types.ts';
+import type { Audit } from '../audit/audit.ts';
 import { cloneStoreError, type CloneStoreError } from './errors.ts';
 import type { Clone, CloneHandle, CloneState, CorruptTreeOverride, EvictionBlocker, EvictionOutcome, ObservedGitState, SafeToEvictVerdict } from './types.ts';
 
@@ -34,6 +35,15 @@ export interface CloneStore {
   markAttention(declarationId: DeclarationId, reason: string): Promise<Outcome<void, CloneStoreError>>;
   clearAttention(declarationId: DeclarationId, actor: ActorRef): Promise<Outcome<void, CloneStoreError>>;
   readVolumeUsage(): Promise<Outcome<VolumeUsage, CloneStoreError>>;
+  /**
+   * S27.2's findings, built against a usage reading the caller already has
+   * rather than one this call takes itself — the mutating dispatch path's
+   * pre-`Journal.begin` refuse check (`dispatch-pipeline.ts`) reuses the
+   * post-mutation watermark reading for exactly this reason, to avoid a
+   * second `statfs`/`SUM` under the mutation lock. `ensure()`'s own refuse
+   * branch below calls this with the fresh reading it just took.
+   */
+  diskFullFindings(usage: VolumeUsage): Promise<readonly Finding[]>;
   requestMaintenance(reason: MaintenanceReason): void;
   runRetention(): Promise<RetentionReport>;
 }
@@ -88,7 +98,25 @@ export interface CloneStoreDependencies {
    * only otherwise has the real figure for `clones`. Optional so every
    * pre-S27 test keeps compiling.
    */
-  readonly store?: Pick<StructuredStore, 'usageByTable'>;
+  readonly store?: Pick<StructuredStore, 'usageByTable' | 'backupBytes'>;
+  /**
+   * `byConsumer['audit-log']` (2026-08-13 post-S27 reconciliation) — the
+   * audit trail's own segment-directory byte total, folded in the same way
+   * `store.usageByTable` is above. Optional so every pre-this-decision test
+   * keeps compiling; without it, `audit-log` stays the honest zero it always
+   * was.
+   */
+  readonly audit?: Pick<Audit, 'usageBytes'>;
+  /**
+   * `byConsumer['watcher-files']`. A plain callback rather than a typed
+   * `Pick<Watcher, ...>` — `Watcher` is L2 and `CloneStore` is L1, so typing
+   * this against the module directly would put an upward edge in the
+   * layering `scripts/check-layer-direction.ts` exists to catch. The
+   * composition root wires this the same way it wires
+   * `onMaintenanceRequested` above, without `CloneStore` ever importing
+   * `watcher.ts`.
+   */
+  readonly watcherUsageBytes?: () => Promise<number>;
 }
 
 const CLONE_SECONDS_DEFAULT = 300;
@@ -136,33 +164,6 @@ function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): Outcome<T, 
   } finally {
     db.close();
   }
-}
-
-function directoryBytes(root: string): number {
-  if (!existsSync(root)) return 0;
-  let total = 0;
-  const stack = [root];
-  while (stack.length > 0) {
-    const current = stack.pop()!;
-    let stat;
-    try {
-      stat = statSync(current);
-    } catch {
-      continue;
-    }
-    if (stat.isDirectory()) {
-      let entries: string[] = [];
-      try {
-        entries = readdirSync(current);
-      } catch {
-        entries = [];
-      }
-      for (const entry of entries) stack.push(path.join(current, entry));
-    } else {
-      total += stat.size;
-    }
-  }
-  return total;
 }
 
 export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
@@ -214,12 +215,12 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
    * `totalBytes`/`usedBytes`/`usedPercent` are real, read from the volume's
    * own filesystem statistics — the watermark machinery is meaningless
    * against a fabricated percentage. `clones` is real (summed from the
-   * `clone` table). `structured-store`/`storeByTable` are real when
-   * `deps.store` is wired (folded in from `StructuredStore.usageByTable`,
-   * the same figure `Lifecycle.runMaintenance` overlays onto its own
-   * reading) and honest zeros otherwise. `audit-log`, `backups-and-snapshots`
-   * and `watcher-files` stay honest zeros — outside this slice's `Touches`
-   * list, same reasoning as `store/volume-usage.ts`'s own doc comment.
+   * `clone` table). `structured-store`/`storeByTable`, `backups-and-snapshots`,
+   * `audit-log` and `watcher-files` are each real when their owning module is
+   * wired (`deps.store`, `deps.audit`, `deps.watcherUsageBytes` respectively
+   * — the 2026-08-13 post-S27 reconciliation that closed the last three
+   * permanent zeros) and an honest zero otherwise, the same "wired module,
+   * real figure; unwired, honest zero" shape throughout.
    */
   const readDiskStats = deps.readDiskStats ?? statfsSync;
 
@@ -254,11 +255,25 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
       }
     }
 
+    // 2026-08-13 post-S27 reconciliation: the three consumers that were
+    // permanent zeros — each optional so a caller that has not wired the
+    // owning module keeps its honest zero rather than throwing.
+    const backupsAndSnapshotsBytes = deps.store ? await deps.store.backupBytes() : 0;
+    const auditLogBytes = deps.audit ? await deps.audit.usageBytes() : 0;
+    const watcherFilesBytes = deps.watcherUsageBytes ? await deps.watcherUsageBytes() : 0;
+
     return {
       totalBytes,
       usedBytes,
       usedPercent: totalBytes > 0 ? (usedBytes / totalBytes) * 100 : 0,
-      byConsumer: { ...NO_VOLUME_USAGE.byConsumer, clones: clonesBytes, 'structured-store': structuredStoreBytes },
+      byConsumer: {
+        ...NO_VOLUME_USAGE.byConsumer,
+        clones: clonesBytes,
+        'structured-store': structuredStoreBytes,
+        'audit-log': auditLogBytes,
+        'backups-and-snapshots': backupsAndSnapshotsBytes,
+        'watcher-files': watcherFilesBytes,
+      },
       storeByTable,
     };
   }
@@ -291,7 +306,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
    * (`dispatch-pipeline.ts`) can carry them generically, the same path
    * `authorization()`'s missing-capability findings already take.
    */
-  function diskFullFindings(usage: VolumeUsage, blockersByDeclaration: ReadonlyMap<DeclarationId, readonly EvictionBlocker[]>): readonly Finding[] {
+  function diskFullFindingsFrom(usage: VolumeUsage, blockersByDeclaration: ReadonlyMap<DeclarationId, readonly EvictionBlocker[]>): readonly Finding[] {
     const findings: Finding[] = [];
     for (const consumer of Object.keys(usage.byConsumer) as VolumeConsumer[]) {
       findings.push({ path: 'volume.byConsumer', rule: consumer, message: `${usage.byConsumer[consumer]} bytes` });
@@ -623,7 +638,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
           materialisationLock.release();
           return identitySet;
         }
-        const bytes = directoryBytes(clonePath);
+        const bytes = await directoryBytes(clonePath);
         const now = clock.now();
         const written = upsertRow({ declaration_id: declaration.id, generation: declarationRecord.generation, state: 'ready', path: clonePath, size_bytes: bytes, last_operation_at: now, observed_remote: observed, attention_reason: null });
         if (!written.ok) {
@@ -665,7 +680,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
           cloneStoreError(
             { code: 'disk-full', usage: usageBeforeClone, evictionBlockers: flatBlockers },
             `the volume is at ${usageBeforeClone.usedPercent.toFixed(1)}% — refusing to materialise a new clone for '${declaration.id}'`,
-            diskFullFindings(usageBeforeClone, blockersByDeclaration),
+            diskFullFindingsFrom(usageBeforeClone, blockersByDeclaration),
           ),
         );
       }
@@ -704,7 +719,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
         return identitySet;
       }
 
-      const bytes = directoryBytes(clonePath);
+      const bytes = await directoryBytes(clonePath);
       const now = clock.now();
       const written = upsertRow({
         declaration_id: declaration.id,
@@ -768,7 +783,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
         // mean the parked reason (e.g. an unresolved journal entry, S7/S8) no
         // longer applies.
         const nextState: CloneState = row.state === 'needs-attention' ? 'needs-attention' : 'ready';
-        const bytes = directoryBytes(clonePath);
+        const bytes = await directoryBytes(clonePath);
         upsertRow({ ...row, state: nextState, size_bytes: bytes });
         derived.push({ ...toClone(row), state: nextState, sizeBytes: bytes });
       }
@@ -838,7 +853,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
         if (blockers === 'corrupt' || blockers.length > 0) {
           return ok({ declarationId, evicted: false, freedBytes: 0, blockers: blockers === 'corrupt' ? [{ kind: 'corrupt-tree' }] : blockers });
         }
-        const freedBytes = directoryBytes(row.value.path);
+        const freedBytes = await directoryBytes(row.value.path);
         removePartial(row.value.path);
         const updated = upsertRow({ ...row.value, state: 'evicted', size_bytes: 0, observed_remote: null });
         if (!updated.ok) return err(cloneStoreError({ code: 'store-failed', cause: updated.error }, updated.error.summary));
@@ -915,6 +930,11 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
         const message = cause instanceof Error ? cause.message : String(cause);
         return err(cloneStoreError({ code: 'store-failed', cause: storeError({ code: 'io-failed' }, message) }, message));
       }
+    },
+
+    async diskFullFindings(usage: VolumeUsage): Promise<readonly Finding[]> {
+      const blockersByDeclaration = await evictionBlockersAcrossDeclarations();
+      return diskFullFindingsFrom(usage, blockersByDeclaration);
     },
 
     requestMaintenance(reason): void {

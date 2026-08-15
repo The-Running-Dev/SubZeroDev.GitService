@@ -1,4 +1,6 @@
 import { statSync, unlinkSync } from 'node:fs';
+import { lstat, readdir } from 'node:fs/promises';
+import path from 'node:path';
 import { err, ok, type Outcome } from './outcome.ts';
 
 /**
@@ -57,4 +59,58 @@ export function unlinkAndCountBytes(file: string): Outcome<number, void> {
   } catch {
     return err(undefined);
   }
+}
+
+/**
+ * The recursive byte total of every regular file under `root`, or `0` when
+ * `root` does not exist yet. Shared by every module `VolumeUsage.byConsumer`
+ * folds a real reading in for (`clone-store.ts`'s clones, and — since the
+ * 2026-08-13 post-S27 reconciliation — audit segments, the structured
+ * store's `backups/`, and the watcher's per-declaration inboxes) rather than
+ * each walking its own directory tree the same way independently. Best-effort
+ * per entry: a file or directory that disappears mid-walk (a concurrent
+ * delete, a retention pass) is skipped rather than failing the whole total.
+ *
+ * **Asynchronous, and `lstat` rather than `stat`** — both corrections from
+ * the review of the reconciliation that generalised this walk (PR #112):
+ *
+ * - `readVolumeUsage` now folds three of these in and runs after every
+ *   mutating dispatch, so a synchronous walk over ninety days of audit
+ *   segments plus every declaration's inbox tree blocked the event loop —
+ *   and every other in-flight response with it — on each commit.
+ * - `stat` follows symlinks. The watcher's own inbox scan deliberately uses
+ *   `lstatSync` and skips symlinks (`watcher.ts`, asserted by S17.4), so a
+ *   symlink in an inbox is anticipated input, not a hypothetical: following
+ *   one counted a target elsewhere on the volume against `watcher-files`,
+ *   and a symlink to its own parent made this walk push the same subtree
+ *   forever. Counting only regular files matches the guard the watcher
+ *   already applies to the same directory.
+ */
+export async function directoryBytes(root: string): Promise<number> {
+  let total = 0;
+  const stack = [root];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    let stat;
+    try {
+      stat = await lstat(current);
+    } catch {
+      // Absent (`root` itself never materialised) or deleted mid-walk. Both
+      // are the same answer here: nothing to count.
+      continue;
+    }
+    if (stat.isSymbolicLink()) continue;
+    if (stat.isDirectory()) {
+      let entries: string[] = [];
+      try {
+        entries = await readdir(current);
+      } catch {
+        entries = [];
+      }
+      for (const entry of entries) stack.push(path.join(current, entry));
+    } else if (stat.isFile()) {
+      total += stat.size;
+    }
+  }
+  return total;
 }
