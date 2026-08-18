@@ -250,6 +250,7 @@ Bodies retired; the closed issue is the record. Criteria are not re-derived from
 | **S26** | Filesystem history ages out without losing the only copy | [#95](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/95) |
 | **S27** | Disk pressure releases only disposable clones, or refuses clearly | [#96](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/96) |
 | **S28** | The service ships as a container, and a second one refuses the volume | [#114](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/114) |
+| **S29** | The layering is enforced by a check, and every gate runs unattended | [#115](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/115) |
 
 Two rows carry a name this document changed after the issue was opened: #31 is titled "A dropped
 file becomes a pull request…" and #92 "A consumer can declare a safe content-drop protocol", both
@@ -259,40 +260,6 @@ edited — reported here rather than reconciled.
 ---
 
 ## Outstanding
-
-## S29 — The layering is enforced by a check, and every gate runs unattended
-
-Delivers: anyone changing this repository finds out immediately when a change breaks the boundary
-that keeps the generic runtime separable from the git domain, and every check the repository
-already has runs on every change rather than when someone remembers to run it.
-
-Touches: the dependency-direction check script, the build script, the CI workflow definition.
-
-Depends on: S28.
-
-Acceptance:
-- S29.1 A crafted import of an L2 module from L0, from L3, from L4 and from L5 each fails the check
-  with a non-zero exit naming the importing file and the imported module. Four rejected fixtures
-  against the accepted real graph, counts stated — invariant B1 has never rejected anything, and a
-  validator that has never failed is not known to constrain anything.
-- S29.2 The composition root is the only exempt path, and the exemption is a literal path rather
-  than a directory: a fixture importing L2 from a file beside the root is rejected. Widening the
-  exemption is therefore a one-line diff a reviewer sees.
-- S29.3 The check runs inside `npm run build`, so it fails the same build that already fails on the
-  compiler-import check and the migration check. Removing it from the build script makes the
-  build script's own test fail.
-- S29.4 A push and a pull request run typecheck, the full test suite, every `check:*` gate and
-  S28's image build. A commit violating B1 fails the workflow rather than merging green,
-  demonstrated once on a real branch.
-- S29.5 The workflow pins Node to the `engines` range in `package.json`. A runtime outside that
-  range fails the job rather than silently running every gate on a different one.
-
-Out of scope: running the gates for the derived consumer image (S20); any deployment step in the
-workflow. **This is this repository's own CI, not the service's execution mechanism** — the brief's
-workflow-dispatcher non-goal is about how the service performs git operations and is untouched by
-anything here.
-
----
 
 ## S30 — Where single-instance ownership actually stops, demonstrated
 
