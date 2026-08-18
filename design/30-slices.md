@@ -1,6 +1,6 @@
 # Slices — SubZeroDev.Git
 
-Derived from `10-design.md` and `20-contract.md`. Twenty-nine vertical slices. Each one ends
+Derived from `10-design.md` and `20-contract.md`. Thirty vertical slices. Each one ends
 runnable: it goes from an entry point to persistence and leaves nothing half-wired.
 
 ## How this document is kept
@@ -50,7 +50,19 @@ criteria S17.8 and S17.10–S17.14 are retired, not reassigned. Their requiremen
 the new slices, so `/track` can report the removal and addition rather than silently treating one
 checkbox as another. S28 and S29 are appended on the same rule and placed the same way — ahead of
 S18, because that is where their dependencies run and where the assumption S28 rests on is worth
-exercising.
+exercising. S30 is appended on the same rule and placed after S29, for the same reason.
+
+**S28.4 is retired, not reworded, and the gap it leaves is deliberate.** It asked one box to carry
+two requirements — that a named volume passes boot's lease self-test, and that a bind-mounted Windows
+host path fails it — and the second did not reproduce: run for real on 2026-08-14 against Docker
+Desktop 4.86, the bind mount honoured the lock, the self-test passed, and a second container was
+refused with `lease-held` rather than `lease-not-exclusive`. The machinery is real and was exercised
+correctly; the environmental premise it was written against is not true of that deployment target.
+The decision log's 2026-08-14 entry recorded the finding and left the resolution to this command.
+Retiring the id rather than narrowing it is what keeps the existing checkbox honest: narrowing S28.4
+to the half that was demonstrated would silently shrink what an already-reported box refers to, which
+is the one failure this scheme exists to prevent. The demonstrated half is now `S28.7`; the refusal
+requirement is reframed onto a filesystem that genuinely does not lock and becomes `S30.1`.
 
 ## Why this order
 
@@ -79,6 +91,15 @@ and never against the deployment the brief describes. Everything after it — th
 parity migration, the rollback — assumes a container that has never been built. S29 follows it
 because invariant B1 has no enforcement at all today, and the seam it protects is the one
 `MCP-NEXT.md` Phase 8 exists to eventually cut.
+
+**S30 finishes what S28 could not, and it is a proof rather than a feature.** S28 shipped the image
+and demonstrated mutual exclusion, so definition-of-done item 9 is met. What it could not
+demonstrate is the *guard* behind item 9 — boot's refusal to serve on a filesystem that does not
+honour exclusion — because the deployment target turned out to honour it. That refusal is therefore
+still the one safety branch in this system reached only through an injected seam, which is the same
+objection S28 was written to answer, one level down. It runs ahead of S18 because it needs the image
+S28 built and nothing else, and because a guard nobody has seen fire is worth less the longer the
+system leans on it.
 
 ## Contract gates
 
@@ -174,11 +195,6 @@ Acceptance:
   pre-migration store backup taken in the container contains neither a resolved secret nor the TOTP
   sealing key — invariant S5's separation, demonstrated on the real mount layout rather than on a
   temporary directory.
-- S28.4 Started against a container-managed named volume, boot's lease self-test passes and the
-  service serves. Started against a bind-mounted Windows host path, boot exits non-zero with
-  `lease-not-exclusive` naming the volume configuration. **Both against the real image** — S2 proved
-  the code path behind an injected `LockAcquirer`, and the configuration the brief says a Windows
-  operator is most likely to choose has never been exercised.
 - S28.5 A second container started against the same named volume exits non-zero naming the first
   container's `instanceId`, `hostName` and `startedAt`. Definition-of-done item 9, at the level the
   brief states it.
@@ -186,10 +202,16 @@ Acceptance:
   what-survives-a-restart table: a materialised clone, a declaration, an OAuth grant with a live
   refresh token, and an unsettled journal entry. Each is read back after the restart, and the
   journal entry is classified rather than lost.
+- S28.7 Started against a container-managed named volume, boot's lease self-test passes — the real
+  spawned-child test, on the real image, with no injected `LockAcquirer` — and the service serves.
+  **Appended after S28.6 although it runs before it**, because it replaces the demonstrated half of
+  the retired S28.4 and the id rules forbid renumbering; see § Criterion ids. The refusal half of
+  S28.4 is not lost, it is S30.1.
 
 Out of scope: publishing the image to a registry and provisioning the host that runs it — that is
 the deployment S22 exercises; the derived consumer image (S19 and S20); off-volume backup, which
-the design records as an accepted risk rather than a gap.
+the design records as an accepted risk rather than a gap; and making boot's `lease-not-exclusive`
+refusal fire against a real filesystem, which is S30.
 
 ---
 
@@ -224,6 +246,48 @@ Out of scope: running the gates for the derived consumer image (S20); any deploy
 workflow. **This is this repository's own CI, not the service's execution mechanism** — the brief's
 workflow-dispatcher non-goal is about how the service performs git operations and is untouched by
 anything here.
+
+---
+
+## S30 — The lease guard refuses a filesystem that does not lock
+
+Delivers: an operator who puts the service's storage somewhere that cannot actually keep two
+instances apart — a network share, most obviously — is stopped at startup with a message naming the
+problem, instead of getting a service that runs and quietly lets a second copy corrupt the same
+repositories.
+
+Touches: the deployment run configuration (a test-only mount overlay and its sidecar), Lifecycle
+(L1 — boot step 1's self-test). **No production source change is expected**; if one turns out to be
+needed, that is a defect and this slice stops on it.
+
+Depends on: S28 — it needs the real image, and nothing else.
+
+Acceptance:
+- S30.1 The service container, started with its data volume on a real mount whose byte-range locking
+  is genuinely absent — CIFS/SMB mounted `nobrl`, or NFS mounted `nolock`, served by a sidecar
+  container — exits non-zero with `lease-not-exclusive`, naming the volume configuration. Against the
+  real image, with no injected `LockAcquirer`. This is the first time invariant C7's refusal branch
+  fires against a filesystem rather than a fake, and it carries the requirement retired from S28.4.
+- S30.2 The same harness, same image and same command with only the data mount changed to a
+  container-managed named volume, boots and serves. Without this the refusal in S30.1 is attributable
+  to the harness rather than to the filesystem.
+- S30.3 `lease-self-test-child.ts` is run directly inside the container against the S30.1 mount, as
+  its own step rather than through boot, and exits `0` — `CHILD_ACQUIRED_EXIT_CODE`, meaning the
+  filesystem granted a second process the same exclusive lock. Its exit code is stated. Boot maps
+  every non-`3` exit to the same `lease-not-exclusive`, so a spawn failure and a permissive
+  filesystem are indistinguishable in S30.1's result alone, and this is what tells them apart
+  without instrumenting `childIsRefused`.
+- S30.4 The mount configurations exercised are counted and each one's outcome stated: served,
+  `lease-held`, or `lease-not-exclusive`. The set includes a bind-mounted Windows host path, recorded
+  as **served** — the 2026-08-14 negative result, carried into the acceptance record rather than
+  living only in the decision log, and the answer to issue #55.
+
+Out of scope: changing `lease.ts`, `lease-self-test-child.ts` or the self-test protocol — if the
+refusal does not fire on a mount whose locking is demonstrably absent, that is a defect in the
+self-test and this slice stops and says so rather than adjusting the thing it is testing. Making a
+non-locking mount a supported deployment configuration; it is exercised here only to prove it is
+refused. Whether the design's named-volume requirement should soften to a recommendation given
+S30.4's result — that is a `design/10-design.md` change and belongs to `/design`.
 
 ---
 
