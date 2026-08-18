@@ -2,6 +2,52 @@
 
 Append-only. Newest at the top. The rejected alternatives are the point — without them, every future session relitigates the same choice.
 
+### 2026-08-19 — S30.1 and S30.3 cannot pass: boot's lease self-test is structurally blind to cross-session network-share locking failure
+Context: S30 (`design/30-slices.md` § S30) requires boot's real self-test to fire `lease-not-exclusive`
+against a mount whose byte-range locking is genuinely absent — CIFS mounted `nobrl` or NFS mounted
+`nolock` — proving invariant C7's refusal branch against a filesystem rather than a fake. Attempted
+against a real Samba sidecar, `nobrl`, real image, no injected `LockAcquirer`.
+
+NFS was not testable at all in this environment: Docker Desktop's Linux VM kernel has no NFSv3 client
+(`mount.nfs: requested NFS version or transport protocol is not supported`), and NFSv4's
+protocol-integrated locking has no `nolock`-equivalent that reproduces "genuinely absent" locking the
+way NFSv3's does.
+
+CIFS `nobrl` genuinely defeats locking **across independent client sessions** — verified directly:
+two separate sessions against the same share (forced independent via the `nosharesock` mount option,
+matching what two separate hosts each get) both acquired the same nominally-exclusive SQLite lock
+concurrently. This is the real split-brain condition C7 exists to prevent.
+
+But `acquireLease`'s self-test (`lease.ts`'s `childIsRefused`) spawns its check as a **subprocess of
+the boot process itself** — same container, same mount, same CIFS client session as its parent.
+Within one session, local lock bookkeeping is enforced regardless of `nobrl` (the option only disables
+*server-mediated, cross-session* locking) — confirmed at the raw-script level, then decisively against
+the real built image: **two full production containers, each on an independent CIFS session against
+the same `nobrl` share, both booted and both reported `ready: true` simultaneously**, with boot's own
+self-test reporting success on both sides. The self-test cannot observe the failure category S30.1 and
+S30.3 ask it to demonstrate catching, because it has no mechanism to create a second, independent
+session — it only ever exercises the session it already holds.
+Chosen: Record the finding rather than force a result. No code, invariant, or acceptance-criterion
+text is changed here — `/slices` owns deciding whether S30.1 and S30.3 should be reworded, dropped, or
+reframed around what the self-test can actually prove (same-host lock-API integrity, not cross-host
+network-share exclusion), given that the design's actual defense against split-brain is the
+named-volume mandate (`docker-compose.yml`'s own "never a bind-mounted host path" — a network share
+was never a supported deployment target for the data volume). The `Done when` boxes for S30.1 and
+S30.3 are left unticked.
+Rejected: **Make the self-test's spawned child mount a second, independent session** (e.g. forcing
+`nosharesock`-equivalent behaviour into `childIsRefused`) — boot's self-test receives only a
+filesystem path, never a share address, protocol or credentials; building a second real mount from
+that would mean threading remote-mount parameters through `Lifecycle`/`lease.ts` to support a
+deployment configuration the design does not endorse, and is a design-level change (`lease.ts`,
+`lease-self-test-child.ts` and the self-test protocol are explicitly out of scope for this slice).
+**Substitute a same-process double-acquire or a fabricated failure** — proves nothing about the real
+filesystem, the same objection the 2026-08-14 entry raised against S28.4. **Silently mark S30.1/S30.3
+met** — the criteria ask for a demonstrated refusal, and boot demonstrably does not refuse; ticking
+them would be exactly the "assert what you have not checked" verification rules `AGENTS.md` forbids.
+Reversibility: cheap — a documentation/reporting decision, not a code change. Reopening it costs
+re-running the same real test, or building the second-session self-test mechanism if `/slices` (or
+`/design`) decides that guarantee is worth having.
+
 ## Open
 <Things noticed mid-slice that were deliberately not acted on. Move them out or delete them; do not let this section rot.>
 
