@@ -205,6 +205,49 @@ test('S9.5: the mark clears when the resolver observes a changed secret', async 
   });
 });
 
+test('S9.5: a rotation inside the mark\'s own millisecond keeps the mark, and one millisecond later clears it', async () => {
+  await withVolumeAsync(async (volumeRoot) => {
+    await migratedVolume(volumeRoot);
+    const secrets = mount({ [REF]: 'stale-value' });
+    try {
+      const resolver = createCredentialResolver({ credentialMountRoot: secrets.root, volumeRoot, clock: systemClock });
+      await resolver.markFailing(REF, REPO_A, 'the remote refused this credential');
+      const markedAt = (await resolver.listFailing())[0]?.markedAt;
+      assert.notEqual(markedAt, undefined);
+      const markedMs = Date.parse(markedAt ?? '');
+
+      // The comparison behind "the mark clears when the resolver observes a
+      // changed secret" is a strictly-later whole millisecond, and the tie is
+      // load-bearing in the direction that *keeps* the mark: the secret that was
+      // just rejected can share the mark's own millisecond, so `>=` would make
+      // every mark clear itself the instant it was taken. That direction is
+      // invisible from outside the module, and issue #122 turned on it — the
+      // boundary is pinned here so a later `>=` fails a test rather than
+      // silently readmitting a credential already known to be failing.
+      const secretPath = path.join(secrets.root, REF);
+      writeFileSync(secretPath, 'rotated-value', 'utf8');
+      const tie = new Date(markedMs);
+      utimesSync(secretPath, tie, tie);
+
+      const blocked = await resolver.resolveInto(REF, REPO_A, new Map());
+      assert.equal(blocked.ok, false);
+      if (!blocked.ok) assert.equal(blocked.error.code, 'marked-failing');
+      assert.equal((await resolver.listFailing()).length, 1);
+
+      // One millisecond is the whole difference, on identical bytes.
+      const later = new Date(markedMs + 1);
+      utimesSync(secretPath, later, later);
+
+      const env = new Map<EnvVarName, string>();
+      assert.equal((await resolver.resolveInto(REF, REPO_A, env)).ok, true);
+      assert.equal(env.get(envVarNameFor(REF)), 'rotated-value');
+      assert.deepEqual(await resolver.listFailing(), []);
+    } finally {
+      secrets.cleanup();
+    }
+  });
+});
+
 test('S9.5: the mark clears by hand, and listFailing is what the health view reads', async () => {
   await withVolumeAsync(async (volumeRoot) => {
     await migratedVolume(volumeRoot);
