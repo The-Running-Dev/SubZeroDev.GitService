@@ -1,6 +1,6 @@
 # Slices — SubZeroDev.Git
 
-Derived from `10-design.md` and `20-contract.md`. Thirty vertical slices. Each one ends
+Derived from `10-design.md` and `20-contract.md`. Thirty-four vertical slices. Each one ends
 runnable: it goes from an entry point to persistence and leaves nothing half-wired.
 
 ## How this document is kept
@@ -64,6 +64,40 @@ to the half that was demonstrated would silently shrink what an already-reported
 is the one failure this scheme exists to prevent. The demonstrated half is now `S28.7`; the refusal
 requirement is reframed onto a filesystem that genuinely does not lock and becomes `S30.1`.
 
+**S18 is split the same way S17 was, and six of its criteria are retired rather than moved.** S18
+asked one session to stand up a user interface from nothing, ship five views on top of it, federate
+login against a real identity provider, and drive all of it through a browser. There is no user
+interface in this repository at all — no markup, no styles, no build for any of it — so the console
+S18 described as needing completion has not been started, and the slice was mis-sized by roughly the
+whole of its first half. `S18.3`, `S18.4`, `S18.5`, `S18.6`, `S18.7` and `S18.8` are **retired**, and
+their requirements carry new ids in S31 to S34, so `/track` reports a removal and an addition rather
+than silently treating one checkbox as another. S18 keeps `S18.1` and `S18.2`, both of which describe
+work that now sits in the first sub-slice; the criteria covering the parts that were never written
+down — serving the bundle at all, signing in from a browser, enrolling the first operator, and
+hashing the bundle's asset manifest — are **appended as `S18.9` onwards, even though every one of
+them runs before `S18.2`**, on the same rule that put `S12.8` and `S18.8` where they sit.
+
+**S18.1's and S18.2's wording changed; their ids did not.** `S18.1` was written as though no route
+existed, and about twenty-two already ship. `S18.2` opened with a clause about views that will not
+exist until S33 and S34. Both are reworded to what is checkable in the slice that now holds them,
+which is the case criterion ids exist for: prose moves, the checkbox keeps its meaning.
+
+S18 is also **renamed** — "The console is complete, and federated login works" described the whole
+of what has now become five slices. Issue [#32](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/32)
+still carries the old title, and issue [#33](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/33)
+still carries S19's old `Depends on`. Both are reported here rather than reconciled, the same way the
+two renamed landed rows below are.
+
+**S32 has no retired predecessor, because nothing named it.** `10-design.md` § Console session
+requires a grants view — "revoke everything and re-authenticate is one screen during an incident" —
+and S18's own `Delivers` line said "the three remaining operator views", counting grants as already
+built. S13's closed issue does carry a ticked box reading "The grants view lists clients, grants,
+operator API tokens and operator sessions with last use, and revokes any of them", and S13 did ship
+every route behind it. What it did not ship, because no console existed to put it in, is the screen.
+**S13 is landed and is not edited, reopened or reported as drift** — a landed slice with a closed
+issue is finished. The missing screen is picked up as new outstanding work in S32 instead, which is
+where it can be checked.
+
 ## Why this order
 
 The two bets the design cannot control were proven first, because both are cheap to test and both
@@ -101,6 +135,16 @@ objection S28 was written to answer, one level down. It runs ahead of S18 becaus
 S28 built and nothing else, and because a guard nobody has seen fire is worth less the longer the
 system leans on it.
 
+**Among the console slices, the bet that has never been taken runs first and the external dependency
+runs second.** S18 is where a browser talks to this service for the first time: an ambient-authority
+cookie session, a double-submit token, and a bundle this repository has never built are all assumed
+to work together, and every later view is written on top of that assumption. S31 follows because a
+real identity provider is the console's one external dependency, and because it reopens the login
+surface S18 has just finished — a session later would be reopening it cold. S32, S33 and S34 are
+views over backends that already ship, so the risk in them is presentation rather than architecture;
+they are ordered smallest-first, and only S34's last criterion depends on the other three, because it
+is the one that counts every view.
+
 ## Contract gates
 
 Items in `20-contract.md` § Unresolved block specific slices. Each is a contract amendment,
@@ -113,7 +157,19 @@ Two gates are still live:
 | Gate | Blocks | Answered by |
 |---|---|---|
 | **U4** — the HTTP route table | S18 | S18 |
-| **U7** — the console element type and build entry | S19 | S19 |
+| **U7** — the console element type and build entry | S18, S19 | S18 for the framework binding, the build entry and how the asset manifest is hashed; S19 for the published package |
+
+**U7 is answered in two parts, and the first part moved earlier than this table used to say.**
+Invariant B3 has boot verify the console asset manifest and refuse to start on a mismatch, and the
+2026-08-03 decision fixing `consoleFingerprint` at the SHA-256 of the empty string did so on the
+stated ground that "the console does not exist until S19". That ground is wrong — the console's own
+views land at S18 — so leaving the fingerprint empty would ship real, runtime-swappable assets for
+the whole span between S18 and S19 under an invariant claiming to verify them. S18 therefore fixes
+the framework binding, the build entry and the manifest hash, and B3's console half stops being
+vacuous the moment there is anything to verify. S19 keeps what is genuinely its own: publishing the
+console as a versioned package a consumer's build can consume. `S19.1` is left as written and will
+be met by S18; that is drift for `/track` to report against its issue, not a criterion to rewrite
+here.
 
 The rest — U1, U2, U3, U5, U6, U8, U9 and U10 — were each resolved by the slice that needed them,
 between 2026-08-03 and 2026-08-11. `20-contract.md` § Unresolved carries which slice closed which,
@@ -245,38 +301,191 @@ S30.4's result — that is a `design/10-design.md` change and belongs to `/desig
 
 ---
 
-## S18 — The console is complete, and federated login works
+## S18 — The console opens, and the operator picks a repository
 
-Delivers: the repository dimension across every view, the three remaining operator views, and OIDC
-against a real issuer.
+Delivers: the operator gets a console they can actually open. They set up their account on a brand
+new instance, sign in from a browser, see every repository the service manages alongside its current
+state, and pick the one they want to work on — and that choice is what every screen after it acts
+against.
 
-Touches: Surfaces (L5), Operator identity (L4 — OIDC), Audit (L1 — query), Journal (L1 — parked).
+Touches: Surfaces (L5 — the console bundle, its build, how it is served, and the route table),
+Lifecycle (L1 — boot's console asset check).
 
-Depends on: S29. **Gated on U4.**
+Depends on: S29. **Gated on U4, and on the framework-binding, build-entry and manifest-hashing parts
+of U7.**
 
 Acceptance:
-- S18.1 The route table is written into `20-contract.md` before any route is implemented.
-- S18.2 Every view takes a repository, and the landing view lists declarations with clone state,
-  current branch, dirty flag and last operation. Selecting one sets the dimension for every
-  subsequent view.
-- S18.3 The audit view filters by declaration, tool, actor and window, and shows chain state inline:
-  verified through which sequence, which anchors cover aged-out segments, and where a break sits.
-- S18.4 The health view surfaces failed outbox rows and failing credential references, and clearing
-  a failing reference works from it.
-- S18.5 The parked-operations view shows `preState`, the observed state and the diff, and drives the
-  repair session from S8.
-- S18.6 OIDC against a real issuer authenticates the operator; a returned subject off the allowlist
-  is refused. **With the issuer unreachable, local password plus TOTP still works.**
-- S18.7 Every view is driven end to end in a real browser against a real repository —
-  definition-of-done item 19, which the prior art records as the only way two genuine bugs were
-  found.
-- S18.8 An operator whose `totp_reenrol_required` is set re-enrols TOTP from the console, the flag
-  clears, and an `identity-event` record carrying `'totp-reenrolled'` is written. The signature is
-  added to `20-contract.md` first, since none exists. S4 only ever sets the flag, so before this
-  criterion the enum member is unreachable and the flag is write-only for the life of the
-  credential — a recovery code burned once leaves the operator permanently marked and no route back.
+- S18.1 The HTTP route table is written into `20-contract.md` before any route this slice adds is
+  implemented, and it **records the routes that already ship rather than renaming them** —
+  `/auth/*`, `/declarations*` including the nested tool paths, `/grants*` including the revocation
+  paths, `/failing-credentials/*/clear`, `/parked-operations*`, `/healthz`, `/version`, `/health`,
+  `/mcp/*`, `/oauth/*` and `/.well-known/oauth-*`. Every row states its method, which of the two
+  credentials it accepts, and whether it carries a repository dimension. This closes U4.
+- S18.2 The landing view lists declarations with clone state, current branch, dirty flag and last
+  operation. Selecting one sets the repository dimension, and the selection survives a page reload.
+  A declaration that has never been cloned is listed with its state rather than omitted.
+- S18.9 The console is a bundle produced by this repository's own build and served by the existing
+  HTTP server. Serving it introduces **no unauthenticated route carrying repository, credential,
+  audit, volume or operator state**: fetched without a session it yields the shell and nothing else,
+  and every data route still answers `401`.
+- S18.10 An operator signs in from a real browser by password plus TOTP, by recovery code, and by
+  break-glass. The session cookie is `HttpOnly`, `Secure`, `SameSite=Lax` and host-scoped; a
+  mutating request presenting the cookie without the double-submit token is refused; and a bearer
+  token on a cookie route and a cookie on a bearer route are each refused, both demonstrated rather
+  than asserted.
+- S18.11 The built bundle's asset manifest hashes into the console fingerprint the version endpoint
+  reports, distinct from the contract fingerprint. **Changing one byte of a built asset makes boot
+  exit with `console-manifest-mismatch`.** Before this criterion that fingerprint is the SHA-256 of
+  the empty string, so invariant B3's console half has never rejected anything — and a validator
+  that has never failed is not known to constrain anything.
+- S18.12 A brand new instance with provisioning pending shows the enrolment screen and no other, the
+  screen demands the provisioning secret rather than treating the file's presence as authorisation,
+  the ten recovery codes are displayed exactly once, and the provisioning file is burned. Without
+  this the first operator on a fresh instance still has to enrol by hand against the API.
+- S18.13 Enrolment, all three sign-in paths and the landing view are driven end to end in a real
+  browser against a real repository. The browser run is what the criteria above are checked by;
+  a request-level test does not stand in for one.
 
-Out of scope: consumer views (S19); restyling.
+Out of scope: OIDC and TOTP re-enrolment (S31); the grants view (S32); the audit view (S33); the
+health and parked-operations views (S34); consumer views and the published console package (S19);
+restyling. **`S18.3` through `S18.8` are retired** — their requirements carry new ids in S31 to S34,
+and the gaps here are deliberate.
+
+---
+
+## S31 — Federated login, and a way back after a recovery code
+
+Delivers: the operator signs in through their own identity provider instead of a local password —
+and when they have had to burn a recovery code to get in, they can set up a fresh authenticator from
+the console instead of being marked as needing one forever with no way to do it.
+
+Touches: Operator identity (L4 — OIDC, TOTP re-enrolment), Surfaces (L5 — the login and account
+screens), Audit (L1 — the identity event).
+
+Depends on: S18.
+
+Acceptance:
+- S31.1 The TOTP re-enrolment signature is added to `20-contract.md` before it is implemented. None
+  exists: S4 only ever *sets* the re-enrolment flag, `'totp-reenrolled'` is already an
+  `identity-event` value nothing in the tree can produce, and the flag is write-only for the life of
+  the credential until this slice.
+- S31.2 OIDC against a real issuer authenticates the operator and establishes the same persisted
+  session a local login does — same cookie attributes, same idle and absolute lifetimes, same row in
+  the grants view. A returned subject that is not on the allowlist is refused, and the refusal is
+  audited.
+- S31.3 With the issuer genuinely unreachable — not disabled by configuration — local password plus
+  TOTP still authenticates. This is the failure-mode table's stated answer for a broken identity
+  provider, and configuration-disabling it would prove a different claim.
+- S31.4 An operator carrying the re-enrolment flag enrols a new TOTP secret from the console: the
+  old secret stops authenticating, the flag clears, and an `identity-event` record carrying
+  `'totp-reenrolled'` is written.
+- S31.5 The whole lockout round trip is driven end to end in a real browser — a recovery code
+  authenticates once, the same code is refused the second time, the operator is marked for
+  re-enrolment, completes it, and signs in with the new authenticator.
+
+Out of scope: a second operator account; mapping provider groups or roles to anything. The allowlist
+reduces a provider's many identities to the one operator and does nothing else.
+
+---
+
+## S32 — Revoking everything is one screen
+
+Delivers: during an incident the operator sees every credential this service has issued — connected
+clients, the grants they hold, script tokens, and live sessions including their own — on a single
+screen, and revokes any of them from it, instead of working out which API call does what while
+something is going wrong.
+
+Touches: Surfaces (L5 — the grants view). **No backend change is expected**: S13 shipped the records
+and the revocation cascade and S14 the client registration. If a route turns out to be missing, that
+is a contract amendment and this slice stops and says so.
+
+Depends on: S18.
+
+Acceptance:
+- S32.1 The view lists registered clients, MCP grants, operator API tokens, and live sessions —
+  operator and MCP alike — each with when it was last used.
+- S32.2 Revoking any one of them from the view takes effect on the next call presenting it, and what
+  runs is S13's existing cascade rather than a second implementation: revoking a client revokes its
+  grants and their tokens, demonstrated from the view.
+- S32.3 The operator's own session is in the list and revoking it signs them out — the incident case
+  the design names, and the one a list that quietly excludes self would miss.
+- S32.4 The view is driven end to end in a real browser against an instance with a registered client
+  and a live MCP session, both of which are revoked from it.
+
+Out of scope: issuing grants or tokens from this view. S13's routes already mint them; this is the
+revocation screen the design asks for.
+
+---
+
+## S33 — The trail is readable, and its integrity is visible in it
+
+Delivers: an operator working out what happened reads the audit trail from the console, narrows it
+to one repository, one tool, one actor or one span of time, and can see while reading whether the
+record in front of them is still provably intact.
+
+Touches: Surfaces (L5 — the audit view and its query route), Audit (L1 — `query` and `chainState`,
+both already shipped).
+
+Depends on: S18.
+
+Acceptance:
+- S33.1 The query route is added to `20-contract.md`'s route table before it is implemented, as a
+  cookie route under `audit.read`.
+- S33.2 The view filters by declaration, tool, actor and time window, and the four compose. A filter
+  combination matching nothing renders as an empty result, not an error.
+- S33.3 Chain state is shown **inline with the records**: which sequence verification reached, which
+  retained anchors cover segments that have aged out, and where a break sits if there is one.
+- S33.4 Against a deliberately broken chain the view marks the break at the right sequence and still
+  renders the records either side of it. A view that fails closed on a break shows the operator
+  nothing at exactly the moment the trail matters most.
+- S33.5 An operator API token presented as a bearer credential cannot reach the query route.
+  `OperatorScope` names no instance-level capability, so `audit.read` is console-only; this is where
+  that is demonstrated rather than only stated.
+- S33.6 The view is driven end to end in a real browser against a real repository with a trail long
+  enough that at least one segment has aged out behind an anchor.
+
+Out of scope: exporting the trail; an off-volume audit sink, which S22 records as an accepted risk
+with its costs.
+
+---
+
+## S34 — The two states with no other exit become visible, and clearable
+
+Delivers: the operator sees the failures that otherwise only ever appear in logs — notifications
+that never got delivered, and credentials that have stopped working — and clears them from the
+console. They also see every operation the service stopped and set aside for a human, with what it
+expected to find and what it actually found, and can drive it to a resolution.
+
+Touches: Surfaces (L5 — the health and parked-operations views, and a route for the failed outbox
+rows), Notifier (L1 — `listFailed` and `clearFailed`, in the contract but not yet routed).
+
+Depends on: S31, S32 and S33. It carries the coverage criterion for every console view, so it runs
+after the last of them; nothing else in it needs the other three.
+
+Acceptance:
+- S34.1 The health view surfaces failed notification-outbox rows and failing credential references,
+  alongside the volume breakdown, parked count and audit chain state the health report already
+  carries. The outbox rows are listed, not merely counted — a count names no row to act on.
+- S34.2 Clearing a failing credential reference works from the view: the mark clears, the next
+  operation using that reference resolves it afresh, and the clearing is audited.
+- S34.3 Clearing a failed outbox row works from the view and is audited.
+- S34.4 The parked-operations view shows each parked entry's recorded pre-state, the observed current
+  state, and **which of the five compared fields moved** — rendered as the difference, not as two
+  digest strings for the operator to compare by eye.
+- S34.5 A declaration whose tree cannot be observed at all — the case a parked entry is most likely
+  to be sitting on — renders as unobservable with the entry still listed, rather than failing the
+  view.
+- S34.6 A parked entry is driven to both of the design's resolutions from the view: settled with the
+  clone returned to `ready`, and kept parked. The settling is audited against the operator who did
+  it.
+- S34.7 Every console view — enrolment, login, landing, grants, audit, health and
+  parked-operations — is driven end to end in a real browser against a real repository, and the set
+  exercised is counted and named. This is definition-of-done item 19, which the prior art records as
+  the only way two genuine bugs were found.
+
+Out of scope: repairing a working tree from the console. The design's way out of a parked operation
+is to settle it or keep it parked; a file browser or a shell is neither, and adding one would be the
+console growing an escape hatch of its own.
 
 ---
 
@@ -287,7 +496,9 @@ a console fingerprint verified at startup.
 
 Touches: Surfaces (L5), Lifecycle (L1 — boot step 2), build tooling.
 
-Depends on: S18 and S28. **Gated on U7.**
+Depends on: S34 and S28 — it extends a finished console, so it needs every base view, not only the
+shell. **Gated on the remaining half of U7**, the published package; S18 fixes the framework binding,
+the build entry and the manifest hash, so `S19.1` is already met when this slice starts.
 
 Acceptance:
 - S19.1 The element type and build entry are fixed in `20-contract.md` before the package is
