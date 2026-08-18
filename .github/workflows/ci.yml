@@ -30,9 +30,14 @@ jobs:
 
       - run: npm ci
 
-      - run: npm test
+      # verification: true
+      - name: Run the full test suite
+        run: npm test
 
-      - run: npm run build
+      # verification: true
+      - name: Run typecheck and every check:* gate
+        run: npm run build
 
+      # verification: true
       - name: Build S28's container image
         run: docker build --build-arg GIT_COMMIT_SHA=${{ github.sha }} -t subzerodev-git:ci .
