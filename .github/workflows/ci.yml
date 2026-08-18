@@ -11,11 +11,22 @@
 # that ordering is stated. Out of scope: running the gates for the derived
 # consumer image (S20), and any deployment step — this is the repository's
 # own CI, not the service's execution mechanism.
+#
+# `push` is restricted to `main` (issue #122): a branch with an open pull
+# request already gets every commit gated by `pull_request` below, so a
+# `push:` with no branch filter fired a second, concurrent run of the exact
+# same commit. Real subprocess/HTTP-heavy tests (a spawned `git`, an
+# in-process HTTP server) sharing a GitHub-hosted runner with their own
+# duplicate run is a plausible source of CI-only flakiness that never
+# reproduced locally. Every commit that can reach `main` is still gated
+# either way: a feature-branch commit through `pull_request`, a direct or
+# merged push to `main` through `push`.
 
 name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 jobs:
