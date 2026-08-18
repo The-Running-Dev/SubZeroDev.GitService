@@ -158,6 +158,7 @@ Bodies retired; the closed issue is the record. Criteria are not re-derived from
 | **S25** | Expired structured records release real disk space | [#94](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/94) |
 | **S26** | Filesystem history ages out without losing the only copy | [#95](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/95) |
 | **S27** | Disk pressure releases only disposable clones, or refuses clearly | [#96](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/96) |
+| **S28** | The service ships as a container, and a second one refuses the volume | [#114](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/114) |
 
 Two rows carry a name this document changed after the issue was opened: #31 is titled "A dropped
 file becomes a pull request…" and #92 "A consumer can declare a safe content-drop protocol", both
@@ -167,53 +168,6 @@ edited — reported here rather than reconciled.
 ---
 
 ## Outstanding
-
-## S28 — The service ships as a container, and a second one refuses the volume
-
-Delivers: an operator can run the whole service from one container image against its own storage,
-with secrets on a separate read-only mount and each watched inbox mounted from the host — and a
-second container started against the same storage by mistake refuses to run rather than quietly
-sharing the same repositories.
-
-Touches: the image build definition, the deployment run configuration, deployment configuration
-wiring at the composition root, Lifecycle (L1 — boot step 1's lock acquirer), Surfaces (L5 —
-static console assets).
-
-Depends on: S27 — it packages the service as every landed slice now leaves it.
-
-Acceptance:
-- S28.1 The image builds from a clean checkout and carries the `git` and `gh` executables `exec`
-  invokes, each answering `--version` inside the container. A container started from it answers
-  `/healthz` with `ready` true and a `commitSha` equal to the commit the image was built from,
-  compared against the SHA the build recorded rather than against what the container reports about
-  itself.
-- S28.2 `src/contract/compiler.ts` is absent from the built image's filesystem, asserted by
-  inspecting the image rather than the module graph. Invariant B8 is written about the runtime
-  **image**, and the existing build check proves only that no runtime module imports the compiler.
-- S28.3 The data volume, the credential mount and a watcher inbox are three separate mounts, and
-  the credential mount is read-only: a write attempted into it from inside the container fails. A
-  pre-migration store backup taken in the container contains neither a resolved secret nor the TOTP
-  sealing key — invariant S5's separation, demonstrated on the real mount layout rather than on a
-  temporary directory.
-- S28.5 A second container started against the same named volume exits non-zero naming the first
-  container's `instanceId`, `hostName` and `startedAt`. Definition-of-done item 9, at the level the
-  brief states it.
-- S28.6 Stopping and restarting the container preserves all four rows of the design's
-  what-survives-a-restart table: a materialised clone, a declaration, an OAuth grant with a live
-  refresh token, and an unsettled journal entry. Each is read back after the restart, and the
-  journal entry is classified rather than lost.
-- S28.7 Started against a container-managed named volume, boot's lease self-test passes — the real
-  spawned-child test, on the real image, with no injected `LockAcquirer` — and the service serves.
-  **Appended after S28.6 although it runs before it**, because it replaces the demonstrated half of
-  the retired S28.4 and the id rules forbid renumbering; see § Criterion ids. The refusal half of
-  S28.4 is not lost, it is S30.1.
-
-Out of scope: publishing the image to a registry and provisioning the host that runs it — that is
-the deployment S22 exercises; the derived consumer image (S19 and S20); off-volume backup, which
-the design records as an accepted risk rather than a gap; and making boot's `lease-not-exclusive`
-refusal fire against a real filesystem, which is S30.
-
----
 
 ## S29 — The layering is enforced by a check, and every gate runs unattended
 
