@@ -22,13 +22,9 @@ import ts from 'typescript';
  * the seam on purpose, not violating the boundary the seam sits behind.
  */
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const srcRoot = path.join(repoRoot, 'src');
-const exemptPath = path.join(srcRoot, 'server.ts');
+export type Layer = 'L0' | 'L1' | 'L2' | 'L3' | 'L4' | 'L5';
 
-type Layer = 'L0' | 'L1' | 'L2' | 'L3' | 'L4' | 'L5';
-
-const LAYER_BY_TOP_DIR: Readonly<Record<string, Layer>> = {
+export const LAYER_BY_TOP_DIR: Readonly<Record<string, Layer>> = {
   contract: 'L0',
   declarations: 'L1',
   credentials: 'L1',
@@ -64,7 +60,7 @@ const LAYER_BY_TOP_DIR: Readonly<Record<string, Layer>> = {
  * while the run still printed OK (review of PR #112). Being made to classify
  * a new directory here is the point, not friction.
  */
-const UNLAYERED_TOP_ENTRIES: ReadonlySet<string> = new Set([
+export const UNLAYERED_TOP_ENTRIES: ReadonlySet<string> = new Set([
   // The composition root, in two files. Exempt from B1 by name — it wires
   // every layer together by construction.
   'server.ts',
@@ -81,7 +77,7 @@ function normalise(filePath: string): string {
   return path.resolve(filePath).replace(/\\/g, '/');
 }
 
-function layerOf(filePath: string): Layer | null {
+function layerOf(srcRoot: string, filePath: string): Layer | null {
   const relative = path.relative(srcRoot, filePath);
   const topDir = relative.split(path.sep)[0] ?? '';
   return LAYER_BY_TOP_DIR[topDir] ?? null;
@@ -99,59 +95,89 @@ function walk(dir: string, out: string[]): void {
   }
 }
 
-// Coverage first: every top-level entry under `src/` is either given a layer
-// or explicitly listed as carrying none. An unclassified one is a failure,
-// not a skip — see `UNLAYERED_TOP_ENTRIES`.
-const unclassified = readdirSync(srcRoot).filter(
-  (entry) => !(entry in LAYER_BY_TOP_DIR) && !UNLAYERED_TOP_ENTRIES.has(entry),
-);
-if (unclassified.length > 0) {
-  console.error(`check-layer-direction: ${unclassified.length} top-level src/ entr(y|ies) carry no layer, so B1 is not being checked for them:`);
-  for (const entry of unclassified) console.error(`  src/${entry}`);
-  console.error("  Add each to LAYER_BY_TOP_DIR, or to UNLAYERED_TOP_ENTRIES with the reason it has no layer.");
-  process.exit(1);
+export interface LayerDirectionResult {
+  /** Top-level `src/` entries that are neither layered nor explicitly unlayered. */
+  unclassified: string[];
+  /** One line per L0/L3/L4/L5 module that imports an L2 module. */
+  violations: string[];
+  /** Count of L0/L3/L4/L5 modules the walk actually inspected. */
+  checkedFiles: number;
+  /** Count of all non-test `.ts` files walked under `srcRoot`. */
+  totalFiles: number;
 }
 
-const files: string[] = [];
-walk(srcRoot, files);
+/**
+ * Walks `srcRoot` and reports invariant B1 violations. `exemptPath` is
+ * compared by resolved file path, never by directory or by name — the one
+ * exemption is the composition root itself, nothing beside it.
+ */
+export function checkLayerDirection(srcRoot: string, exemptPath: string): LayerDirectionResult {
+  const unclassified = readdirSync(srcRoot).filter(
+    (entry) => !(entry in LAYER_BY_TOP_DIR) && !UNLAYERED_TOP_ENTRIES.has(entry),
+  );
 
-const violations: string[] = [];
-let checkedFiles = 0;
+  const files: string[] = [];
+  walk(srcRoot, files);
 
-for (const file of files) {
-  const normalisedFile = normalise(file);
-  if (normalisedFile === normalise(exemptPath)) continue;
-  const fromLayer = layerOf(file);
-  // L1, L2 and the unlayered primitives are not checked source layers: B1 as
-  // written in `20-contract.md` names only L0, L3, L4 and L5, and this check
-  // enforces exactly what is written.
-  if (fromLayer === null || fromLayer === 'L1' || fromLayer === 'L2') continue;
-  checkedFiles += 1;
+  const violations: string[] = [];
+  let checkedFiles = 0;
+  const normalisedExempt = normalise(exemptPath);
 
-  const sourceText = readFileSync(file, 'utf8');
-  const sourceFile = ts.createSourceFile(file, sourceText, ts.ScriptTarget.ES2023, true);
+  for (const file of files) {
+    const normalisedFile = normalise(file);
+    if (normalisedFile === normalisedExempt) continue;
+    const fromLayer = layerOf(srcRoot, file);
+    // L1, L2 and the unlayered primitives are not checked source layers: B1
+    // as written in `20-contract.md` names only L0, L3, L4 and L5, and this
+    // check enforces exactly what is written.
+    if (fromLayer === null || fromLayer === 'L1' || fromLayer === 'L2') continue;
+    checkedFiles += 1;
 
-  sourceFile.forEachChild((node) => {
-    let specifier: string | undefined;
-    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
-      specifier = node.moduleSpecifier.text;
-    }
-    if (!specifier || !specifier.startsWith('.')) return;
+    const sourceText = readFileSync(file, 'utf8');
+    const sourceFile = ts.createSourceFile(file, sourceText, ts.ScriptTarget.ES2023, true);
 
-    const resolved = normalise(path.resolve(path.dirname(file), specifier));
-    const toLayer = layerOf(resolved);
-    if (toLayer === 'L2') {
-      violations.push(`${path.relative(repoRoot, file)} (${fromLayer}) imports ${path.relative(repoRoot, resolved)} (L2)`);
-    }
-  });
+    sourceFile.forEachChild((node) => {
+      let specifier: string | undefined;
+      if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+        specifier = node.moduleSpecifier.text;
+      }
+      if (!specifier || !specifier.startsWith('.')) return;
+
+      const resolved = normalise(path.resolve(path.dirname(file), specifier));
+      const toLayer = layerOf(srcRoot, resolved);
+      if (toLayer === 'L2') {
+        violations.push(`${path.relative(srcRoot, file)} (${fromLayer}) imports ${path.relative(srcRoot, resolved)} (L2)`);
+      }
+    });
+  }
+
+  return { unclassified, violations, checkedFiles, totalFiles: files.length };
 }
 
-if (violations.length > 0) {
-  console.error(`check-layer-direction: ${violations.length} violation(s) of invariant B1 — L0/L3/L4/L5 importing L2:`);
-  for (const violation of violations) console.error(`  ${violation}`);
-  process.exit(1);
-}
+// CLI entrypoint — only runs when this file is executed directly, not when
+// imported by the test.
+const isMain = process.argv[1] !== undefined && normalise(process.argv[1]) === normalise(fileURLToPath(import.meta.url));
+if (isMain) {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const srcRoot = path.join(repoRoot, 'src');
+  const exemptPath = path.join(srcRoot, 'server.ts');
 
-console.log(
-  `check-layer-direction: OK — ${checkedFiles} L0/L3/L4/L5 module(s) checked of ${files.length} walked, none imports L2`,
-);
+  const result = checkLayerDirection(srcRoot, exemptPath);
+
+  if (result.unclassified.length > 0) {
+    console.error(`check-layer-direction: ${result.unclassified.length} top-level src/ entr(y|ies) carry no layer, so B1 is not being checked for them:`);
+    for (const entry of result.unclassified) console.error(`  src/${entry}`);
+    console.error('  Add each to LAYER_BY_TOP_DIR, or to UNLAYERED_TOP_ENTRIES with the reason it has no layer.');
+    process.exit(1);
+  }
+
+  if (result.violations.length > 0) {
+    console.error(`check-layer-direction: ${result.violations.length} violation(s) of invariant B1 — L0/L3/L4/L5 importing L2:`);
+    for (const violation of result.violations) console.error(`  ${violation}`);
+    process.exit(1);
+  }
+
+  console.log(
+    `check-layer-direction: OK — ${result.checkedFiles} L0/L3/L4/L5 module(s) checked of ${result.totalFiles} walked, none imports L2`,
+  );
+}
