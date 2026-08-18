@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { systemClock } from '../clock/clock.ts';
@@ -345,7 +345,26 @@ test('S9.3: replacing the secret file changes what the next push sends, with no 
       // The first attempt marked the reference. Rotating the secret is what
       // clears the mark *and* what the next attempt must send — both halves of
       // "no restart" in one step.
-      writeFileSync(path.join(mount.root, REF), 'second-secret-value', 'utf8');
+      const secretPath = path.join(mount.root, REF);
+      writeFileSync(secretPath, 'second-secret-value', 'utf8');
+
+      // Stamped strictly after the mark rather than trusting the clock, the same
+      // way `credentials.test.ts`'s own rotation test does and for the same
+      // reason. `credentials.ts` clears a mark only when the secret's mtime is a
+      // strictly later *whole millisecond* than `marked_at`, and a tie
+      // deliberately keeps the mark. The push above takes the mark and this
+      // rewrite follows it within microseconds, so on a fast runner both land in
+      // the same millisecond, the mark survives, and the second push resolves no
+      // credential at all — issue #122, which failed only in CI because only CI
+      // was fast enough to tie. What this test is about is rotation, not the
+      // clock's resolution.
+      const marks = await resolver.listFailing();
+      assert.equal(marks.length, 1);
+      const markedAt = marks[0]?.markedAt;
+      assert.notEqual(markedAt, undefined);
+      const rotatedAt = new Date(Date.parse(markedAt ?? '') + 5_000);
+      utimesSync(secretPath, rotatedAt, rotatedAt);
+
       await operations.push(contextFor(clone.clonePath), { branch: null });
 
       const sent = remote.authorizations
