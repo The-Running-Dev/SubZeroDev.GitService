@@ -1,0 +1,54 @@
+# S29 (`design/30-slices.md` § S29): every gate this repository already has
+# runs unattended on every push and pull request, rather than when someone
+# remembers to run it. `node-version-file: package.json` pins the runner to
+# `engines.node`; `.npmrc`'s `engine-strict=true` makes `npm ci` itself
+# refuse a Node outside that range, so a mismatch fails the job rather than
+# silently running every gate on a different runtime.
+#
+# `npm run build` chains typecheck, the registry build and every `check:*`
+# gate (`check:layering`, `check:migration`, `check:layer-direction`) — the
+# same chain the Dockerfile's `builder` stage runs, so this is the one place
+# that ordering is stated. Out of scope: running the gates for the derived
+# consumer image (S20), and any deployment step — this is the repository's
+# own CI, not the service's execution mechanism.
+#
+# `push` is restricted to `main` (issue #122): a branch with an open pull
+# request already gets every commit gated by `pull_request` below, so a
+# `push:` with no branch filter fired a second, concurrent run of the exact
+# same commit. Real subprocess/HTTP-heavy tests (a spawned `git`, an
+# in-process HTTP server) sharing a GitHub-hosted runner with their own
+# duplicate run is a plausible source of CI-only flakiness that never
+# reproduced locally. Every commit that can reach `main` is still gated
+# either way: a feature-branch commit through `pull_request`, a direct or
+# merged push to `main` through `push`.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: package.json
+
+      - run: npm ci
+
+      # verification: true
+      - name: Run the full test suite
+        run: npm test
+
+      # verification: true
+      - name: Run typecheck and every check:* gate
+        run: npm run build
+
+      # verification: true
+      - name: Build S28's container image
+        run: docker build --build-arg GIT_COMMIT_SHA=${{ github.sha }} -t subzerodev-git:ci .
