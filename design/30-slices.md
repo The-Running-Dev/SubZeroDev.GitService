@@ -62,7 +62,41 @@ The decision log's 2026-08-14 entry recorded the finding and left the resolution
 Retiring the id rather than narrowing it is what keeps the existing checkbox honest: narrowing S28.4
 to the half that was demonstrated would silently shrink what an already-reported box refers to, which
 is the one failure this scheme exists to prevent. The demonstrated half is now `S28.7`; the refusal
-requirement is reframed onto a filesystem that genuinely does not lock and becomes `S30.1`.
+requirement was reframed onto a filesystem that genuinely does not lock and became `S30.1`,
+which has since been retired in its turn — see below.
+
+**`S30.1` and `S30.3` are retired, and this is the second time the same requirement has failed to
+land.** Both asked boot to exit `lease-not-exclusive` against a real mount whose byte-range locking is
+absent, `S30.1` through boot and `S30.3` by measuring the self-test child's exit code directly. Run
+for real on 2026-08-19 against a Samba sidecar mounted `nobrl`: the share **does** defeat locking
+across independent client sessions — two production containers both booted and both reported
+`ready: true` against it at once, which is exactly the split-brain invariant C7 exists to prevent —
+and boot's self-test **passed on both sides**. `childIsRefused` spawns its child inside the container
+that already holds the lock, so parent and child share one CIFS client session, and `nobrl` disables
+only server-mediated cross-session locking; the check measures the session it already holds. So
+`S30.3` does not merely fail, it inverts: the child exits `3` (refused) on the very filesystem the
+criterion was written to catch. NFS could not be exercised at all — Docker Desktop's Linux VM kernel
+carries no NFSv3 client, and NFSv4 has no `nolock` equivalent.
+
+The decision log's 2026-08-19 entry recorded the finding and left the resolution to this command.
+Retiring both ids rather than rewording them is what keeps the existing checkboxes honest: a
+criterion asking for a demonstrated refusal cannot be quietly turned into one asking for a
+demonstrated *failure to refuse* while the same box carries both meanings. Their replacements
+`S30.5` through `S30.9` measure what the check actually does, and `S30.2` and `S30.4` are **reworded
+without changing their ids**, on the same rule that reworded `S18.1` and `S18.2` — `S30.2` had been
+written as a control for `S30.1`, and `S30.4`'s outcome set had no category for two live instances.
+
+S30 is **renamed** for the same reason: "The lease guard refuses a filesystem that does not lock"
+states as fact the thing the slice now exists to disprove. Issue
+[#118](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/118) still carries the old
+title and the old criteria. It is open, so that is drift for `/track` to report and sync, not
+something this command reconciles.
+
+**The blindness itself is not resolved here, and must not be read as accepted.** `/slices` can decide
+what S30 checks; it cannot decide whether boot should be able to see a cross-session lock failure at
+all, because that means telling boot what kind of mount it is on — new surface in `lease.ts` and a
+claim in `10-design.md` that would have to change. That is `/design`'s, and it is staged in
+`90-decisions.md` § Open so `/track` raises it.
 
 **S18 is split the same way S17 was, and six of its criteria are retired rather than moved.** S18
 asked one session to stand up a user interface from nothing, ship five views on top of it, federate
@@ -126,14 +160,15 @@ parity migration, the rollback — assumes a container that has never been built
 because invariant B1 has no enforcement at all today, and the seam it protects is the one
 `MCP-NEXT.md` Phase 8 exists to eventually cut.
 
-**S30 finishes what S28 could not, and it is a proof rather than a feature.** S28 shipped the image
-and demonstrated mutual exclusion, so definition-of-done item 9 is met. What it could not
-demonstrate is the *guard* behind item 9 — boot's refusal to serve on a filesystem that does not
-honour exclusion — because the deployment target turned out to honour it. That refusal is therefore
-still the one safety branch in this system reached only through an injected seam, which is the same
-objection S28 was written to answer, one level down. It runs ahead of S18 because it needs the image
-S28 built and nothing else, and because a guard nobody has seen fire is worth less the longer the
-system leans on it.
+**S30 no longer finishes what S28 could not; it establishes why nothing can, yet.** S28 shipped the
+image and demonstrated mutual exclusion, so definition-of-done item 9 is met for every supported
+configuration. The *guard* behind item 9 — boot's refusal to serve on a filesystem that does not
+honour exclusion — turns out to be unreachable from any real filesystem in this environment, and the
+one real filesystem that does produce split-brain sails straight past it. S30 is therefore a
+measurement rather than a proof: it pins where single-instance ownership actually stops, and leaves a
+committed fixture that any future repair has to satisfy. It still runs ahead of S18 because it needs
+the image S28 built and nothing else, and because a boundary the system leans on is worth knowing
+before five more slices are written on top of it.
 
 **Among the console slices, the bet that has never been taken runs first and the external dependency
 runs second.** S18 is where a browser talks to this service for the first time: an ambient-authority
@@ -259,45 +294,63 @@ anything here.
 
 ---
 
-## S30 — The lease guard refuses a filesystem that does not lock
+## S30 — Where single-instance ownership actually stops, demonstrated
 
-Delivers: an operator who puts the service's storage somewhere that cannot actually keep two
-instances apart — a network share, most obviously — is stopped at startup with a message naming the
-problem, instead of getting a service that runs and quietly lets a second copy corrupt the same
-repositories.
+Delivers: anyone deciding where to put this service's storage can see, from a test they can run
+themselves, exactly which storage arrangements keep two copies of the service apart and which do
+not — including one that does not, and where the startup check waves it through. Nobody has to take
+that boundary on trust, or rediscover it by losing a repository to two instances writing at once.
 
-Touches: the deployment run configuration (a test-only mount overlay and its sidecar), Lifecycle
-(L1 — boot step 1's self-test). **No production source change is expected**; if one turns out to be
-needed, that is a defect and this slice stops on it.
+Touches: a committed container harness beside `lease-self-test-container.ts` and the deployment run
+configuration it needs (a mount overlay and a file-server sidecar). **No production source change is
+expected**; if one turns out to be needed, that is a defect and this slice stops on it.
 
 Depends on: S28 — it needs the real image, and nothing else.
 
 Acceptance:
-- S30.1 The service container, started with its data volume on a real mount whose byte-range locking
-  is genuinely absent — CIFS/SMB mounted `nobrl`, or NFS mounted `nolock`, served by a sidecar
-  container — exits non-zero with `lease-not-exclusive`, naming the volume configuration. Against the
-  real image, with no injected `LockAcquirer`. This is the first time invariant C7's refusal branch
-  fires against a filesystem rather than a fake, and it carries the requirement retired from S28.4.
-- S30.2 The same harness, same image and same command with only the data mount changed to a
-  container-managed named volume, boots and serves. Without this the refusal in S30.1 is attributable
-  to the harness rather than to the filesystem.
-- S30.3 `lease-self-test-child.ts` is run directly inside the container against the S30.1 mount, as
-  its own step rather than through boot, and exits `0` — `CHILD_ACQUIRED_EXIT_CODE`, meaning the
-  filesystem granted a second process the same exclusive lock. Its exit code is stated. Boot maps
-  every non-`3` exit to the same `lease-not-exclusive`, so a spawn failure and a permissive
-  filesystem are indistinguishable in S30.1's result alone, and this is what tells them apart
-  without instrumenting `childIsRefused`.
-- S30.4 The mount configurations exercised are counted and each one's outcome stated: served,
-  `lease-held`, or `lease-not-exclusive`. The set includes a bind-mounted Windows host path, recorded
-  as **served** — the 2026-08-14 negative result, carried into the acceptance record rather than
-  living only in the decision log, and the answer to issue #55.
+- S30.2 A container on a container-managed named volume — the supported configuration, same image
+  and same command as every other run in this slice — boots and serves. This is the control: without
+  it, every outcome below is attributable to the harness rather than to the mount under it.
+- S30.4 The mount configurations exercised are counted and each one's outcome stated, from a set of
+  four: served, `lease-held`, `lease-not-exclusive`, or **served twice** — two instances live against
+  one volume at once. The set includes a bind-mounted Windows host path, recorded as `lease-held` on
+  the second container — the 2026-08-14 negative result, carried into the acceptance record rather
+  than living only in the decision log, and the answer to issue #55.
+- S30.5 Two containers of the real image, each holding an independent client session against one
+  CIFS/SMB share mounted `nobrl` and served by a sidecar, both boot and both answer `/healthz` with
+  `ready: true` at the same time. Session independence is forced rather than hoped for, and the
+  harness states how. No injected `LockAcquirer`. This is the split-brain invariant C7 exists to
+  prevent, reached against a real filesystem.
+- S30.6 In that same run, boot's own self-test **passes on both sides** — neither container exits
+  `lease-not-exclusive`. S30.5 and S30.6 together are the finding: the guard does not fire on the
+  condition it was written for.
+- S30.7 `lease-self-test-child.ts` is run directly inside a container whose data mount is S30.5's
+  `nobrl` share, as its own step rather than through boot, and exits `3` — `CHILD_REFUSED_EXIT_CODE`.
+  Stated as a number. This is the mechanism behind S30.6 rather than a restatement of it: the child
+  is a subprocess of the container that already holds the lock, so it shares that CIFS client
+  session, and `nobrl` disables only server-mediated cross-session locking. The check measures the
+  session it already holds, which is why it cannot see S30.5.
+- S30.8 The harness is committed, is runnable on demand rather than swept into `npm test` — the
+  same treatment `lease-self-test-container.ts` already has, for the same reason — and its own header
+  states in full that it asserts a vulnerability rather than a guarantee, so that **a later change
+  making S30.5 or S30.6 fail is a fix and not a regression**. This is the fixture any repair to the
+  self-test would have to satisfy.
+- S30.9 The harness output names every mount configuration it did **not** exercise, and why. NFS is
+  one of them: Docker Desktop's Linux VM kernel carries no NFSv3 client, so `nolock` is unreachable,
+  and NFSv4's locking is protocol-integrated with no equivalent switch. A coverage claim nobody can
+  check is a description, not a gate.
 
-Out of scope: changing `lease.ts`, `lease-self-test-child.ts` or the self-test protocol — if the
-refusal does not fire on a mount whose locking is demonstrably absent, that is a defect in the
-self-test and this slice stops and says so rather than adjusting the thing it is testing. Making a
-non-locking mount a supported deployment configuration; it is exercised here only to prove it is
-refused. Whether the design's named-volume requirement should soften to a recommendation given
-S30.4's result — that is a `design/10-design.md` change and belongs to `/design`.
+Out of scope: changing `lease.ts`, `lease-self-test-child.ts` or the self-test protocol. **The
+blindness S30.6 and S30.7 measure is a defect in the self-test, and this slice records it rather than
+repairing it** — a repair means boot learning what kind of mount it is on, which it is not told
+today, and that is a `design/10-design.md` and `design/20-contract.md` change belonging to `/design`.
+Making a non-locking mount a supported deployment configuration; it is exercised here only to measure
+where the guarantee stops. Whether the design's named-volume requirement should harden, soften, or
+stay as it is given these results — also `/design`'s.
+
+**`S30.1` and `S30.3` are retired, and the gaps they leave are deliberate.** Both asked boot to
+refuse a filesystem whose locking is absent, and boot demonstrably does not refuse it; the criteria
+that replace them measure what the check actually does instead. See *Criterion ids* above.
 
 ---
 
