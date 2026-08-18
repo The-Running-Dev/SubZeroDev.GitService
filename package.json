@@ -13,7 +13,8 @@
     "check:migration": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/check-migration-matches-contract.ts",
     "check:layer-direction": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/check-layer-direction.ts",
     "build": "npm run typecheck && npm run build:registry && npm run check:layering && npm run check:migration && npm run check:layer-direction",
-    "start": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON src/server.ts"
+    "start": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON src/server.ts",
+    "verify:container-lease": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/lifecycle/lease-self-test-container.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
