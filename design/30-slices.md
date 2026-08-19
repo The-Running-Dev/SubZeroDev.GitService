@@ -365,6 +365,10 @@ Acceptance:
 - S18.13 Enrolment, all three sign-in paths and the landing view are driven end to end in a real
   browser against a real repository. The browser run is what the criteria above are checked by;
   a request-level test does not stand in for one.
+- S18.14 The route table names every route carrying no repository dimension — liveness, version,
+  health, authentication and OAuth — as an explicit closed set, and every other row in it carries
+  a declaration id. Both counts are stated. This is definition-of-done item 6's endpoint half; its
+  console half is `S18.2` and `S34.7`.
 
 Out of scope: OIDC and TOTP re-enrolment (S31); the grants view (S32); the audit view (S33); the
 health and parked-operations views (S34); consumer views and the published console package (S19);

@@ -2,6 +2,31 @@
 
 Append-only. Newest at the top. The rejected alternatives are the point — without them, every future session relitigates the same choice.
 
+### 2026-08-19 — Definition-of-done item 6 narrowed: not every endpoint carries a repository
+Context: A `/slices` re-run found nothing to size — `30-slices.md` is already newer than every
+document it derives from — but the coverage check surfaced that brief item 6 ("Every endpoint and
+every view takes a repository") is both unclaimed by any acceptance criterion and contradicted by the
+contract fixing the surface. `20-contract.md` § L5 fixes `/healthz`, `/version` and `/health` as live
+routes with no repository dimension; U4 asks each row to state "whether it carries a repository
+dimension"; `/auth/*`, `/oauth/register` and `/.well-known/oauth-authorization-server` are the same
+case. The item's console half is already covered by `S18.2` and `S34.7`. Its endpoint half is the one
+that cannot be demonstrated as written.
+Chosen: Narrow item 6 to "every route that acts on repository state carries a declaration id", and
+require the route table to name the instance-level exceptions as a **closed set**. The closed set is
+what makes the item checkable at all — a completeness claim whose exceptions are decided after the
+fact can never fail. `S18.14` is appended to claim the endpoint half, in the slice that writes the
+route table.
+Rejected: **Leave item 6 as written** — costs nothing now, and leaves a definition-of-done item that
+gets quietly reinterpreted at the finish line instead of passed or failed. **Widen `S18.1` to carry
+the requirement** — its checkbox is already live on issue #32, and rewording a criterion to carry a
+second requirement is the failure criterion ids exist to prevent; the same reasoning retired `S28.4`
+rather than narrowing it. **Change the contract so every route carries a repository** — makes an
+unauthenticated liveness probe impossible, which is exactly what invariant E8's 2026-08-03 payload
+split exists to allow.
+Reversibility: mixed — the brief line reverts cleanly; `S18.14` does not. Once `/track` syncs it to
+issue #32, retiring it leaves a permanent gap, the same as `S18.3`–`S18.8`.
+---
+
 ### 2026-08-19 — S30.1 and S30.3 cannot pass: boot's lease self-test is structurally blind to cross-session network-share locking failure
 Context: S30 (`design/30-slices.md` § S30) requires boot's real self-test to fire `lease-not-exclusive`
 against a mount whose byte-range locking is genuinely absent — CIFS mounted `nobrl` or NFS mounted
