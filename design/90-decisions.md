@@ -2,6 +2,47 @@
 
 Append-only. Newest at the top. The rejected alternatives are the point — without them, every future session relitigates the same choice.
 
+### 2026-08-19 — S30.5–S30.8 do not reproduce on this host: `nobrl` breaks `node:sqlite` outright, before any lock behaviour is reachable
+Context: `/slice S30` (`design/30-slices.md` § S30) implementing `S30.5`–`S30.8` needs a Samba sidecar
+mounted `nobrl`, the real image, no injected `LockAcquirer` — the same setup the entry immediately
+below this one (also dated 2026-08-19) used to reach two containers both booting and both reporting
+`ready: true`. Attempted for real on this host: macOS Docker Desktop, kernel `7.0.12-linuxkit`, the
+data volume mounted via Docker's `local` volume driver (`--opt type=cifs`) against a Samba sidecar,
+`nobrl` set.
+
+`lease.ts`'s `openLocked` runs `CREATE TABLE IF NOT EXISTS lease_lock ...` and `BEGIN EXCLUSIVE` on
+every boot — the same `node:sqlite` sequence `sqlite3` and a raw `strace` reproduced directly. Committing
+that first statement's rollback-journal deletion calls `unlink()` on the `-journal` file, and the CIFS
+client on this kernel returns `EOPNOTSUPP` for that unlink whenever the mount carries `nobrl` —
+confirmed with `strace`, and confirmed independent of `nosharesock`, independent of which Samba server
+was used (`dperson/samba` 4.12.2 and, separately, `ghcr.io/servercontainers/samba` 4.23.8), and
+independent of server-side oplock/share-mode settings. The real image cannot boot against this mount at
+all: not "boots and the self-test is blind" (the finding immediately below), but boot itself never
+reaches the self-test, because `node:sqlite` cannot commit its first statement. This is an earlier,
+different failure than the entry below records, and that entry's environment — whatever produced two
+containers both reaching `ready: true` — is not reproducible with what this host has.
+Chosen: Record the finding rather than force a result. `S30.2` (the control) and `S30.9` (naming what
+was not exercised) are implemented and pass for real; `S30.4` carries this outcome as `blocked`, a fifth
+category alongside the four the criterion names, rather than forcing it into `served`,
+`lease-held`, `lease-not-exclusive` or `served-twice` — none of which describe "the mount cannot run
+`node:sqlite` at all". `S30.5`–`S30.8`'s `Done when` boxes are left unticked. The committed harness
+(`src/lifecycle/lease-self-test-split-brain.ts`) states this reasoning in its own header and marks the
+three blocked tests `skip` with the reason inline, rather than deleting them or asserting a result never
+observed.
+Rejected: **Keep varying Samba/mount configuration until something reproduces the other entry's result**
+— open-ended: nothing here bounds how many more combinations might exist, and no failed attempt is
+evidence the next one will succeed. Stopped after the sidecar, mount-option and server-setting
+combinations above all reproduced the same `EOPNOTSUPP`, and the choice to stop was put to the user
+rather than made unilaterally. **Silently mark `S30.5`–`S30.8` met, citing the other entry's result** —
+that entry's environment is not this one; asserting a result this host never produced is exactly what
+`AGENTS.md`'s verification rules forbid. **Force a result by relaxing `nobrl` or switching journal
+modes** — `lease.ts` is out of scope for this slice, and changing the test's own conditions to dodge the
+failure would prove nothing about the mount `S30.5`–`S30.8` ask about.
+Reversibility: cheap — a documentation/reporting decision, not a code change. Reopening it costs nothing
+more than re-running the harness on a host where `node:sqlite` does not fail outright over a `nobrl`
+CIFS mount, if and when one is available.
+---
+
 ### 2026-08-19 — Definition-of-done item 6 narrowed: not every endpoint carries a repository
 Context: A `/slices` re-run found nothing to size — `30-slices.md` is already newer than every
 document it derives from — but the coverage check surfaced that brief item 6 ("Every endpoint and
