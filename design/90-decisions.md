@@ -2,6 +2,21 @@
 
 Append-only. Newest at the top. The rejected alternatives are the point — without them, every future session relitigates the same choice.
 
+### 2026-08-19 — `oidc-unavailable`'s `reason` gains `'state'` and `'token-exchange'`
+Context: a code-review finding on S31's `completeOidc` (`src/operator-identity/operator-identity.ts`)
+found that a stale/replayed/forged `state` and a failed authorization-code exchange were both reported
+as `reason: 'discovery'` — the same reason a genuinely unreachable issuer gets. The distinct
+human-readable messages already existed at each call site but were discarded at the `reason` field,
+the layer any log/alerting consumer would key off, making a replayed-callback attempt indistinguishable
+from routine issuer flakiness.
+Chosen: widen `OperatorIdentityError`'s `oidc-unavailable` reason union (`errors.ts`, mirrored in
+`20-contract.md`) with `'state'` (CSRF/state check failure) and `'token-exchange'` (the code-for-token
+POST failing), and point each `completeOidc` call site at its own reason instead of the shared
+`'discovery'` fallback.
+Rejected: leaving the three failures collapsed — cheaper, but leaves a security-relevant signal
+(state replay) indistinguishable from routine unreachability in anything consuming `reason`.
+Reversibility: cheap — two additional string literals in an existing union, no schema/storage change.
+
 ### 2026-08-19 — S31 adds `oidcClientId`/`oidcClientSecret` to `DeploymentConfig`
 Context: `/slice S31` (`design/30-slices.md` § S31) needs a real OIDC authorization-code exchange.
 `DeploymentConfig` already declared `oidcIssuer` and `oidcSubjectAllowlist`, but no `client_id` —

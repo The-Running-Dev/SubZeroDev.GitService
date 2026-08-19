@@ -19,17 +19,26 @@ export function TotpReenrol({ onCompleted }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    let cancelled = false;
-    api.post<TotpReenrolStart | { readonly error: string }>('/auth/totp-reenrol/begin').then((res) => {
-      if (cancelled) return;
-      if (!res.ok) {
-        setError('error' in res.body ? res.body.error : 'could not start re-enrolment');
-        return;
-      }
-      setTotpSecret((res.body as TotpReenrolStart).totpSecret);
-    });
+    // An `AbortController`, not just a `cancelled` flag: React StrictMode
+    // double-invokes this effect in dev, and without actually aborting the
+    // first request, both `begin` calls would persist their own pending
+    // secret (last DB write wins) while either response could resolve last
+    // in the browser — the secret shown could be the one that lost the race.
+    const controller = new AbortController();
+    api
+      .post<TotpReenrolStart | { readonly error: string }>('/auth/totp-reenrol/begin', undefined, controller.signal)
+      .then((res) => {
+        if (!res.ok) {
+          setError('error' in res.body ? res.body.error : 'could not start re-enrolment');
+          return;
+        }
+        setTotpSecret((res.body as TotpReenrolStart).totpSecret);
+      })
+      .catch(() => {
+        // Aborted by the cleanup below — a real second mount will retry.
+      });
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, []);
 
@@ -51,6 +60,7 @@ export function TotpReenrol({ onCompleted }: Props) {
       <h1>Re-enrol your authenticator</h1>
       <p>You signed in with a recovery code. Add a fresh authenticator before continuing.</p>
       {totpSecret === null && !error && <p>Loading…</p>}
+      {totpSecret === null && error && <p role="alert">{error}</p>}
       {totpSecret && (
         <form onSubmit={submit}>
           <p>

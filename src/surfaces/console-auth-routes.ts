@@ -131,6 +131,22 @@ export async function requireSession(deps: ConsoleAuthDependencies, req: Incomin
 }
 
 /**
+ * The session cookie's raw id, without touching the session — for routes
+ * whose own identity call (`beginTotpReenrol`/`completeTotpReenrol`) already
+ * validates liveness and extends the idle timeout on its own, so routing
+ * through `requireSession` first would touch the same session twice per
+ * request.
+ */
+function sessionIdFromCookie(req: IncomingMessage, res: ServerResponse): SessionId | null {
+  const raw = parseCookies(req.headers.cookie)[SESSION_COOKIE];
+  if (!raw) {
+    sendJson(res, 401, { error: 'session-unknown' });
+    return null;
+  }
+  return raw as SessionId;
+}
+
+/**
  * The `Origin` half of invariant E7, on its own: the request's declared
  * origin must be this service's own host. Applied to every mutating
  * `/auth/*` route as blanket defense-in-depth, not because the contract
@@ -279,7 +295,12 @@ export async function handleConsoleAuthRoute(
   if (req.method === 'GET' && url.pathname === '/auth/login/oidc') {
     const result = await deps.identity.beginOidc();
     if (!result.ok) {
-      sendError(res, result.error);
+      // A full-page navigation, not a fetch (`Login.tsx`'s `sso-link`) — a
+      // JSON error body here would strand the operator on a bare error page
+      // with no way back. Redirect to the app instead, carrying the error
+      // code as a query param it can surface.
+      res.writeHead(302, { Location: `/?oidcError=${encodeURIComponent(result.error.code)}` });
+      res.end();
       return true;
     }
     res.writeHead(302, { Location: result.value.authorizeUrl });
@@ -292,7 +313,8 @@ export async function handleConsoleAuthRoute(
     const state = url.searchParams.get('state') ?? '';
     const result = await deps.identity.completeOidc(code, state);
     if (!result.ok) {
-      sendError(res, result.error);
+      res.writeHead(302, { Location: `/?oidcError=${encodeURIComponent(result.error.code)}` });
+      res.end();
       return true;
     }
     res.writeHead(302, {
@@ -304,13 +326,13 @@ export async function handleConsoleAuthRoute(
   }
 
   if (req.method === 'POST' && url.pathname === '/auth/totp-reenrol/begin') {
-    const session = await requireSession(deps, req, res);
-    if (!session) return true;
+    const sessionId = sessionIdFromCookie(req, res);
+    if (!sessionId) return true;
     if (!csrfOk(req)) {
       sendJson(res, 403, { error: 'csrf-check-failed' });
       return true;
     }
-    const result = await deps.identity.beginTotpReenrol(session.id);
+    const result = await deps.identity.beginTotpReenrol(sessionId);
     if (!result.ok) {
       sendError(res, result.error);
       return true;
@@ -320,8 +342,8 @@ export async function handleConsoleAuthRoute(
   }
 
   if (req.method === 'POST' && url.pathname === '/auth/totp-reenrol/complete') {
-    const session = await requireSession(deps, req, res);
-    if (!session) return true;
+    const sessionId = sessionIdFromCookie(req, res);
+    if (!sessionId) return true;
     if (!csrfOk(req)) {
       sendJson(res, 403, { error: 'csrf-check-failed' });
       return true;
@@ -331,7 +353,7 @@ export async function handleConsoleAuthRoute(
       sendJson(res, 400, { error: 'bad-request' });
       return true;
     }
-    const result = await deps.identity.completeTotpReenrol(session.id, stringField(body, 'totpCode'));
+    const result = await deps.identity.completeTotpReenrol(sessionId, stringField(body, 'totpCode'));
     if (!result.ok) {
       sendError(res, result.error);
       return true;

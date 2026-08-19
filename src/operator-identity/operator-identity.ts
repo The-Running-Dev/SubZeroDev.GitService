@@ -11,7 +11,7 @@ import type { Audit } from '../audit/audit.ts';
 import { storeError } from '../store/errors.ts';
 import { operatorIdentityError, type OperatorIdentityError } from './errors.ts';
 import { base32Encode, generateTotpSecret, sealTotpSecret, unsealTotpSecret, verifyTotpCode } from './totp.ts';
-import { discoverOidc, exchangeCodeForIdToken, verifyIdToken } from './oidc.ts';
+import { discoverOidc, exchangeCodeForIdToken, verifyIdToken, type OidcDiscoveryDocument } from './oidc.ts';
 import {
   generateRecoveryCodes,
   hashRecoveryCode,
@@ -199,6 +199,14 @@ function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): Outcome<T, 
 
 /** S31.2's CSRF-state check. In-memory: single-instance (invariant C7), and losing a pending redirect on restart costs the operator one retry, not a durable record `S8`-style recovery has to account for. */
 const OIDC_PENDING_STATE_TTL_MS = 10 * 60 * 1000;
+/** Caps `pendingOidcStates`' growth from abandoned `beginOidc` calls that never reach a matching `completeOidc` — the same bound `mcp-routes.ts`'s analogous `pendingAuthorizations` map applies via its own `MAX_PENDING_AUTHORIZATIONS`. */
+const MAX_PENDING_OIDC_STATES = 500;
+
+interface PendingOidcState {
+  readonly expiresAt: number;
+  /** Cached from the `beginOidc` call that created this entry, so `completeOidc` doesn't re-fetch the same discovery document moments later. */
+  readonly discovery: OidcDiscoveryDocument;
+}
 
 export function createOperatorIdentity(deps: OperatorIdentityDependencies): OperatorIdentity {
   const { volumeRoot, credentialMountRoot, clock, audit } = deps;
@@ -210,7 +218,14 @@ export function createOperatorIdentity(deps: OperatorIdentityDependencies): Oper
   const oidcClientSecret = deps.oidcClientSecret ?? null;
   const oidcSubjectAllowlist = deps.oidcSubjectAllowlist ?? [];
   const oidcRedirectUri = deps.oidcRedirectUri ?? '';
-  const pendingOidcStates = new Map<string, number>();
+  const pendingOidcStates = new Map<string, PendingOidcState>();
+
+  /** Sweeps entries whose TTL has passed without a matching `completeOidc` — an abandoned `beginOidc` otherwise lingers in the map for the life of the process. */
+  function pruneExpiredOidcStates(now: number): void {
+    for (const [key, value] of pendingOidcStates) {
+      if (value.expiresAt <= now) pendingOidcStates.delete(key);
+    }
+  }
 
   const provisioningFile = path.join(volumeRoot, PROVISIONING_FILENAME);
   const breakGlassFile = path.join(volumeRoot, BREAK_GLASS_FILENAME);
@@ -537,8 +552,14 @@ export function createOperatorIdentity(deps: OperatorIdentityDependencies): Oper
         return err(operatorIdentityError({ code: 'oidc-unavailable', reason: 'discovery' }, 'the OIDC issuer could not be reached or returned a malformed discovery document'));
       }
 
+      const now = Date.parse(clock.now());
+      pruneExpiredOidcStates(now);
+      if (pendingOidcStates.size >= MAX_PENDING_OIDC_STATES) {
+        return err(operatorIdentityError({ code: 'oidc-unavailable', reason: 'state' }, 'too many pending sign-in attempts; try again shortly'));
+      }
+
       const state = crypto.randomUUID();
-      pendingOidcStates.set(state, Date.now() + OIDC_PENDING_STATE_TTL_MS);
+      pendingOidcStates.set(state, { expiresAt: now + OIDC_PENDING_STATE_TTL_MS, discovery });
 
       const authorizeUrl = new URL(discovery.authorizationEndpoint);
       authorizeUrl.searchParams.set('response_type', 'code');
@@ -555,20 +576,12 @@ export function createOperatorIdentity(deps: OperatorIdentityDependencies): Oper
         return err(operatorIdentityError({ code: 'oidc-unavailable', reason: 'discovery' }, 'no OIDC issuer is configured for this deployment'));
       }
 
-      // A stale, replayed or forged `state` is folded into `discovery` — the
-      // contract's `OidcVerifyFailureReason` has no dedicated code for it,
-      // and this failure sits in the same place in the flow: before any real
-      // exchange with the issuer has happened.
-      const expiresAt = pendingOidcStates.get(state);
+      const pending = pendingOidcStates.get(state);
       pendingOidcStates.delete(state);
-      if (!expiresAt || expiresAt < Date.now()) {
-        return err(operatorIdentityError({ code: 'oidc-unavailable', reason: 'discovery' }, 'the sign-in request state is missing, expired or already used'));
+      if (!pending || pending.expiresAt < Date.parse(clock.now())) {
+        return err(operatorIdentityError({ code: 'oidc-unavailable', reason: 'state' }, 'the sign-in request state is missing, expired or already used'));
       }
-
-      const discovery = await discoverOidc(oidcIssuer);
-      if (!discovery) {
-        return err(operatorIdentityError({ code: 'oidc-unavailable', reason: 'discovery' }, 'the OIDC issuer could not be reached or returned a malformed discovery document'));
-      }
+      const discovery = pending.discovery;
 
       const idToken = await exchangeCodeForIdToken(discovery.tokenEndpoint, {
         code,
@@ -577,7 +590,7 @@ export function createOperatorIdentity(deps: OperatorIdentityDependencies): Oper
         clientSecret: oidcClientSecret,
       });
       if (!idToken) {
-        return err(operatorIdentityError({ code: 'oidc-unavailable', reason: 'discovery' }, 'the authorization code could not be exchanged for a token'));
+        return err(operatorIdentityError({ code: 'oidc-unavailable', reason: 'token-exchange' }, 'the authorization code could not be exchanged for a token'));
       }
 
       const verified = await verifyIdToken(idToken, discovery, oidcClientId);
@@ -585,7 +598,16 @@ export function createOperatorIdentity(deps: OperatorIdentityDependencies): Oper
         return err(operatorIdentityError({ code: 'oidc-unavailable', reason: verified.reason }, `id token ${verified.reason} check failed`));
       }
 
-      if (!oidcSubjectAllowlist.includes(verified.subject)) {
+      // Anchored to the singleton `operator_credential.subject`, the same way
+      // `loginLocal`/`loginWithRecoveryCode` check `credential.subject !==
+      // subject` — allowlist membership alone is not enough, since an
+      // allowlist entry that doesn't match the enrolled operator's own
+      // subject would otherwise mint a session for an identity that was
+      // never locally enrolled.
+      const found = withDb(volumeRoot, (db) => getCredentialRow(db));
+      if (!found.ok) return err(found.error);
+      const credential = found.value;
+      if (!credential || credential.subject !== verified.subject || !oidcSubjectAllowlist.includes(verified.subject)) {
         await audit.append({
           at: clock.now(),
           operationId: null,
@@ -600,7 +622,7 @@ export function createOperatorIdentity(deps: OperatorIdentityDependencies): Oper
         return err(operatorIdentityError({ code: 'subject-not-allowlisted', subject: verified.subject }, 'the federated subject is not on the allowlist'));
       }
 
-      return finishLogin(verified.subject);
+      return finishLogin(credential.subject as Subject);
     },
 
     async beginTotpReenrol(sessionId: SessionId): Promise<Outcome<TotpReenrolStart, OperatorIdentityError>> {

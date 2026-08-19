@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api, type SessionEnvelope } from './api.ts';
 
 interface Props {
@@ -21,6 +21,19 @@ export function Login({ onSignedIn }: Props) {
   const [recoveryCode, setRecoveryCode] = useState('');
   const [breakGlassToken, setBreakGlassToken] = useState('');
   const [error, setError] = useState<string | null>(null);
+
+  // The SSO link (`/auth/login/oidc`) is a full-page navigation; a failure
+  // redirects back here carrying its error code as a query param, since the
+  // component itself never sees the failed response.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const oidcError = params.get('oidcError');
+    if (!oidcError) return;
+    setError(oidcError);
+    params.delete('oidcError');
+    const rest = params.toString();
+    window.history.replaceState(null, '', rest ? `?${rest}` : window.location.pathname);
+  }, []);
 
   async function submitPassword(e: React.FormEvent) {
     e.preventDefault();

@@ -41,6 +41,12 @@ export async function discoverOidc(issuer: string): Promise<OidcDiscoveryDocumen
     ) {
       return null;
     }
+    // The discovery document's self-reported `issuer` must match the
+    // configured URL it was fetched from — otherwise a compromised or
+    // misconfigured discovery endpoint could name a different issuer/JWKS
+    // and have it trusted anyway.
+    const normalize = (value: string) => (value.endsWith('/') ? value.slice(0, -1) : value);
+    if (normalize(body.issuer) !== normalize(issuer)) return null;
     return {
       issuer: body.issuer,
       authorizationEndpoint: body.authorization_endpoint,
@@ -86,6 +92,18 @@ export async function exchangeCodeForIdToken(tokenEndpoint: string, params: Exch
 
 export type OidcVerifyOutcome = { readonly ok: true; readonly subject: Subject } | { readonly ok: false; readonly reason: 'jwks' | 'signature' | 'validity-window' };
 
+/** Keyed by `jwksUri` — `createRemoteJWKSet` is meant to be built once and reused so its own key cache is actually effective across verifications, rather than re-fetched from the network on every login. */
+const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
+
+function remoteJwks(jwksUri: string): ReturnType<typeof createRemoteJWKSet> {
+  let jwks = jwksCache.get(jwksUri);
+  if (!jwks) {
+    jwks = createRemoteJWKSet(new URL(jwksUri));
+    jwksCache.set(jwksUri, jwks);
+  }
+  return jwks;
+}
+
 /**
  * `jose`'s `jwtVerify` checks signature, `iss`, `aud`, `exp`, `iat` and `nbf`
  * against the clock in one call — this only has to route which of those
@@ -95,7 +113,7 @@ export type OidcVerifyOutcome = { readonly ok: true; readonly subject: Subject }
 export async function verifyIdToken(idToken: string, discovery: OidcDiscoveryDocument, clientId: string): Promise<OidcVerifyOutcome> {
   let jwks: ReturnType<typeof createRemoteJWKSet>;
   try {
-    jwks = createRemoteJWKSet(new URL(discovery.jwksUri));
+    jwks = remoteJwks(discovery.jwksUri);
   } catch {
     return { ok: false, reason: 'jwks' };
   }

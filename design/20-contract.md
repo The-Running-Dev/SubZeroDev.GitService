@@ -3578,7 +3578,7 @@ type OperatorIdentityError = ModuleErrorBase & (
   | { readonly code: 'recovery-code-invalid' }
   | { readonly code: 'recovery-code-used' }
   | { readonly code: 'break-glass-invalid' }
-  | { readonly code: 'oidc-unavailable'; readonly reason: 'discovery' | 'jwks' | 'signature' | 'validity-window' }
+  | { readonly code: 'oidc-unavailable'; readonly reason: 'discovery' | 'jwks' | 'signature' | 'validity-window' | 'state' | 'token-exchange' }
   | { readonly code: 'subject-not-allowlisted'; readonly subject: Subject }
   | { readonly code: 'session-unknown' }
   | { readonly code: 'session-expired' }
