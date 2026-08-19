@@ -3,8 +3,9 @@ import { api, type SessionEnvelope } from './api.ts';
 import { Enrol } from './Enrol.tsx';
 import { Login } from './Login.tsx';
 import { Landing } from './Landing.tsx';
+import { TotpReenrol } from './TotpReenrol.tsx';
 
-type Screen = 'loading' | 'enrol' | 'login' | 'landing';
+type Screen = 'loading' | 'enrol' | 'login' | 'totp-reenrol' | 'landing';
 
 /**
  * S18.12's "shows the enrolment screen and no other" without a new
@@ -18,7 +19,7 @@ type Screen = 'loading' | 'enrol' | 'login' | 'landing';
  */
 async function resolveInitialScreen(): Promise<Screen> {
   const session = await api.get<SessionEnvelope>('/auth/session');
-  if (session.ok) return 'landing';
+  if (session.ok) return session.body.totpReenrolRequired ? 'totp-reenrol' : 'landing';
 
   const probe = await api.post<{ readonly error: string }>('/auth/login', { subject: '', password: '', totpCode: '' });
   if (!probe.ok && probe.body.error === 'not-provisioned') return 'enrol';
@@ -40,6 +41,9 @@ export function App() {
 
   if (screen === 'loading') return <p>Loading…</p>;
   if (screen === 'enrol') return <Enrol onEnrolled={() => setScreen('login')} />;
-  if (screen === 'login') return <Login onSignedIn={() => setScreen('landing')} />;
+  if (screen === 'login') {
+    return <Login onSignedIn={(session) => setScreen(session.totpReenrolRequired ? 'totp-reenrol' : 'landing')} />;
+  }
+  if (screen === 'totp-reenrol') return <TotpReenrol onCompleted={() => setScreen('landing')} />;
   return <Landing onSignedOut={() => setScreen('login')} />;
 }

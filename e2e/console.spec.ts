@@ -10,7 +10,7 @@ import { E2E_PASSWORD, E2E_PROVISIONING_SECRET, E2E_SUBJECT, E2E_VOLUME_ROOT } f
  * shown once, so every later step's credentials come from what this same
  * run captured, not from a fixture written in advance.
  */
-test('S18.12/S18.13/S18.10/S18.2 — enrolment, every sign-in path, and the landing view, against a real repository', async ({ page }) => {
+test('S18.12/S18.13/S18.10/S18.2/S31.4/S31.5 — enrolment, every sign-in path, the lockout round trip, and the landing view, against a real repository', async ({ page }) => {
   // S18.12 — a brand new instance shows the enrolment screen and no other.
   await page.goto('/');
   await expect(page.getByTestId('provisioning-secret')).toBeVisible();
@@ -80,12 +80,45 @@ test('S18.12/S18.13/S18.10/S18.2 — enrolment, every sign-in path, and the land
   await page.getByTestId('sign-out').click();
   await expect(page.getByTestId('login-subject')).toBeVisible();
 
-  // --- Path 2: recovery code ---
+  // --- Path 2: recovery code, then S31.4/S31.5's lockout round trip ---
   await page.getByTestId('tab-recovery-code').click();
   await page.getByTestId('recovery-subject').fill(E2E_SUBJECT);
   await page.getByTestId('recovery-password').fill(E2E_PASSWORD);
   await page.getByTestId('recovery-code').fill(recoveryCodes[0]!);
   await page.getByRole('button', { name: 'Sign in with recovery code' }).click();
+
+  // S31.4 — a recovery-code sign-in forces re-enrolment; the console routes
+  // here instead of the landing view.
+  await expect(page.getByTestId('reenrol-secret')).toBeVisible();
+  const reenrolSecretText = await page.getByTestId('reenrol-secret').textContent();
+  expect(reenrolSecretText).toBeTruthy();
+  const newTotpSecret = base32Decode(reenrolSecretText!);
+
+  // A wrong code leaves the old secret's re-enrolment incomplete.
+  await page.getByTestId('reenrol-totp').fill('000000');
+  await page.getByRole('button', { name: 'Confirm' }).click();
+  await expect(page.getByRole('alert')).toBeVisible();
+
+  await page.getByTestId('reenrol-totp').fill(currentTotpCode(newTotpSecret));
+  await page.getByRole('button', { name: 'Confirm' }).click();
+  await expect(page.getByTestId('declaration-list')).toBeVisible();
+  await page.getByTestId('sign-out').click();
+  await expect(page.getByTestId('login-subject')).toBeVisible();
+
+  // S31.5 — the same recovery code is refused the second time.
+  await page.getByTestId('tab-recovery-code').click();
+  await page.getByTestId('recovery-subject').fill(E2E_SUBJECT);
+  await page.getByTestId('recovery-password').fill(E2E_PASSWORD);
+  await page.getByTestId('recovery-code').fill(recoveryCodes[0]!);
+  await page.getByRole('button', { name: 'Sign in with recovery code' }).click();
+  await expect(page.getByRole('alert')).toBeVisible();
+
+  // S31.5 — signs in with the new authenticator.
+  await page.getByTestId('tab-password').click();
+  await page.getByTestId('login-subject').fill(E2E_SUBJECT);
+  await page.getByTestId('login-password').fill(E2E_PASSWORD);
+  await page.getByTestId('login-totp').fill(currentTotpCode(newTotpSecret));
+  await page.getByRole('button', { name: 'Sign in' }).click();
   await expect(page.getByTestId('declaration-list')).toBeVisible();
   await page.getByTestId('sign-out').click();
   await expect(page.getByTestId('login-subject')).toBeVisible();

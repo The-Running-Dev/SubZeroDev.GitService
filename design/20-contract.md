@@ -408,6 +408,8 @@ interface OperatorSession {
   readonly idleExpiresAt: IsoUtcTimestamp;
   readonly absoluteExpiresAt: IsoUtcTimestamp;
   readonly revokedAt: IsoUtcTimestamp | null;
+  /** S31 — mirrors `operator_credential.totp_reenrol_required` at the moment this session was read, so a caller knows to route to re-enrolment without a second query. */
+  readonly totpReenrolRequired: boolean;
 }
 ```
 
@@ -642,6 +644,7 @@ type IdentityEvent =
   | 'recovery-code-used'
   | 'break-glass-used'
   | 'totp-reenrolled'
+  | 'oidc-subject-rejected'
   | 'session-revoked'
   | 'token-issued'
   | 'client-revoked'
@@ -1129,6 +1132,10 @@ interface DeploymentConfig {
   readonly notifierWebhook: HttpsUrl | null;
   readonly oidcIssuer: HttpsUrl | null;
   readonly oidcSubjectAllowlist: readonly Subject[];
+  /** S31 — the client identity every OIDC authorization request carries. `null` until configured, the same direction as `oidcIssuer`. */
+  readonly oidcClientId: string | null;
+  /** S31 — `null` for a public client (no secret, e.g. PKCE); set for a confidential client. */
+  readonly oidcClientSecret: string | null;
   readonly sessionIdleSeconds: number;
   readonly sessionAbsoluteSeconds: number;
 }
@@ -1413,6 +1420,11 @@ CREATE INDEX operator_session_retention ON operator_session (absolute_expires_at
 
 `operator_credential` is a singleton table. The `CHECK` is what makes "one operator identity, no
 accounts table" enforceable rather than asserted.
+
+**Migration 0002** (`src/store/migration-0002.ts`, hand-written — migration 0001 above is immutable
+once released, per `scripts/generate-migration-0001.ts`) adds `totp_pending_secret_sealed TEXT` to
+`operator_credential`: the not-yet-committed secret `beginTotpReenrol` (S31.1) seals, read back and
+committed by `completeTotpReenrol` on a correct code. `NULL` whenever no re-enrolment is in progress.
 
 **`password_hash` is a one-way hash; `totp_secret_sealed` is not, and cannot be.** Verifying a
 password compares hashes, but verifying a TOTP code recomputes `HMAC-SHA1(secret, timeStep)` on
@@ -2899,6 +2911,11 @@ interface OidcRedirect {
   readonly state: string;
 }
 
+/** S31.1. `totpSecret` is the freshly generated, not-yet-committed secret — the same base32 shape `EnrolmentResult.totpSecret` already returns, displayed once so the operator can add it to an authenticator app before `completeTotpReenrol` asks for a code against it. */
+interface TotpReenrolStart {
+  readonly totpSecret: string;
+}
+
 interface OperatorIdentity {
   provisioningState(): Promise<ProvisioningState>;
   enrol(request: EnrolmentRequest): Promise<Outcome<EnrolmentResult, OperatorIdentityError>>;
@@ -2909,6 +2926,11 @@ interface OperatorIdentity {
 
   beginOidc(): Promise<Outcome<OidcRedirect, OperatorIdentityError>>;
   completeOidc(code: string, state: string): Promise<Outcome<OperatorSession, OperatorIdentityError>>;
+
+  /** S31.1/S31.4. Generates and seals a fresh TOTP secret without committing it, so the old secret keeps authenticating until `completeTotpReenrol` proves the operator captured the new one. Callable whether or not `totp_reenrol_required` is set — a lockout is what forces it, not what permits it. */
+  beginTotpReenrol(sessionId: SessionId): Promise<Outcome<TotpReenrolStart, OperatorIdentityError>>;
+  /** S31.1/S31.4. Verifies `totpCode` against the pending secret `beginTotpReenrol` sealed, and only on success: commits it as `totp_secret_sealed`, clears `totp_reenrol_required`, and writes an `identity-event` carrying `'totp-reenrolled'`. A wrong code leaves the old secret authenticating and the pending secret in place, so a mistyped code costs a retry, not the whole enrolment. */
+  completeTotpReenrol(sessionId: SessionId, totpCode: string): Promise<Outcome<void, OperatorIdentityError>>;
 
   touch(sessionId: SessionId): Promise<Outcome<OperatorSession, OperatorIdentityError>>;
   logout(sessionId: SessionId): Promise<Outcome<void, OperatorIdentityError>>;
@@ -3011,6 +3033,10 @@ call against whichever declaration a later request names, not at sign-in.
 | `/auth/login` | `POST` | none (password + TOTP) |
 | `/auth/login/recovery-code` | `POST` | none (password + recovery code) |
 | `/auth/login/break-glass` | `POST` | none (break-glass token) |
+| `/auth/login/oidc` | `GET` | none (redirects to the configured issuer) |
+| `/auth/login/oidc/callback` | `GET` | none (the issuer's redirect back, carrying `code` and `state`) |
+| `/auth/totp-reenrol/begin` | `POST` | cookie |
+| `/auth/totp-reenrol/complete` | `POST` | cookie |
 | `/auth/session` | `GET` | cookie |
 | `/auth/logout` | `POST` | cookie |
 
@@ -3570,7 +3596,7 @@ type OperatorIdentityError = ModuleErrorBase & (
 | `recovery-code-invalid`, `recovery-code-used` | Recovery-code login | no | `401`. A successful use burns the code, audits, and forces TOTP re-enrolment |
 | `break-glass-invalid` | The token is absent, stale or already consumed | no | `401`. Consumption is audited |
 | `oidc-unavailable` | Discovery, JWKS, signature or validity-window failure | by the operator, later | `401` with a reason. **Local password plus TOTP still works** |
-| `subject-not-allowlisted` | Federated login returned an unlisted subject | no | `401` |
+| `subject-not-allowlisted` | Federated login returned an unlisted subject | no | `401`, audited as `identity-event` `'oidc-subject-rejected'` (S31.2) |
 | `session-unknown`, `session-expired`, `session-revoked` | A cookie presented against the persisted row | no | `401`. Invalidation is server-side, not a cleared cookie |
 
 ### Compiler

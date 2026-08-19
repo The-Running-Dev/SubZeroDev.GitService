@@ -82,6 +82,7 @@ export type IdentityEvent =
   | 'recovery-code-used'
   | 'break-glass-used'
   | 'totp-reenrolled'
+  | 'oidc-subject-rejected'
   | 'session-revoked'
   | 'token-issued'
   | 'client-revoked'

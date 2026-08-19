@@ -45,6 +45,11 @@ export interface SessionEnvelope {
   readonly createdAt: string;
   readonly idleExpiresAt: string;
   readonly absoluteExpiresAt: string;
+  readonly totpReenrolRequired: boolean;
+}
+
+export interface TotpReenrolStart {
+  readonly totpSecret: string;
 }
 
 export interface EnrolResult {

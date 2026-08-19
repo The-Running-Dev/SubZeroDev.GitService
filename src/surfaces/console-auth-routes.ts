@@ -100,6 +100,7 @@ function sessionEnvelope(session: OperatorSession): unknown {
     createdAt: session.createdAt,
     idleExpiresAt: session.idleExpiresAt,
     absoluteExpiresAt: session.absoluteExpiresAt,
+    totpReenrolRequired: session.totpReenrolRequired,
   };
 }
 
@@ -272,6 +273,70 @@ export async function handleConsoleAuthRoute(
     sendJson(res, 200, sessionEnvelope(result.value), {
       'Set-Cookie': loginCookies(result.value, deps.sessionAbsoluteSeconds),
     });
+    return true;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/auth/login/oidc') {
+    const result = await deps.identity.beginOidc();
+    if (!result.ok) {
+      sendError(res, result.error);
+      return true;
+    }
+    res.writeHead(302, { Location: result.value.authorizeUrl });
+    res.end();
+    return true;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/auth/login/oidc/callback') {
+    const code = url.searchParams.get('code') ?? '';
+    const state = url.searchParams.get('state') ?? '';
+    const result = await deps.identity.completeOidc(code, state);
+    if (!result.ok) {
+      sendError(res, result.error);
+      return true;
+    }
+    res.writeHead(302, {
+      Location: '/',
+      'Set-Cookie': loginCookies(result.value, deps.sessionAbsoluteSeconds),
+    });
+    res.end();
+    return true;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/auth/totp-reenrol/begin') {
+    const session = await requireSession(deps, req, res);
+    if (!session) return true;
+    if (!csrfOk(req)) {
+      sendJson(res, 403, { error: 'csrf-check-failed' });
+      return true;
+    }
+    const result = await deps.identity.beginTotpReenrol(session.id);
+    if (!result.ok) {
+      sendError(res, result.error);
+      return true;
+    }
+    sendJson(res, 200, result.value);
+    return true;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/auth/totp-reenrol/complete') {
+    const session = await requireSession(deps, req, res);
+    if (!session) return true;
+    if (!csrfOk(req)) {
+      sendJson(res, 403, { error: 'csrf-check-failed' });
+      return true;
+    }
+    const body = await readJsonBody(req);
+    if (!body) {
+      sendJson(res, 400, { error: 'bad-request' });
+      return true;
+    }
+    const result = await deps.identity.completeTotpReenrol(session.id, stringField(body, 'totpCode'));
+    if (!result.ok) {
+      sendError(res, result.error);
+      return true;
+    }
+    sendJson(res, 200, { reenrolled: true });
     return true;
   }
 

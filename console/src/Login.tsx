@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { api, type SessionEnvelope } from './api.ts';
 
 interface Props {
-  readonly onSignedIn: () => void;
+  readonly onSignedIn: (session: SessionEnvelope) => void;
 }
 
 type Mode = 'password' | 'recovery-code' | 'break-glass';
@@ -30,7 +30,7 @@ export function Login({ onSignedIn }: Props) {
       setError('error' in res.body ? res.body.error : 'sign-in failed');
       return;
     }
-    onSignedIn();
+    onSignedIn(res.body as SessionEnvelope);
   }
 
   async function submitRecoveryCode(e: React.FormEvent) {
@@ -45,7 +45,7 @@ export function Login({ onSignedIn }: Props) {
       setError('error' in res.body ? res.body.error : 'sign-in failed');
       return;
     }
-    onSignedIn();
+    onSignedIn(res.body as SessionEnvelope);
   }
 
   async function submitBreakGlass(e: React.FormEvent) {
@@ -56,7 +56,7 @@ export function Login({ onSignedIn }: Props) {
       setError('error' in res.body ? res.body.error : 'sign-in failed');
       return;
     }
-    onSignedIn();
+    onSignedIn(res.body as SessionEnvelope);
   }
 
   return (
@@ -127,6 +127,13 @@ export function Login({ onSignedIn }: Props) {
           <button type="submit">Sign in with break-glass token</button>
         </form>
       )}
+
+      {/* S31.2 — a full-page navigation, not a fetch: the redirect to the issuer and back is the flow, not an API call this component makes. */}
+      <p>
+        <a href="/auth/login/oidc" data-testid="sso-link">
+          Sign in with your identity provider
+        </a>
+      </p>
     </main>
   );
 }

@@ -30,7 +30,7 @@ const EXPECTED_INDEXES = [
   'outbox_retention',
 ];
 
-test('S2.1 — migration 0001 applies against a fresh volume: all sixteen tables, the declared indexes, and one schema_migration row', async () => {
+test('S2.1 — migration 0001 applies against a fresh volume: all sixteen tables, the declared indexes, and one schema_migration row per migration', async () => {
   await withVolumeAsync(async (volume) => {
     const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
     assert.equal((await store.open()).ok, true);
@@ -38,7 +38,7 @@ test('S2.1 — migration 0001 applies against a fresh volume: all sixteen tables
     const migrated = await store.migrate();
     assert.equal(migrated.ok, true);
     if (!migrated.ok) return;
-    assert.equal(migrated.value, 1, 'exactly one migration applied');
+    assert.equal(migrated.value, MIGRATIONS.length, 'every migration applied, in order');
     await store.close();
 
     const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
@@ -60,20 +60,25 @@ test('S2.1 — migration 0001 applies against a fresh volume: all sixteen tables
         assert.ok(indexes.includes(expected), `index '${expected}' exists`);
       }
 
-      const rows = db.prepare('SELECT version, applied_at, checksum FROM schema_migration').all() as {
+      const rows = db.prepare('SELECT version, applied_at, checksum FROM schema_migration ORDER BY version').all() as {
         version: number;
         checksum: string;
       }[];
-      assert.equal(rows.length, 1, 'schema_migration holds exactly one row');
-      assert.equal(rows[0]?.version, 1);
-      assert.match(String(rows[0]?.checksum), /^[0-9a-f]{64}$/, 'the migration checksum is recorded');
+      assert.equal(rows.length, MIGRATIONS.length, 'schema_migration holds one row per migration');
+      assert.deepEqual(
+        rows.map((r) => r.version),
+        MIGRATIONS.map((m) => m.version),
+      );
+      for (const row of rows) {
+        assert.match(String(row.checksum), /^[0-9a-f]{64}$/, 'the migration checksum is recorded');
+      }
     } finally {
       db.close();
     }
   });
 });
 
-test('S2.1 — migrate is idempotent: a second run applies nothing and leaves one row', async () => {
+test('S2.1 — migrate is idempotent: a second run applies nothing and leaves one row per migration', async () => {
   await withVolumeAsync(async (volume) => {
     const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
     await store.open();
@@ -88,7 +93,7 @@ test('S2.1 — migrate is idempotent: a second run applies nothing and leaves on
     const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
     try {
       const rows = db.prepare('SELECT version FROM schema_migration').all();
-      assert.equal(rows.length, 1, 'schema_migration still holds exactly one row');
+      assert.equal(rows.length, MIGRATIONS.length, 'schema_migration still holds one row per migration');
     } finally {
       db.close();
     }
@@ -199,7 +204,7 @@ test('S2.5 — an induced migration failure leaves the pre-migration copy intact
     const store = createStructuredStore({
       volumeRoot: volume,
       clock: systemClock,
-      migrations: [...MIGRATIONS, { version: 2, sql: 'CREATE TABLE this_is_not_valid_sql (((;' }],
+      migrations: [...MIGRATIONS, { version: 3, sql: 'CREATE TABLE this_is_not_valid_sql (((;' }],
     });
     try {
       await store.open();
@@ -210,7 +215,7 @@ test('S2.5 — an induced migration failure leaves the pre-migration copy intact
       if (migrated.ok) return;
       assert.equal(migrated.error.code, 'migration-failed');
       if (migrated.error.code !== 'migration-failed') return;
-      assert.equal(migrated.error.version, 2, 'names the migration that failed');
+      assert.equal(migrated.error.version, 3, 'names the migration that failed');
       assert.ok(migrated.error.backupAt.length > 0, 'names the rollback target');
 
       const copies = readdirSync(path.join(volume, 'backups')).filter((f) => f.startsWith('pre-migration-'));
@@ -218,14 +223,19 @@ test('S2.5 — an induced migration failure leaves the pre-migration copy intact
 
       await store.close();
 
-      // The failed migration rolled back: 0001's tables are still there and
-      // no partial row was left behind for version 2.
+      // The failed migration (version 3) rolled back: every real migration
+      // through version 2 is still recorded and no partial row was left
+      // behind for version 3.
       const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
       try {
         const versions = (db.prepare('SELECT version FROM schema_migration').all() as { version: number }[]).map(
           (r) => r.version,
         );
-        assert.deepEqual(versions, [1], 'only migration 0001 is recorded');
+        assert.deepEqual(
+          versions,
+          MIGRATIONS.map((m) => m.version),
+          'only the real migrations are recorded',
+        );
       } finally {
         db.close();
       }
@@ -414,7 +424,7 @@ test('S25.6 — migrate() converts an already-schema\'d store (one migrated befo
       const migrated = await store.migrate();
       assert.equal(migrated.ok, true);
       if (!migrated.ok) return;
-      assert.equal(migrated.value, 0, 'migration 0001 was already applied by hand; this boot applies nothing new');
+      assert.equal(migrated.value, MIGRATIONS.length - 1, 'migration 0001 was already applied by hand; this boot applies only the migrations after it');
 
       const check = new DatabaseSync(storePath);
       const modeAfter = check.prepare('PRAGMA auto_vacuum').get() as { auto_vacuum: number };

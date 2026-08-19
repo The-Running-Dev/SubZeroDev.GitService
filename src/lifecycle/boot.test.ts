@@ -6,7 +6,7 @@ import path from 'node:path';
 import { systemClock } from '../clock/clock.ts';
 import { compiler } from '../contract/compiler.ts';
 import { createAudit } from '../audit/audit.ts';
-import { createStructuredStore } from '../store/structured-store.ts';
+import { createStructuredStore, MIGRATIONS } from '../store/structured-store.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
 import { CONSOLE_HASH_FILENAME } from './console-integrity.ts';
 import { createOperatorIdentity } from '../operator-identity/operator-identity.ts';
@@ -145,7 +145,7 @@ test('boot takes the lease, applies migrations and reports both', async () => {
 
       assert.equal(booted.value.leaseSelfTestPassed, true, 'the child-process self-test ran and passed');
       assert.ok(booted.value.lease.instanceId.length > 0);
-      assert.equal(booted.value.migrationsApplied, 1, 'migration 0001 applied');
+      assert.equal(booted.value.migrationsApplied, MIGRATIONS.length, 'every migration applied');
       assert.match(booted.value.registryFingerprint, /^[0-9a-f]{64}$/);
       assert.match(booted.value.consoleFingerprint, /^[0-9a-f]{64}$/, 'S18.11 — a real digest of the built console, not the placeholder');
       assert.deepEqual(booted.value.clones, [], 'step 8 derives an empty clone set with none declared');
@@ -363,7 +363,7 @@ test('S2.7 — readiness passes only after the lease is held and migrations have
       ready = booted.ok;
 
       assert.equal(ready, true, 'readiness passes once the lease is held and migrations applied');
-      assert.equal(booted.value.migrationsApplied, 1);
+      assert.equal(booted.value.migrationsApplied, MIGRATIONS.length);
     } finally {
       await lifecycle.shutdown('operator');
     }

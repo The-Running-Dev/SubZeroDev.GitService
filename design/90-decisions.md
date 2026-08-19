@@ -2,6 +2,59 @@
 
 Append-only. Newest at the top. The rejected alternatives are the point — without them, every future session relitigates the same choice.
 
+### 2026-08-19 — S31 adds `oidcClientId`/`oidcClientSecret` to `DeploymentConfig`
+Context: `/slice S31` (`design/30-slices.md` § S31) needs a real OIDC authorization-code exchange.
+`DeploymentConfig` already declared `oidcIssuer` and `oidcSubjectAllowlist`, but no `client_id` —
+required by every OIDC authorization request — and `PUBLIC_ORIGIN` (an untyped env var read directly
+in `server.ts`, outside `DeploymentConfig`) already covers the redirect URI, so only the client
+identity was missing. S31.1 only names the TOTP re-enrolment signature as a required contract
+addition; widening `DeploymentConfig` itself is a step further than that criterion states.
+Chosen: add `oidcClientId: string | null` and `oidcClientSecret: string | null` to `DeploymentConfig`
+in `20-contract.md`, alongside `oidcIssuer`/`oidcSubjectAllowlist` — asked and confirmed with the
+operator rather than assumed silently, per the "no new public interfaces" hard rule.
+Rejected: reading `OIDC_CLIENT_ID`/`OIDC_CLIENT_SECRET` as raw env vars in `server.ts`, the way
+`PUBLIC_ORIGIN` is read — avoids a contract amendment, but leaves the OIDC-relevant deployment knobs
+split across a typed field (`oidcIssuer`) and untyped ones (client id/secret) for no reason other than
+sequencing accident; the operator preferred the consistent, typed shape.
+Reversibility: cheap — two nullable fields, both already unused before this slice.
+
+### 2026-08-19 — S31's OIDC id-token verification uses `jose`; discovery is hand-rolled
+Context: S31.2 needs real OIDC discovery, JWKS-based signature verification, and validity-window
+checks. The repo has favoured hand-rolled crypto over dependencies so far (TOTP in `totp.ts` implements
+RFC 4226/6238 directly rather than pulling in `otplib`), so adding any dependency needs its
+alternatives named here.
+Chosen: `jose`, for JWKS fetch/cache (`createRemoteJWKSet`) and JWT verification (`jwtVerify`) only.
+Discovery (`GET /.well-known/openid-configuration`) stays a plain `fetch` in this repo's own code — a
+single request returning a known JSON shape is not worth a library — and the authorization-code
+exchange (`POST` to the token endpoint) is a hand-written `fetch` too. `jose` is scoped to the one
+place hand-rolling would be a materially worse trade: multi-algorithm signature verification, `kid`
+matching against a rotating key set, and clock-skew-tolerant claim validation.
+Rejected: hand-rolling RSA/EC JWT verification against `node:crypto` directly, matching `totp.ts`'s
+precedent — TOTP is a ~30-line HMAC computation; JWKS-based JWT verification is a much larger,
+security-sensitive surface (multiple key types, key rotation, `kid` selection) where a maintained
+library reduces risk more than it costs. Rejected `openid-client` — it owns the whole
+authorization-code/PKCE/session flow, where this slice only needs the verification primitive; keeping
+discovery and the redirect/callback handling in this repo's own route code keeps the flow auditable
+in one place (`console-auth-routes.ts`) rather than behind a framework.
+Reversibility: cheap — one dependency, isolated to `src/operator-identity/oidc.ts`.
+
+### 2026-08-19 — S31's "real issuer" is a hand-built OIDC provider fixture, not a third-party tenant or a Dex/Keycloak sidecar
+Context: S31.2, S31.3 and S31.5 all require testing against something that behaves like a genuine OIDC
+issuer, not a stub that always succeeds — S31.3 in particular needs the issuer "genuinely
+unreachable", which a configuration flag cannot honestly demonstrate.
+Chosen: a minimal, committed OIDC provider (`src/operator-identity/testing/oidc-issuer-fixture.ts`) —
+a real `node:http` server implementing discovery, JWKS, `/authorize` (a real page a browser navigates
+and clicks through) and `/token` (a real authorization-code exchange, RS256-signed `id_token` via
+`jose`). S31.3's "unreachable" is a real closed TCP port, not a config toggle. Self-contained, no
+external account, in keeping with this repo's existing self-hosted-harness pattern for "real, not
+mocked" (`lease-self-test-container.ts`, S30's Samba sidecar).
+Rejected: a real third-party test IdP (Auth0/Okta/Google) — genuinely external, but needs a real
+account and credentials the operator would have to create and hand over by hand; not automatable and
+not reproducible by a later session. Rejected a Dockerized IdP (Dex, Keycloak) as a sidecar — closer
+to production server behaviour, but materially heavier (an image pull, container lifecycle, config
+volume) for what S31 needs to prove, and the operator preferred the lighter, fully-owned fixture.
+Reversibility: cheap — a test-only fixture, replaceable without touching production code.
+
 ### 2026-08-19 — S30.5–S30.8 do not reproduce on this host: `nobrl` breaks `node:sqlite` outright, before any lock behaviour is reachable
 Context: `/slice S30` (`design/30-slices.md` § S30) implementing `S30.5`–`S30.8` needs a Samba sidecar
 mounted `nobrl`, the real image, no injected `LockAcquirer` — the same setup the entry immediately
