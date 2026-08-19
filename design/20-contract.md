@@ -1250,21 +1250,16 @@ sits, and it enforces its own, per D14.
 
 ### Console view registration (L5, published package)
 
-```ts
-interface ConsoleViewProps {
-  readonly declarationId: DeclarationId;
-}
-
-interface ConsoleViewRegistration<TElement> {
-  readonly id: ConsoleViewId;
-  readonly title: string;
-  readonly capabilities: readonly CapabilityName[];
-  readonly render: (props: ConsoleViewProps) => TElement;
-}
-```
+Declared in `console/src/view-registry.ts`, exported from the package's build entry
+(`console/src/index.ts`). `TElement` is fixed to React's `ReactElement`, resolving U7's remaining
+question — S18 already fixed the framework binding, so the design's own generic closes to the one
+type React's `render` can return. `ConsoleViewId` and `CapabilityName` are plain `string` on this
+side of the seam, the same JSON-shaped-not-branded convention every other console-side type already
+follows (`console/src/api.ts`'s `DeclarationListRow`).
 
 A view declares the capabilities it needs and receives the selected declaration. It never names a
-declaration it belongs to.
+declaration it belongs to — `console/src/view-registry.ts`'s `ConsoleViewRegistration` carries no
+such field, and `console/src/view-registry.test.ts` asserts it via `satisfies`.
 
 ---
 
@@ -3917,16 +3912,20 @@ backoff policy, and the requirement for an explicit per-tool `maxResultBytes` ar
 defaults; `hatchSeconds`, `sessionIdleSeconds` and `sessionAbsoluteSeconds` retain their previously
 fixed values. See `design/90-decisions.md`, 2026-08-11. This unblocks S17.
 
-**U7 — The console package's element type and build entry.** `ConsoleViewRegistration` is generic
-over the element type because the design fixes what a view receives and what it declares, but not
-the UI framework binding, the package's exported build entry, or how the asset manifest is hashed
-into the console fingerprint.
+~~**U7 — The console package's element type and build entry.**~~ — **resolved 2026-08-19 by S19.**
+`ConsoleViewRegistration` was generic over the element type because the design fixed what a view
+receives and what it declares, but not the UI framework binding, the package's exported build entry,
+or how the asset manifest is hashed into the console fingerprint.
 
 *Narrowed 2026-08-19 by S18:* the framework binding (React), the build entry (Vite, `console/`, an
 `index.html` root) and the asset-manifest hashing (`console-integrity.ts`'s digest over every built
 file, verified at boot per `### Boot`'s `console-manifest-mismatch`/`console-unreadable`) are fixed.
-See `design/90-decisions.md`, 2026-08-19. U7 otherwise stands: the published package's own exported
-build entry for a consumer view (S19's `TElement` binding for an external caller) remains open.
+
+*Resolved 2026-08-19 by S19:* `TElement` is fixed to `ReactElement`, and the package's exported build
+entry is `console/src/index.ts` (`main`/`types` in `console/package.json`), re-exporting
+`ConsoleViewProps`, `ConsoleViewRegistration` and `createConsole` — the function a consumer's own
+`main.tsx` calls with its additional views. See `### Console view registration` above and
+`design/90-decisions.md`, 2026-08-19.
 
 **U10 — The file-watcher target protocol, resolved 2026-08-11.** One logical target is an explicit
 pair of ordinary compiled registry entries named by `FileWatcherConfig.planTool` and `applyTool`.

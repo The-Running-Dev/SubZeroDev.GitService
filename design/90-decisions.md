@@ -2,6 +2,66 @@
 
 Append-only. Newest at the top. The rejected alternatives are the point — without them, every future session relitigates the same choice.
 
+### 2026-08-19 — `GET /declarations` and every route that echoes a `Declaration` serialise `capabilityGrant` as a sorted array
+Context: implementing S19.4 ("a registered view... renders for a declaration whose grant contains
+them and is absent for one whose grant does not") found that the console has no way to see a
+declaration's granted capabilities at all: `Declaration.capabilityGrant` is a `Set` at runtime
+(`declarations.ts`'s `new Set(...)`), and `JSON.stringify` serialises a `Set` as `{}`. Every route
+in `declaration-routes.ts` that echoes a `Declaration` — the landing-view rows, `declare`, `amend`,
+a single `GET` — was silently sending this empty object, and nothing caught it because no existing
+test asserted the field's shape. This sits inside S19's own `Touches` (Surfaces, L5) and blocks
+S19.4 outright, so it is fixed here rather than logged as an out-of-scope finding.
+Chosen: `declaration-routes.ts`'s new `serializeDeclaration` helper renders `capabilityGrant` as
+`[...d.capabilityGrant].sort()` at every site that sends a `Declaration` to the console. Sorted so
+the wire shape is deterministic rather than iteration-order-dependent, matching this codebase's
+existing canonical-serialisation convention elsewhere (the audit record's deep-key-sorted JSON, U9).
+`OrphanReport` (the `orphan` route's own result type) carries no `Declaration` at all, so that one
+call site is untouched.
+Rejected: **Make `capabilityGrant` a JSON-serialisable array on `Declaration` itself** — `Declaration`
+is `20-contract.md`'s fixed shape (`capabilityGrant: DeclarationGrant`, a branded `CapabilitySet`);
+changing its runtime representation is a contract-level change with no acceptance criterion asking
+for it, for a gap that is purely how one surface renders the type over HTTP. **Add a custom `JSON.stringify`
+replacer to `sendJson`** — fixes every field of every `Set`-typed value repo-wide sight-unseen, a
+much wider blast radius than this slice's `Touches` for a defect that only ever affected this one field.
+Reversibility: cheap — one helper function and five call sites.
+
+### 2026-08-19 — S19: the published console package's build entry, and how a "derived build" is proven without a real npm publish
+Context: `20-contract.md`'s U7 left the published package's exported build entry and `TElement`
+binding open for S19 to fix (`design/90-decisions.md`, 2026-08-19's S18 entry). The design's own
+2026-08-03 entry (below) already settled the *shape* — "sources, view-registration types, build
+entry," consumed by a derived image's own build — but not the mechanics. Two questions this slice
+had to answer to be implementable at all: what a consumer imports, and how S19.2/S19.3 ("a derived
+image's build produces a bundle...", "a runtime-swapped bundle...") can be demonstrated without
+this session taking the external, explicit-permission-gated action of publishing a real package to
+a public registry, and without inventing a second real "consumer repository" nowhere in this checkout.
+Chosen: `console/src/index.ts` is the package's build entry (`main`/`types` in `console/package.json`),
+re-exporting `ConsoleViewProps`, `ConsoleViewRegistration` and `createConsole(views)` — a consumer's
+own `main.tsx` calls `createConsole([...myViews])` and mounts the result the same way the base's own
+`main.tsx` now does with `createConsole()`. `TElement` is fixed to `ReactElement` (`console/src/view-registry.ts`).
+`console/package.json` stays `"private": true` — nothing in this slice's acceptance criteria requires
+an actual `npm publish`, and taking that action without being asked is exactly what this repository's
+own external-write rules gate on explicit user authorization; "published" here means "packaged and
+importable," proven by the workspace's own consumption of it (`console/src/main.tsx` imports the
+same build entry a real external consumer would). S19.2/S19.3 are proven at the mechanism's actual
+level of generality instead: `src/lifecycle/boot.ts`'s `verifyConsoleArtifact` has no notion of
+"base" vs "derived" — it verifies whatever bytes are in `consoleDir` — so `boot.test.ts`'s new
+`S19.2`/`S19.3` tests model a derived build's extra asset the same way `writeConsoleDir` already
+models the base's own build, and `npm run build` (already exercised end to end for this slice) is
+the real Vite build proving the base's own consumption of the new entry still produces a working,
+fingerprinted bundle.
+Rejected: **Actually run `npm publish`** — an external, public-content action `AGENTS.md`'s system-level
+safety rules require explicit user permission for, on every publish, not just the first; out of reach
+for an unattended slice regardless of scope. **Build a second real consumer project (e.g. under
+`e2e/consumer-console/`) and drive it through a real `vite build` in the test suite** — genuine
+end-to-end proof, but a second Vite project, a second build step wired into `npm run build`, and
+(for S19.4's DOM-visible "renders/is absent") either a second Playwright fixture server or a new
+React-DOM-testing dependency neither `console/package.json` nor the root carries today; substantially
+larger than this slice's `Touches` (Surfaces, Lifecycle L1, build tooling) for coverage the boot-level
+tests already give at the level the acceptance criteria are written. **A prebuilt bundle a consumer
+just drops in** — explicitly rejected already by the 2026-08-03 entry below, for the same reasons.
+Reversibility: cheap for the entry-point shape (one file, one export list) — expensive only in the
+sense the framework binding already carries (below), which this decision does not reopen.
+
 ### 2026-08-19 — `oidc-unavailable`'s `reason` gains `'state'` and `'token-exchange'`
 Context: a code-review finding on S31's `completeOidc` (`src/operator-identity/operator-identity.ts`)
 found that a stale/replayed/forged `state` and a failed authorization-code exchange were both reported

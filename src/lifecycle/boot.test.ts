@@ -8,7 +8,7 @@ import { compiler } from '../contract/compiler.ts';
 import { createAudit } from '../audit/audit.ts';
 import { createStructuredStore, MIGRATIONS } from '../store/structured-store.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
-import { CONSOLE_HASH_FILENAME } from './console-integrity.ts';
+import { CONSOLE_HASH_FILENAME, computeConsoleDigest } from './console-integrity.ts';
 import { createOperatorIdentity } from '../operator-identity/operator-identity.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { createJournal } from '../journal/journal.ts';
@@ -604,6 +604,87 @@ test('S18.11 — changing one byte of a built console asset makes boot exit with
     const indexPath = path.join(consoleDir, 'index.html');
     writeFileSync(indexPath, 'tampered after the manifest hash was written', 'utf8');
 
+    const lifecycle = createLifecycle({
+      volumeRoot: volume,
+      buildDir: writeBuildDir(volume),
+      clock: systemClock,
+      store,
+      audit,
+      operatorIdentity: operatorIdentityFor(volume, audit),
+      consoleDir,
+      ceiling: EMPTY_CEILING,
+      revalidateFileWatchers: async () => ok(undefined),
+    });
+
+    const booted = await lifecycle.boot();
+    assert.equal(booted.ok, false);
+    if (booted.ok) return;
+    assert.equal(booted.error.code, 'console-manifest-mismatch');
+    if (booted.error.code !== 'console-manifest-mismatch') return;
+    assert.notEqual(booted.error.expected, booted.error.found);
+  });
+});
+
+/**
+ * A derived image's build adds a consumer's registered view as an extra
+ * built asset and re-stamps the manifest hash over the whole directory,
+ * exactly what `scripts/build-console-manifest.ts` does for the base's own
+ * build — boot's verification has no notion of "base" vs "derived", so this
+ * models the extension by writing one extra file into the same fixture
+ * `writeConsoleDir` produces.
+ */
+function addConsumerView(consoleDir: string): void {
+  const extraPath = path.join(consoleDir, 'assets', 'consumer-view-abc123.js');
+  mkdirSync(path.dirname(extraPath), { recursive: true });
+  writeFileSync(extraPath, 'export const ConsumerView = () => null;', 'utf8');
+}
+
+async function restampConsoleManifest(consoleDir: string): Promise<void> {
+  const digest = await computeConsoleDigest(consoleDir);
+  writeFileSync(path.join(consoleDir, CONSOLE_HASH_FILENAME), `${digest}\n`, 'utf8');
+}
+
+test('S19.2 — a derived build with an extra registered view still verifies, and its console fingerprint is a real digest distinct from the contract fingerprint', async () => {
+  await withVolumeAsync(async (volume) => {
+    const consoleDir = writeConsoleDir(volume);
+    addConsumerView(consoleDir);
+    await restampConsoleManifest(consoleDir);
+
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const lifecycle = createLifecycle({
+      volumeRoot: volume,
+      buildDir: writeBuildDir(volume),
+      clock: systemClock,
+      store,
+      audit,
+      operatorIdentity: operatorIdentityFor(volume, audit),
+      consoleDir,
+      ceiling: EMPTY_CEILING,
+      revalidateFileWatchers: async () => ok(undefined),
+    });
+
+    const booted = await lifecycle.boot();
+    try {
+      assert.equal(booted.ok, true);
+      if (!booted.ok) return;
+      assert.match(booted.value.consoleFingerprint, /^[0-9a-f]{64}$/);
+      assert.notEqual(booted.value.consoleFingerprint, booted.value.registryFingerprint, 'distinct hashing domains — an asset digest is never the compiler fingerprint');
+    } finally {
+      if (booted.ok) await lifecycle.shutdown('operator');
+    }
+  });
+});
+
+test('S19.3 — tampering a derived build after its manifest hash was written makes boot exit with console-manifest-mismatch, the same shape as a registry mismatch', async () => {
+  await withVolumeAsync(async (volume) => {
+    const consoleDir = writeConsoleDir(volume);
+    addConsumerView(consoleDir);
+    await restampConsoleManifest(consoleDir);
+    writeFileSync(path.join(consoleDir, 'assets', 'consumer-view-abc123.js'), 'tampered after the manifest hash was written', 'utf8');
+
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
     const lifecycle = createLifecycle({
       volumeRoot: volume,
       buildDir: writeBuildDir(volume),

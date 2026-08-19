@@ -4,7 +4,7 @@ import type { ActorRef } from '../shared/actor.ts';
 import type { DeclarationScopedCapability, HostKind } from '../contract/capabilities.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import type { DeclarationError } from '../declarations/errors.ts';
-import type { AmendInput, DeclareInput } from '../declarations/types.ts';
+import type { AmendInput, Declaration, DeclareInput } from '../declarations/types.ts';
 import type { CloneStore } from '../clone/clone-store.ts';
 import type { CloneStoreError } from '../clone/errors.ts';
 import type { Clone } from '../clone/types.ts';
@@ -95,6 +95,17 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(payload) });
   res.end(payload);
+}
+
+/**
+ * `Declaration.capabilityGrant` is a `Set` at runtime (`declarations.ts`), which
+ * `JSON.stringify` serialises as `{}` — so every route below sends this
+ * rendering instead of the raw `Declaration`. S19.4 needs the console to see
+ * a declaration's granted capabilities to decide which registered views to
+ * show; without this a landing-view row could never carry that data at all.
+ */
+function serializeDeclaration(d: Declaration): Omit<Declaration, 'capabilityGrant'> & { readonly capabilityGrant: readonly string[] } {
+  return { ...d, capabilityGrant: [...d.capabilityGrant].sort() };
 }
 
 function declarationErrorStatus(error: DeclarationError): number {
@@ -291,7 +302,7 @@ export async function handleDeclarationRoute(
       const rawClone = described.ok ? described.value : null;
       const { branch, dirty } = await landingViewFields(deps.cloneStore, rawClone);
       const clone = withRecoveryOverlay(rawClone, awaiting);
-      return { declaration: d, clone, branch, dirty };
+      return { declaration: serializeDeclaration(d), clone, branch, dirty };
     });
     sendJson(res, 200, rows);
     return true;
@@ -314,7 +325,7 @@ export async function handleDeclarationRoute(
       sendDeclarationError(res, result.error);
       return true;
     }
-    sendJson(res, 201, result.value);
+    sendJson(res, 201, serializeDeclaration(result.value));
     return true;
   }
 
@@ -337,7 +348,7 @@ export async function handleDeclarationRoute(
     const rawClone = described.ok ? described.value : null;
     const { branch, dirty } = await landingViewFields(deps.cloneStore, rawClone);
     const clone = withRecoveryOverlay(rawClone, awaiting);
-    sendJson(res, 200, { declaration, clone, branch, dirty });
+    sendJson(res, 200, { declaration: serializeDeclaration(declaration), clone, branch, dirty });
     return true;
   }
 
@@ -358,7 +369,7 @@ export async function handleDeclarationRoute(
       sendDeclarationError(res, result.error);
       return true;
     }
-    sendJson(res, 200, result.value);
+    sendJson(res, 200, serializeDeclaration(result.value));
     return true;
   }
 

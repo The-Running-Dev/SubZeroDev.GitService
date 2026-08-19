@@ -35,7 +35,7 @@ const FIXTURE_DECLARATION = {
   cloneUrl: 'https://example.invalid/watch-1.git',
   host: 'github',
   credentialRef: 'unused',
-  capabilityGrant: [],
+  capabilityGrant: new Set(['audit.read', 'repo.read']),
   writablePathPrefixes: [],
   pinned: false,
   fileWatcher: null,
@@ -215,6 +215,18 @@ test('S18.2 — GET /declarations reports clone state, current branch, dirty fla
       assert.equal(row.clone?.lastOperationAt, '2026-01-01T00:00:00.000Z');
       assert.equal(row.branch, 'feature/landing-view');
       assert.equal(row.dirty, true);
+    });
+  });
+});
+
+test('S19.4 — GET /declarations reports capabilityGrant as a real, sorted array, not the empty object a raw Set serialises to', async () => {
+  await withVolumeAsync(async (volume) => {
+    await withServer(volume, readyDirtyCloneStore(), async (baseUrl) => {
+      const cookie = await enrolAndLogin(baseUrl);
+      const res = await fetch(`${baseUrl}/declarations`, { headers: { Cookie: cookie } });
+      assert.equal(res.status, 200);
+      const rows = (await res.json()) as readonly { readonly declaration: { readonly capabilityGrant: readonly string[] } }[];
+      assert.deepEqual(rows[0]!.declaration.capabilityGrant, ['audit.read', 'repo.read']);
     });
   });
 });
