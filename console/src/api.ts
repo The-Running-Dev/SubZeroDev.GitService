@@ -40,6 +40,27 @@ export const api = {
   delete: <T>(path: string, signal?: AbortSignal) => request<T>('DELETE', path, undefined, signal),
 };
 
+/**
+ * The fetch/cancel-guard/error shape every view's initial-load `useEffect`
+ * needs — shared so it has one home instead of being hand-copied per view
+ * (`Landing.tsx`, `Grants.tsx`). `cancelledRef` is checked before either
+ * handler runs, so a response that resolves after the caller has unmounted
+ * triggers neither a `setState` nor a callback like `onSignedOut`.
+ */
+export async function loadResource<T>(
+  path: string,
+  cancelledRef: { readonly current: boolean },
+  handlers: { readonly onSuccess: (body: T) => void; readonly onError: (status: number) => void },
+): Promise<void> {
+  const res = await api.get<T>(path);
+  if (cancelledRef.current) return;
+  if (!res.ok) {
+    handlers.onError(res.status);
+    return;
+  }
+  handlers.onSuccess(res.body);
+}
+
 export interface SessionEnvelope {
   readonly subject: string;
   readonly createdAt: string;
@@ -72,4 +93,47 @@ export interface DeclarationListRow {
   } | null;
   readonly branch: string | null;
   readonly dirty: boolean;
+}
+
+export interface OAuthClientRecord {
+  readonly clientId: string;
+  readonly redirectUris: readonly string[];
+  readonly registeredAt: string;
+  readonly revokedAt: string | null;
+}
+
+export interface GrantRecord {
+  readonly grantId: string;
+  readonly kind: 'mcp' | 'operator-api';
+  readonly clientId: string | null;
+  readonly subject: string;
+  readonly resource: string | null;
+  readonly declarationId: string | null;
+  readonly generation: number | null;
+  readonly scopes: readonly string[];
+  readonly createdAt: string;
+  readonly lastUsedAt: string | null;
+  readonly revokedAt: string | null;
+}
+
+export interface GrantView {
+  readonly grant: GrantRecord;
+  readonly client: OAuthClientRecord | null;
+  readonly activeTokens: number;
+  readonly liveSessions: number;
+}
+
+export interface OperatorSessionListing {
+  readonly ref: string;
+  readonly subject: string;
+  readonly createdAt: string;
+  readonly lastSeenAt: string;
+  readonly idleExpiresAt: string;
+  readonly absoluteExpiresAt: string;
+  readonly revokedAt: string | null;
+}
+
+export interface GrantsView {
+  readonly grants: readonly GrantView[];
+  readonly operatorSessions: readonly OperatorSessionListing[];
 }

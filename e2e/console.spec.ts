@@ -1,7 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { writeBreakGlassToken } from '../src/operator-identity/operator-identity.ts';
 import { base32Decode, currentTotpCode } from '../src/operator-identity/totp.ts';
-import { E2E_PASSWORD, E2E_PROVISIONING_SECRET, E2E_SUBJECT, E2E_VOLUME_ROOT } from './constants.ts';
+import { pkce, registerClient, exchangeCodeForTokens } from '../src/surfaces/testing/oauth-test-flow.ts';
+import { E2E_BASE_URL, E2E_PASSWORD, E2E_PROVISIONING_SECRET, E2E_SUBJECT, E2E_VOLUME_ROOT } from './constants.ts';
 
 /**
  * S18.13 — enrolment, all three sign-in paths and the landing view, driven
@@ -9,8 +10,13 @@ import { E2E_PASSWORD, E2E_PROVISIONING_SECRET, E2E_SUBJECT, E2E_VOLUME_ROOT } f
  * order: the enrolment step's recovery codes and TOTP secret are only ever
  * shown once, so every later step's credentials come from what this same
  * run captured, not from a fixture written in advance.
+ *
+ * S32.4 continues in the same test, against the same signed-in browser
+ * session and the same declared `e2e-repo` — a fresh test would need its own
+ * sign-in, and the whole point of this file's single-test shape is that the
+ * enrolment secrets it captures are only ever available once.
  */
-test('S18.12/S18.13/S18.10/S18.2/S31.4/S31.5 — enrolment, every sign-in path, the lockout round trip, and the landing view, against a real repository', async ({ page }) => {
+test('S18.12/S18.13/S18.10/S18.2/S31.4/S31.5/S32.1/S32.2/S32.3/S32.4 — enrolment, every sign-in path, the lockout round trip, the landing view, and the grants view against a real repository', async ({ page }) => {
   // S18.12 — a brand new instance shows the enrolment screen and no other.
   await page.goto('/');
   await expect(page.getByTestId('provisioning-secret')).toBeVisible();
@@ -174,4 +180,157 @@ test('S18.12/S18.13/S18.10/S18.2/S31.4/S31.5 — enrolment, every sign-in path, 
   await page.reload();
   await expect(page.getByTestId('declaration-list')).toBeVisible();
   await expect(page.getByTestId('selected-declaration')).toHaveText('Selected: e2e-repo');
+
+  // --- S32 — the grants view revokes everything, including live MCP sessions and the operator's own session ---
+
+  await page.getByTestId('nav-grants').click();
+  await expect(page.getByTestId('client-list')).toBeVisible();
+  await expect(page.getByTestId('mcp-grant-list')).toBeVisible();
+  await expect(page.getByTestId('operator-token-list')).toBeVisible();
+  await expect(page.getByTestId('operator-session-list')).toBeVisible();
+
+  // Exactly one operator session is live at this point — every earlier
+  // sign-in on this run was cleanly signed out first — and it is this
+  // page's own, the case S32.3 asks for.
+  const liveSessionRows = page.locator('[data-testid="operator-session-list"] tbody tr').filter({ hasText: 'no' });
+  await expect(liveSessionRows).toHaveCount(1);
+
+  // Register a real MCP client and drive it through the real PKCE
+  // authorization-code flow to establish a genuinely live MCP session — S32.4
+  // asks for a registered client and a live MCP session, not a stub.
+  // Registration and the token exchange below need no browser session (they
+  // are unauthenticated per `mcp-routes.ts`), so both run as plain Node-side
+  // calls through the same `oauth-test-flow.ts` helpers `mcp-routes.test.ts`
+  // uses, rather than a second copy of the request shapes driven through
+  // `page.evaluate`. Only the `/oauth/authorize` approval step below carries
+  // the operator's session cookie and stays in-page for that reason.
+  const CLIENT_REDIRECT_URI = 'https://client.invalid/callback';
+  const { verifier, challenge } = pkce();
+
+  const client = await registerClient(E2E_BASE_URL, [CLIENT_REDIRECT_URI], 'S32 e2e client');
+  expect(client.client_id).toBeTruthy();
+
+  const authorizeUrl = new URL('/oauth/authorize', 'https://placeholder.invalid');
+  authorizeUrl.searchParams.set('client_id', client.client_id);
+  authorizeUrl.searchParams.set('redirect_uri', CLIENT_REDIRECT_URI);
+  authorizeUrl.searchParams.set('response_type', 'code');
+  authorizeUrl.searchParams.set('code_challenge', challenge);
+  authorizeUrl.searchParams.set('code_challenge_method', 'S256');
+  authorizeUrl.searchParams.set('resource', '/mcp/e2e-repo');
+  authorizeUrl.searchParams.set('scope', 'read');
+
+  const { requestId } = await page.evaluate(
+    async ({ path }) => {
+      const res = await fetch(path, { credentials: 'same-origin' });
+      const html = await res.text();
+      const match = /name="request_id" value="([^"]+)"/.exec(html);
+      return { requestId: match ? match[1] : null };
+    },
+    { path: authorizeUrl.pathname + authorizeUrl.search },
+  );
+  expect(requestId, 'the approval form must carry a request_id').toBeTruthy();
+
+  // The approval POST 302-redirects to the client's own redirect URI, which
+  // resolves to nothing real. A real browser `fetch` cannot read a
+  // cross-origin redirect's `Location` (opaque in `redirect: 'manual'`
+  // mode, and a same-site follow triggers a genuine network request to a
+  // host that doesn't resolve) — so the request is driven through
+  // `page.route`'s own `route.fetch`, which runs outside the page's CORS
+  // and redirect-following rules and can read the header directly, the same
+  // way `mcp-routes.test.ts`'s Node-side `fetch` does for this exact step.
+  let authorizeLocation: string | null = null;
+  await page.route('**/oauth/authorize', async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch({ maxRedirects: 0 });
+    authorizeLocation = response.headers()['location'] ?? null;
+    await route.fulfill({ response });
+  });
+
+  await page.evaluate(
+    async ({ requestId }) => {
+      const csrfToken = document.cookie.match(/(?:^|; )szg_csrf=([^;]+)/)?.[1] ?? '';
+      try {
+        await fetch('/oauth/authorize', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': csrfToken },
+          body: new URLSearchParams({ request_id: requestId!, action: 'approve' }).toString(),
+        });
+      } catch {
+        // The fulfilled response is the real 302; the in-page `fetch` then
+        // tries to follow it to a host that doesn't resolve. Irrelevant —
+        // `authorizeLocation` above already captured the header server-side.
+      }
+    },
+    { requestId },
+  );
+  await page.unroute('**/oauth/authorize');
+
+  expect(authorizeLocation, 'the approval must redirect to the client redirect URI carrying a code').toBeTruthy();
+  const code = new URL(authorizeLocation!).searchParams.get('code');
+  expect(code).toBeTruthy();
+
+  const tokenResponse = await exchangeCodeForTokens(E2E_BASE_URL, client.client_id, code!, verifier, CLIENT_REDIRECT_URI);
+  expect(tokenResponse.status, tokenResponse.body).toBe(200);
+  const tokens = JSON.parse(tokenResponse.body) as { access_token: string };
+  expect(tokens.access_token).toBeTruthy();
+
+  const initialized = await page.evaluate(
+    async ({ accessToken }) => {
+      const res = await fetch('/mcp/e2e-repo', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }),
+      });
+      return { status: res.status };
+    },
+    { accessToken: tokens.access_token },
+  );
+  expect(initialized.status, 'the MCP client must reach a genuinely live session').toBe(200);
+
+  // S32.1/S32.2/S32.4 — the newly registered client and its MCP grant are
+  // visible from the reloaded view, with the last-used timestamp the
+  // `initialize` call above just wrote.
+  await page.getByTestId('grants-back').click();
+  await page.getByTestId('nav-grants').click();
+  const clientRow = page.getByTestId(`client-row-${client.client_id}`);
+  await expect(clientRow).toBeVisible();
+  await expect(clientRow).not.toContainText('never');
+
+  const grantRow = page.locator('[data-testid="mcp-grant-list"] tbody tr').filter({ hasText: 'e2e-repo' });
+  await expect(grantRow).toHaveCount(1);
+  await expect(grantRow).not.toContainText('never');
+
+  // S32.2 — revoking the client from the view runs S13's cascade: the
+  // client itself is marked revoked, and — demonstrated below rather than
+  // read off this row, since the cascade lives in `grantIsLive`'s upward
+  // walk (`authorization.ts`) rather than a second `revoked_at` write on
+  // every grant it touches — its grant's tokens stop authorizing.
+  await page.getByTestId(`revoke-client-${client.client_id}`).click();
+  await expect(page.getByTestId(`revoke-client-${client.client_id}`)).toBeDisabled();
+  await expect(page.getByTestId(`client-revoked-${client.client_id}`)).not.toHaveText('no');
+
+  // S32.4 — the live MCP session established above no longer authorizes,
+  // demonstrated against the real transport rather than asserted from the
+  // view.
+  const afterRevoke = await page.evaluate(
+    async ({ accessToken }) => {
+      const res = await fetch('/mcp/e2e-repo', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'initialize', params: {} }),
+      });
+      return { status: res.status };
+    },
+    { accessToken: tokens.access_token },
+  );
+  expect(afterRevoke.status, 'a revoked client\'s MCP session must no longer authorize').toBe(401);
+
+  // S32.3 — revoking the operator's own session from the same view signs
+  // them out: the incident case the design names by name.
+  await liveSessionRows.getByRole('button', { name: 'Revoke' }).click();
+  await expect(page.getByTestId('login-subject')).toBeVisible();
 });

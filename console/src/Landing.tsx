@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
-import { api, type DeclarationListRow } from './api.ts';
+import { api, loadResource, type DeclarationListRow } from './api.ts';
 
 const SELECTED_DECLARATION_KEY = 'szg-console-selected-declaration';
 
 interface Props {
   readonly onSignedOut: () => void;
+  readonly onNavigateGrants: () => void;
 }
 
 /**
@@ -14,23 +15,19 @@ interface Props {
  * dimension for every later view; `localStorage` is what makes that survive
  * a reload rather than living only in this component's state.
  */
-export function Landing({ onSignedOut }: Props) {
+export function Landing({ onSignedOut, onNavigateGrants }: Props) {
   const [rows, setRows] = useState<readonly DeclarationListRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(() => localStorage.getItem(SELECTED_DECLARATION_KEY));
 
   useEffect(() => {
-    let cancelled = false;
-    api.get<readonly DeclarationListRow[]>('/declarations').then((res) => {
-      if (cancelled) return;
-      if (!res.ok) {
-        setError('could not load declarations');
-        return;
-      }
-      setRows(res.body);
+    const cancelledRef = { current: false };
+    loadResource<readonly DeclarationListRow[]>('/declarations', cancelledRef, {
+      onSuccess: setRows,
+      onError: () => setError('could not load declarations'),
     });
     return () => {
-      cancelled = true;
+      cancelledRef.current = true;
     };
   }, []);
 
@@ -50,6 +47,9 @@ export function Landing({ onSignedOut }: Props) {
   return (
     <main>
       <h1>Repositories</h1>
+      <button type="button" data-testid="nav-grants" onClick={onNavigateGrants}>
+        Grants
+      </button>
       <button type="button" data-testid="sign-out" onClick={signOut}>
         Sign out
       </button>
