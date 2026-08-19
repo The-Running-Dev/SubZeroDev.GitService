@@ -24,14 +24,26 @@ function contentType(filePath: string): string {
   return MIME_TYPES[path.extname(filePath)] ?? 'application/octet-stream';
 }
 
-async function sendFile(res: ServerResponse, absolutePath: string, cacheControl: string): Promise<void> {
+async function sendFile(res: ServerResponse, absolutePath: string, cacheControl: string, method: string): Promise<void> {
   const info = await stat(absolutePath);
+  if (!info.isFile()) {
+    throw new Error(`not a regular file: ${absolutePath}`);
+  }
   res.writeHead(200, {
     'Content-Type': contentType(absolutePath),
     'Content-Length': info.size,
     'Cache-Control': cacheControl,
   });
-  createReadStream(absolutePath).pipe(res);
+  if (method === 'HEAD') {
+    res.end();
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    const stream = createReadStream(absolutePath);
+    stream.on('error', reject);
+    res.on('finish', resolve);
+    stream.pipe(res);
+  });
 }
 
 /**
@@ -54,7 +66,16 @@ async function sendFile(res: ServerResponse, absolutePath: string, cacheControl:
 export async function handleConsoleStaticRoute(deps: ConsoleStaticDependencies, req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> {
   if (req.method !== 'GET' && req.method !== 'HEAD') return false;
 
-  const requested = decodeURIComponent(url.pathname);
+  // An invalid percent-encoding (e.g. a lone `%`) makes `decodeURIComponent`
+  // throw; falling back to the raw pathname just means it won't match a real
+  // asset below, which lands the request in the SPA fallback like any other
+  // unrecognised path instead of surfacing as a generic 500.
+  let requested: string;
+  try {
+    requested = decodeURIComponent(url.pathname);
+  } catch {
+    requested = url.pathname;
+  }
   const relative = requested === '/' ? 'index.html' : requested.replace(/^\/+/, '');
   const resolved = path.resolve(deps.consoleDir, relative);
 
@@ -64,19 +85,28 @@ export async function handleConsoleStaticRoute(deps: ConsoleStaticDependencies, 
 
   if (withinConsoleDir && !isHashCompanion) {
     try {
-      await sendFile(res, resolved, relative === 'index.html' ? 'no-cache' : 'public, max-age=31536000, immutable');
+      await sendFile(res, resolved, relative === 'index.html' ? 'no-cache' : 'public, max-age=31536000, immutable', req.method);
       return true;
-    } catch {
-      // Falls through to the SPA fallback below — a missing asset on a
-      // client-side route is exactly what the fallback exists to answer.
+    } catch (cause) {
+      // Falls through to the SPA fallback below only for "nothing there" —
+      // a missing asset on a client-side route is exactly what the fallback
+      // exists to answer. Anything else (a permission error, a directory in
+      // place of a file, a stream fault) is a real infrastructure problem
+      // and must not be silently repainted as a normal 200.
+      if (!isMissingOrNotAFile(cause)) throw cause;
     }
   }
 
   // SPA fallback: any other unrecognised GET path still gets the shell.
   try {
-    await sendFile(res, path.join(deps.consoleDir, 'index.html'), 'no-cache');
+    await sendFile(res, path.join(deps.consoleDir, 'index.html'), 'no-cache', req.method);
     return true;
-  } catch {
+  } catch (cause) {
+    if (!isMissingOrNotAFile(cause)) throw cause;
     return false;
   }
+}
+
+function isMissingOrNotAFile(cause: unknown): boolean {
+  return cause instanceof Error && (('code' in cause && (cause as NodeJS.ErrnoException).code === 'ENOENT') || cause.message.startsWith('not a regular file:'));
 }

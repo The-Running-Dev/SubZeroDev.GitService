@@ -199,6 +199,35 @@ function resolverActorFor(session: Session): ActorRef {
   return session.actorRef;
 }
 
+/**
+ * Every prefix an API route family above claims, so the console's SPA
+ * fallback (below) never answers for one of them. Without this, a typo'd or
+ * version-skewed path under a real API prefix (e.g. `/mcp/typo-endpoint`)
+ * falls through every specific handler unmatched and reaches the SPA
+ * fallback, which serves `200 text/html` instead of the `404` a client
+ * expects and can parse as JSON.
+ */
+const RESERVED_API_PATHS: readonly RegExp[] = [
+  /^\/auth\//,
+  /^\/declarations(\/|$)/,
+  /^\/grants(\/|$)/,
+  /^\/tokens\//,
+  /^\/clients\//,
+  /^\/operator-sessions\//,
+  /^\/mcp\//,
+  /^\/oauth\//,
+  /^\/\.well-known\/oauth-/,
+  /^\/healthz$/,
+  /^\/version$/,
+  /^\/parked-operations(\/|$)/,
+  /^\/failing-credentials\//,
+  /^\/health$/,
+];
+
+function isReservedApiPath(pathname: string): boolean {
+  return RESERVED_API_PATHS.some((pattern) => pattern.test(pathname));
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
@@ -341,7 +370,7 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
     return;
   }
 
-  if (deps.consoleDir) {
+  if (deps.consoleDir && !isReservedApiPath(url.pathname)) {
     const served = await handleConsoleStaticRoute({ consoleDir: deps.consoleDir }, req, res, url);
     if (served) return;
   }

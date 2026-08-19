@@ -30,6 +30,10 @@ async function listFilesRecursive(dir: string, base: string): Promise<readonly s
   const entries = await readdir(dir, { withFileTypes: true });
   const files: string[] = [];
   for (const entry of entries) {
+    // Mirrors `shared/retention.ts`'s `directoryBytes`: a symlink is skipped
+    // rather than followed, so a build artifact that happens to contain one
+    // can't make this digest silently absorb bytes from outside `dir`.
+    if (entry.isSymbolicLink()) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       files.push(...(await listFilesRecursive(full, base)));
