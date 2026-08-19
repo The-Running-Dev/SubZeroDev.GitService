@@ -24,6 +24,11 @@ COPY tsconfig.json ./
 COPY scripts ./scripts
 COPY src ./src
 COPY console ./console
+# `typecheck:e2e` (part of `npm run build`) needs e2e/tsconfig.json and the
+# Playwright specs it type-checks against — build-time only, like `design/`
+# below. Neither `e2e/` nor `design/` reaches the `runtime` stage.
+COPY e2e ./e2e
+COPY playwright.config.ts ./
 # `check:migration` reads `design/20-contract.md` against the SQL migration
 # (`scripts/check-migration-matches-contract.ts`) — a build-time-only
 # dependency. `design/` never reaches the `runtime` stage below.
