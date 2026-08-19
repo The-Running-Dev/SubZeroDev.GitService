@@ -48,6 +48,7 @@ async function withServer<T>(volume: string, consoleDir: string | undefined, fn:
     provisioningPending: async () => (await identity.provisioningState()) === 'pending',
     auditChain: async () => ({ verifiedThrough: null, headHash: null, mirroredHeadHash: null, retainedAnchors: [], chainBreak: null }),
     authorization,
+    audit,
     identity,
     sessionAbsoluteSeconds: 43_200,
     declarations: createStubDeclarations(),

@@ -32,6 +32,11 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # A bound on the whole job, not just the retried step below: GitHub's own
+    # default (360 minutes) is what let the hang this fixes run for hours
+    # undetected rather than failing loudly. 45 leaves headroom for that
+    # step's own worst case (three 8-minute attempts) plus everything else.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -49,8 +54,30 @@ jobs:
       - name: Run typecheck and every check:* gate
         run: npm run build
 
+      # `--with-deps` shells out to `apt-get`. The confirmed cause of this
+      # step's hang (pulled from a cancelled run's own logs, not guessed):
+      # `azure.archive.ubuntu.com` — the runner's local mirror — refused
+      # every request (`Ign:` in the log), apt fell back to the public
+      # `archive.ubuntu.com`, and that fetch itself then stalled mid-download
+      # with no further output for the rest of the job. apt has no default
+      # timeout on a connection that stops sending data, so this hangs
+      # indefinitely rather than failing — `timeout 8m` bounds one attempt,
+      # and the loop retries twice more since a stalled mirror is usually
+      # transient. `NEEDRESTART_MODE`/`DEBIAN_FRONTEND` guard the unrelated
+      # interactive-prompt failure mode this class of command can also hit.
       - name: Install Playwright's browser
-        run: npx playwright install --with-deps chromium
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          NEEDRESTART_MODE: a
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 8m npx playwright install --with-deps chromium; then
+              exit 0
+            fi
+            echo "attempt $attempt failed or stalled past 8 minutes; retrying" >&2
+            sleep 10
+          done
+          exit 1
 
       # verification: true
       - name: Run S18.13's end-to-end browser suite

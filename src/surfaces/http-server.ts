@@ -15,6 +15,7 @@ import { handleConsoleAuthRoute, type ConsoleAuthDependencies } from './console-
 import { handleDeclarationRoute, type DeclarationRoutesDependencies } from './declaration-routes.ts';
 import { handleToolRoute, type ToolRoutesDependencies } from './tool-routes.ts';
 import { handleAuthorizationRoute, type AuthorizationRoutesDependencies } from './authorization-routes.ts';
+import { handleAuditRoute, type AuditRoutesDependencies } from './audit-routes.ts';
 import { handleMcpRoute, type McpRoutesDependencies } from './mcp-routes.ts';
 import { handleConsoleStaticRoute } from './console-static-routes.ts';
 
@@ -67,6 +68,7 @@ export interface HealthReport {
 export interface SurfacesDependencies
   extends ConsoleAuthDependencies,
     AuthorizationRoutesDependencies,
+    AuditRoutesDependencies,
     Pick<DeclarationRoutesDependencies, 'declarations' | 'cloneStore' | 'declarationsAwaitingRecovery'>,
     Pick<ToolRoutesDependencies, 'dispatchPipeline' | 'contractCapabilitySet'>,
     Pick<McpRoutesDependencies, 'mcpState' | 'origin'> {
@@ -222,6 +224,7 @@ const RESERVED_API_PATHS: readonly RegExp[] = [
   /^\/parked-operations(\/|$)/,
   /^\/failing-credentials\//,
   /^\/health$/,
+  /^\/audit$/,
 ];
 
 function isReservedApiPath(pathname: string): boolean {
@@ -264,6 +267,11 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
     /^\/operator-sessions\/[^/]+\/revoke$/.test(url.pathname)
   ) {
     const handled = await handleAuthorizationRoute(deps, req, res, url);
+    if (handled) return;
+  }
+
+  if (url.pathname === '/audit') {
+    const handled = await handleAuditRoute(deps, req, res, url);
     if (handled) return;
   }
 

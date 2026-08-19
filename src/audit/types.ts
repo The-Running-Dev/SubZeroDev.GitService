@@ -55,14 +55,9 @@ export const UNVERIFIED_AUDIT_CHAIN: AuditChainState = {
   chainBreak: null,
 };
 
-export type AuditRecordForm =
-  | 'call'
-  | 'authorization-rejection'
-  | 'hatch-intent'
-  | 'hatch-outcome'
-  | 'file-watcher'
-  | 'identity-event'
-  | 'lease-takeover';
+export const AUDIT_RECORD_FORMS = ['call', 'authorization-rejection', 'hatch-intent', 'hatch-outcome', 'file-watcher', 'identity-event', 'lease-takeover'] as const;
+
+export type AuditRecordForm = (typeof AUDIT_RECORD_FORMS)[number];
 
 export interface AuditRecordBase {
   readonly sequence: number;

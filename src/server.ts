@@ -906,6 +906,7 @@ async function main(): Promise<void> {
     failingCredentialRefs: () => credentials.listFailing(),
     clearFailingCredential: (ref, declarationId) => credentials.clearFailing(ref, declarationId),
     failedOutboxRows: async () => (await notifier.listFailed()).length,
+    audit,
     identity: operatorIdentity,
     sessionAbsoluteSeconds: SESSION_ABSOLUTE_SECONDS_DEFAULT,
     declarations,

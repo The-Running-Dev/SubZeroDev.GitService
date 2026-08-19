@@ -7,6 +7,7 @@ import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './http-server.ts';
 import { createMcpRoutesState } from './mcp-routes.ts';
 import type { GitSha, Sha256Hex } from '../shared/brands.ts';
 import type { AuditChainState } from '../audit/types.ts';
+import type { Audit } from '../audit/audit.ts';
 import { createStubOperatorIdentity } from '../operator-identity/testing/stub-operator-identity.ts';
 import { createStubDeclarations } from '../declarations/testing/stub-declarations.ts';
 import { createStubCloneStore } from '../clone/testing/stub-clone-store.ts';
@@ -19,6 +20,17 @@ const COMMIT_SHA = '0'.repeat(40) as GitSha;
 const CONTRACT_FINGERPRINT = '1'.repeat(64) as Sha256Hex;
 const TOKEN = 'test-operator-token';
 const AUTHORIZATION = createStubAuthorization(new Map([[TOKEN, 'operator-api' as never]]));
+
+/** This file exercises every route but `/audit` itself (`audit-routes.test.ts` owns that); the routes here only need `audit` present to satisfy the dependency shape. */
+const STUB_AUDIT: Audit = {
+  append: async () => ({ appended: true, sequence: 1 }),
+  query: async () => ({ ok: true, value: { records: [], nextCursor: null, chain: HEALTHY_CHAIN } }),
+  verify: async () => HEALTHY_CHAIN,
+  chainState: async () => HEALTHY_CHAIN,
+  runRetention: async () => ({ module: 'audit', deletedRows: 0, freedBytes: 0, skipped: [] }),
+  usageBytes: async () => 0,
+  close: async () => {},
+};
 
 const HEALTHY_CHAIN: AuditChainState = {
   verifiedThrough: 3,
@@ -48,6 +60,7 @@ async function withServer<T>(options: ServerOptions, fn: (baseUrl: string) => Pr
     provisioningPending: async () => options.provisioningPending ?? false,
     auditChain: async () => options.auditChain ?? HEALTHY_CHAIN,
     authorization: options.authorization ?? AUTHORIZATION,
+    audit: STUB_AUDIT,
     parkedOperations: async () => options.parked ?? [],
     observeGitState: async () => options.observed ?? null,
     ...(options.resolve ? { resolveParkedOperation: async (operationId: string) => options.resolve!(operationId) } : {}),
@@ -185,6 +198,7 @@ test('a throwing handler answers 500 and leaves the process serving, rather than
       throw new Error('file is not a database');
     },
     authorization: AUTHORIZATION,
+    audit: STUB_AUDIT,
     identity: createStubOperatorIdentity(),
     sessionAbsoluteSeconds: 43_200,
     declarations: createStubDeclarations(),

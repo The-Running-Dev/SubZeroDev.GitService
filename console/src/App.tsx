@@ -5,8 +5,9 @@ import { Login } from './Login.tsx';
 import { Landing } from './Landing.tsx';
 import { TotpReenrol } from './TotpReenrol.tsx';
 import { Grants } from './Grants.tsx';
+import { Audit } from './Audit.tsx';
 
-type Screen = 'loading' | 'enrol' | 'login' | 'totp-reenrol' | 'landing' | 'grants';
+type Screen = 'loading' | 'enrol' | 'login' | 'totp-reenrol' | 'landing' | 'grants' | 'audit';
 
 /**
  * S18.12's "shows the enrolment screen and no other" without a new
@@ -49,5 +50,10 @@ export function App() {
   if (screen === 'grants') {
     return <Grants onSignedOut={() => setScreen('login')} onBack={() => setScreen('landing')} />;
   }
-  return <Landing onSignedOut={() => setScreen('login')} onNavigateGrants={() => setScreen('grants')} />;
+  if (screen === 'audit') {
+    return <Audit onSignedOut={() => setScreen('login')} onBack={() => setScreen('landing')} />;
+  }
+  return (
+    <Landing onSignedOut={() => setScreen('login')} onNavigateGrants={() => setScreen('grants')} onNavigateAudit={() => setScreen('audit')} />
+  );
 }
