@@ -140,6 +140,47 @@ function resolveNotifierWebhook(): HttpsUrl | null {
 }
 
 /**
+ * `DeploymentConfig.oidcIssuer` (S31) — `null` until configured, the same
+ * direction as `notifierWebhook`. `https://` is required except against a
+ * loopback host, which a self-hosted test issuer
+ * (`operator-identity/testing/oidc-issuer-fixture.ts`) has no certificate for
+ * — the same trustworthy-origin exception `e2e/console.spec.ts` already
+ * relies on for the session cookie's `Secure` attribute.
+ */
+function resolveOidcIssuer(): string | null {
+  const raw = process.env.OIDC_ISSUER_URL;
+  if (!raw || raw.trim().length === 0) return null;
+  const isLoopback = /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/.test(raw);
+  if (!raw.startsWith('https://') && !isLoopback) {
+    console.error(`server: OIDC_ISSUER_URL must be an https:// URL (got '${raw}')`);
+    process.exit(1);
+  }
+  return raw;
+}
+
+/** `DeploymentConfig.oidcClientId` (S31). `null` until configured. */
+function resolveOidcClientId(): string | null {
+  const raw = process.env.OIDC_CLIENT_ID;
+  return raw && raw.trim().length > 0 ? raw : null;
+}
+
+/** `DeploymentConfig.oidcClientSecret` (S31). `null` for a public client, the safe default absent explicit configuration. */
+function resolveOidcClientSecret(): string | null {
+  const raw = process.env.OIDC_CLIENT_SECRET;
+  return raw && raw.trim().length > 0 ? raw : null;
+}
+
+/** `DeploymentConfig.oidcSubjectAllowlist` (S31) — empty until configured, the same direction as `remoteHostAllowlist`: nothing federates in until named. */
+function resolveOidcSubjectAllowlist(): readonly Subject[] {
+  const raw = process.env.OIDC_SUBJECT_ALLOWLIST;
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0) as Subject[];
+}
+
+/**
  * How often the composition root drives `deliverPending`.
  *
  * **The contract fixes no value for this.** `RetentionWindows` and
@@ -307,9 +348,21 @@ async function main(): Promise<void> {
   const port = resolvePort();
   const watermarks = resolveWatermarks();
 
+  const origin = resolveOrigin(port);
+
   const store = createStructuredStore({ volumeRoot, clock: systemClock });
   const audit = createAudit({ volumeRoot, clock: systemClock });
-  const operatorIdentity = createOperatorIdentity({ volumeRoot, credentialMountRoot, clock: systemClock, audit });
+  const operatorIdentity = createOperatorIdentity({
+    volumeRoot,
+    credentialMountRoot,
+    clock: systemClock,
+    audit,
+    oidcIssuer: resolveOidcIssuer(),
+    oidcClientId: resolveOidcClientId(),
+    oidcClientSecret: resolveOidcClientSecret(),
+    oidcSubjectAllowlist: resolveOidcSubjectAllowlist(),
+    oidcRedirectUri: `${origin}/auth/login/oidc/callback`,
+  });
   // The one `MutableEnv` the resolver writes a secret into and `Exec` reads it
   // back out of, by variable name. Sharing the map here is what keeps the
   // value out of every signature in between (`20-contract.md` § L1 —
@@ -859,7 +912,7 @@ async function main(): Promise<void> {
     cloneStore,
     dispatchPipeline,
     contractCapabilitySet,
-    origin: resolveOrigin(port),
+    origin,
     mcpState: createMcpRoutesState(),
     consoleDir,
   });

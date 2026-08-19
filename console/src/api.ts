@@ -17,9 +17,9 @@ export interface ApiResult<T> {
   readonly body: T;
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<ApiResult<T>> {
+async function request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<ApiResult<T>> {
   const headers: Record<string, string> = {};
-  const init: RequestInit = { method, credentials: 'same-origin', headers };
+  const init: RequestInit = { method, credentials: 'same-origin', headers, signal };
   if (body !== undefined) {
     headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body);
@@ -34,10 +34,10 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 export const api = {
-  get: <T>(path: string) => request<T>('GET', path),
-  post: <T>(path: string, body?: unknown) => request<T>('POST', path, body ?? {}),
-  patch: <T>(path: string, body?: unknown) => request<T>('PATCH', path, body ?? {}),
-  delete: <T>(path: string) => request<T>('DELETE', path),
+  get: <T>(path: string, signal?: AbortSignal) => request<T>('GET', path, undefined, signal),
+  post: <T>(path: string, body?: unknown, signal?: AbortSignal) => request<T>('POST', path, body ?? {}, signal),
+  patch: <T>(path: string, body?: unknown, signal?: AbortSignal) => request<T>('PATCH', path, body ?? {}, signal),
+  delete: <T>(path: string, signal?: AbortSignal) => request<T>('DELETE', path, undefined, signal),
 };
 
 export interface SessionEnvelope {
@@ -45,6 +45,11 @@ export interface SessionEnvelope {
   readonly createdAt: string;
   readonly idleExpiresAt: string;
   readonly absoluteExpiresAt: string;
+  readonly totpReenrolRequired: boolean;
+}
+
+export interface TotpReenrolStart {
+  readonly totpSecret: string;
 }
 
 export interface EnrolResult {

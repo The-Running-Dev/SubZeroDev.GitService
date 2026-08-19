@@ -11,6 +11,7 @@ import type { Audit } from '../audit/audit.ts';
 import { storeError } from '../store/errors.ts';
 import { operatorIdentityError, type OperatorIdentityError } from './errors.ts';
 import { base32Encode, generateTotpSecret, sealTotpSecret, unsealTotpSecret, verifyTotpCode } from './totp.ts';
+import { discoverOidc, exchangeCodeForIdToken, verifyIdToken, type OidcDiscoveryDocument } from './oidc.ts';
 import {
   generateRecoveryCodes,
   hashRecoveryCode,
@@ -44,6 +45,10 @@ export interface OidcRedirect {
   readonly state: string;
 }
 
+export interface TotpReenrolStart {
+  readonly totpSecret: string;
+}
+
 export interface OperatorSession {
   readonly id: SessionId;
   readonly subject: Subject;
@@ -52,6 +57,7 @@ export interface OperatorSession {
   readonly idleExpiresAt: IsoUtcTimestamp;
   readonly absoluteExpiresAt: IsoUtcTimestamp;
   readonly revokedAt: IsoUtcTimestamp | null;
+  readonly totpReenrolRequired: boolean;
 }
 
 export interface OperatorIdentity {
@@ -64,6 +70,9 @@ export interface OperatorIdentity {
 
   beginOidc(): Promise<Outcome<OidcRedirect, OperatorIdentityError>>;
   completeOidc(code: string, state: string): Promise<Outcome<OperatorSession, OperatorIdentityError>>;
+
+  beginTotpReenrol(sessionId: SessionId): Promise<Outcome<TotpReenrolStart, OperatorIdentityError>>;
+  completeTotpReenrol(sessionId: SessionId, totpCode: string): Promise<Outcome<void, OperatorIdentityError>>;
 
   touch(sessionId: SessionId): Promise<Outcome<OperatorSession, OperatorIdentityError>>;
   logout(sessionId: SessionId): Promise<Outcome<void, OperatorIdentityError>>;
@@ -94,6 +103,16 @@ export interface OperatorIdentityDependencies {
   readonly sessionAbsoluteSeconds?: number;
   /** `RetentionWindows.operatorSessionDays` (`20-contract.md` § Deployment configuration, default 7). Local, overridable default — no `DeploymentConfig` is wired yet. */
   readonly operatorSessionDays?: number;
+  /** `DeploymentConfig.oidcIssuer`. `null` until configured — `beginOidc`/`completeOidc` answer `oidc-unavailable`/`discovery` for every call until it is. */
+  readonly oidcIssuer?: string | null;
+  /** `DeploymentConfig.oidcClientId` (S31). */
+  readonly oidcClientId?: string | null;
+  /** `DeploymentConfig.oidcClientSecret` (S31). `null` for a public client. */
+  readonly oidcClientSecret?: string | null;
+  /** `DeploymentConfig.oidcSubjectAllowlist`. */
+  readonly oidcSubjectAllowlist?: readonly Subject[];
+  /** The callback URL registered with the issuer — derived by the caller from its own public origin, not stored in `DeploymentConfig` (`20-contract.md` § Deployment configuration only fixes the issuer and the client identity). */
+  readonly oidcRedirectUri?: string;
 }
 
 interface CredentialRow {
@@ -101,6 +120,7 @@ interface CredentialRow {
   readonly password_hash: string;
   readonly totp_secret_sealed: string;
   readonly totp_reenrol_required: number;
+  readonly totp_pending_secret_sealed: string | null;
   readonly enrolled_at: string;
 }
 
@@ -114,7 +134,7 @@ interface SessionRow {
   readonly revoked_at: string | null;
 }
 
-function toOperatorSession(row: SessionRow): OperatorSession {
+function toOperatorSession(row: SessionRow, totpReenrolRequired: boolean): OperatorSession {
   return {
     id: row.id as SessionId,
     subject: row.subject as Subject,
@@ -123,6 +143,7 @@ function toOperatorSession(row: SessionRow): OperatorSession {
     idleExpiresAt: row.idle_expires_at as IsoUtcTimestamp,
     absoluteExpiresAt: row.absolute_expires_at as IsoUtcTimestamp,
     revokedAt: row.revoked_at as IsoUtcTimestamp | null,
+    totpReenrolRequired,
   };
 }
 
@@ -176,11 +197,35 @@ function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): Outcome<T, 
   }
 }
 
+/** S31.2's CSRF-state check. In-memory: single-instance (invariant C7), and losing a pending redirect on restart costs the operator one retry, not a durable record `S8`-style recovery has to account for. */
+const OIDC_PENDING_STATE_TTL_MS = 10 * 60 * 1000;
+/** Caps `pendingOidcStates`' growth from abandoned `beginOidc` calls that never reach a matching `completeOidc` — the same bound `mcp-routes.ts`'s analogous `pendingAuthorizations` map applies via its own `MAX_PENDING_AUTHORIZATIONS`. */
+const MAX_PENDING_OIDC_STATES = 500;
+
+interface PendingOidcState {
+  readonly expiresAt: number;
+  /** Cached from the `beginOidc` call that created this entry, so `completeOidc` doesn't re-fetch the same discovery document moments later. */
+  readonly discovery: OidcDiscoveryDocument;
+}
+
 export function createOperatorIdentity(deps: OperatorIdentityDependencies): OperatorIdentity {
   const { volumeRoot, credentialMountRoot, clock, audit } = deps;
   const sessionIdleSeconds = deps.sessionIdleSeconds ?? SESSION_IDLE_SECONDS_DEFAULT;
   const sessionAbsoluteSeconds = deps.sessionAbsoluteSeconds ?? SESSION_ABSOLUTE_SECONDS_DEFAULT;
   const operatorSessionDays = deps.operatorSessionDays ?? OPERATOR_SESSION_RETENTION_DAYS_DEFAULT;
+  const oidcIssuer = deps.oidcIssuer ?? null;
+  const oidcClientId = deps.oidcClientId ?? null;
+  const oidcClientSecret = deps.oidcClientSecret ?? null;
+  const oidcSubjectAllowlist = deps.oidcSubjectAllowlist ?? [];
+  const oidcRedirectUri = deps.oidcRedirectUri ?? '';
+  const pendingOidcStates = new Map<string, PendingOidcState>();
+
+  /** Sweeps entries whose TTL has passed without a matching `completeOidc` — an abandoned `beginOidc` otherwise lingers in the map for the life of the process. */
+  function pruneExpiredOidcStates(now: number): void {
+    for (const [key, value] of pendingOidcStates) {
+      if (value.expiresAt <= now) pendingOidcStates.delete(key);
+    }
+  }
 
   const provisioningFile = path.join(volumeRoot, PROVISIONING_FILENAME);
   const breakGlassFile = path.join(volumeRoot, BREAK_GLASS_FILENAME);
@@ -242,9 +287,16 @@ export function createOperatorIdentity(deps: OperatorIdentityDependencies): Oper
 
   function getCredentialRow(db: DatabaseSync): CredentialRow | null {
     const rows = db
-      .prepare('SELECT subject, password_hash, totp_secret_sealed, totp_reenrol_required, enrolled_at FROM operator_credential WHERE singleton = 1')
+      .prepare(
+        'SELECT subject, password_hash, totp_secret_sealed, totp_reenrol_required, totp_pending_secret_sealed, enrolled_at FROM operator_credential WHERE singleton = 1',
+      )
       .all() as unknown as CredentialRow[];
     return rows[0] ?? null;
+  }
+
+  function readTotpReenrolRequired(db: DatabaseSync): boolean {
+    const credential = getCredentialRow(db);
+    return credential !== null && credential.totp_reenrol_required === 1;
   }
 
   function addSeconds(at: IsoUtcTimestamp, seconds: number): IsoUtcTimestamp {
@@ -265,7 +317,7 @@ export function createOperatorIdentity(deps: OperatorIdentityDependencies): Oper
     db.prepare(
       'INSERT INTO operator_session (id, subject, created_at, last_seen_at, idle_expires_at, absolute_expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, NULL)',
     ).run(row.id, row.subject, row.created_at, row.last_seen_at, row.idle_expires_at, row.absolute_expires_at);
-    return toOperatorSession(row);
+    return toOperatorSession(row, readTotpReenrolRequired(db));
   }
 
   function getSessionRow(db: DatabaseSync, sessionId: SessionId): SessionRow | null {
@@ -277,6 +329,30 @@ export function createOperatorIdentity(deps: OperatorIdentityDependencies): Oper
 
   function finishLogin(subject: Subject): Outcome<OperatorSession, OperatorIdentityError> {
     return withDb(volumeRoot, (db) => createSession(db, subject));
+  }
+
+  /** Shared by the `touch` method and `beginTotpReenrol`/`completeTotpReenrol`, which both need "this session is live" without exposing a second way to touch one. */
+  function touchSession(sessionId: SessionId): Outcome<OperatorSession, OperatorIdentityError> {
+    const now = clock.now();
+    const result = withDb(volumeRoot, (db) => {
+      const row = getSessionRow(db, sessionId);
+      if (!row) return { kind: 'unknown' as const };
+      if (row.revoked_at !== null) return { kind: 'revoked' as const };
+      if (Date.parse(now) > Date.parse(row.absolute_expires_at) || Date.parse(now) > Date.parse(row.idle_expires_at)) {
+        return { kind: 'expired' as const };
+      }
+      const idleExpiresAt = addSeconds(now, sessionIdleSeconds);
+      db.prepare('UPDATE operator_session SET last_seen_at = ?, idle_expires_at = ? WHERE id = ?').run(now, idleExpiresAt, sessionId);
+      return {
+        kind: 'ok' as const,
+        session: toOperatorSession({ ...row, last_seen_at: now, idle_expires_at: idleExpiresAt }, readTotpReenrolRequired(db)),
+      };
+    });
+    if (!result.ok) return err(result.error);
+    if (result.value.kind === 'unknown') return err(operatorIdentityError({ code: 'session-unknown' }, 'no such session'));
+    if (result.value.kind === 'revoked') return err(operatorIdentityError({ code: 'session-revoked' }, 'this session was revoked'));
+    if (result.value.kind === 'expired') return err(operatorIdentityError({ code: 'session-expired' }, 'this session has expired'));
+    return ok(result.value.session);
   }
 
   return {
@@ -468,38 +544,152 @@ export function createOperatorIdentity(deps: OperatorIdentityDependencies): Oper
     },
 
     async beginOidc(): Promise<Outcome<OidcRedirect, OperatorIdentityError>> {
-      // OIDC federation lands in S18 ("The local path must stand alone,
-      // which is the whole reason recovery codes exist" — 30-slices.md § S4
-      // Out of scope). Reported at its true empty state rather than invented,
-      // the same way boot.ts reports subsystems that do not exist yet.
-      return err(operatorIdentityError({ code: 'oidc-unavailable', reason: 'discovery' }, 'OIDC federation is not implemented until S18'));
+      if (!oidcIssuer || !oidcClientId) {
+        return err(operatorIdentityError({ code: 'oidc-unavailable', reason: 'discovery' }, 'no OIDC issuer is configured for this deployment'));
+      }
+      const discovery = await discoverOidc(oidcIssuer);
+      if (!discovery) {
+        return err(operatorIdentityError({ code: 'oidc-unavailable', reason: 'discovery' }, 'the OIDC issuer could not be reached or returned a malformed discovery document'));
+      }
+
+      const now = Date.parse(clock.now());
+      pruneExpiredOidcStates(now);
+      if (pendingOidcStates.size >= MAX_PENDING_OIDC_STATES) {
+        return err(operatorIdentityError({ code: 'oidc-unavailable', reason: 'state' }, 'too many pending sign-in attempts; try again shortly'));
+      }
+
+      const state = crypto.randomUUID();
+      pendingOidcStates.set(state, { expiresAt: now + OIDC_PENDING_STATE_TTL_MS, discovery });
+
+      const authorizeUrl = new URL(discovery.authorizationEndpoint);
+      authorizeUrl.searchParams.set('response_type', 'code');
+      authorizeUrl.searchParams.set('client_id', oidcClientId);
+      authorizeUrl.searchParams.set('redirect_uri', oidcRedirectUri);
+      authorizeUrl.searchParams.set('scope', 'openid');
+      authorizeUrl.searchParams.set('state', state);
+
+      return ok({ authorizeUrl: authorizeUrl.toString() as HttpsUrl, state });
     },
 
-    async completeOidc(_code: string, _state: string): Promise<Outcome<OperatorSession, OperatorIdentityError>> {
-      return err(operatorIdentityError({ code: 'oidc-unavailable', reason: 'discovery' }, 'OIDC federation is not implemented until S18'));
+    async completeOidc(code: string, state: string): Promise<Outcome<OperatorSession, OperatorIdentityError>> {
+      if (!oidcIssuer || !oidcClientId) {
+        return err(operatorIdentityError({ code: 'oidc-unavailable', reason: 'discovery' }, 'no OIDC issuer is configured for this deployment'));
+      }
+
+      const pending = pendingOidcStates.get(state);
+      pendingOidcStates.delete(state);
+      if (!pending || pending.expiresAt < Date.parse(clock.now())) {
+        return err(operatorIdentityError({ code: 'oidc-unavailable', reason: 'state' }, 'the sign-in request state is missing, expired or already used'));
+      }
+      const discovery = pending.discovery;
+
+      const idToken = await exchangeCodeForIdToken(discovery.tokenEndpoint, {
+        code,
+        redirectUri: oidcRedirectUri,
+        clientId: oidcClientId,
+        clientSecret: oidcClientSecret,
+      });
+      if (!idToken) {
+        return err(operatorIdentityError({ code: 'oidc-unavailable', reason: 'token-exchange' }, 'the authorization code could not be exchanged for a token'));
+      }
+
+      const verified = await verifyIdToken(idToken, discovery, oidcClientId);
+      if (!verified.ok) {
+        return err(operatorIdentityError({ code: 'oidc-unavailable', reason: verified.reason }, `id token ${verified.reason} check failed`));
+      }
+
+      // Anchored to the singleton `operator_credential.subject`, the same way
+      // `loginLocal`/`loginWithRecoveryCode` check `credential.subject !==
+      // subject` — allowlist membership alone is not enough, since an
+      // allowlist entry that doesn't match the enrolled operator's own
+      // subject would otherwise mint a session for an identity that was
+      // never locally enrolled.
+      const found = withDb(volumeRoot, (db) => getCredentialRow(db));
+      if (!found.ok) return err(found.error);
+      const credential = found.value;
+      if (!credential || credential.subject !== verified.subject || !oidcSubjectAllowlist.includes(verified.subject)) {
+        await audit.append({
+          at: clock.now(),
+          operationId: null,
+          declarationId: null,
+          generation: null,
+          tool: null,
+          actorRef: IDENTITY_ACTOR(verified.subject),
+          context: 'normal',
+          form: 'identity-event',
+          event: 'oidc-subject-rejected',
+        });
+        return err(operatorIdentityError({ code: 'subject-not-allowlisted', subject: verified.subject }, 'the federated subject is not on the allowlist'));
+      }
+
+      return finishLogin(credential.subject as Subject);
+    },
+
+    async beginTotpReenrol(sessionId: SessionId): Promise<Outcome<TotpReenrolStart, OperatorIdentityError>> {
+      const session = touchSession(sessionId);
+      if (!session.ok) return err(session.error);
+
+      const sealingKey = readTotpSealingKey();
+      if (!sealingKey) {
+        return err(operatorIdentityError({ code: 'totp-key-unavailable' }, 'the TOTP sealing key is absent or unreadable'));
+      }
+
+      const pendingSecret = generateTotpSecret();
+      const sealed = sealTotpSecret(pendingSecret, sealingKey);
+      const written = withDb(volumeRoot, (db) => {
+        db.prepare('UPDATE operator_credential SET totp_pending_secret_sealed = ? WHERE singleton = 1').run(sealed);
+      });
+      if (!written.ok) return err(written.error);
+
+      return ok({ totpSecret: base32Encode(pendingSecret) });
+    },
+
+    async completeTotpReenrol(sessionId: SessionId, totpCode: string): Promise<Outcome<void, OperatorIdentityError>> {
+      const session = touchSession(sessionId);
+      if (!session.ok) return err(session.error);
+
+      const found = withDb(volumeRoot, (db) => getCredentialRow(db));
+      if (!found.ok) return err(found.error);
+      const credential = found.value;
+      if (!credential) return err(operatorIdentityError({ code: 'not-provisioned' }, 'no operator identity exists yet'));
+      if (!credential.totp_pending_secret_sealed) {
+        return err(operatorIdentityError({ code: 'totp-invalid' }, 'no re-enrolment is in progress — call beginTotpReenrol first'));
+      }
+
+      const sealingKey = readTotpSealingKey();
+      if (!sealingKey) {
+        return err(operatorIdentityError({ code: 'totp-key-unavailable' }, 'the TOTP sealing key is absent or unreadable'));
+      }
+      const pendingSecret = unsealTotpSecret(credential.totp_pending_secret_sealed, sealingKey);
+      if (!pendingSecret || !verifyTotpCode(pendingSecret, totpCode, Date.parse(clock.now()) / 1000)) {
+        return err(operatorIdentityError({ code: 'totp-invalid' }, 'the TOTP code did not verify against the pending secret'));
+      }
+
+      const sealed = sealTotpSecret(pendingSecret, sealingKey);
+      const written = withDb(volumeRoot, (db) => {
+        db.prepare(
+          'UPDATE operator_credential SET totp_secret_sealed = ?, totp_pending_secret_sealed = NULL, totp_reenrol_required = 0 WHERE singleton = 1',
+        ).run(sealed);
+      });
+      if (!written.ok) return err(written.error);
+
+      await audit.append({
+        at: clock.now(),
+        operationId: null,
+        declarationId: null,
+        generation: null,
+        tool: null,
+        actorRef: IDENTITY_ACTOR(credential.subject as Subject),
+        context: 'normal',
+        form: 'identity-event',
+        event: 'totp-reenrolled',
+      });
+
+      return ok(undefined);
     },
 
     async touch(sessionId: SessionId): Promise<Outcome<OperatorSession, OperatorIdentityError>> {
-      const now = clock.now();
-      const result = withDb(volumeRoot, (db) => {
-        const row = getSessionRow(db, sessionId);
-        if (!row) return { kind: 'unknown' as const };
-        if (row.revoked_at !== null) return { kind: 'revoked' as const };
-        if (Date.parse(now) > Date.parse(row.absolute_expires_at) || Date.parse(now) > Date.parse(row.idle_expires_at)) {
-          return { kind: 'expired' as const };
-        }
-        const idleExpiresAt = addSeconds(now, sessionIdleSeconds);
-        db.prepare('UPDATE operator_session SET last_seen_at = ?, idle_expires_at = ? WHERE id = ?').run(now, idleExpiresAt, sessionId);
-        return {
-          kind: 'ok' as const,
-          session: toOperatorSession({ ...row, last_seen_at: now, idle_expires_at: idleExpiresAt }),
-        };
-      });
-      if (!result.ok) return err(result.error);
-      if (result.value.kind === 'unknown') return err(operatorIdentityError({ code: 'session-unknown' }, 'no such session'));
-      if (result.value.kind === 'revoked') return err(operatorIdentityError({ code: 'session-revoked' }, 'this session was revoked'));
-      if (result.value.kind === 'expired') return err(operatorIdentityError({ code: 'session-expired' }, 'this session has expired'));
-      return ok(result.value.session);
+      return touchSession(sessionId);
     },
 
     async logout(sessionId: SessionId): Promise<Outcome<void, OperatorIdentityError>> {
@@ -557,7 +747,8 @@ export function createOperatorIdentity(deps: OperatorIdentityDependencies): Oper
         const rows = db
           .prepare('SELECT id, subject, created_at, last_seen_at, idle_expires_at, absolute_expires_at, revoked_at FROM operator_session ORDER BY created_at')
           .all() as unknown as SessionRow[];
-        return rows.map(toOperatorSession);
+        const totpReenrolRequired = readTotpReenrolRequired(db);
+        return rows.map((row) => toOperatorSession(row, totpReenrolRequired));
       });
       return result.ok ? result.value : [];
     },

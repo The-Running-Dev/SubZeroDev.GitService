@@ -10,12 +10,14 @@ import { createStructuredStore } from '../store/structured-store.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
 import type { SessionId, Subject } from '../shared/brands.ts';
 import { base32Decode, currentTotpCode } from './totp.ts';
+import { startOidcIssuerFixture } from './testing/oidc-issuer-fixture.ts';
 import {
   createOperatorIdentity,
   TOTP_SEALING_KEY_FILENAME,
   writeBreakGlassToken,
   writeProvisioningSecret,
   type OperatorIdentity,
+  type OperatorIdentityDependencies,
 } from './operator-identity.ts';
 
 const SUBJECT = 'operator' as Subject;
@@ -34,7 +36,7 @@ function setUpMount(credentialMount: string): void {
   writeFileSync(path.join(credentialMount, TOTP_SEALING_KEY_FILENAME), randomBytes(32));
 }
 
-async function rigIn(volume: string): Promise<Rig> {
+async function rigIn(volume: string, overrides: Partial<OperatorIdentityDependencies> = {}): Promise<Rig> {
   const credentialMount = path.join(volume, '_credential-mount');
   setUpMount(credentialMount);
 
@@ -47,8 +49,24 @@ async function rigIn(volume: string): Promise<Rig> {
   await store.close();
 
   const audit = createAudit({ volumeRoot: volume, clock: systemClock });
-  const identity = createOperatorIdentity({ volumeRoot: volume, credentialMountRoot: credentialMount, clock: systemClock, audit });
+  const identity = createOperatorIdentity({ volumeRoot: volume, credentialMountRoot: credentialMount, clock: systemClock, audit, ...overrides });
   return { volume, credentialMount, audit, identity };
+}
+
+async function identityEvents(rig: Rig): Promise<readonly string[]> {
+  const page = await rig.audit.query({
+    declarationId: null,
+    tool: null,
+    actorSubject: null,
+    form: 'identity-event',
+    from: null,
+    to: null,
+    limit: 50,
+    cursor: null,
+  });
+  assert.equal(page.ok, true);
+  if (!page.ok) return [];
+  return page.value.records.map((r) => (r as unknown as { event: string }).event);
 }
 
 async function enrolled(rig: Rig): Promise<{ totpSecretBytes: Buffer; recoveryCodes: readonly string[] }> {
@@ -438,5 +456,157 @@ test('S25.3 — runRetention deletes an expired-or-revoked session past the wind
     const remaining = (after.prepare('SELECT id FROM operator_session').all() as { id: string }[]).map((r) => r.id);
     after.close();
     assert.deepEqual(remaining, ['still-live']);
+  });
+});
+
+const OIDC_REDIRECT_URI = 'http://127.0.0.1:9/auth/login/oidc/callback';
+
+/** Stands in for a browser landing on the fixture's `/authorize` page and clicking "Approve" as `subject` — a real HTTP round trip against the real fixture server, not a call directly into `oidc.ts`. */
+async function driveOidcAuthorize(authorizeUrl: string, subject: string): Promise<{ code: string; state: string }> {
+  const url = new URL(authorizeUrl);
+  url.searchParams.set('sub', subject);
+  const res = await fetch(url, { redirect: 'manual' });
+  assert.equal(res.status, 302, 'the fixture issuer redirects back with a code');
+  const location = new URL(res.headers.get('location')!);
+  return { code: location.searchParams.get('code')!, state: location.searchParams.get('state')! };
+}
+
+test('S31.2 — OIDC against a real issuer authenticates the operator and establishes the same kind of session a local login does', async () => {
+  await withVolumeAsync(async (volume) => {
+    const fixture = await startOidcIssuerFixture();
+    try {
+      const rig = await rigIn(volume, {
+        oidcIssuer: fixture.issuerUrl,
+        oidcClientId: fixture.clientId,
+        oidcClientSecret: fixture.clientSecret,
+        oidcSubjectAllowlist: [SUBJECT],
+        oidcRedirectUri: OIDC_REDIRECT_URI,
+      });
+      await enrolled(rig);
+
+      const begin = await rig.identity.beginOidc();
+      assert.equal(begin.ok, true);
+      if (!begin.ok) return;
+
+      const { code, state } = await driveOidcAuthorize(begin.value.authorizeUrl, SUBJECT);
+      assert.equal(state, begin.value.state, 'the state round-trips through the issuer unchanged');
+
+      const session = await rig.identity.completeOidc(code, state);
+      assert.equal(session.ok, true);
+      if (!session.ok) return;
+      assert.equal(session.value.subject, SUBJECT);
+      assert.equal(session.value.totpReenrolRequired, false);
+
+      // "the same persisted session a local login does" — same shape, same
+      // lifetimes (`createSession`/`finishLogin` is the one funnel every
+      // login path, OIDC included, goes through), and a real row
+      // `listSessions` can see.
+      assert.ok(Date.parse(session.value.idleExpiresAt) > Date.parse(session.value.createdAt));
+      assert.ok(Date.parse(session.value.absoluteExpiresAt) > Date.parse(session.value.createdAt));
+
+      const sessions = await rig.identity.listSessions();
+      assert.ok(sessions.some((s) => s.id === session.value.id));
+    } finally {
+      await fixture.stop();
+    }
+  });
+});
+
+test('S31.2 — a federated subject not on the allowlist is refused, and the refusal is audited', async () => {
+  await withVolumeAsync(async (volume) => {
+    const fixture = await startOidcIssuerFixture();
+    try {
+      const rig = await rigIn(volume, {
+        oidcIssuer: fixture.issuerUrl,
+        oidcClientId: fixture.clientId,
+        oidcClientSecret: fixture.clientSecret,
+        oidcSubjectAllowlist: ['someone-else' as Subject],
+        oidcRedirectUri: OIDC_REDIRECT_URI,
+      });
+      await enrolled(rig);
+
+      const begin = await rig.identity.beginOidc();
+      assert.equal(begin.ok, true);
+      if (!begin.ok) return;
+      const { code, state } = await driveOidcAuthorize(begin.value.authorizeUrl, SUBJECT);
+
+      const result = await rig.identity.completeOidc(code, state);
+      assert.equal(result.ok, false);
+      if (result.ok) return;
+      assert.equal(result.error.code, 'subject-not-allowlisted');
+
+      const events = await identityEvents(rig);
+      assert.ok(events.includes('oidc-subject-rejected'), 'the refusal is audited');
+    } finally {
+      await fixture.stop();
+    }
+  });
+});
+
+test('S31.3 — with the issuer genuinely unreachable, local password plus TOTP still authenticates', async () => {
+  await withVolumeAsync(async (volume) => {
+    const fixture = await startOidcIssuerFixture();
+    const deadIssuerUrl = fixture.issuerUrl;
+    await fixture.stop(); // the port is now closed — a real, not configured, unreachability.
+
+    const rig = await rigIn(volume, {
+      oidcIssuer: deadIssuerUrl,
+      oidcClientId: 'whatever',
+      oidcClientSecret: null,
+      oidcSubjectAllowlist: [SUBJECT],
+      oidcRedirectUri: OIDC_REDIRECT_URI,
+    });
+    const { totpSecretBytes } = await enrolled(rig);
+
+    const begin = await rig.identity.beginOidc();
+    assert.equal(begin.ok, false);
+    if (begin.ok) return;
+    assert.equal(begin.error.code, 'oidc-unavailable');
+    if (begin.error.code === 'oidc-unavailable') assert.equal(begin.error.reason, 'discovery');
+
+    const local = await rig.identity.loginLocal({ subject: SUBJECT, password: PASSWORD, totpCode: currentTotpCode(totpSecretBytes) });
+    assert.equal(local.ok, true, 'the local path stands alone — a broken issuer does not take it down too');
+  });
+});
+
+test('S31.4 — TOTP re-enrolment: the old secret keeps working until a correct code against the new one commits it, clears the flag, and is audited', async () => {
+  await withVolumeAsync(async (volume) => {
+    const rig = await rigIn(volume);
+    const { totpSecretBytes: oldSecret, recoveryCodes } = await enrolled(rig);
+
+    // A recovery-code login is what forces re-enrolment (S4.4) — S31.4
+    // extends that lockout with a real way out.
+    const recovered = await rig.identity.loginWithRecoveryCode(SUBJECT, PASSWORD, recoveryCodes[0]!);
+    assert.equal(recovered.ok, true);
+    if (!recovered.ok) return;
+    assert.equal(recovered.value.totpReenrolRequired, true, 'the session itself reports the lockout');
+
+    const begin = await rig.identity.beginTotpReenrol(recovered.value.id);
+    assert.equal(begin.ok, true);
+    if (!begin.ok) return;
+    const newSecret = base32Decode(begin.value.totpSecret);
+
+    // The old secret still authenticates — nothing commits until a correct
+    // code against the new one is proven.
+    const stillOld = await rig.identity.loginLocal({ subject: SUBJECT, password: PASSWORD, totpCode: currentTotpCode(oldSecret) });
+    assert.equal(stillOld.ok, true, 'the old secret is not revoked merely by starting re-enrolment');
+
+    const wrongCode = await rig.identity.completeTotpReenrol(recovered.value.id, '000000');
+    assert.equal(wrongCode.ok, false);
+    if (!wrongCode.ok) assert.equal(wrongCode.error.code, 'totp-invalid');
+
+    const completed = await rig.identity.completeTotpReenrol(recovered.value.id, currentTotpCode(newSecret));
+    assert.equal(completed.ok, true);
+
+    const oldNowFails = await rig.identity.loginLocal({ subject: SUBJECT, password: PASSWORD, totpCode: currentTotpCode(oldSecret) });
+    assert.equal(oldNowFails.ok, false, 'the old secret stops authenticating once the new one is committed');
+    if (!oldNowFails.ok) assert.equal(oldNowFails.error.code, 'totp-invalid');
+
+    const newWorks = await rig.identity.loginLocal({ subject: SUBJECT, password: PASSWORD, totpCode: currentTotpCode(newSecret) });
+    assert.equal(newWorks.ok, true);
+    assert.equal(newWorks.value.totpReenrolRequired, false, 'the flag clears');
+
+    const events = await identityEvents(rig);
+    assert.ok(events.includes('totp-reenrolled'));
   });
 });

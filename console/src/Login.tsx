@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api, type SessionEnvelope } from './api.ts';
 
 interface Props {
-  readonly onSignedIn: () => void;
+  readonly onSignedIn: (session: SessionEnvelope) => void;
 }
 
 type Mode = 'password' | 'recovery-code' | 'break-glass';
@@ -22,6 +22,19 @@ export function Login({ onSignedIn }: Props) {
   const [breakGlassToken, setBreakGlassToken] = useState('');
   const [error, setError] = useState<string | null>(null);
 
+  // The SSO link (`/auth/login/oidc`) is a full-page navigation; a failure
+  // redirects back here carrying its error code as a query param, since the
+  // component itself never sees the failed response.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const oidcError = params.get('oidcError');
+    if (!oidcError) return;
+    setError(oidcError);
+    params.delete('oidcError');
+    const rest = params.toString();
+    window.history.replaceState(null, '', rest ? `?${rest}` : window.location.pathname);
+  }, []);
+
   async function submitPassword(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
@@ -30,7 +43,7 @@ export function Login({ onSignedIn }: Props) {
       setError('error' in res.body ? res.body.error : 'sign-in failed');
       return;
     }
-    onSignedIn();
+    onSignedIn(res.body as SessionEnvelope);
   }
 
   async function submitRecoveryCode(e: React.FormEvent) {
@@ -45,7 +58,7 @@ export function Login({ onSignedIn }: Props) {
       setError('error' in res.body ? res.body.error : 'sign-in failed');
       return;
     }
-    onSignedIn();
+    onSignedIn(res.body as SessionEnvelope);
   }
 
   async function submitBreakGlass(e: React.FormEvent) {
@@ -56,7 +69,7 @@ export function Login({ onSignedIn }: Props) {
       setError('error' in res.body ? res.body.error : 'sign-in failed');
       return;
     }
-    onSignedIn();
+    onSignedIn(res.body as SessionEnvelope);
   }
 
   return (
@@ -127,6 +140,13 @@ export function Login({ onSignedIn }: Props) {
           <button type="submit">Sign in with break-glass token</button>
         </form>
       )}
+
+      {/* S31.2 — a full-page navigation, not a fetch: the redirect to the issuer and back is the flow, not an API call this component makes. */}
+      <p>
+        <a href="/auth/login/oidc" data-testid="sso-link">
+          Sign in with your identity provider
+        </a>
+      </p>
     </main>
   );
 }

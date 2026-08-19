@@ -100,6 +100,7 @@ function sessionEnvelope(session: OperatorSession): unknown {
     createdAt: session.createdAt,
     idleExpiresAt: session.idleExpiresAt,
     absoluteExpiresAt: session.absoluteExpiresAt,
+    totpReenrolRequired: session.totpReenrolRequired,
   };
 }
 
@@ -127,6 +128,22 @@ export async function requireSession(deps: ConsoleAuthDependencies, req: Incomin
     return null;
   }
   return touched.value;
+}
+
+/**
+ * The session cookie's raw id, without touching the session — for routes
+ * whose own identity call (`beginTotpReenrol`/`completeTotpReenrol`) already
+ * validates liveness and extends the idle timeout on its own, so routing
+ * through `requireSession` first would touch the same session twice per
+ * request.
+ */
+function sessionIdFromCookie(req: IncomingMessage, res: ServerResponse): SessionId | null {
+  const raw = parseCookies(req.headers.cookie)[SESSION_COOKIE];
+  if (!raw) {
+    sendJson(res, 401, { error: 'session-unknown' });
+    return null;
+  }
+  return raw as SessionId;
 }
 
 /**
@@ -272,6 +289,76 @@ export async function handleConsoleAuthRoute(
     sendJson(res, 200, sessionEnvelope(result.value), {
       'Set-Cookie': loginCookies(result.value, deps.sessionAbsoluteSeconds),
     });
+    return true;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/auth/login/oidc') {
+    const result = await deps.identity.beginOidc();
+    if (!result.ok) {
+      // A full-page navigation, not a fetch (`Login.tsx`'s `sso-link`) — a
+      // JSON error body here would strand the operator on a bare error page
+      // with no way back. Redirect to the app instead, carrying the error
+      // code as a query param it can surface.
+      res.writeHead(302, { Location: `/?oidcError=${encodeURIComponent(result.error.code)}` });
+      res.end();
+      return true;
+    }
+    res.writeHead(302, { Location: result.value.authorizeUrl });
+    res.end();
+    return true;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/auth/login/oidc/callback') {
+    const code = url.searchParams.get('code') ?? '';
+    const state = url.searchParams.get('state') ?? '';
+    const result = await deps.identity.completeOidc(code, state);
+    if (!result.ok) {
+      res.writeHead(302, { Location: `/?oidcError=${encodeURIComponent(result.error.code)}` });
+      res.end();
+      return true;
+    }
+    res.writeHead(302, {
+      Location: '/',
+      'Set-Cookie': loginCookies(result.value, deps.sessionAbsoluteSeconds),
+    });
+    res.end();
+    return true;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/auth/totp-reenrol/begin') {
+    const sessionId = sessionIdFromCookie(req, res);
+    if (!sessionId) return true;
+    if (!csrfOk(req)) {
+      sendJson(res, 403, { error: 'csrf-check-failed' });
+      return true;
+    }
+    const result = await deps.identity.beginTotpReenrol(sessionId);
+    if (!result.ok) {
+      sendError(res, result.error);
+      return true;
+    }
+    sendJson(res, 200, result.value);
+    return true;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/auth/totp-reenrol/complete') {
+    const sessionId = sessionIdFromCookie(req, res);
+    if (!sessionId) return true;
+    if (!csrfOk(req)) {
+      sendJson(res, 403, { error: 'csrf-check-failed' });
+      return true;
+    }
+    const body = await readJsonBody(req);
+    if (!body) {
+      sendJson(res, 400, { error: 'bad-request' });
+      return true;
+    }
+    const result = await deps.identity.completeTotpReenrol(sessionId, stringField(body, 'totpCode'));
+    if (!result.ok) {
+      sendError(res, result.error);
+      return true;
+    }
+    sendJson(res, 200, { reenrolled: true });
     return true;
   }
 

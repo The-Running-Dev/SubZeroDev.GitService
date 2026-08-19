@@ -32,6 +32,12 @@ export function createStubOperatorIdentity(): OperatorIdentity {
     async completeOidc() {
       return err(operatorIdentityError({ code: 'oidc-unavailable', reason: 'discovery' }, 'stub: completeOidc not exercised'));
     },
+    async beginTotpReenrol() {
+      return err(operatorIdentityError({ code: 'session-unknown' }, 'stub: no session ever exists'));
+    },
+    async completeTotpReenrol() {
+      return err(operatorIdentityError({ code: 'session-unknown' }, 'stub: no session ever exists'));
+    },
     async touch() {
       return err(operatorIdentityError({ code: 'session-unknown' }, 'stub: no session ever exists'));
     },
