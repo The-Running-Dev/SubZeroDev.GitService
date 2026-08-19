@@ -32,6 +32,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # A bound on the whole job, not just this fix's step: GitHub's own default
+    # (360 minutes) is what let the hang below run for hours undetected rather
+    # than failing loudly.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -49,7 +53,17 @@ jobs:
       - name: Run typecheck and every check:* gate
         run: npm run build
 
+      # `--with-deps` shells out to `apt-get install`, which on ubuntu-latest
+      # intermittently invokes `needrestart`'s interactive "which services
+      # should be restarted?" prompt — with no TTY attached, that prompt waits
+      # forever rather than failing, which is what turned this step from its
+      # usual ~2 minutes into an hours-long hang. `NEEDRESTART_MODE=a` answers
+      # it automatically; `DEBIAN_FRONTEND=noninteractive` covers the same
+      # class of prompt from apt itself.
       - name: Install Playwright's browser
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          NEEDRESTART_MODE: a
         run: npx playwright install --with-deps chromium
 
       # verification: true
