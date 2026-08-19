@@ -14,7 +14,7 @@ import { createLocks } from './locks/locks.ts';
 import type { AdmissionLimits } from './locks/types.ts';
 import { createDeclarations } from './declarations/declarations.ts';
 import { createCloneStore, type CloneStore } from './clone/clone-store.ts';
-import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './surfaces/http-server.ts';
+import { createSurfacesServer } from './surfaces/http-server.ts';
 import { createMcpRoutesState } from './surfaces/mcp-routes.ts';
 import { createGitOperations } from './git/git-operations.ts';
 import { createJournal } from './journal/journal.ts';
@@ -59,6 +59,8 @@ import type { GrantEpoch, SessionId, Subject } from './shared/brands.ts';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const buildDir = path.join(repoRoot, 'build');
+/** The console workspace's Vite build output (S18) — verified at boot the same way `buildDir` is. */
+const consoleDir = path.join(repoRoot, 'console', 'dist');
 
 function resolvePort(): number {
   const raw = process.env.PORT ?? '8080';
@@ -628,7 +630,7 @@ async function main(): Promise<void> {
     store,
     audit,
     operatorIdentity,
-    consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+    consoleDir,
     ceiling,
     deriveCloneStatesFromDisk: () => cloneStore.deriveAllStatesFromDisk(),
     registryEntries: PRODUCTION_TOOL_DECLARATIONS,
@@ -859,6 +861,7 @@ async function main(): Promise<void> {
     contractCapabilitySet,
     origin: resolveOrigin(port),
     mcpState: createMcpRoutesState(),
+    consoleDir,
   });
 
   // What actually drives delivery. Boot re-drives once, and recovery fires a

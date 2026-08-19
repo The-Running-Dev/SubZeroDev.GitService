@@ -8,7 +8,7 @@ import { compiler } from '../contract/compiler.ts';
 import { createAudit } from '../audit/audit.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
-import { NO_CONSOLE_FINGERPRINT } from '../surfaces/http-server.ts';
+import { CONSOLE_HASH_FILENAME } from './console-integrity.ts';
 import { createOperatorIdentity } from '../operator-identity/operator-identity.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { createJournal } from '../journal/journal.ts';
@@ -79,6 +79,26 @@ function writeBuildDir(root: string, declarations: Parameters<typeof compiler.co
   return buildDir;
 }
 
+/**
+ * Writes the artifact boot's step 2b (S18.11) verifies. Mirrors
+ * `writeBuildDir` above, for the console side: a built asset plus the
+ * companion hash `scripts/build-console-manifest.ts` writes atomically.
+ * Kept synchronous, like `writeBuildDir`, so every `lifecycleFor` call site
+ * stays synchronous too — `computeConsoleDigest` itself is async (it mirrors
+ * the real boot-time verification path, exercised directly in
+ * `console-integrity.test.ts`), so this recomputes the same one-file digest
+ * inline rather than awaiting it here.
+ */
+function writeConsoleDir(root: string): string {
+  const consoleDir = path.join(root, 'console-dist');
+  mkdirSync(consoleDir, { recursive: true });
+  const indexHtml = '<!doctype html><div id="root"></div>';
+  writeFileSync(path.join(consoleDir, 'index.html'), indexHtml, 'utf8');
+  const hash = createHash('sha256').update('index.html', 'utf8').update('\0').update(indexHtml, 'utf8').update('\0').digest('hex');
+  writeFileSync(path.join(consoleDir, CONSOLE_HASH_FILENAME), `${hash}\n`, 'utf8');
+  return consoleDir;
+}
+
 const EMPTY_CEILING = new Set() as unknown as DeploymentCeiling;
 
 function lifecycleFor(
@@ -103,7 +123,7 @@ function lifecycleFor(
     store,
     audit,
     operatorIdentity: operatorIdentityFor(volume, audit),
-    consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+    consoleDir: writeConsoleDir(volume),
     ceiling: options.ceiling ?? EMPTY_CEILING,
     revalidateFileWatchers: options.revalidateFileWatchers ?? (async () => ok(undefined)),
     ...(acquirer ? { acquirer } : {}),
@@ -127,6 +147,7 @@ test('boot takes the lease, applies migrations and reports both', async () => {
       assert.ok(booted.value.lease.instanceId.length > 0);
       assert.equal(booted.value.migrationsApplied, 1, 'migration 0001 applied');
       assert.match(booted.value.registryFingerprint, /^[0-9a-f]{64}$/);
+      assert.match(booted.value.consoleFingerprint, /^[0-9a-f]{64}$/, 'S18.11 — a real digest of the built console, not the placeholder');
       assert.deepEqual(booted.value.clones, [], 'step 8 derives an empty clone set with none declared');
     } finally {
       await lifecycle.shutdown('operator');
@@ -514,7 +535,7 @@ test('a boot that fails after opening the store closes it again, leaking no hand
       store: countingStore,
       audit,
       operatorIdentity: operatorIdentityFor(volume, audit),
-      consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+      consoleDir: writeConsoleDir(volume),
       ceiling: EMPTY_CEILING,
       revalidateFileWatchers: async () => ok(undefined),
     });
@@ -536,7 +557,7 @@ test('a registry that is absent reports registry-unreadable, not a mismatch with
       store,
       audit,
       operatorIdentity: operatorIdentityFor(volume, audit),
-      consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+      consoleDir: writeConsoleDir(volume),
       ceiling: EMPTY_CEILING,
       revalidateFileWatchers: async () => ok(undefined),
     });
@@ -547,6 +568,60 @@ test('a registry that is absent reports registry-unreadable, not a mismatch with
     assert.equal(booted.error.code, 'registry-unreadable', 'distinct from fingerprint-mismatch');
     if (booted.error.code !== 'registry-unreadable') return;
     assert.ok(booted.error.reason.length > 0, 'names why it could not be read');
+  });
+});
+
+test('a console build that is absent reports console-unreadable, not a mismatch with invented digests', async () => {
+  await withVolumeAsync(async (volume) => {
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const lifecycle = createLifecycle({
+      volumeRoot: volume,
+      buildDir: writeBuildDir(volume),
+      clock: systemClock,
+      store,
+      audit,
+      operatorIdentity: operatorIdentityFor(volume, audit),
+      consoleDir: path.join(volume, 'no-such-console-dir'),
+      ceiling: EMPTY_CEILING,
+      revalidateFileWatchers: async () => ok(undefined),
+    });
+
+    const booted = await lifecycle.boot();
+    assert.equal(booted.ok, false);
+    if (booted.ok) return;
+    assert.equal(booted.error.code, 'console-unreadable', 'distinct from console-manifest-mismatch');
+    if (booted.error.code !== 'console-unreadable') return;
+    assert.ok(booted.error.reason.length > 0, 'names why it could not be read');
+  });
+});
+
+test('S18.11 — changing one byte of a built console asset makes boot exit with console-manifest-mismatch', async () => {
+  await withVolumeAsync(async (volume) => {
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const consoleDir = writeConsoleDir(volume);
+    const indexPath = path.join(consoleDir, 'index.html');
+    writeFileSync(indexPath, 'tampered after the manifest hash was written', 'utf8');
+
+    const lifecycle = createLifecycle({
+      volumeRoot: volume,
+      buildDir: writeBuildDir(volume),
+      clock: systemClock,
+      store,
+      audit,
+      operatorIdentity: operatorIdentityFor(volume, audit),
+      consoleDir,
+      ceiling: EMPTY_CEILING,
+      revalidateFileWatchers: async () => ok(undefined),
+    });
+
+    const booted = await lifecycle.boot();
+    assert.equal(booted.ok, false);
+    if (booted.ok) return;
+    assert.equal(booted.error.code, 'console-manifest-mismatch');
+    if (booted.error.code !== 'console-manifest-mismatch') return;
+    assert.notEqual(booted.error.expected, booted.error.found);
   });
 });
 
@@ -618,7 +693,7 @@ test('S6 — boot exits with executor-missing when a registry entry has no regis
       store,
       audit,
       operatorIdentity: operatorIdentityFor(volume, audit),
-      consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+      consoleDir: writeConsoleDir(volume),
       ceiling: new Set(['repo.read']) as unknown as DeploymentCeiling,
       revalidateFileWatchers: async () => ok(undefined),
       registryEntries: registryDeclarations,
@@ -652,7 +727,7 @@ test('S12 — boot exits with executor-missing for an http-targeted entry when r
       store,
       audit,
       operatorIdentity: operatorIdentityFor(volume, audit),
-      consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+      consoleDir: writeConsoleDir(volume),
       ceiling: new Set(['repo.read']) as unknown as DeploymentCeiling,
       revalidateFileWatchers: async () => ok(undefined),
       registryEntries: registryDeclarations,
@@ -688,7 +763,7 @@ test('S6 — boot succeeds when every registry entry has a registered executor',
       store,
       audit,
       operatorIdentity: operatorIdentityFor(volume, audit),
-      consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+      consoleDir: writeConsoleDir(volume),
       ceiling: new Set(['repo.read']) as unknown as DeploymentCeiling,
       revalidateFileWatchers: async () => ok(undefined),
       registryEntries: registryDeclarations,
@@ -741,7 +816,7 @@ test('S25.1/S25.7/S26.5 — runMaintenance drives every owner, reports filesyste
       store,
       audit,
       operatorIdentity: operatorIdentityFor(volume, audit),
-      consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+      consoleDir: writeConsoleDir(volume),
       ceiling: EMPTY_CEILING,
       revalidateFileWatchers: async () => ok(undefined),
       journal,
@@ -817,7 +892,7 @@ test('S25.7 — a maintenance-pass notification that fails to enqueue is recorde
       store,
       audit,
       operatorIdentity: operatorIdentityFor(volume, audit),
-      consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+      consoleDir: writeConsoleDir(volume),
       ceiling: EMPTY_CEILING,
       revalidateFileWatchers: async () => ok(undefined),
       notifier,
@@ -942,7 +1017,7 @@ test('S27.1/S27.5 — runMaintenance evicts least-recently-used clones only once
       store,
       audit,
       operatorIdentity: operatorIdentityFor(volume, audit),
-      consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+      consoleDir: writeConsoleDir(volume),
       ceiling: EMPTY_CEILING,
       revalidateFileWatchers: async () => ok(undefined),
       notifier,
@@ -992,7 +1067,7 @@ test('S27.1 — runMaintenance never attempts eviction when usage stays below th
       store,
       audit,
       operatorIdentity: operatorIdentityFor(volume, audit),
-      consoleFingerprint: NO_CONSOLE_FINGERPRINT,
+      consoleDir: writeConsoleDir(volume),
       ceiling: EMPTY_CEILING,
       revalidateFileWatchers: async () => ok(undefined),
       deriveCloneStatesFromDisk: async () => {

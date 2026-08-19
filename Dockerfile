@@ -1,25 +1,34 @@
 # S28 — the service ships as a container.
 #
-# Three stages. `builder` has the full toolchain (typescript, the compiler)
-# and runs the same `npm run build` the repository's own gates run, emitting
-# `build/registry.json` + `.sha256` (boot's step 2 tamper check) alongside
-# the compiler-import and migration checks. `trimmed` copies the source out
-# and deletes `src/contract/compiler.ts` — invariant B8, "the compiler is
-# absent from the runtime image" — before the final `runtime` stage ever
-# copies from it, so the file is never present in any layer that stage
-# contributes to the final image, not merely deleted after the fact.
-# `runtime` is what ships: git and gh (`Exec.runGit`/`runGh`), production
-# dependencies only, the trimmed source, and the build artifact.
+# Three stages. `builder` has the full toolchain (typescript, the compiler,
+# the console's own Vite build) and runs the same `npm run build` the
+# repository's own gates run, emitting `build/registry.json` + `.sha256`
+# (boot's step 2 tamper check) and `console/dist/` + its own `.sha256` (S18's
+# step 2b) alongside the compiler-import and migration checks. `trimmed`
+# copies the source out and deletes `src/contract/compiler.ts` — invariant
+# B8, "the compiler is absent from the runtime image" — before the final
+# `runtime` stage ever copies from it, so the file is never present in any
+# layer that stage contributes to the final image, not merely deleted after
+# the fact. `runtime` is what ships: git and gh (`Exec.runGit`/`runGh`),
+# production dependencies only, the trimmed source, the build artifact, and
+# the built console bundle.
 
 # syntax=docker/dockerfile:1.7
 
 FROM node:22-bookworm-slim AS builder
 WORKDIR /app
 COPY package.json package-lock.json ./
+COPY console/package.json ./console/package.json
 RUN npm ci
 COPY tsconfig.json ./
 COPY scripts ./scripts
 COPY src ./src
+COPY console ./console
+# `typecheck:e2e` (part of `npm run build`) needs e2e/tsconfig.json and the
+# Playwright specs it type-checks against — build-time only, like `design/`
+# below. Neither `e2e/` nor `design/` reaches the `runtime` stage.
+COPY e2e ./e2e
+COPY playwright.config.ts ./
 # `check:migration` reads `design/20-contract.md` against the SQL migration
 # (`scripts/check-migration-matches-contract.ts`) — a build-time-only
 # dependency. `design/` never reaches the `runtime` stage below.
@@ -52,6 +61,7 @@ RUN npm ci --omit=dev
 
 COPY --from=trimmed /app/src ./src
 COPY --from=builder /app/build ./build
+COPY --from=builder /app/console/dist ./console/dist
 
 # The three mounts S28.3 requires as separate mount points: the data volume,
 # the read-only credential mount, and (per declaration, at deploy time) a

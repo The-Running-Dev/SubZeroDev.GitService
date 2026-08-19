@@ -38,6 +38,51 @@ function withRecoveryOverlay(clone: Clone | null, awaiting: ReadonlySet<string>)
   return { ...clone, state: 'recovery-pending' };
 }
 
+/**
+ * S18.2's "current branch" and "dirty flag". `Clone` itself (the persisted
+ * row) carries neither — `state` already distinguishes `dirty` as one of its
+ * own values, but the branch name is only ever observed live, the same way
+ * `/parked-operations` already reads it for its own state-comparison view.
+ * Skipped for a clone with nothing on disk to inspect (`absent`,
+ * `materialising`, `evicted`) — S18.2 still lists that row, just without a
+ * live branch to report, per its own "listed with its state rather than
+ * omitted" requirement.
+ */
+async function landingViewFields(cloneStore: DeclarationRoutesDependencies['cloneStore'], clone: Clone | null): Promise<{ readonly branch: string | null; readonly dirty: boolean }> {
+  // `clone` here must be the raw `describe()` result, never the
+  // recovery-overlaid one: the overlay rewrites `state` to
+  // `recovery-pending` regardless of what's actually on disk, which would
+  // both defeat this exclusion list and make `dirty` read `false` for a
+  // clone that is genuinely dirty.
+  if (!clone || clone.state === 'absent' || clone.state === 'materialising' || clone.state === 'evicted') {
+    return { branch: null, dirty: false };
+  }
+  const observed = await cloneStore.observeGitState(clone.declarationId);
+  return { branch: observed.ok ? observed.value.branch : null, dirty: clone.state === 'dirty' };
+}
+
+/**
+ * Caps how many declarations are inspected concurrently by
+ * `landingViewFields` — each call is a live git subprocess spawn, and an
+ * uncapped `Promise.all` across every declaration turns a single
+ * `GET /declarations` into an unbounded fan-out as the number of declared
+ * repositories grows.
+ */
+const LANDING_VIEW_CONCURRENCY = 8;
+
+async function mapWithConcurrencyLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index]!);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+  return results;
+}
+
 /** Every mutating route here is a cookie route, so it gets invariant E7 in full — session first (401), then origin + double-submit token (403), same order and shapes `console-auth-routes.ts` uses. */
 function requireCsrf(req: IncomingMessage, res: ServerResponse): boolean {
   if (csrfOk(req)) return true;
@@ -241,14 +286,14 @@ export async function handleDeclarationRoute(
   if (req.method === 'GET' && segments.length === 1) {
     const declarations = await deps.declarations.list({ state: null, hasFileWatcher: null });
     const awaiting = deps.declarationsAwaitingRecovery ? await deps.declarationsAwaitingRecovery() : new Set<string>();
-    const withClones = await Promise.all(
-      declarations.map(async (d) => ({ declaration: d, clone: await deps.cloneStore.describe(d.id) })),
-    );
-    sendJson(
-      res,
-      200,
-      withClones.map(({ declaration, clone }) => ({ declaration, clone: withRecoveryOverlay(clone.ok ? clone.value : null, awaiting) })),
-    );
+    const rows = await mapWithConcurrencyLimit(declarations, LANDING_VIEW_CONCURRENCY, async (d) => {
+      const described = await deps.cloneStore.describe(d.id);
+      const rawClone = described.ok ? described.value : null;
+      const { branch, dirty } = await landingViewFields(deps.cloneStore, rawClone);
+      const clone = withRecoveryOverlay(rawClone, awaiting);
+      return { declaration: d, clone, branch, dirty };
+    });
+    sendJson(res, 200, rows);
     return true;
   }
 
@@ -287,9 +332,12 @@ export async function handleDeclarationRoute(
       sendJson(res, 404, { error: 'not-found' });
       return true;
     }
-    const clone = await deps.cloneStore.describe(id);
+    const described = await deps.cloneStore.describe(id);
     const awaiting = deps.declarationsAwaitingRecovery ? await deps.declarationsAwaitingRecovery() : new Set<string>();
-    sendJson(res, 200, { declaration, clone: withRecoveryOverlay(clone.ok ? clone.value : null, awaiting) });
+    const rawClone = described.ok ? described.value : null;
+    const { branch, dirty } = await landingViewFields(deps.cloneStore, rawClone);
+    const clone = withRecoveryOverlay(rawClone, awaiting);
+    sendJson(res, 200, { declaration, clone, branch, dirty });
     return true;
   }
 

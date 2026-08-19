@@ -16,6 +16,7 @@ import { handleDeclarationRoute, type DeclarationRoutesDependencies } from './de
 import { handleToolRoute, type ToolRoutesDependencies } from './tool-routes.ts';
 import { handleAuthorizationRoute, type AuthorizationRoutesDependencies } from './authorization-routes.ts';
 import { handleMcpRoute, type McpRoutesDependencies } from './mcp-routes.ts';
+import { handleConsoleStaticRoute } from './console-static-routes.ts';
 
 /**
  * `LivenessReport` is the sole unauthenticated payload in the whole service
@@ -72,6 +73,15 @@ export interface SurfacesDependencies
   readonly commitSha: GitSha;
   readonly contractFingerprint: Sha256Hex;
   readonly consoleFingerprint: Sha256Hex;
+  /**
+   * The built console bundle's directory (S18.9), served for any GET path no
+   * API route claims. Optional so a `SurfacesServer` built without a real
+   * console build (most of this module's own tests) still serves every API
+   * route exactly as before and simply falls through to `404` for anything
+   * else, rather than requiring every test to fabricate a bundle it does not
+   * exercise.
+   */
+  readonly consoleDir?: string;
   readonly ready: () => boolean;
   /**
    * Live, not a boot-time snapshot: enrolment can complete without a
@@ -187,6 +197,35 @@ async function requireBearerSession(
 
 function resolverActorFor(session: Session): ActorRef {
   return session.actorRef;
+}
+
+/**
+ * Every prefix an API route family above claims, so the console's SPA
+ * fallback (below) never answers for one of them. Without this, a typo'd or
+ * version-skewed path under a real API prefix (e.g. `/mcp/typo-endpoint`)
+ * falls through every specific handler unmatched and reaches the SPA
+ * fallback, which serves `200 text/html` instead of the `404` a client
+ * expects and can parse as JSON.
+ */
+const RESERVED_API_PATHS: readonly RegExp[] = [
+  /^\/auth\//,
+  /^\/declarations(\/|$)/,
+  /^\/grants(\/|$)/,
+  /^\/tokens\//,
+  /^\/clients\//,
+  /^\/operator-sessions\//,
+  /^\/mcp\//,
+  /^\/oauth\//,
+  /^\/\.well-known\/oauth-/,
+  /^\/healthz$/,
+  /^\/version$/,
+  /^\/parked-operations(\/|$)/,
+  /^\/failing-credentials\//,
+  /^\/health$/,
+];
+
+function isReservedApiPath(pathname: string): boolean {
+  return RESERVED_API_PATHS.some((pattern) => pattern.test(pathname));
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -329,6 +368,11 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
     };
     sendJson(res, 200, report);
     return;
+  }
+
+  if (deps.consoleDir && !isReservedApiPath(url.pathname)) {
+    const served = await handleConsoleStaticRoute({ consoleDir: deps.consoleDir }, req, res, url);
+    if (served) return;
   }
 
   sendJson(res, 404, { error: 'not-found' });

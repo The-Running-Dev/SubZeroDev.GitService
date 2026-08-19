@@ -25,6 +25,7 @@ import type { BootJobReport } from '../scheduler/types.ts';
 import type { Watcher } from '../watcher/watcher.ts';
 import { acquireLease, type InstanceLease, type LeaseGuard, type LockAcquirer } from './lease.ts';
 import { verifyRegistryArtifact } from './registry-integrity.ts';
+import { verifyConsoleArtifact } from './console-integrity.ts';
 import { declarationsWithUnsettledEntries, recoverDeclaration as runRecoveryLadder, type RecoveryDependencies } from './recovery.ts';
 
 export type BootError = ModuleErrorBase &
@@ -34,6 +35,7 @@ export type BootError = ModuleErrorBase &
     | { readonly code: 'fingerprint-mismatch'; readonly expected: Sha256Hex; readonly found: Sha256Hex }
     | { readonly code: 'registry-unreadable'; readonly reason: string }
     | { readonly code: 'console-manifest-mismatch'; readonly expected: Sha256Hex; readonly found: Sha256Hex }
+    | { readonly code: 'console-unreadable'; readonly reason: string }
     | { readonly code: 'ceiling-outside-contract'; readonly capabilities: readonly CapabilityName[] }
     | { readonly code: 'executor-missing'; readonly tools: readonly RegistryToolName[] }
     | { readonly code: 'watcher-revalidation-failed'; readonly cause: DeclarationError }
@@ -134,11 +136,17 @@ export interface Lifecycle {
 export interface LifecycleDependencies {
   readonly volumeRoot: string;
   readonly buildDir: string;
+  /**
+   * The built console bundle's directory (S18), verified the same way
+   * `buildDir` is — a manifest plus a companion `.sha256` hash file written
+   * atomically at build time. `console-integrity.ts` mirrors
+   * `registry-integrity.ts` exactly.
+   */
+  readonly consoleDir: string;
   readonly clock: Clock;
   readonly store: StructuredStore;
   readonly audit: Audit;
   readonly operatorIdentity: OperatorIdentity;
-  readonly consoleFingerprint: Sha256Hex;
   readonly ceiling: DeploymentCeiling;
   /** Step 8 re-derives clone state from disk. Optional so a `Lifecycle` used only up through S4's concerns need not supply one. */
   readonly deriveCloneStatesFromDisk?: () => Promise<readonly Clone[]>;
@@ -278,6 +286,30 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
           bootError(
             { code: 'registry-unreadable', reason: registry.error.reason },
             `registry artifact unreadable: ${registry.error.reason}`,
+          ),
+        );
+      }
+
+      // Step 2b — the console asset manifest (S18, invariant B3's console
+      // half). Same shape as the registry check just above: a mismatch
+      // reports the two real digests, an unreadable artifact reports why
+      // rather than fabricating one to compare.
+      const consoleArtifact = await verifyConsoleArtifact(deps.consoleDir);
+      if (!consoleArtifact.ok) {
+        guard.release();
+        guard = null;
+        if (consoleArtifact.error.code === 'console-manifest-mismatch') {
+          return err(
+            bootError(
+              { code: 'console-manifest-mismatch', expected: consoleArtifact.error.expected, found: consoleArtifact.error.found },
+              `console manifest mismatch: expected ${consoleArtifact.error.expected}, found ${consoleArtifact.error.found}`,
+            ),
+          );
+        }
+        return err(
+          bootError(
+            { code: 'console-unreadable', reason: consoleArtifact.error.reason },
+            `console artifact unreadable: ${consoleArtifact.error.reason}`,
           ),
         );
       }
@@ -502,7 +534,7 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         lease: leaseResult.value.lease,
         leaseSelfTestPassed: leaseResult.value.selfTestPassed,
         registryFingerprint: registry.value.contractFingerprint,
-        consoleFingerprint: deps.consoleFingerprint,
+        consoleFingerprint: consoleArtifact.value,
         migrationsApplied: migrated.value,
         provisioningPending,
         auditChain,

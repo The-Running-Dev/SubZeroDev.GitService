@@ -49,6 +49,13 @@ jobs:
       - name: Run typecheck and every check:* gate
         run: npm run build
 
+      - name: Install Playwright's browser
+        run: npx playwright install --with-deps chromium
+
+      # verification: true
+      - name: Run S18.13's end-to-end browser suite
+        run: npm run test:e2e
+
       # verification: true
       - name: Build S28's container image
         run: docker build --build-arg GIT_COMMIT_SHA=${{ github.sha }} -t subzerodev-git:ci .

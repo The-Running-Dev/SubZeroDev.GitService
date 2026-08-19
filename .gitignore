@@ -1,6 +1,8 @@
 node_modules/
 build/
 volume/
+console/dist/
+test-results/
 
 # Per-machine Claude Code settings; the tracked settings.json is deliberate
 .claude/settings.local.json
@@ -12,6 +14,11 @@ volume/
 # Per-machine gate discovery cache, written by Test-GatesCache.ps1. Regenerable
 # by running /verify on any tree.
 .claude/gates.json
+
+# The most recent /verify run's structured report. Regenerable by re-running
+# /verify; its content is rendered into the PR body's Verified section, not
+# meant to be tracked itself.
+.claude/verify-report.json
 
 # Scratch copies of issue bodies, written by /track while it compares the
 # tracker against design/. Regenerable by re-running /track.

@@ -2,26 +2,37 @@
   "name": "subzerodev-git",
   "private": true,
   "type": "module",
+  "workspaces": [
+    "console"
+  ],
   "engines": {
     "node": ">=22.6.0"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "typecheck:console": "npm run typecheck --workspace=console",
+    "typecheck:e2e": "tsc --noEmit -p e2e/tsconfig.json",
     "test": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test",
+    "test:e2e": "playwright test",
     "build:registry": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/build-registry.ts",
+    "build:console": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/build-console-manifest.ts",
     "check:layering": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/check-no-compiler-in-runtime.ts",
     "check:migration": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/check-migration-matches-contract.ts",
     "check:layer-direction": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/check-layer-direction.ts",
-    "build": "npm run typecheck && npm run build:registry && npm run check:layering && npm run check:migration && npm run check:layer-direction",
+    "build": "npm run typecheck && npm run typecheck:console && npm run typecheck:e2e && npm run build:registry && npm run build:console && npm run check:layering && npm run check:migration && npm run check:layer-direction",
     "start": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON src/server.ts",
     "verify:container-lease": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/lifecycle/lease-self-test-container.ts",
     "verify:split-brain-lease": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/lifecycle/lease-self-test-split-brain.ts"
   },
   "devDependencies": {
+    "@playwright/test": "^1.49.0",
     "@types/node": "^22.10.0",
     "typescript": "~5.7.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true
   }
 }
