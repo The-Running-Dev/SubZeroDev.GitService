@@ -2982,6 +2982,95 @@ not fixed here — see `## Unresolved`.
 three are externally observable — an operator's monitoring binds to them — so U4 resolving later
 must accept them rather than rename a live endpoint.
 
+#### The HTTP API route table (resolves U4, S18.1/S18.14)
+
+Every row states its method, which of the two credentials it accepts — `none` for a route
+authenticated by a one-time secret or a body-carried token rather than by session, `cookie` for
+the operator console session plus CSRF, `bearer` for `Authorization: Bearer` — and whether it
+carries a repository dimension: a `:declarationId` (or the equivalent path segment) naming the one
+repository the call acts on. `console.manage`-style capability names are not repeated here; they
+are `20-contract.md` § Capabilities and the lattice's, and this table only fixes paths, methods and
+credentials, per U4's own scope.
+
+**Liveness, version and health** — no repository dimension. Fixed above this table because they
+already shipped ahead of it.
+
+| Path | Method | Credential |
+|---|---|---|
+| `/healthz` | `GET` | none |
+| `/version` | `GET` | bearer |
+| `/health` | `GET` | bearer |
+
+**Authentication (`console-auth-routes.ts`)** — no repository dimension. An operator session has no
+repository binding (`design/10-design.md` § Operator drives the console, step 2); it narrows per
+call against whichever declaration a later request names, not at sign-in.
+
+| Path | Method | Credential |
+|---|---|---|
+| `/auth/enrol` | `POST` | none (provisioning secret) |
+| `/auth/login` | `POST` | none (password + TOTP) |
+| `/auth/login/recovery-code` | `POST` | none (password + recovery code) |
+| `/auth/login/break-glass` | `POST` | none (break-glass token) |
+| `/auth/session` | `GET` | cookie |
+| `/auth/logout` | `POST` | cookie |
+
+**Declarations (`declaration-routes.ts`)** — the landing view's feed and declaration management.
+Listing and creating a declaration carry no repository dimension (there is nothing yet to bind to,
+or the call spans every declaration); every route naming an existing declaration's id does.
+
+| Path | Method | Credential | Repository dimension |
+|---|---|---|---|
+| `/declarations` | `GET` | cookie | no |
+| `/declarations` | `POST` | cookie | no |
+| `/declarations/{declarationId}` | `GET` | cookie | yes |
+| `/declarations/{declarationId}` | `PATCH` | cookie | yes |
+| `/declarations/{declarationId}` | `DELETE` | cookie | yes |
+| `/declarations/{declarationId}/orphan` | `POST` | cookie | yes |
+| `/declarations/{declarationId}/clone` | `DELETE` | cookie | yes |
+| `/declarations/{declarationId}/tools` | `GET` | cookie | yes |
+| `/declarations/{declarationId}/tools/{toolName}` | `POST` | cookie | yes |
+
+**Grants and authorization (`authorization-routes.ts`)** — the grants view (S32). No repository
+dimension: a client, grant, operator API token or operator session is not scoped to one
+declaration in its path, even where the underlying grant itself narrows to one.
+
+| Path | Method | Credential |
+|---|---|---|
+| `/grants` | `GET` | cookie |
+| `/grants/tokens` | `POST` | cookie |
+| `/grants/{grantId}/revoke` | `POST` | cookie |
+| `/tokens/{tokenId}/revoke` | `POST` | cookie |
+| `/clients/{clientId}/revoke` | `POST` | cookie |
+| `/operator-sessions/{sessionRef}/revoke` | `POST` | cookie |
+
+**Attention and health administration (`http-server.ts`)** — the parked-operations and
+failing-credential views (S8, S9, S34). `/parked-operations*` spans every declaration in its
+listing and resolves by `operationId`, which is not itself a repository dimension; clearing a
+failing credential names the declaration it was recorded against directly in its path.
+
+| Path | Method | Credential | Repository dimension |
+|---|---|---|---|
+| `/parked-operations` | `GET` | bearer | no |
+| `/parked-operations/{operationId}/resolve` | `POST` | bearer | no |
+| `/failing-credentials/{credentialRef}/{declarationId}/clear` | `POST` | bearer | yes |
+
+**OAuth and the MCP transport** — see the table immediately below (resolves U5). No repository
+dimension except the protected-resource metadata document and the MCP transport itself, both of
+which name a `declarationId` directly in their path; `/oauth/authorize`'s `GET` step also carries a
+`resource` query parameter naming one, but the table below classifies routes by path rather than by
+query, consistent with every other row here.
+
+**The closed set, and the count S18.14 asks for.** Twenty-five routes above carry no repository
+dimension — the three liveness/version/health routes, the six authentication routes, the two
+declaration listing/creation routes, the six grants/authorization routes, the two
+parked-operations routes, and the six no-dimension OAuth/MCP routes below (`/.well-known/oauth-authorization-server`,
+`/oauth/register`, `/oauth/authorize` ×2 methods, `/oauth/token`, `/oauth/revoke`). This is the
+closed set; nothing may be added to it without a contract amendment naming why the new route has no
+repository to scope to. The remaining ten routes each carry a `declarationId` (or the equivalent —
+`/failing-credentials/{credentialRef}/{declarationId}/clear`'s second segment) directly in their
+path: the seven declaration-management and tool routes above, `/failing-credentials/.../clear`, the
+protected-resource metadata document, and the MCP transport itself. Thirty-five routes in total.
+
 #### OAuth endpoints and the MCP transport (resolves U5)
 
 ```ts
@@ -3544,6 +3633,7 @@ type BootError = ModuleErrorBase & (
   | { readonly code: 'fingerprint-mismatch'; readonly expected: Sha256Hex; readonly found: Sha256Hex }
   | { readonly code: 'registry-unreadable'; readonly reason: string }
   | { readonly code: 'console-manifest-mismatch'; readonly expected: Sha256Hex; readonly found: Sha256Hex }
+  | { readonly code: 'console-unreadable'; readonly reason: string }
   | { readonly code: 'ceiling-outside-contract'; readonly capabilities: readonly CapabilityName[] }
   | { readonly code: 'executor-missing'; readonly tools: readonly RegistryToolName[] }
   | { readonly code: 'watcher-revalidation-failed'; readonly cause: DeclarationError }
@@ -3556,7 +3646,7 @@ type BootError = ModuleErrorBase & (
 | `lease-held` | A live instance holds the lease | no | Refuse to start, naming the holder from the lease contents |
 | `lease-not-exclusive` | The child-process self-test was granted the same lock | no | **Fatal**, naming the volume configuration. This is the bind-mount case, and the alternative is two instances silently sharing one store |
 | `fingerprint-mismatch`, `console-manifest-mismatch` | The artifact does not match what was built | no | Fatal. The service must never start with a smaller accidental tool set or a swapped bundle |
-| `registry-unreadable` | The registry artifact is absent, unparseable, or carries no valid fingerprint | no | Fatal, naming the reason. Distinct from `fingerprint-mismatch`, which has two real digests to report; here there is nothing to compare, and reporting it as a mismatch would mean inventing them |
+| `registry-unreadable`, `console-unreadable` | The registry or console artifact is absent, unparseable, or carries no valid fingerprint | no | Fatal, naming the reason. Distinct from a mismatch, which has two real digests to report; here there is nothing to compare, and reporting it as a mismatch would mean inventing them |
 | `ceiling-outside-contract` | The deployment ceiling names a capability the contract set lacks | no | Fatal |
 | `executor-missing` | A registry entry has no registered executor | no | Fatal |
 | `watcher-revalidation-failed` | An active declaration's stored file-watcher pair is invalid against the registry loaded by this boot | no | Fatal, preserving the `DeclarationError` as `cause`; no transport starts under invalid declaration authority |
@@ -3742,10 +3832,10 @@ descriptor (S9) is not revisited by this resolution — it sits outside S12's `T
 doc comment's "a contract question, not a predicate this file can be clever about" is now answered by
 this entry, but fixing `sync_base` itself is a separate, later change.
 
-**U4 — The HTTP API route table.** The design fixes that it is an explicit route table and never a
-call-any-tool-by-name proxy; that every route takes a repository dimension; that bearer and cookie
-routes are disjoint; and that four views are operator-only. It does not enumerate the routes, their
-paths, or their request and response bodies.
+**U4 — The HTTP API route table, resolved 2026-08-19 by S18.** The full table — every path, method,
+credential and whether it carries a repository dimension — is fixed under `### L5 — surfaces`
+above, closing the twenty-five-route no-repository-dimension set and confirming the remaining ten
+routes each carry a declaration id. See `design/90-decisions.md`, 2026-08-19.
 
 **U5 — OAuth endpoint paths and the protected-resource metadata document, resolved 2026-08-10 by
 S14.** Standard RFC-shaped paths under `/oauth/*` and `/.well-known/*`, with `issueMcpGrant` added
@@ -3762,6 +3852,12 @@ fixed values. See `design/90-decisions.md`, 2026-08-11. This unblocks S17.
 over the element type because the design fixes what a view receives and what it declares, but not
 the UI framework binding, the package's exported build entry, or how the asset manifest is hashed
 into the console fingerprint.
+
+*Narrowed 2026-08-19 by S18:* the framework binding (React), the build entry (Vite, `console/`, an
+`index.html` root) and the asset-manifest hashing (`console-integrity.ts`'s digest over every built
+file, verified at boot per `### Boot`'s `console-manifest-mismatch`/`console-unreadable`) are fixed.
+See `design/90-decisions.md`, 2026-08-19. U7 otherwise stands: the published package's own exported
+build entry for a consumer view (S19's `TElement` binding for an external caller) remains open.
 
 **U10 — The file-watcher target protocol, resolved 2026-08-11.** One logical target is an explicit
 pair of ordinary compiled registry entries named by `FileWatcherConfig.planTool` and `applyTool`.

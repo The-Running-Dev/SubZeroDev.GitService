@@ -1,6 +1,8 @@
 node_modules/
 build/
 volume/
+console/dist/
+test-results/
 
 # Per-machine Claude Code settings; the tracked settings.json is deliberate
 .claude/settings.local.json

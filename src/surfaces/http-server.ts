@@ -16,6 +16,7 @@ import { handleDeclarationRoute, type DeclarationRoutesDependencies } from './de
 import { handleToolRoute, type ToolRoutesDependencies } from './tool-routes.ts';
 import { handleAuthorizationRoute, type AuthorizationRoutesDependencies } from './authorization-routes.ts';
 import { handleMcpRoute, type McpRoutesDependencies } from './mcp-routes.ts';
+import { handleConsoleStaticRoute } from './console-static-routes.ts';
 
 /**
  * `LivenessReport` is the sole unauthenticated payload in the whole service
@@ -72,6 +73,15 @@ export interface SurfacesDependencies
   readonly commitSha: GitSha;
   readonly contractFingerprint: Sha256Hex;
   readonly consoleFingerprint: Sha256Hex;
+  /**
+   * The built console bundle's directory (S18.9), served for any GET path no
+   * API route claims. Optional so a `SurfacesServer` built without a real
+   * console build (most of this module's own tests) still serves every API
+   * route exactly as before and simply falls through to `404` for anything
+   * else, rather than requiring every test to fabricate a bundle it does not
+   * exercise.
+   */
+  readonly consoleDir?: string;
   readonly ready: () => boolean;
   /**
    * Live, not a boot-time snapshot: enrolment can complete without a
@@ -329,6 +339,11 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
     };
     sendJson(res, 200, report);
     return;
+  }
+
+  if (deps.consoleDir) {
+    const served = await handleConsoleStaticRoute({ consoleDir: deps.consoleDir }, req, res, url);
+    if (served) return;
   }
 
   sendJson(res, 404, { error: 'not-found' });
