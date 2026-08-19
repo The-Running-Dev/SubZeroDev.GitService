@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Sha256Hex } from '../shared/brands.ts';
 import { canonicalize } from '../shared/canonical-json.ts';
+import { sortedArray } from '../shared/sorted-array.ts';
 import type { CapabilityName, ContractCapabilitySet } from './capabilities.ts';
 import type { ToolDeclaration } from './tool-declaration.ts';
 
@@ -24,14 +25,14 @@ export function normaliseEntryOrder(entries: readonly ToolDeclaration[]): readon
  * one.
  */
 function fingerprintProjection(entry: ToolDeclaration): unknown {
-  return { ...entry, capabilities: [...entry.capabilities].sort(), scopes: [...entry.scopes].sort() };
+  return { ...entry, capabilities: sortedArray(entry.capabilities), scopes: sortedArray(entry.scopes) };
 }
 
 export function computeFingerprint(
   normalisedEntries: readonly ToolDeclaration[],
   contractCapabilitySet: ContractCapabilitySet,
 ): Sha256Hex {
-  const capabilities = [...(contractCapabilitySet as ReadonlySet<CapabilityName>)].sort();
+  const capabilities = sortedArray(contractCapabilitySet as ReadonlySet<CapabilityName>);
   const projectedEntries = normalisedEntries.map(fingerprintProjection);
   const canonical = canonicalize({ entries: projectedEntries, contractCapabilitySet: capabilities });
   return createHash('sha256').update(canonical, 'utf8').digest('hex') as Sha256Hex;

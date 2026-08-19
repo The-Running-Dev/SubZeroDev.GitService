@@ -1261,6 +1261,11 @@ A view declares the capabilities it needs and receives the selected declaration.
 declaration it belongs to — `console/src/view-registry.ts`'s `ConsoleViewRegistration` carries no
 such field, and `console/src/view-registry.test.ts` asserts it via `satisfies`.
 
+The build entry also exports `eligibleViews(views, capabilityGrant)`, the pure filter a consumer's
+own shell (or the base console's `Landing`) applies to decide which registered views to offer for
+the selected declaration — a view is eligible when the grant passed in contains every capability it
+declares.
+
 ---
 
 ## Persisted schemas

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { createElement, useEffect, useState } from 'react';
 import { api, type SessionEnvelope } from './api.ts';
 import { Enrol } from './Enrol.tsx';
 import { Login } from './Login.tsx';
@@ -87,7 +87,14 @@ export function App({ views = [] }: AppProps) {
     // `Landing` just filtered from this same `views` array — kept as a
     // typed fallback rather than a non-null assertion.
     if (!view) return <p role="alert">unknown view: {screen.viewId}</p>;
-    return view.render({ declarationId: screen.declarationId });
+    return (
+      <>
+        <button type="button" data-testid="registered-view-back" onClick={() => setScreen('landing')}>
+          Back
+        </button>
+        {createElement(view.render, { key: `${screen.viewId}:${screen.declarationId}`, declarationId: screen.declarationId })}
+      </>
+    );
   }
   return (
     <Landing

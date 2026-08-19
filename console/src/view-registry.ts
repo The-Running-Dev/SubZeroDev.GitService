@@ -23,6 +23,15 @@ export interface ConsoleViewRegistration {
  * agnostic — `views` never names the declaration it belongs to (S19.5), it
  * only carries the capabilities it needs; the caller supplies the grant to
  * check them against.
+ *
+ * `capabilityGrant` is the declaration's own grant, not the operator
+ * session's effective grant (`effectiveGrant` in
+ * `src/dispatch/dispatch-pipeline.ts`, which additionally narrows by
+ * contract, ceiling and session). The two agree today only because operator
+ * sessions currently hold the full grant (`design/90-decisions.md`,
+ * 2026-08-08); once S13 gives sessions their own narrower, durable grant,
+ * this can offer a view the operator's actual session can't use. See
+ * `design/90-decisions.md`'s `## Open` for this gap, tracked against S13.
  */
 export function eligibleViews(
   views: readonly ConsoleViewRegistration[],

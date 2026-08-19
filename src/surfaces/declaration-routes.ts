@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { declarationId, pathPrefix, credentialRef, type DeclarationId, type RegistryToolName } from '../shared/brands.ts';
 import type { ActorRef } from '../shared/actor.ts';
+import { sortedArray } from '../shared/sorted-array.ts';
 import type { DeclarationScopedCapability, HostKind } from '../contract/capabilities.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import type { DeclarationError } from '../declarations/errors.ts';
@@ -105,7 +106,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
  * show; without this a landing-view row could never carry that data at all.
  */
 function serializeDeclaration(d: Declaration): Omit<Declaration, 'capabilityGrant'> & { readonly capabilityGrant: readonly string[] } {
-  return { ...d, capabilityGrant: [...d.capabilityGrant].sort() };
+  return { ...d, capabilityGrant: sortedArray(d.capabilityGrant) };
 }
 
 function declarationErrorStatus(error: DeclarationError): number {
