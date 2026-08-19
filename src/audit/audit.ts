@@ -18,8 +18,11 @@ import type {
   AuditPage,
   AuditQuery,
   AuditRecord,
+  IdentityEvent,
   RetainedAnchor,
 } from './types.ts';
+import type { ActorRef } from '../shared/actor.ts';
+import type { DeclarationId } from '../shared/brands.ts';
 
 export interface Audit {
   append(input: AuditAppendInput): Promise<AuditAppendOutcome>;
@@ -35,6 +38,34 @@ export interface Audit {
    */
   usageBytes(): Promise<number>;
   close(): Promise<void>;
+}
+
+/**
+ * One audit line for a credential/identity mutation that is not a tool call
+ * against a repository — `operationId`/`generation`/`tool` are always null,
+ * and `declarationId` is null except where the event names one (e.g. a
+ * credential mark scoped to a declaration). Shared by every module that
+ * records one of these (`authorization.ts`, `credentials.ts`,
+ * `notifier.ts`) so the record shape has one home instead of one per caller.
+ */
+export async function appendIdentityEvent(
+  audit: Pick<Audit, 'append'>,
+  clock: Clock,
+  event: IdentityEvent,
+  actor: ActorRef,
+  declarationId: DeclarationId | null = null,
+): Promise<void> {
+  await audit.append({
+    at: clock.now(),
+    operationId: null,
+    declarationId,
+    generation: null,
+    tool: null,
+    actorRef: actor,
+    context: 'normal',
+    form: 'identity-event',
+    event,
+  });
 }
 
 /** The contract's stated default (`20-contract.md` § Deployment configuration). */

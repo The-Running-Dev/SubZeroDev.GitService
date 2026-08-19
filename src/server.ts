@@ -369,7 +369,7 @@ async function main(): Promise<void> {
   // credentials).
   const credentialEnv = new Map<EnvVarName, string>();
   const exec = createExec({ volumeRoot, credentialEnv });
-  const credentials = createCredentialResolver({ credentialMountRoot, volumeRoot, clock: systemClock });
+  const credentials = createCredentialResolver({ credentialMountRoot, volumeRoot, clock: systemClock, audit });
   const locks = createLocks(resolveAdmissionLimits());
   const ceiling = resolveCeiling();
   const remoteHostAllowlist = resolveRemoteHostAllowlist();
@@ -464,7 +464,7 @@ async function main(): Promise<void> {
   // call), which is what keeps invariant B8 (the compiler absent from the
   // runtime image) intact here.
   const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit, journal, declarations, credentials, credentialEnv, cloneStore });
-  const notifier = createNotifier({ volumeRoot, clock: systemClock, webhookUrl: resolveNotifierWebhook() });
+  const notifier = createNotifier({ volumeRoot, clock: systemClock, webhookUrl: resolveNotifierWebhook(), audit });
   const moduleAdapter = createModuleAdapter();
   moduleAdapter.register('git.status' as ModuleTargetName, toModuleHandler(gitOperations.status));
   moduleAdapter.register('git.log' as ModuleTargetName, toModuleHandler(gitOperations.log));
@@ -887,6 +887,20 @@ async function main(): Promise<void> {
       const settled = await journal.settle(operationId, null);
       if (!settled.ok) return { ok: false, summary: settled.error.summary };
 
+      // S34.6 — the settling is audited against the operator who did it,
+      // regardless of whether this was the declaration's last parked entry.
+      await audit.append({
+        at: systemClock.now(),
+        operationId,
+        declarationId: entry.declarationId,
+        generation: entry.generation,
+        tool: entry.tool,
+        actorRef: actor,
+        context: 'normal',
+        form: 'identity-event',
+        event: 'parked-operation-settled',
+      });
+
       // The clone is unparked only when this was the declaration's *last*
       // parked entry. Two entries can park the same repository, and clearing
       // on the first would readmit ordinary traffic while the second is still
@@ -904,8 +918,10 @@ async function main(): Promise<void> {
         : { ok: false, summary: cleared.error.summary };
     },
     failingCredentialRefs: () => credentials.listFailing(),
-    clearFailingCredential: (ref, declarationId) => credentials.clearFailing(ref, declarationId),
+    clearFailingCredential: (ref, declarationId, actor) => credentials.clearFailing(ref, declarationId, actor),
     failedOutboxRows: async () => (await notifier.listFailed()).length,
+    listFailedOutbox: () => notifier.listFailed(),
+    clearFailedOutbox: (id, actor) => notifier.clearFailed(id, actor),
     audit,
     identity: operatorIdentity,
     sessionAbsoluteSeconds: SESSION_ABSOLUTE_SECONDS_DEFAULT,

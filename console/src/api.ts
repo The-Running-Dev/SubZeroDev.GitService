@@ -189,6 +189,69 @@ export interface AuditFilter {
   readonly to: string;
 }
 
+export interface CredentialFailureMarkDto {
+  readonly ref: string;
+  readonly declarationId: string;
+  readonly reason: string;
+  readonly markedAt: string;
+}
+
+export interface VolumeUsageDto {
+  readonly totalBytes: number;
+  readonly usedBytes: number;
+  readonly usedPercent: number;
+  readonly byConsumer: Readonly<Record<string, number>>;
+}
+
+export interface HealthReportDto {
+  readonly ready: boolean;
+  readonly provisioningPending: boolean;
+  readonly auditChain: AuditChainStateDto;
+  readonly failedOutboxRows: number;
+  readonly failingCredentialRefs: readonly CredentialFailureMarkDto[];
+  readonly parkedOperations: number;
+  readonly volume: VolumeUsageDto;
+}
+
+export interface OutboxRowDto {
+  readonly id: string;
+  readonly severity: string;
+  readonly declarationId: string | null;
+  readonly status: string;
+  readonly attempts: number;
+  readonly lastAttemptAt: string | null;
+  readonly lastError: string | null;
+  readonly createdAt: string;
+  readonly deliveredAt: string | null;
+}
+
+export interface FailedOutboxDto {
+  readonly rows: readonly OutboxRowDto[];
+}
+
+export interface ParkedOperationFieldDiff {
+  readonly field: string;
+  readonly before: unknown;
+  readonly after: unknown;
+}
+
+export interface ParkedOperationDto {
+  readonly operationId: string;
+  readonly declarationId: string;
+  readonly generation: number;
+  readonly tool: string;
+  readonly reason: string | null;
+  readonly startedAt: string;
+  readonly updatedAt: string;
+  readonly preState: Readonly<Record<string, unknown>>;
+  readonly observed: Readonly<Record<string, unknown>> | null;
+  readonly diff: readonly ParkedOperationFieldDiff[] | null;
+}
+
+export interface ParkedOperationsDto {
+  readonly operations: readonly ParkedOperationDto[];
+}
+
 export function auditQueryPath(filter: AuditFilter, cursor: string | null): string {
   const params = new URLSearchParams();
   if (filter.declarationId) params.set('declarationId', filter.declarationId);

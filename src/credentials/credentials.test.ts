@@ -6,7 +6,8 @@ import path from 'node:path';
 import { systemClock } from '../clock/clock.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
-import type { CredentialRef, DeclarationId, EnvVarName, RemoteHost } from '../shared/brands.ts';
+import type { CredentialRef, DeclarationId, EnvVarName, RemoteHost, Subject } from '../shared/brands.ts';
+import type { ActorRef } from '../shared/actor.ts';
 import { createCredentialResolver, envVarNameFor } from './credentials.ts';
 
 const REF = 'github-token' as CredentialRef;
@@ -181,7 +182,18 @@ test('S9.5: the mark clears when the resolver observes a changed secret', async 
     await migratedVolume(volumeRoot);
     const secrets = mount({ [REF]: 'stale-value' });
     try {
-      const resolver = createCredentialResolver({ credentialMountRoot: secrets.root, volumeRoot, clock: systemClock });
+      const appended: unknown[] = [];
+      const resolver = createCredentialResolver({
+        credentialMountRoot: secrets.root,
+        volumeRoot,
+        clock: systemClock,
+        audit: {
+          append: async (input) => {
+            appended.push(input);
+            return { appended: true, sequence: appended.length };
+          },
+        },
+      });
       await resolver.markFailing(REF, REPO_A, 'the remote refused this credential');
       assert.equal((await resolver.resolveInto(REF, REPO_A, new Map())).ok, false);
 
@@ -199,6 +211,10 @@ test('S9.5: the mark clears when the resolver observes a changed secret', async 
       assert.equal(env.get(envVarNameFor(REF)), 'rotated-value');
       // Cleared, not merely bypassed: the health view must stop listing it.
       assert.deepEqual(await resolver.listFailing(), []);
+      // S34.2 — this clear was the resolver's own, not an operator's, and
+      // `clearFailing`'s one internal caller passes `actor: null` for exactly
+      // this reason: nothing to audit.
+      assert.equal(appended.length, 0);
     } finally {
       secrets.cleanup();
     }
@@ -253,7 +269,18 @@ test('S9.5: the mark clears by hand, and listFailing is what the health view rea
     await migratedVolume(volumeRoot);
     const secrets = mount({ [REF]: SECRET });
     try {
-      const resolver = createCredentialResolver({ credentialMountRoot: secrets.root, volumeRoot, clock: systemClock });
+      const appended: unknown[] = [];
+      const resolver = createCredentialResolver({
+        credentialMountRoot: secrets.root,
+        volumeRoot,
+        clock: systemClock,
+        audit: {
+          append: async (input) => {
+            appended.push(input);
+            return { appended: true, sequence: appended.length };
+          },
+        },
+      });
       await resolver.markFailing(REF, REPO_A, 'refused');
       await resolver.markFailing(OTHER_REF, REPO_B, 'also refused');
 
@@ -264,14 +291,31 @@ test('S9.5: the mark clears by hand, and listFailing is what the health view rea
         true,
       );
 
-      await resolver.clearFailing(REF, REPO_A);
+      const actor: ActorRef = { kind: 'operator', subject: 'test-operator' as Subject, clientId: null, grantId: null };
+      await resolver.clearFailing(REF, REPO_A, actor);
       const after = await resolver.listFailing();
       assert.equal(after.length, 1);
       assert.equal(after[0]?.ref, OTHER_REF);
       assert.equal(after[0]?.declarationId, REPO_B);
 
-      // Cleared by hand means the next operation may try again.
+      // S34.2 — clearing by hand is audited, against the operator who did it.
+      assert.equal(appended.length, 1);
+      assert.deepEqual(appended[0], {
+        at: (appended[0] as { at: string }).at,
+        operationId: null,
+        declarationId: REPO_A,
+        generation: null,
+        tool: null,
+        actorRef: actor,
+        context: 'normal',
+        form: 'identity-event',
+        event: 'failing-credential-cleared',
+      });
+
+      // Cleared by hand means the next operation may try again — the mark
+      // was already gone, so this succeeds without a second clear.
       assert.equal((await resolver.resolveInto(REF, REPO_A, new Map())).ok, true);
+      assert.equal(appended.length, 1, 'no second clear happened, so no second audit record');
     } finally {
       secrets.cleanup();
     }

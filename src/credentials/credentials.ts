@@ -3,7 +3,9 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { err, ok, type Outcome } from '../shared/outcome.ts';
 import type { CredentialRef, DeclarationId, EnvVarName, IsoUtcTimestamp, RemoteHost } from '../shared/brands.ts';
+import type { ActorRef } from '../shared/actor.ts';
 import type { Clock } from '../clock/clock.ts';
+import { appendIdentityEvent, type Audit } from '../audit/audit.ts';
 import type { CredentialBinding, MutableEnv } from '../exec/exec.ts';
 import { credentialError, type CredentialError } from './errors.ts';
 import type { CredentialFailureMark } from './types.ts';
@@ -12,7 +14,8 @@ export interface CredentialResolver {
   resolveInto(ref: CredentialRef, declarationId: DeclarationId, env: MutableEnv): Promise<Outcome<CredentialBinding, CredentialError>>;
   allowedHosts(ref: CredentialRef): Promise<Outcome<readonly RemoteHost[], CredentialError>>;
   markFailing(ref: CredentialRef, declarationId: DeclarationId, reason: string): Promise<void>;
-  clearFailing(ref: CredentialRef, declarationId: DeclarationId): Promise<void>;
+  /** `actor` is `null` on the one internal caller — `resolveInto` clearing a mark it just observed the resolver itself resolve, with no operator involved. The health view's clear (S34) always carries one, and is the one path that audits. */
+  clearFailing(ref: CredentialRef, declarationId: DeclarationId, actor: ActorRef | null): Promise<void>;
   listFailing(): Promise<readonly CredentialFailureMark[]>;
 }
 
@@ -22,6 +25,13 @@ export interface CredentialResolverDependencies {
   /** The data volume, which is where the marks live (`credential_failure_mark`). */
   readonly volumeRoot: string;
   readonly clock: Clock;
+  /**
+   * `clearFailing`'s audit record when `actor` is not `null` (S34). Optional,
+   * defaulting to a no-op — `resolveInto`'s own internal clear always passes
+   * `actor: null` and never reaches it, so most callers never need one wired
+   * in, the same reasoning `notifier.ts`'s equivalent optional `audit` rests on.
+   */
+  readonly audit?: Pick<Audit, 'append'>;
 }
 
 /**
@@ -92,6 +102,7 @@ function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): DbOutcome<T
  */
 export function createCredentialResolver(deps: CredentialResolverDependencies): CredentialResolver {
   const { credentialMountRoot, volumeRoot, clock } = deps;
+  const audit = deps.audit ?? { append: async () => ({ appended: true as const, sequence: -1 }) };
 
   function secretPath(ref: CredentialRef): string {
     // `CredentialRef`'s pattern admits no separator and no leading dot, so a
@@ -195,10 +206,19 @@ export function createCredentialResolver(deps: CredentialResolverDependencies): 
     }
   }
 
-  async function clearFailing(ref: CredentialRef, declarationId: DeclarationId): Promise<void> {
-    withDb(volumeRoot, (db) => {
-      db.prepare('DELETE FROM credential_failure_mark WHERE credential_ref = ? AND declaration_id = ?').run(ref as string, declarationId as string);
-    });
+  async function clearFailing(ref: CredentialRef, declarationId: DeclarationId, actor: ActorRef | null): Promise<void> {
+    const cleared = withDb(volumeRoot, (db) =>
+      Number(
+        db.prepare('DELETE FROM credential_failure_mark WHERE credential_ref = ? AND declaration_id = ?').run(ref as string, declarationId as string)
+          .changes,
+      ),
+    );
+    // Only a mark that actually existed is worth an audit record — otherwise
+    // a stray/duplicate clear would permanently record clearing something
+    // that was never marked failing.
+    if (actor && cleared.ok && cleared.value > 0) {
+      await appendIdentityEvent(audit, clock, 'failing-credential-cleared', actor, declarationId);
+    }
   }
 
   return {
@@ -233,7 +253,7 @@ export function createCredentialResolver(deps: CredentialResolverDependencies): 
             ),
           );
         }
-        await clearFailing(ref, declarationId);
+        await clearFailing(ref, declarationId, null);
       }
 
       const variableName = envVarNameFor(ref);

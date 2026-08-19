@@ -395,6 +395,46 @@ test('clearFailed resets a failed row to pending without deleting it, and refuse
   });
 });
 
+test('S34.3 — clearFailed appends an identity-event audit record once the clear has landed', async () => {
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin(beginInputFor('op-1'));
+    await journal.settle('op-1' as never, TERMINAL_NOTIFICATIONS[0]!);
+
+    const appended: unknown[] = [];
+    const notifier = createNotifier({
+      volumeRoot: volume,
+      clock: systemClock,
+      webhookUrl: 'https://hooks.example.invalid/notify' as never,
+      maxAttempts: 1,
+      deliverFn: async () => ({ ok: false, status: 500 }),
+      audit: {
+        append: async (input) => {
+          appended.push(input);
+          return { appended: true, sequence: appended.length };
+        },
+      },
+    });
+    await notifier.deliverPending();
+    const failed = await notifier.listFailed();
+
+    const cleared = await notifier.clearFailed(failed[0]!.id, ACTOR);
+    assert.equal(cleared.ok, true);
+    assert.equal(appended.length, 1);
+    assert.deepEqual(appended[0], {
+      at: (appended[0] as { at: string }).at,
+      operationId: null,
+      declarationId: null,
+      generation: null,
+      tool: null,
+      actorRef: ACTOR,
+      context: 'normal',
+      form: 'identity-event',
+      event: 'outbox-row-cleared',
+    });
+  });
+});
+
 test('S11.4 — all four NotifierError variants are constructible, and each is produced by a real path; counts stated', async () => {
   const produced = new Set<string>();
 

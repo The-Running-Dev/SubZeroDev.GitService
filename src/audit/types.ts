@@ -82,7 +82,10 @@ export type IdentityEvent =
   | 'token-issued'
   | 'client-revoked'
   | 'grant-revoked'
-  | 'token-revoked';
+  | 'token-revoked'
+  | 'failing-credential-cleared'
+  | 'outbox-row-cleared'
+  | 'parked-operation-settled';
 
 export type WatchedFileOutcome =
   | { readonly kind: 'succeeded'; readonly pullRequest: PullRequestRef }

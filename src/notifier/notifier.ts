@@ -10,6 +10,7 @@ import type { JsonValue } from '../contract/json.ts';
 import { retentionCutoff, toRetentionReport, type RetentionReport } from '../shared/retention.ts';
 import type { NotificationRequest } from '../journal/types.ts';
 import type { StoreTransaction } from '../store/structured-store.ts';
+import { appendIdentityEvent, type Audit } from '../audit/audit.ts';
 import { notifierError, type NotifierError } from './errors.ts';
 import type { DeliveryReport, OutboxRow, OutboxRowStatus } from './types.ts';
 
@@ -27,6 +28,14 @@ export interface NotifierDependencies {
   readonly clock: Clock;
   /** `DeploymentConfig.notifierWebhook` — `null` means no transport is configured. */
   readonly webhookUrl: HttpsUrl | null;
+  /**
+   * `clearFailed`'s audit record (S34) — the same `Audit` instance every
+   * other L1 module writes through. Optional, defaulting to a no-op, so
+   * every test constructing a `Notifier` for delivery behaviour it does not
+   * touch `clearFailed` at all — the large majority — need not also wire one
+   * in, the same reasoning `deliverFn`/`sleepFn` below are optional for.
+   */
+  readonly audit?: Pick<Audit, 'append'>;
   /** Injected for tests. Defaults to a real `fetch` call. */
   readonly deliverFn?: (url: string, body: string, signal: AbortSignal) => Promise<{ readonly ok: boolean; readonly status: number }>;
   /** Injected for tests, so backoff does not really sleep. */
@@ -138,6 +147,7 @@ function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): DbOutcome<T
  */
 export function createNotifier(deps: NotifierDependencies): Notifier {
   const { volumeRoot, clock, webhookUrl } = deps;
+  const audit = deps.audit ?? { append: async () => ({ appended: true as const, sequence: -1 }) };
   const deliverFn = deps.deliverFn ?? realDeliver;
   const sleepFn = deps.sleepFn ?? realSleep;
   const maxAttempts = deps.maxAttempts ?? MAX_ATTEMPTS_DEFAULT;
@@ -459,10 +469,12 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
      * operator clearing it from the health view is asking for.
      */
     async clearFailed(id: OutboxRowId, actor: ActorRef): Promise<Outcome<void, NotifierError>> {
-      const found = withDb(volumeRoot, (db) => db.prepare(`SELECT id FROM notification_outbox WHERE id = ? AND status = 'failed'`).get(id as string));
-      if (!found.ok || !found.value) {
-        return err(notifierError({ code: 'row-not-found', rowId: id }, `no failed outbox row '${id}'`));
-      }
+      // The existence check and the write-back are the same statement: the
+      // `AND status = 'failed'` in the `UPDATE`'s own `WHERE` clause is what
+      // that write-back atomically requires, so two concurrent clears of the
+      // same row cannot both observe it as still-failed and both count as the
+      // one that cleared it — the second's `UPDATE` matches zero rows.
+      //
       // Checked, not assumed — the same discipline `deliverRows` applies to
       // its own write-back a few lines up. Returning `ok` on a write that did
       // not land tells an operator the row is cleared while it is still
@@ -472,24 +484,23 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
       // `clearFailed` is the *only* way back for a `failed` row now that
       // `redriveUndelivered` is `pending`-only, so a silently lost clear
       // strands the row until someone thinks to try again.
-      const cleared = withDb(volumeRoot, (db) => {
-        db.prepare(`UPDATE notification_outbox SET status = 'pending', attempts = 0, last_attempt_at = NULL, last_error = NULL WHERE id = ?`).run(id as string);
-      });
+      const cleared = withDb(volumeRoot, (db) =>
+        Number(
+          db
+            .prepare(`UPDATE notification_outbox SET status = 'pending', attempts = 0, last_attempt_at = NULL, last_error = NULL WHERE id = ? AND status = 'failed'`)
+            .run(id as string).changes,
+        ),
+      );
       if (!cleared.ok) {
         return err(notifierError({ code: 'delivery-failed', status: null, attempts: 0 }, `outbox row '${id}' could not be cleared: ${cleared.reason}`));
       }
-      // `actor` is recorded rather than discarded, because resetting a row
-      // that had already reached a terminal decision is an operator judgement
-      // and someone will later ask who made it.
-      //
-      // **This is a log line, not an audit record, and that is a shortfall
-      // rather than a design.** A durable, hash-chained record needs an
-      // `AuditRecordBody` form for it, and none of the seven existing forms
-      // describes an operator clearing an outbox row — adding one is a
-      // contract amendment. This member has no HTTP route and no production
-      // caller yet, so the amendment belongs with whichever slice gives it
-      // one, alongside the route's own authorization.
-      console.info(`notifier: outbox row '${id}' cleared back to pending by ${actor.kind}:${actor.subject}`);
+      if (cleared.value === 0) {
+        return err(notifierError({ code: 'row-not-found', rowId: id }, `no failed outbox row '${id}'`));
+      }
+      // Audited after the write-back is confirmed, not before: an append
+      // that ran ahead of a clear that then failed would record a clearing
+      // that never happened on disk.
+      await appendIdentityEvent(audit, clock, 'outbox-row-cleared', actor);
       return ok(undefined);
     },
 

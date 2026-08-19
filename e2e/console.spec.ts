@@ -2,7 +2,17 @@ import { test, expect } from '@playwright/test';
 import { writeBreakGlassToken } from '../src/operator-identity/operator-identity.ts';
 import { base32Decode, currentTotpCode } from '../src/operator-identity/totp.ts';
 import { pkce, registerClient, exchangeCodeForTokens } from '../src/surfaces/testing/oauth-test-flow.ts';
-import { E2E_BASE_URL, E2E_PASSWORD, E2E_PROVISIONING_SECRET, E2E_SUBJECT, E2E_VOLUME_ROOT } from './constants.ts';
+import {
+  E2E_BASE_URL,
+  E2E_FAILING_CREDENTIAL_DECLARATION,
+  E2E_FAILING_CREDENTIAL_REF,
+  E2E_PARKED_OBSERVABLE_DECLARATION,
+  E2E_PARKED_UNOBSERVABLE_DECLARATION,
+  E2E_PASSWORD,
+  E2E_PROVISIONING_SECRET,
+  E2E_SUBJECT,
+  E2E_VOLUME_ROOT,
+} from './constants.ts';
 
 /**
  * S18.13 — enrolment, all three sign-in paths and the landing view, driven
@@ -22,7 +32,7 @@ import { E2E_BASE_URL, E2E_PASSWORD, E2E_PROVISIONING_SECRET, E2E_SUBJECT, E2E_V
  * long enough to exercise retention, not merely the handful of records this
  * test's own actions produced.
  */
-test('S18.12/S18.13/S18.10/S18.2/S31.4/S31.5/S32.1/S32.2/S32.3/S32.4/S33.2/S33.3/S33.5/S33.6 — enrolment, every sign-in path, the lockout round trip, the landing view, the grants view and the audit view against a real repository', async ({ page }) => {
+test('S18.12/S18.13/S18.10/S18.2/S31.4/S31.5/S32.1/S32.2/S32.3/S32.4/S33.2/S33.3/S33.5/S33.6/S34.1/S34.2/S34.3/S34.4/S34.5/S34.6/S34.7 — enrolment, every sign-in path, the lockout round trip, the landing view, the grants view, the audit view, the health view and the parked-operations view, against a real repository', async ({ page }) => {
   // S18.12 — a brand new instance shows the enrolment screen and no other.
   await page.goto('/');
   await expect(page.getByTestId('provisioning-secret')).toBeVisible();
@@ -76,12 +86,15 @@ test('S18.12/S18.13/S18.10/S18.2/S31.4/S31.5/S32.1/S32.2/S32.3/S32.4/S33.2/S33.3
     // `credentials: 'omit'` still carries the browser's ambient cookie for a
     // same-origin fetch unless explicitly suppressed — flip it off so this
     // request truly carries no Authorization header and relies on nothing
-    // but the cookie the page already holds, then show `/health` (bearer
-    // route) refuses it anyway.
-    const res = await fetch('/health', { credentials: 'include' });
+    // but the cookie the page already holds, then show `/version` (still
+    // bearer-only) refuses it anyway. Not `/health`: S34 made `/health`
+    // accept either credential for the console's own health view
+    // (`20-contract.md` § the HTTP API route table, `bearer or cookie`), so
+    // it no longer demonstrates this half of S18.10.
+    const res = await fetch('/version', { credentials: 'include' });
     return res.status;
   });
-  expect(cookieOnBearerRoute, 'a cookie alone does not satisfy a bearer route').toBe(401);
+  expect(cookieOnBearerRoute, 'a cookie alone does not satisfy a bearer-only route').toBe(401);
 
   const mutationWithoutCsrfToken = await page.evaluate(async () => {
     const res = await fetch('/auth/logout', { method: 'POST', credentials: 'include' });
@@ -398,4 +411,75 @@ test('S18.12/S18.13/S18.10/S18.2/S31.4/S31.5/S32.1/S32.2/S32.3/S32.4/S33.2/S33.3
     return res.status;
   });
   expect(auditBearerCheck, 'an operator-api bearer token, even with every scope, cannot authenticate /audit').toBe(401);
+
+  // --- S34 — the health view and the parked-operations view, both seeded by `run-server.ts` before this instance ever started ---
+
+  await page.getByTestId('audit-back').click();
+
+  // S34.1 — failed outbox rows are listed, not merely counted, alongside
+  // the failing-credential list `run-server.ts` seeded.
+  await page.getByTestId('nav-health').click();
+  await expect(page.getByTestId('health-parked-count')).toHaveText('2');
+  await expect(page.getByTestId('failed-outbox-list')).toBeVisible();
+  const outboxRows = page.locator('[data-testid="failed-outbox-list"] tbody tr[data-testid^="failed-outbox-row-"]');
+  await expect(outboxRows).toHaveCount(1);
+
+  await expect(page.getByTestId('failing-credential-list')).toBeVisible();
+  const credentialRowTestId = `failing-credential-row-${E2E_FAILING_CREDENTIAL_REF}-${E2E_FAILING_CREDENTIAL_DECLARATION}`;
+  await expect(page.getByTestId(credentialRowTestId)).toBeVisible();
+
+  // S34.2 — clearing the failing credential from the view works, and is
+  // audited (`notifier.test.ts`/`credentials.test.ts` prove the audit
+  // record itself; this is the view calling the real route).
+  await page.getByTestId(`clear-credential-${E2E_FAILING_CREDENTIAL_REF}-${E2E_FAILING_CREDENTIAL_DECLARATION}`).click();
+  await expect(page.getByTestId('failing-credential-list-empty')).toBeVisible();
+
+  // S34.3 — clearing the failed outbox row from the view works.
+  const outboxRowId = await outboxRows.first().getAttribute('data-testid');
+  await page.getByTestId(`clear-outbox-${outboxRowId!.replace('failed-outbox-row-', '')}`).click();
+  await expect(page.getByTestId('failed-outbox-list-empty')).toBeVisible();
+
+  // --- The parked-operations view ---
+
+  await page.getByTestId('health-back').click();
+  await page.getByTestId('nav-parked-operations').click();
+  await expect(page.getByTestId('parked-list')).toBeVisible();
+
+  // S34.5 — a declaration whose tree cannot be observed at all (`e2e-repo`,
+  // declared above but never cloned — S5 means declaring alone clones
+  // nothing) renders as unobservable, with the entry still listed rather
+  // than the view failing.
+  const unobservableRow = page.getByTestId(`parked-row-e2e-seed-parked-unobservable`);
+  await expect(unobservableRow).toBeVisible();
+  await expect(unobservableRow.getByTestId('parked-unobservable-e2e-seed-parked-unobservable')).toBeVisible();
+
+  // S34.4 — the observable entry (`e2e-repo-parked`, seeded with a real
+  // clone and a deliberately wrong `preState`) renders every one of the
+  // five compared fields as moved.
+  const observableRow = page.getByTestId('parked-row-e2e-seed-parked-observable');
+  await expect(observableRow).toBeVisible();
+  const diffTable = observableRow.getByTestId('parked-diff-e2e-seed-parked-observable');
+  await expect(diffTable).toBeVisible();
+  for (const field of ['branch', 'headSha', 'upstreamSha', 'indexDigest', 'worktreeDigest']) {
+    const row = diffTable.getByTestId(`parked-diff-row-e2e-seed-parked-observable-${field}`);
+    await expect(row).toContainText('yes');
+  }
+
+  // S34.6 — settled with the clone returned to ready, driven from the view.
+  await page.getByTestId('settle-e2e-seed-parked-observable').click();
+  await expect(page.getByTestId('parked-row-e2e-seed-parked-observable')).toHaveCount(0);
+
+  // S34.6's other resolution — kept parked — is simply not calling this for
+  // the unobservable entry. Reloading and returning to the view proves it,
+  // rather than an absence nobody checked.
+  await page.reload();
+  await page.getByTestId('declaration-row-e2e-repo').waitFor();
+  await page.getByTestId('nav-parked-operations').click();
+  await expect(page.getByTestId(`parked-row-e2e-seed-parked-unobservable`)).toBeVisible();
+  await expect(page.getByTestId('parked-row-e2e-seed-parked-observable')).toHaveCount(0);
+
+  // S34.7 — every console view is driven end to end above, in this order:
+  // enrolment, login, landing, grants, audit, health, parked-operations.
+  // Seven views exercised — this comment is what names the set; the
+  // `getByTestId`/navigation calls throughout this test are what exercised it.
 });

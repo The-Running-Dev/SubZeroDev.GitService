@@ -649,7 +649,10 @@ type IdentityEvent =
   | 'token-issued'
   | 'client-revoked'
   | 'grant-revoked'
-  | 'token-revoked';
+  | 'token-revoked'
+  | 'failing-credential-cleared'
+  | 'outbox-row-cleared'
+  | 'parked-operation-settled';
 
 type AuditRecordBody =
   | { readonly form: 'call'; readonly resultKind: ResultKind; readonly changedPaths: readonly RepoRelativePath[] }
@@ -1753,10 +1756,15 @@ interface CredentialResolver {
   resolveInto(ref: CredentialRef, declarationId: DeclarationId, env: MutableEnv): Promise<Outcome<CredentialBinding, CredentialError>>;
   allowedHosts(ref: CredentialRef): Promise<Outcome<readonly RemoteHost[], CredentialError>>;
   markFailing(ref: CredentialRef, declarationId: DeclarationId, reason: string): Promise<void>;
-  clearFailing(ref: CredentialRef, declarationId: DeclarationId): Promise<void>;
+  clearFailing(ref: CredentialRef, declarationId: DeclarationId, actor: ActorRef | null): Promise<void>;
   listFailing(): Promise<readonly CredentialFailureMark[]>;
 }
 ```
+
+**`clearFailing`'s `actor` is `null` on its one internal caller (S34).** `resolveInto` clears a mark
+itself the moment it observes a secret rewritten since the mark was taken — no operator is involved,
+so there is nothing to audit. The health view's own clear, added by S34, always carries the
+operator's `ActorRef` and is the one path that appends an `identity-event` record.
 
 No signature here returns a secret value. `resolveInto` writes into a `MutableEnv` that only `Exec`
 consumes, and hands back a `CredentialBinding` naming the variable. Resolution happens at the
@@ -1949,6 +1957,12 @@ interface Notifier {
 
 `enqueue` is synchronous and takes a transaction, so the row and the settle commit together.
 Delivery happens afterwards and never blocks the operation it describes.
+
+`clearFailed`'s `actor` was accepted from the start but never recorded anywhere but a log line
+(S11) — none of the seven `AuditRecordBody` forms described an operator clearing an outbox row.
+S34 gives it one: `clearFailed` appends an `identity-event` record carrying `'outbox-row-cleared'`
+once the row's write-back has actually landed, the same order `authorization.ts`'s revocations
+already audit in.
 
 ### L1 — lifecycle
 
@@ -3014,6 +3028,21 @@ repository the call acts on. `console.manage`-style capability names are not rep
 are `20-contract.md` § Capabilities and the lattice's, and this table only fixes paths, methods and
 credentials, per U4's own scope.
 
+**`bearer or cookie` is a third credential value, added by S34.** Every route fixed before S34
+accepts exactly one of the two — a bearer route rejects a cookie and a cookie route rejects a
+bearer, both demonstrated end to end by S18.10 — and that split holds everywhere this value does
+not appear. The four rows it does mark (`/health`, `/parked-operations`, its `/resolve` and
+`/failing-credentials/.../clear`) predate the console's health and parked-operations views: they
+were bearer-only because nothing but a script had ever called them. S34 gives the operator console
+its own reason to call the same routes, and duplicating each as a second cookie-only path would
+mean two implementations of one read or one mutation to keep in sync, which is the drift this
+amendment avoids instead. A bearer credential on one of these four is checked exactly as before,
+capability included; a cookie is accepted as an authenticated operator session with no capability
+gate, the same as every other cookie route, and a mutating request over cookie still requires the
+double-submit CSRF token — a bearer request never does, since it carries no ambient cookie for
+CSRF to defend. Presenting neither, or a cookie failing its CSRF check, is refused exactly as a
+plain cookie route refuses it today.
+
 **Liveness, version and health** — no repository dimension. Fixed above this table because they
 already shipped ahead of it.
 
@@ -3021,7 +3050,7 @@ already shipped ahead of it.
 |---|---|---|
 | `/healthz` | `GET` | none |
 | `/version` | `GET` | bearer |
-| `/health` | `GET` | bearer |
+| `/health` | `GET` | bearer or cookie |
 
 **Authentication (`console-auth-routes.ts`)** — no repository dimension. An operator session has no
 repository binding (`design/10-design.md` § Operator drives the console, step 2); it narrows per
@@ -3072,13 +3101,17 @@ declaration in its path, even where the underlying grant itself narrows to one.
 **Attention and health administration (`http-server.ts`)** — the parked-operations and
 failing-credential views (S8, S9, S34). `/parked-operations*` spans every declaration in its
 listing and resolves by `operationId`, which is not itself a repository dimension; clearing a
-failing credential names the declaration it was recorded against directly in its path.
+failing credential names the declaration it was recorded against directly in its path. The two
+`/notifier/failed*` rows are new with S34: the health view's failed-outbox list and its own way
+out, which had a `Notifier` member (`clearFailed`) but no route before this slice.
 
 | Path | Method | Credential | Repository dimension |
 |---|---|---|---|
-| `/parked-operations` | `GET` | bearer | no |
-| `/parked-operations/{operationId}/resolve` | `POST` | bearer | no |
-| `/failing-credentials/{credentialRef}/{declarationId}/clear` | `POST` | bearer | yes |
+| `/parked-operations` | `GET` | bearer or cookie | no |
+| `/parked-operations/{operationId}/resolve` | `POST` | bearer or cookie | no |
+| `/failing-credentials/{credentialRef}/{declarationId}/clear` | `POST` | bearer or cookie | yes |
+| `/notifier/failed` | `GET` | cookie | no |
+| `/notifier/failed/{id}/clear` | `POST` | cookie | no |
 
 **Audit trail (`audit-routes.ts`)** — the audit view (S33), under `audit.read`. No repository
 dimension: `declarationId` narrows the query as a filter, the same as `tool` and `actorSubject`,
@@ -3095,16 +3128,17 @@ which name a `declarationId` directly in their path; `/oauth/authorize`'s `GET` 
 `resource` query parameter naming one, but the table below classifies routes by path rather than by
 query, consistent with every other row here.
 
-**The closed set, and the count S18.14 asks for.** Twenty-six routes above carry no repository
+**The closed set, and the count S18.14 asks for.** Twenty-eight routes above carry no repository
 dimension — the three liveness/version/health routes, the six authentication routes, the two
 declaration listing/creation routes, the six grants/authorization routes, the two
-parked-operations routes, `/audit`, and the six no-dimension OAuth/MCP routes below (`/.well-known/oauth-authorization-server`,
-`/oauth/register`, `/oauth/authorize` ×2 methods, `/oauth/token`, `/oauth/revoke`). This is the
-closed set; nothing may be added to it without a contract amendment naming why the new route has no
-repository to scope to. The remaining ten routes each carry a `declarationId` (or the equivalent —
+parked-operations routes, the two `/notifier/failed*` routes, `/audit`, and the six no-dimension
+OAuth/MCP routes below (`/.well-known/oauth-authorization-server`, `/oauth/register`,
+`/oauth/authorize` ×2 methods, `/oauth/token`, `/oauth/revoke`). This is the closed set; nothing
+may be added to it without a contract amendment naming why the new route has no repository to
+scope to. The remaining ten routes each carry a `declarationId` (or the equivalent —
 `/failing-credentials/{credentialRef}/{declarationId}/clear`'s second segment) directly in their
 path: the seven declaration-management and tool routes above, `/failing-credentials/.../clear`, the
-protected-resource metadata document, and the MCP transport itself. Thirty-six routes in total.
+protected-resource metadata document, and the MCP transport itself. Thirty-eight routes in total.
 
 #### OAuth endpoints and the MCP transport (resolves U5)
 

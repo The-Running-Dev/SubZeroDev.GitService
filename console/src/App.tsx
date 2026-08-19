@@ -6,8 +6,10 @@ import { Landing } from './Landing.tsx';
 import { TotpReenrol } from './TotpReenrol.tsx';
 import { Grants } from './Grants.tsx';
 import { Audit } from './Audit.tsx';
+import { Health } from './Health.tsx';
+import { ParkedOperations } from './ParkedOperations.tsx';
 
-type Screen = 'loading' | 'enrol' | 'login' | 'totp-reenrol' | 'landing' | 'grants' | 'audit';
+type Screen = 'loading' | 'enrol' | 'login' | 'totp-reenrol' | 'landing' | 'grants' | 'audit' | 'health' | 'parked-operations';
 
 /**
  * S18.12's "shows the enrolment screen and no other" without a new
@@ -53,7 +55,19 @@ export function App() {
   if (screen === 'audit') {
     return <Audit onSignedOut={() => setScreen('login')} onBack={() => setScreen('landing')} />;
   }
+  if (screen === 'health') {
+    return <Health onSignedOut={() => setScreen('login')} onBack={() => setScreen('landing')} />;
+  }
+  if (screen === 'parked-operations') {
+    return <ParkedOperations onSignedOut={() => setScreen('login')} onBack={() => setScreen('landing')} />;
+  }
   return (
-    <Landing onSignedOut={() => setScreen('login')} onNavigateGrants={() => setScreen('grants')} onNavigateAudit={() => setScreen('audit')} />
+    <Landing
+      onSignedOut={() => setScreen('login')}
+      onNavigateGrants={() => setScreen('grants')}
+      onNavigateAudit={() => setScreen('audit')}
+      onNavigateHealth={() => setScreen('health')}
+      onNavigateParkedOperations={() => setScreen('parked-operations')}
+    />
   );
 }
