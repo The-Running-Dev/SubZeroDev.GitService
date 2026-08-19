@@ -73,3 +73,46 @@ export interface DeclarationListRow {
   readonly branch: string | null;
   readonly dirty: boolean;
 }
+
+export interface OAuthClientRecord {
+  readonly clientId: string;
+  readonly redirectUris: readonly string[];
+  readonly registeredAt: string;
+  readonly revokedAt: string | null;
+}
+
+export interface GrantRecord {
+  readonly grantId: string;
+  readonly kind: 'mcp' | 'operator-api';
+  readonly clientId: string | null;
+  readonly subject: string;
+  readonly resource: string | null;
+  readonly declarationId: string | null;
+  readonly generation: number | null;
+  readonly scopes: readonly string[];
+  readonly createdAt: string;
+  readonly lastUsedAt: string | null;
+  readonly revokedAt: string | null;
+}
+
+export interface GrantView {
+  readonly grant: GrantRecord;
+  readonly client: OAuthClientRecord | null;
+  readonly activeTokens: number;
+  readonly liveSessions: number;
+}
+
+export interface OperatorSessionListing {
+  readonly ref: string;
+  readonly subject: string;
+  readonly createdAt: string;
+  readonly lastSeenAt: string;
+  readonly idleExpiresAt: string;
+  readonly absoluteExpiresAt: string;
+  readonly revokedAt: string | null;
+}
+
+export interface GrantsView {
+  readonly grants: readonly GrantView[];
+  readonly operatorSessions: readonly OperatorSessionListing[];
+}
