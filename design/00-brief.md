@@ -247,7 +247,7 @@ Twenty checkable statements. Nothing here is aspirational; each is either demons
 3. **`SubZeroDev.Blog` runs as a consumer**, with no loss of capability. Its ~16 authoring tools remain its own domain code; the runtime, the contract and all repository-generic git operations come from here. No bespoke MCP server, no duplicated git layer.
 4. **A second repository, end to end.** Some repository other than `SubZeroDev.Blog` is declared and driven through a full change. Generalisation is the justification for the whole project; one consumer is not evidence of it.
 5. **A new target repository is onboarded by declaration alone** — no code changes, no rebuild, no new server, no restart. A running instance picks it up and clones it while continuing to serve every other repository.
-6. **The repository dimension is complete.** Every endpoint and every view takes a repository, and the console lists and selects across them.
+6. **The repository dimension is complete.** Every route that acts on repository state carries a declaration id, and every console view acts against the current selection; the console lists and selects across them. Instance-level routes — liveness, version, health, authentication and OAuth — carry no repository, and the route table names them as a closed set rather than leaving it implicit.
 
 ### Safety
 
