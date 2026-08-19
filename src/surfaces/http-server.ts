@@ -1,17 +1,21 @@
 import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { sha256Hex, type BearerToken, type GitSha, type Sha256Hex } from '../shared/brands.ts';
+import { sha256Hex, type BearerToken, type GitSha, type OutboxRowId, type Sha256Hex } from '../shared/brands.ts';
+import type { Outcome } from '../shared/outcome.ts';
 import type { AuditChainState } from '../audit/types.ts';
 import type { CredentialFailureMark } from '../credentials/types.ts';
 import type { CredentialRef, DeclarationId, OperationId } from '../shared/brands.ts';
 import type { ActorRef } from '../shared/actor.ts';
 import type { Session } from '../shared/session.ts';
+import type { OperatorSession } from '../operator-identity/operator-identity.ts';
 import type { CapabilityName } from '../contract/capabilities.ts';
 import type { Authorization } from '../authorization/authorization.ts';
 import type { ObservedGitState, PreState } from '../clone/types.ts';
 import type { OperationJournalEntry } from '../journal/types.ts';
+import type { NotifierError } from '../notifier/errors.ts';
+import type { OutboxRow } from '../notifier/types.ts';
 import { NO_VOLUME_USAGE, type VolumeUsage } from '../store/volume-usage.ts';
-import { handleConsoleAuthRoute, type ConsoleAuthDependencies } from './console-auth-routes.ts';
+import { csrfOk, requireSession, handleConsoleAuthRoute, type ConsoleAuthDependencies } from './console-auth-routes.ts';
 import { handleDeclarationRoute, type DeclarationRoutesDependencies } from './declaration-routes.ts';
 import { handleToolRoute, type ToolRoutesDependencies } from './tool-routes.ts';
 import { handleAuthorizationRoute, type AuthorizationRoutesDependencies } from './authorization-routes.ts';
@@ -122,13 +126,21 @@ export interface SurfacesDependencies
    * still reports an honest empty list.
    */
   readonly failingCredentialRefs?: () => Promise<readonly CredentialFailureMark[]>;
-  readonly clearFailingCredential?: (ref: CredentialRef, declarationId: DeclarationId) => Promise<void>;
+  readonly clearFailingCredential?: (ref: CredentialRef, declarationId: DeclarationId, actor: ActorRef) => Promise<void>;
   /**
    * The count behind `failedOutboxRows` (S11). Optional so a surfaces server
    * assembled without a notifier still reports an honest zero rather than
    * failing to construct — the same shape as `failingCredentialRefs` above.
    */
   readonly failedOutboxRows?: () => Promise<number>;
+  /**
+   * The rows themselves, for the health view's outbox list (S34.1) — a count
+   * names no row to act on. Optional for the same reason `failedOutboxRows`
+   * is: a surfaces server assembled without a notifier reports an honest
+   * empty list.
+   */
+  readonly listFailedOutbox?: () => Promise<readonly OutboxRow[]>;
+  readonly clearFailedOutbox?: (id: OutboxRowId, actor: ActorRef) => Promise<Outcome<void, NotifierError>>;
 }
 
 /** The three fields `10-design.md` requires of each row in the parked view. */
@@ -201,6 +213,49 @@ function resolverActorFor(session: Session): ActorRef {
   return session.actorRef;
 }
 
+function operatorActorFor(session: OperatorSession): ActorRef {
+  return { kind: 'operator', subject: session.subject, clientId: null, grantId: null };
+}
+
+/**
+ * The four routes this section shares with the health and parked-operations
+ * views (S34) accept either credential rather than only `bearer`: a script
+ * still authenticates with an operator-api token exactly as before, and the
+ * console now authenticates with its own session cookie, matching how every
+ * other console view reaches its data. `Authorization` decides which branch
+ * runs — a request carrying no bearer header falls to the cookie session,
+ * which is what `requireSession` itself checks. No capability gate applies
+ * on the cookie branch, the same as every other cookie route: an
+ * authenticated operator is not scoped by `OperatorScope`.
+ */
+async function requireBearerOrCookieSession(
+  deps: Pick<SurfacesDependencies, 'authorization' | 'identity' | 'sessionAbsoluteSeconds'>,
+  req: IncomingMessage,
+  res: ServerResponse,
+  requiredBearerCapability: CapabilityName | null,
+): Promise<ActorRef | null> {
+  const header = req.headers.authorization;
+  if (header && header.startsWith('Bearer ')) {
+    const session = await requireBearerSession(deps, req, res, requiredBearerCapability);
+    return session ? resolverActorFor(session) : null;
+  }
+  const session = await requireSession(deps, req, res);
+  return session ? operatorActorFor(session) : null;
+}
+
+/**
+ * A bearer credential carries no ambient cookie for a forged cross-site
+ * request to reuse, so CSRF does not apply to it — this only checks the
+ * double-submit token when `requireBearerOrCookieSession` above took the
+ * cookie branch, mirroring `declaration-routes.ts`'s `requireCsrf`.
+ */
+function requireCsrfUnlessBearer(req: IncomingMessage, res: ServerResponse): boolean {
+  if (req.headers.authorization?.startsWith('Bearer ')) return true;
+  if (csrfOk(req)) return true;
+  sendJson(res, 403, { error: 'csrf-check-failed' });
+  return false;
+}
+
 /**
  * Every prefix an API route family above claims, so the console's SPA
  * fallback (below) never answers for one of them. Without this, a typo'd or
@@ -223,6 +278,7 @@ const RESERVED_API_PATHS: readonly RegExp[] = [
   /^\/version$/,
   /^\/parked-operations(\/|$)/,
   /^\/failing-credentials\//,
+  /^\/notifier\//,
   /^\/health$/,
   /^\/audit$/,
 ];
@@ -306,8 +362,9 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
   // operator can see which repository, which tool, and why, without host
   // access. Authenticated, like every route but `/healthz`: a parked
   // operation names a declaration and a tool, which is operator data.
+  // `bearer or cookie` since S34 — the console's own parked-operations view.
   if (req.method === 'GET' && url.pathname === '/parked-operations') {
-    if (!(await requireBearerSession(deps, req, res, 'repo.read'))) return;
+    if (!(await requireBearerOrCookieSession(deps, req, res, 'repo.read'))) return;
     const parked = deps.parkedOperations ? await deps.parkedOperations() : [];
     const operations = [];
     for (const entry of parked) {
@@ -330,38 +387,69 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
   // A failing credential's second way out. The first — replacing the secret in
   // the mount — needs no route at all, which is the point of resolving at
   // point of use; this is the one for a mark left by a fault that has since
-  // been fixed somewhere other than the file.
+  // been fixed somewhere other than the file. `bearer or cookie` since S34 —
+  // the health view's own clear button.
   const clearCredentialMatch = /^\/failing-credentials\/([^/]+)\/([^/]+)\/clear$/.exec(url.pathname);
   if (req.method === 'POST' && clearCredentialMatch) {
-    if (!(await requireBearerSession(deps, req, res, null))) return;
+    const actorRef = await requireBearerOrCookieSession(deps, req, res, null);
+    if (!actorRef) return;
+    if (!requireCsrfUnlessBearer(req, res)) return;
     if (!deps.clearFailingCredential) {
       sendJson(res, 503, { error: 'unavailable', summary: 'no credential resolver is wired into this server' });
       return;
     }
     const ref = decodeURIComponent(clearCredentialMatch[1]!) as CredentialRef;
     const declarationId = decodeURIComponent(clearCredentialMatch[2]!) as DeclarationId;
-    await deps.clearFailingCredential(ref, declarationId);
+    await deps.clearFailingCredential(ref, declarationId, actorRef);
     sendJson(res, 200, { cleared: true, ref, declarationId });
     return;
   }
 
+  // The failed-outbox view's own clear (S34) — `clearFailed` existed as a
+  // `Notifier` member since S11 but had no route until this slice gave the
+  // health view a reason to call it.
+  const clearOutboxMatch = /^\/notifier\/failed\/([^/]+)\/clear$/.exec(url.pathname);
+  if (req.method === 'POST' && clearOutboxMatch) {
+    const actorRef = await requireBearerOrCookieSession(deps, req, res, null);
+    if (!actorRef) return;
+    if (!requireCsrfUnlessBearer(req, res)) return;
+    if (!deps.clearFailedOutbox) {
+      sendJson(res, 503, { error: 'unavailable', summary: 'no notifier is wired into this server' });
+      return;
+    }
+    const id = decodeURIComponent(clearOutboxMatch[1]!) as OutboxRowId;
+    const cleared = await deps.clearFailedOutbox(id, actorRef);
+    sendJson(res, cleared.ok ? 200 : 404, cleared.ok ? { cleared: true, id } : { error: cleared.error.code, summary: cleared.error.summary });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/notifier/failed') {
+    if (!(await requireBearerOrCookieSession(deps, req, res, 'repo.read'))) return;
+    const rows = deps.listFailedOutbox ? await deps.listFailedOutbox() : [];
+    sendJson(res, 200, { rows });
+    return;
+  }
+
   // The way out. A parked entry's other resolution — keeping it parked — is
-  // not calling this, so there is deliberately no route for it.
+  // not calling this, so there is deliberately no route for it. `bearer or
+  // cookie` since S34 — the console's own resolve button.
   const resolveMatch = /^\/parked-operations\/([^/]+)\/resolve$/.exec(url.pathname);
   if (req.method === 'POST' && resolveMatch) {
-    const session = await requireBearerSession(deps, req, res, null);
-    if (!session) return;
+    const actorRef = await requireBearerOrCookieSession(deps, req, res, null);
+    if (!actorRef) return;
+    if (!requireCsrfUnlessBearer(req, res)) return;
     if (!deps.resolveParkedOperation) {
       sendJson(res, 503, { error: 'unavailable', summary: 'no journal is wired into this server' });
       return;
     }
-    const resolved = await deps.resolveParkedOperation(resolveMatch[1] as OperationId, resolverActorFor(session));
+    const resolved = await deps.resolveParkedOperation(resolveMatch[1] as OperationId, actorRef);
     sendJson(res, resolved.ok ? 200 : 409, resolved.ok ? { resolved: true, summary: resolved.summary } : { error: 'not-resolved', summary: resolved.summary });
     return;
   }
 
+  // `bearer or cookie` since S34 — the console's own health view.
   if (req.method === 'GET' && url.pathname === '/health') {
-    if (!(await requireBearerSession(deps, req, res, 'repo.read'))) return;
+    if (!(await requireBearerOrCookieSession(deps, req, res, 'repo.read'))) return;
     const auditChain = await deps.auditChain();
     const parked = deps.parkedOperations ? await deps.parkedOperations() : [];
     const report: HealthReport = {

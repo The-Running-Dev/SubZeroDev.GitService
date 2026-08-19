@@ -127,8 +127,12 @@ test('S13.2 — a bearer route rejects a cookie presented with no Authorization 
   await withVolumeAsync(async (volume) => {
     await withServer(volume, async (baseUrl) => {
       const auth = await enrolAndLogin(baseUrl);
-      const response = await fetch(`${baseUrl}/health`, { headers: { Cookie: auth.sessionCookieHeader } });
-      assert.equal(response.status, 401, 'a console session cookie alone does not authenticate a bearer route');
+      // `/version`, not `/health`: S34 made `/health` accept either credential
+      // for the console's own health view (`20-contract.md` § the HTTP API
+      // route table, `bearer or cookie`), so it no longer demonstrates this —
+      // `/version` still accepts bearer only.
+      const response = await fetch(`${baseUrl}/version`, { headers: { Cookie: auth.sessionCookieHeader } });
+      assert.equal(response.status, 401, 'a console session cookie alone does not authenticate a bearer-only route');
     });
   });
 });

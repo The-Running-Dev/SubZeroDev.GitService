@@ -10,6 +10,7 @@ import type { JsonValue } from '../contract/json.ts';
 import { retentionCutoff, toRetentionReport, type RetentionReport } from '../shared/retention.ts';
 import type { NotificationRequest } from '../journal/types.ts';
 import type { StoreTransaction } from '../store/structured-store.ts';
+import type { Audit } from '../audit/audit.ts';
 import { notifierError, type NotifierError } from './errors.ts';
 import type { DeliveryReport, OutboxRow, OutboxRowStatus } from './types.ts';
 
@@ -27,6 +28,14 @@ export interface NotifierDependencies {
   readonly clock: Clock;
   /** `DeploymentConfig.notifierWebhook` — `null` means no transport is configured. */
   readonly webhookUrl: HttpsUrl | null;
+  /**
+   * `clearFailed`'s audit record (S34) — the same `Audit` instance every
+   * other L1 module writes through. Optional, defaulting to a no-op, so
+   * every test constructing a `Notifier` for delivery behaviour it does not
+   * touch `clearFailed` at all — the large majority — need not also wire one
+   * in, the same reasoning `deliverFn`/`sleepFn` below are optional for.
+   */
+  readonly audit?: Pick<Audit, 'append'>;
   /** Injected for tests. Defaults to a real `fetch` call. */
   readonly deliverFn?: (url: string, body: string, signal: AbortSignal) => Promise<{ readonly ok: boolean; readonly status: number }>;
   /** Injected for tests, so backoff does not really sleep. */
@@ -138,6 +147,7 @@ function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): DbOutcome<T
  */
 export function createNotifier(deps: NotifierDependencies): Notifier {
   const { volumeRoot, clock, webhookUrl } = deps;
+  const audit = deps.audit ?? { append: async () => ({ appended: true as const, sequence: -1 }) };
   const deliverFn = deps.deliverFn ?? realDeliver;
   const sleepFn = deps.sleepFn ?? realSleep;
   const maxAttempts = deps.maxAttempts ?? MAX_ATTEMPTS_DEFAULT;
@@ -478,18 +488,20 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
       if (!cleared.ok) {
         return err(notifierError({ code: 'delivery-failed', status: null, attempts: 0 }, `outbox row '${id}' could not be cleared: ${cleared.reason}`));
       }
-      // `actor` is recorded rather than discarded, because resetting a row
-      // that had already reached a terminal decision is an operator judgement
-      // and someone will later ask who made it.
-      //
-      // **This is a log line, not an audit record, and that is a shortfall
-      // rather than a design.** A durable, hash-chained record needs an
-      // `AuditRecordBody` form for it, and none of the seven existing forms
-      // describes an operator clearing an outbox row — adding one is a
-      // contract amendment. This member has no HTTP route and no production
-      // caller yet, so the amendment belongs with whichever slice gives it
-      // one, alongside the route's own authorization.
-      console.info(`notifier: outbox row '${id}' cleared back to pending by ${actor.kind}:${actor.subject}`);
+      // Audited after the write-back is confirmed, not before: an append
+      // that ran ahead of a clear that then failed would record a clearing
+      // that never happened on disk.
+      await audit.append({
+        at: clock.now(),
+        operationId: null,
+        declarationId: null,
+        generation: null,
+        tool: null,
+        actorRef: actor,
+        context: 'normal',
+        form: 'identity-event',
+        event: 'outbox-row-cleared',
+      });
       return ok(undefined);
     },
 

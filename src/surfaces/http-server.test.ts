@@ -3,12 +3,15 @@ import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import type { ObservedGitState } from '../clone/types.ts';
 import type { OperationJournalEntry } from '../journal/types.ts';
-import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './http-server.ts';
+import { createSurfacesServer, NO_CONSOLE_FINGERPRINT, type SurfacesDependencies } from './http-server.ts';
 import { createMcpRoutesState } from './mcp-routes.ts';
 import type { GitSha, Sha256Hex } from '../shared/brands.ts';
 import type { AuditChainState } from '../audit/types.ts';
 import type { Audit } from '../audit/audit.ts';
 import { createStubOperatorIdentity } from '../operator-identity/testing/stub-operator-identity.ts';
+import type { OperatorIdentity, OperatorSession } from '../operator-identity/operator-identity.ts';
+import { ok, err } from '../shared/outcome.ts';
+import { operatorIdentityError } from '../operator-identity/errors.ts';
 import { createStubDeclarations } from '../declarations/testing/stub-declarations.ts';
 import { createStubCloneStore } from '../clone/testing/stub-clone-store.ts';
 import { createStubDispatchPipeline } from '../dispatch/testing/stub-dispatch-pipeline.ts';
@@ -20,6 +23,44 @@ const COMMIT_SHA = '0'.repeat(40) as GitSha;
 const CONTRACT_FINGERPRINT = '1'.repeat(64) as Sha256Hex;
 const TOKEN = 'test-operator-token';
 const AUTHORIZATION = createStubAuthorization(new Map([[TOKEN, 'operator-api' as never]]));
+
+/**
+ * S34 — the four routes this file also exercises over a cookie session
+ * (`/health`, `/parked-operations`, its `/resolve`, `/failing-credentials`
+ * and `/notifier/failed*`) need a working cookie, unlike `createStubOperatorIdentity`
+ * above, which always answers `session-unknown` — honest for the routes this
+ * file exercised before S34, none of which ever presented one.
+ */
+const COOKIE_SESSION_ID = 'test-cookie-session' as never;
+const COOKIE_SUBJECT = 'cookie-operator' as never;
+const CSRF_TOKEN = 'test-csrf-token';
+const COOKIE_SESSION: OperatorSession = {
+  id: COOKIE_SESSION_ID,
+  subject: COOKIE_SUBJECT,
+  createdAt: '2026-01-01T00:00:00.000Z' as never,
+  lastSeenAt: '2026-01-01T00:00:00.000Z' as never,
+  idleExpiresAt: '2099-01-01T00:00:00.000Z' as never,
+  absoluteExpiresAt: '2099-01-01T00:00:00.000Z' as never,
+  revokedAt: null,
+  totpReenrolRequired: false,
+};
+
+function createCookieOperatorIdentity(): OperatorIdentity {
+  const stub = createStubOperatorIdentity();
+  return {
+    ...stub,
+    async touch(id) {
+      return id === COOKIE_SESSION_ID ? ok(COOKIE_SESSION) : err(operatorIdentityError({ code: 'session-unknown' }, 'no such test session'));
+    },
+  };
+}
+
+/** Cookie + CSRF headers a browser would send once signed in — `origin` must equal the request's own `baseUrl` (`console-auth-routes.ts`'s `originOk`). */
+function cookieHeaders(origin: string, withCsrfToken: boolean): Record<string, string> {
+  const headers: Record<string, string> = { Cookie: `szg_session=${COOKIE_SESSION_ID}; szg_csrf=${CSRF_TOKEN}`, Origin: origin };
+  if (withCsrfToken) headers['X-CSRF-Token'] = CSRF_TOKEN;
+  return headers;
+}
 
 /** This file exercises every route but `/audit` itself (`audit-routes.test.ts` owns that); the routes here only need `audit` present to satisfy the dependency shape. */
 const STUB_AUDIT: Audit = {
@@ -49,6 +90,10 @@ interface ServerOptions {
   readonly resolve?: (operationId: string) => Promise<{ readonly ok: boolean; readonly summary: string }>;
   readonly failedOutboxRows?: number;
   readonly authorization?: Authorization;
+  readonly identity?: OperatorIdentity;
+  readonly clearFailingCredential?: SurfacesDependencies['clearFailingCredential'];
+  readonly listFailedOutbox?: SurfacesDependencies['listFailedOutbox'];
+  readonly clearFailedOutbox?: SurfacesDependencies['clearFailedOutbox'];
 }
 
 async function withServer<T>(options: ServerOptions, fn: (baseUrl: string) => Promise<T>): Promise<T> {
@@ -65,7 +110,10 @@ async function withServer<T>(options: ServerOptions, fn: (baseUrl: string) => Pr
     observeGitState: async () => options.observed ?? null,
     ...(options.resolve ? { resolveParkedOperation: async (operationId: string) => options.resolve!(operationId) } : {}),
     ...(options.failedOutboxRows !== undefined ? { failedOutboxRows: async () => options.failedOutboxRows! } : {}),
-    identity: createStubOperatorIdentity(),
+    ...(options.clearFailingCredential ? { clearFailingCredential: options.clearFailingCredential } : {}),
+    ...(options.listFailedOutbox ? { listFailedOutbox: options.listFailedOutbox } : {}),
+    ...(options.clearFailedOutbox ? { clearFailedOutbox: options.clearFailedOutbox } : {}),
+    identity: options.identity ?? createStubOperatorIdentity(),
     sessionAbsoluteSeconds: 43_200,
     declarations: createStubDeclarations(),
     cloneStore: createStubCloneStore(),
@@ -376,6 +424,130 @@ test('resolving an operation that is not parked answers 409 rather than reportin
       assert.equal(response.status, 409);
       const body = (await response.json()) as { summary: string };
       assert.match(body.summary, /no parked operation/);
+    },
+  );
+});
+
+// --- S34 — `/health`, `/parked-operations*` and `/failing-credentials/.../clear` accept a cookie session too ---
+
+test('S34 — /health and /parked-operations answer 200 for a console session cookie, not only a bearer token', async () => {
+  await withServer({ identity: createCookieOperatorIdentity() }, async (baseUrl) => {
+    const health = await fetch(`${baseUrl}/health`, { headers: cookieHeaders(baseUrl, false) });
+    assert.equal(health.status, 200);
+
+    const parked = await fetch(`${baseUrl}/parked-operations`, { headers: cookieHeaders(baseUrl, false) });
+    assert.equal(parked.status, 200);
+  });
+});
+
+test('S34 — a mutating cookie request without the double-submit token is refused, exactly as every other cookie route refuses it', async () => {
+  const resolved: string[] = [];
+  await withServer(
+    {
+      identity: createCookieOperatorIdentity(),
+      parked: [PARKED_ENTRY],
+      resolve: async (operationId) => {
+        resolved.push(operationId);
+        return { ok: true, summary: `operation ${operationId} settled and 'repo-a' returned to ready` };
+      },
+    },
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/parked-operations/op-parked/resolve`, {
+        method: 'POST',
+        headers: cookieHeaders(baseUrl, false),
+      });
+      assert.equal(response.status, 403);
+      assert.deepEqual(resolved, [], 'the CSRF check must fail before the resolution is ever reached');
+    },
+  );
+});
+
+test('S34 — resolving a parked operation over a cookie session, with the double-submit token, works and audits the operator', async () => {
+  const resolvedActors: unknown[] = [];
+  await withServer(
+    {
+      identity: createCookieOperatorIdentity(),
+      parked: [PARKED_ENTRY],
+      resolve: async (operationId) => {
+        resolvedActors.push(operationId);
+        return { ok: true, summary: `operation ${operationId} settled and 'repo-a' returned to ready` };
+      },
+    },
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/parked-operations/op-parked/resolve`, {
+        method: 'POST',
+        headers: cookieHeaders(baseUrl, true),
+      });
+      assert.equal(response.status, 200);
+      assert.deepEqual(resolvedActors, ['op-parked']);
+    },
+  );
+});
+
+test('S34 — a bearer credential on these four routes still needs no CSRF token, since it carries no ambient cookie', async () => {
+  let cleared: readonly unknown[] = [];
+  await withServer(
+    {
+      clearFailingCredential: async (ref, declarationId, actor) => {
+        cleared = [ref, declarationId, actor];
+      },
+    },
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/failing-credentials/some-ref/repo-a/clear`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      assert.equal(response.status, 200);
+      assert.equal(cleared.length, 3);
+    },
+  );
+});
+
+test('S34.2 — clearing a failing credential over a cookie session passes the operator as actor', async () => {
+  let cleared: readonly unknown[] = [];
+  await withServer(
+    {
+      identity: createCookieOperatorIdentity(),
+      clearFailingCredential: async (ref, declarationId, actor) => {
+        cleared = [ref, declarationId, actor];
+      },
+    },
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/failing-credentials/some-ref/repo-a/clear`, {
+        method: 'POST',
+        headers: cookieHeaders(baseUrl, true),
+      });
+      assert.equal(response.status, 200);
+      assert.equal(cleared.length, 3);
+      assert.equal((cleared[2] as { subject: string }).subject, COOKIE_SUBJECT);
+    },
+  );
+});
+
+test('S34.1/S34.3 — /notifier/failed lists rows and clears one, over a cookie session', async () => {
+  const rows = [{ id: 'row-1', severity: 'attention', declarationId: null, payload: {}, status: 'failed', attempts: 3, lastAttemptAt: null, lastError: 'boom', createdAt: '2026-01-01T00:00:00.000Z', deliveredAt: null }];
+  let clearedId: string | null = null;
+  await withServer(
+    {
+      identity: createCookieOperatorIdentity(),
+      listFailedOutbox: async () => rows as never,
+      clearFailedOutbox: async (id) => {
+        clearedId = id as unknown as string;
+        return { ok: true, value: undefined };
+      },
+    },
+    async (baseUrl) => {
+      const unauthenticated = await fetch(`${baseUrl}/notifier/failed`);
+      assert.equal(unauthenticated.status, 401);
+
+      const listed = await fetch(`${baseUrl}/notifier/failed`, { headers: cookieHeaders(baseUrl, false) });
+      assert.equal(listed.status, 200);
+      const body = (await listed.json()) as { rows: readonly unknown[] };
+      assert.deepEqual(body.rows, rows);
+
+      const cleared = await fetch(`${baseUrl}/notifier/failed/row-1/clear`, { method: 'POST', headers: cookieHeaders(baseUrl, true) });
+      assert.equal(cleared.status, 200);
+      assert.equal(clearedId, 'row-1');
     },
   );
 });
