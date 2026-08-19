@@ -6,8 +6,6 @@ interface Props {
   readonly onBack: () => void;
 }
 
-const COMPARED_FIELDS = ['branch', 'headSha', 'upstreamSha', 'indexDigest', 'worktreeDigest'] as const;
-
 function DiffTable({ entry }: { readonly entry: ParkedOperationDto }) {
   if (entry.observed === null) {
     return (
@@ -17,6 +15,10 @@ function DiffTable({ entry }: { readonly entry: ParkedOperationDto }) {
     );
   }
   const movedFields = new Set((entry.diff ?? []).map((d) => d.field));
+  // The compared fields are exactly `preState`'s own keys — deriving them
+  // here instead of a second hardcoded list keeps this table in step with
+  // whatever fields the server actually compares.
+  const comparedFields = Object.keys(entry.preState);
   return (
     <table data-testid={`parked-diff-${entry.operationId}`}>
       <thead>
@@ -28,7 +30,7 @@ function DiffTable({ entry }: { readonly entry: ParkedOperationDto }) {
         </tr>
       </thead>
       <tbody>
-        {COMPARED_FIELDS.map((field) => (
+        {comparedFields.map((field) => (
           <tr key={field} data-testid={`parked-diff-row-${entry.operationId}-${field}`}>
             <td>{field}</td>
             <td>{String(entry.preState[field] ?? '—')}</td>

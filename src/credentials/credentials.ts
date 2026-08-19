@@ -5,7 +5,7 @@ import { err, ok, type Outcome } from '../shared/outcome.ts';
 import type { CredentialRef, DeclarationId, EnvVarName, IsoUtcTimestamp, RemoteHost } from '../shared/brands.ts';
 import type { ActorRef } from '../shared/actor.ts';
 import type { Clock } from '../clock/clock.ts';
-import type { Audit } from '../audit/audit.ts';
+import { appendIdentityEvent, type Audit } from '../audit/audit.ts';
 import type { CredentialBinding, MutableEnv } from '../exec/exec.ts';
 import { credentialError, type CredentialError } from './errors.ts';
 import type { CredentialFailureMark } from './types.ts';
@@ -207,21 +207,17 @@ export function createCredentialResolver(deps: CredentialResolverDependencies): 
   }
 
   async function clearFailing(ref: CredentialRef, declarationId: DeclarationId, actor: ActorRef | null): Promise<void> {
-    withDb(volumeRoot, (db) => {
-      db.prepare('DELETE FROM credential_failure_mark WHERE credential_ref = ? AND declaration_id = ?').run(ref as string, declarationId as string);
-    });
-    if (actor) {
-      await audit.append({
-        at: clock.now(),
-        operationId: null,
-        declarationId,
-        generation: null,
-        tool: null,
-        actorRef: actor,
-        context: 'normal',
-        form: 'identity-event',
-        event: 'failing-credential-cleared',
-      });
+    const cleared = withDb(volumeRoot, (db) =>
+      Number(
+        db.prepare('DELETE FROM credential_failure_mark WHERE credential_ref = ? AND declaration_id = ?').run(ref as string, declarationId as string)
+          .changes,
+      ),
+    );
+    // Only a mark that actually existed is worth an audit record — otherwise
+    // a stray/duplicate clear would permanently record clearing something
+    // that was never marked failing.
+    if (actor && cleared.ok && cleared.value > 0) {
+      await appendIdentityEvent(audit, clock, 'failing-credential-cleared', actor, declarationId);
     }
   }
 

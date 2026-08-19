@@ -1,23 +1,10 @@
 import { useEffect, useState } from 'react';
+import { ActionButton } from './ActionButton.tsx';
 import { api, loadResource, type GrantsView, type OAuthClientRecord } from './api.ts';
 
 interface Props {
   readonly onSignedOut: () => void;
   readonly onBack: () => void;
-}
-
-interface RevokeButtonProps {
-  readonly testId: string;
-  readonly disabled: boolean;
-  readonly onRevoke: () => void;
-}
-
-function RevokeButton({ testId, disabled, onRevoke }: RevokeButtonProps) {
-  return (
-    <button type="button" data-testid={testId} disabled={disabled} onClick={onRevoke}>
-      Revoke
-    </button>
-  );
 }
 
 interface ClientRow {
@@ -127,10 +114,11 @@ export function Grants({ onSignedOut, onBack }: Props) {
                 <td>{lastUsedAt ?? 'never'}</td>
                 <td data-testid={`client-revoked-${client.clientId}`}>{client.revokedAt ?? 'no'}</td>
                 <td>
-                  <RevokeButton
+                  <ActionButton
                     testId={`revoke-client-${client.clientId}`}
                     disabled={client.revokedAt !== null || pending === `client-${client.clientId}`}
-                    onRevoke={() => revoke(`client-${client.clientId}`, `/clients/${encodeURIComponent(client.clientId)}/revoke`)}
+                    label="Revoke"
+                    onAction={() => revoke(`client-${client.clientId}`, `/clients/${encodeURIComponent(client.clientId)}/revoke`)}
                   />
                 </td>
               </tr>
@@ -165,10 +153,11 @@ export function Grants({ onSignedOut, onBack }: Props) {
                 <td>{grant.lastUsedAt ?? 'never'}</td>
                 <td>{grant.revokedAt ?? 'no'}</td>
                 <td>
-                  <RevokeButton
+                  <ActionButton
                     testId={`revoke-grant-${grant.grantId}`}
                     disabled={grant.revokedAt !== null || pending === `grant-${grant.grantId}`}
-                    onRevoke={() => revoke(`grant-${grant.grantId}`, `/grants/${encodeURIComponent(grant.grantId)}/revoke`)}
+                    label="Revoke"
+                    onAction={() => revoke(`grant-${grant.grantId}`, `/grants/${encodeURIComponent(grant.grantId)}/revoke`)}
                   />
                 </td>
               </tr>
@@ -199,10 +188,11 @@ export function Grants({ onSignedOut, onBack }: Props) {
                 <td>{grant.lastUsedAt ?? 'never'}</td>
                 <td>{grant.revokedAt ?? 'no'}</td>
                 <td>
-                  <RevokeButton
+                  <ActionButton
                     testId={`revoke-grant-${grant.grantId}`}
                     disabled={grant.revokedAt !== null || pending === `grant-${grant.grantId}`}
-                    onRevoke={() => revoke(`grant-${grant.grantId}`, `/grants/${encodeURIComponent(grant.grantId)}/revoke`)}
+                    label="Revoke"
+                    onAction={() => revoke(`grant-${grant.grantId}`, `/grants/${encodeURIComponent(grant.grantId)}/revoke`)}
                   />
                 </td>
               </tr>
@@ -231,10 +221,11 @@ export function Grants({ onSignedOut, onBack }: Props) {
                 <td>{session.lastSeenAt}</td>
                 <td>{session.revokedAt ?? 'no'}</td>
                 <td>
-                  <RevokeButton
+                  <ActionButton
                     testId={`revoke-operator-session-${session.ref}`}
                     disabled={session.revokedAt !== null || pending === `session-${session.ref}`}
-                    onRevoke={() => revoke(`session-${session.ref}`, `/operator-sessions/${encodeURIComponent(session.ref)}/revoke`)}
+                    label="Revoke"
+                    onAction={() => revoke(`session-${session.ref}`, `/operator-sessions/${encodeURIComponent(session.ref)}/revoke`)}
                   />
                 </td>
               </tr>

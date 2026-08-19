@@ -407,24 +407,35 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
 
   // The failed-outbox view's own clear (S34) — `clearFailed` existed as a
   // `Notifier` member since S11 but had no route until this slice gave the
-  // health view a reason to call it.
+  // health view a reason to call it. Cookie only, unlike its `/health` and
+  // `/parked-operations` siblings: this route is new with S34, so there is no
+  // pre-existing operator-api script it needs to keep authenticating.
   const clearOutboxMatch = /^\/notifier\/failed\/([^/]+)\/clear$/.exec(url.pathname);
   if (req.method === 'POST' && clearOutboxMatch) {
-    const actorRef = await requireBearerOrCookieSession(deps, req, res, null);
-    if (!actorRef) return;
-    if (!requireCsrfUnlessBearer(req, res)) return;
+    const session = await requireSession(deps, req, res);
+    if (!session) return;
+    if (!csrfOk(req)) {
+      sendJson(res, 403, { error: 'csrf-check-failed' });
+      return;
+    }
     if (!deps.clearFailedOutbox) {
       sendJson(res, 503, { error: 'unavailable', summary: 'no notifier is wired into this server' });
       return;
     }
     const id = decodeURIComponent(clearOutboxMatch[1]!) as OutboxRowId;
-    const cleared = await deps.clearFailedOutbox(id, actorRef);
-    sendJson(res, cleared.ok ? 200 : 404, cleared.ok ? { cleared: true, id } : { error: cleared.error.code, summary: cleared.error.summary });
+    const cleared = await deps.clearFailedOutbox(id, operatorActorFor(session));
+    if (cleared.ok) {
+      sendJson(res, 200, { cleared: true, id });
+      return;
+    }
+    const status = cleared.error.resultKind === 'infrastructure' ? 503 : 404;
+    sendJson(res, status, { error: cleared.error.code, summary: cleared.error.summary });
     return;
   }
 
+  // Cookie only — see the clear route above for why.
   if (req.method === 'GET' && url.pathname === '/notifier/failed') {
-    if (!(await requireBearerOrCookieSession(deps, req, res, 'repo.read'))) return;
+    if (!(await requireSession(deps, req, res))) return;
     const rows = deps.listFailedOutbox ? await deps.listFailedOutbox() : [];
     sendJson(res, 200, { rows });
     return;

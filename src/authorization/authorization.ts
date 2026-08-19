@@ -8,7 +8,7 @@ import type { BearerToken, HttpsUrl } from '../shared/brands.ts';
 import type { ActorRef } from '../shared/actor.ts';
 import type { Session } from '../shared/session.ts';
 import type { Clock } from '../clock/clock.ts';
-import type { Audit } from '../audit/audit.ts';
+import { appendIdentityEvent, type Audit } from '../audit/audit.ts';
 import type { IdentityEvent } from '../audit/types.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import { MCP_PROFILE, type Declaration } from '../declarations/types.ts';
@@ -264,17 +264,7 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
    * `operator-identity.ts` already uses for its own identity events.
    */
   async function auditCredentialEvent(event: IdentityEvent, actor: ActorRef): Promise<void> {
-    await deps.audit.append({
-      at: deps.clock.now(),
-      operationId: null,
-      declarationId: null,
-      generation: null,
-      tool: null,
-      actorRef: actor,
-      context: 'normal',
-      form: 'identity-event',
-      event,
-    });
+    await appendIdentityEvent(deps.audit, deps.clock, event, actor);
   }
 
   return {

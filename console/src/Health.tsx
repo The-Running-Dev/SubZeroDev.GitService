@@ -1,23 +1,10 @@
 import { useEffect, useState } from 'react';
+import { ActionButton } from './ActionButton.tsx';
 import { api, loadResource, type FailedOutboxDto, type HealthReportDto, type OutboxRowDto } from './api.ts';
 
 interface Props {
   readonly onSignedOut: () => void;
   readonly onBack: () => void;
-}
-
-interface ClearButtonProps {
-  readonly testId: string;
-  readonly disabled: boolean;
-  readonly onClear: () => void;
-}
-
-function ClearButton({ testId, disabled, onClear }: ClearButtonProps) {
-  return (
-    <button type="button" data-testid={testId} disabled={disabled} onClick={onClear}>
-      Clear
-    </button>
-  );
 }
 
 /**
@@ -171,10 +158,11 @@ export function Health({ onSignedOut, onBack }: Props) {
                 <td>{mark.reason}</td>
                 <td>{mark.markedAt}</td>
                 <td>
-                  <ClearButton
+                  <ActionButton
                     testId={`clear-credential-${mark.ref}-${mark.declarationId}`}
                     disabled={pending === `credential-${mark.ref}-${mark.declarationId}`}
-                    onClear={() => clearCredential(mark.ref, mark.declarationId)}
+                    label="Clear"
+                    onAction={() => clearCredential(mark.ref, mark.declarationId)}
                   />
                 </td>
               </tr>
@@ -212,7 +200,7 @@ export function Health({ onSignedOut, onBack }: Props) {
                 <td>{row.lastError ?? '—'}</td>
                 <td>{row.createdAt}</td>
                 <td>
-                  <ClearButton testId={`clear-outbox-${row.id}`} disabled={pending === `outbox-${row.id}`} onClear={() => clearOutboxRow(row)} />
+                  <ActionButton testId={`clear-outbox-${row.id}`} disabled={pending === `outbox-${row.id}`} label="Clear" onAction={() => clearOutboxRow(row)} />
                 </td>
               </tr>
             ))}
