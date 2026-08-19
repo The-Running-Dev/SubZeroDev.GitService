@@ -550,18 +550,38 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
       const now = deps.clock.now();
       const result = withDb(deps.volumeRoot, (db) => {
         const rows = (kind ? db.prepare('SELECT * FROM "grant" WHERE kind = ? ORDER BY created_at ASC').all(kind) : db.prepare('SELECT * FROM "grant" ORDER BY created_at ASC').all()) as unknown as GrantRow[];
+
+        // Batched rather than per-row: this view drives the console's own
+        // bulk-revocation screen, which reloads it after every single
+        // revoke, so a per-row client lookup and token count here turns an
+        // N-row revocation session into O(N²) queries.
+        const clientIds = Array.from(new Set(rows.map((row) => row.client_id).filter((id): id is string => id !== null)));
+        const clientsById = new Map<string, ClientRow>();
+        if (clientIds.length > 0) {
+          const placeholders = clientIds.map(() => '?').join(', ');
+          const clientRows = db.prepare(`SELECT * FROM oauth_client WHERE client_id IN (${placeholders})`).all(...clientIds) as unknown as ClientRow[];
+          for (const clientRow of clientRows) clientsById.set(clientRow.client_id, clientRow);
+        }
+
+        // "Active" has to mean the same thing the verification path means by
+        // it, or the view cannot be used to confirm a revocation took
+        // effect: not revoked, not expired, and under a grant that is
+        // itself still live. `expires_at` compares lexicographically
+        // because every writer of it goes through `Date.toISOString()`.
+        const liveGrantIds = rows.filter((row) => row.revoked_at === null).map((row) => row.grant_id);
+        const activeTokensByGrantId = new Map<string, number>();
+        if (liveGrantIds.length > 0) {
+          const placeholders = liveGrantIds.map(() => '?').join(', ');
+          const countRows = db
+            .prepare(`SELECT grant_id, COUNT(*) AS n FROM token WHERE grant_id IN (${placeholders}) AND revoked_at IS NULL AND expires_at > ? GROUP BY grant_id`)
+            .all(...liveGrantIds, now) as unknown as { grant_id: string; n: number }[];
+          for (const countRow of countRows) activeTokensByGrantId.set(countRow.grant_id, countRow.n);
+        }
+
         return rows.map((row): GrantView => {
           const grant = toGrant(row);
-          const clientRow = grant.clientId ? (db.prepare('SELECT * FROM oauth_client WHERE client_id = ?').get(grant.clientId) as ClientRow | undefined) : undefined;
-          // "Active" has to mean the same thing the verification path means by
-          // it, or the view cannot be used to confirm a revocation took
-          // effect: not revoked, not expired, and under a grant that is
-          // itself still live. `expires_at` compares lexicographically
-          // because every writer of it goes through `Date.toISOString()`.
-          const activeTokens =
-            row.revoked_at !== null
-              ? 0
-              : (db.prepare('SELECT COUNT(*) AS n FROM token WHERE grant_id = ? AND revoked_at IS NULL AND expires_at > ?').get(row.grant_id, now) as { n: number }).n;
+          const clientRow = grant.clientId ? clientsById.get(grant.clientId) : undefined;
+          const activeTokens = row.revoked_at !== null ? 0 : (activeTokensByGrantId.get(row.grant_id) ?? 0);
           return {
             grant,
             client: clientRow ? toClient(clientRow) : null,

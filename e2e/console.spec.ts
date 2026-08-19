@@ -1,14 +1,8 @@
 import { test, expect } from '@playwright/test';
-import { createHash, randomBytes } from 'node:crypto';
 import { writeBreakGlassToken } from '../src/operator-identity/operator-identity.ts';
 import { base32Decode, currentTotpCode } from '../src/operator-identity/totp.ts';
-import { E2E_PASSWORD, E2E_PROVISIONING_SECRET, E2E_SUBJECT, E2E_VOLUME_ROOT } from './constants.ts';
-
-function pkce(): { verifier: string; challenge: string } {
-  const verifier = randomBytes(48).toString('base64url');
-  const challenge = createHash('sha256').update(verifier).digest('base64url');
-  return { verifier, challenge };
-}
+import { pkce, registerClient, exchangeCodeForTokens } from '../src/surfaces/testing/oauth-test-flow.ts';
+import { E2E_BASE_URL, E2E_PASSWORD, E2E_PROVISIONING_SECRET, E2E_SUBJECT, E2E_VOLUME_ROOT } from './constants.ts';
 
 /**
  * S18.13 — enrolment, all three sign-in paths and the landing view, driven
@@ -202,24 +196,18 @@ test('S18.12/S18.13/S18.10/S18.2/S31.4/S31.5/S32.1/S32.2/S32.3/S32.4 — enrolme
   await expect(liveSessionRows).toHaveCount(1);
 
   // Register a real MCP client and drive it through the real PKCE
-  // authorization-code flow (`mcp-routes.test.ts`'s own `fullOAuthFlow`,
-  // reused over the browser's own `fetch` and session cookie rather than a
-  // second HTTP client) to establish a genuinely live MCP session — S32.4
+  // authorization-code flow to establish a genuinely live MCP session — S32.4
   // asks for a registered client and a live MCP session, not a stub.
+  // Registration and the token exchange below need no browser session (they
+  // are unauthenticated per `mcp-routes.ts`), so both run as plain Node-side
+  // calls through the same `oauth-test-flow.ts` helpers `mcp-routes.test.ts`
+  // uses, rather than a second copy of the request shapes driven through
+  // `page.evaluate`. Only the `/oauth/authorize` approval step below carries
+  // the operator's session cookie and stays in-page for that reason.
   const CLIENT_REDIRECT_URI = 'https://client.invalid/callback';
   const { verifier, challenge } = pkce();
 
-  const client = await page.evaluate(
-    async ({ redirectUri }) => {
-      const res = await fetch('/oauth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ redirect_uris: [redirectUri], client_name: 'S32 e2e client' }),
-      });
-      return (await res.json()) as { client_id: string };
-    },
-    { redirectUri: CLIENT_REDIRECT_URI },
-  );
+  const client = await registerClient(E2E_BASE_URL, [CLIENT_REDIRECT_URI], 'S32 e2e client');
   expect(client.client_id).toBeTruthy();
 
   const authorizeUrl = new URL('/oauth/authorize', 'https://placeholder.invalid');
@@ -285,23 +273,9 @@ test('S18.12/S18.13/S18.10/S18.2/S31.4/S31.5/S32.1/S32.2/S32.3/S32.4 — enrolme
   const code = new URL(authorizeLocation!).searchParams.get('code');
   expect(code).toBeTruthy();
 
-  const tokens = await page.evaluate(
-    async ({ clientId, code, verifier, redirectUri }) => {
-      const res = await fetch('/oauth/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          grant_type: 'authorization_code',
-          code: code!,
-          redirect_uri: redirectUri,
-          client_id: clientId,
-          code_verifier: verifier,
-        }).toString(),
-      });
-      return (await res.json()) as { access_token: string };
-    },
-    { clientId: client.client_id, code, verifier, redirectUri: CLIENT_REDIRECT_URI },
-  );
+  const tokenResponse = await exchangeCodeForTokens(E2E_BASE_URL, client.client_id, code!, verifier, CLIENT_REDIRECT_URI);
+  expect(tokenResponse.status, tokenResponse.body).toBe(200);
+  const tokens = JSON.parse(tokenResponse.body) as { access_token: string };
   expect(tokens.access_token).toBeTruthy();
 
   const initialized = await page.evaluate(

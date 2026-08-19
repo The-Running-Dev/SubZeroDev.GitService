@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
@@ -19,6 +19,7 @@ import { success } from '../result/envelope.ts';
 import { createStubCloneStore } from '../clone/testing/stub-clone-store.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './http-server.ts';
 import { createMcpRoutesState } from './mcp-routes.ts';
+import { pkce, registerClient, exchangeCodeForTokens } from './testing/oauth-test-flow.ts';
 import type { GitSha, RemoteHost, Sha256Hex } from '../shared/brands.ts';
 import type { ContractCapabilitySet, DeploymentCeiling } from '../contract/capabilities.ts';
 import type { HttpAdapter } from '../http/http-adapter.ts';
@@ -145,22 +146,7 @@ async function operatorCookie(baseUrl: string): Promise<string> {
   return `szg_session=${session}; szg_csrf=${csrf}`;
 }
 
-function pkce(): { verifier: string; challenge: string } {
-  const verifier = randomBytes(48).toString('base64url');
-  const challenge = createHash('sha256').update(verifier).digest('base64url');
-  return { verifier, challenge };
-}
-
 const CLIENT_REDIRECT_URI = 'https://client.invalid/callback';
-
-async function registerClient(baseUrl: string, redirectUris: readonly string[] = [CLIENT_REDIRECT_URI]): Promise<{ client_id: string }> {
-  const registerResponse = await fetch(`${baseUrl}/oauth/register`, {
-    method: 'POST',
-    body: JSON.stringify({ redirect_uris: redirectUris, client_name: 'test client' }),
-  });
-  assert.equal(registerResponse.status, 201);
-  return (await registerResponse.json()) as { client_id: string };
-}
 
 /**
  * Drives the `/oauth/authorize` `GET` → operator-approval `POST` half of the
@@ -207,27 +193,6 @@ async function obtainAuthorizationCode(
   }
   const location = new URL(approveResponse.headers.get('Location')!);
   return { code: location.searchParams.get('code'), verifier, getStatus: getResponse.status, getBody: html, approveStatus: approveResponse.status };
-}
-
-async function exchangeCodeForTokens(
-  baseUrl: string,
-  clientId: string,
-  code: string,
-  verifier: string,
-  redirectUri: string = CLIENT_REDIRECT_URI,
-): Promise<{ status: number; body: string }> {
-  const tokenResponse = await fetch(`${baseUrl}/oauth/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'authorization_code',
-      code,
-      redirect_uri: redirectUri,
-      client_id: clientId,
-      code_verifier: verifier,
-    }),
-  });
-  return { status: tokenResponse.status, body: await tokenResponse.text() };
 }
 
 /**

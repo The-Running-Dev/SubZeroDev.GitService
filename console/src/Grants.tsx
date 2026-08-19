@@ -1,9 +1,23 @@
 import { useEffect, useState } from 'react';
-import { api, type GrantsView, type OAuthClientRecord } from './api.ts';
+import { api, loadResource, type GrantsView, type OAuthClientRecord } from './api.ts';
 
 interface Props {
   readonly onSignedOut: () => void;
   readonly onBack: () => void;
+}
+
+interface RevokeButtonProps {
+  readonly testId: string;
+  readonly disabled: boolean;
+  readonly onRevoke: () => void;
+}
+
+function RevokeButton({ testId, disabled, onRevoke }: RevokeButtonProps) {
+  return (
+    <button type="button" data-testid={testId} disabled={disabled} onClick={onRevoke}>
+      Revoke
+    </button>
+  );
 }
 
 interface ClientRow {
@@ -43,39 +57,40 @@ export function Grants({ onSignedOut, onBack }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
 
-  async function load(): Promise<void> {
-    const res = await api.get<GrantsView>('/grants');
-    if (!res.ok) {
-      if (res.status === 401) {
-        onSignedOut();
-        return;
-      }
-      setError('could not load grants');
-      return;
-    }
-    setView(res.body);
+  function load(cancelledRef: { readonly current: boolean } = { current: false }): Promise<void> {
+    return loadResource<GrantsView>('/grants', cancelledRef, {
+      onSuccess: setView,
+      onError: (status) => (status === 401 ? onSignedOut() : setError('could not load grants')),
+    });
   }
 
   useEffect(() => {
-    let cancelled = false;
-    load().then(() => {
-      if (cancelled) return;
-    });
+    const cancelledRef = { current: false };
+    load(cancelledRef);
     return () => {
-      cancelled = true;
+      cancelledRef.current = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function revoke(key: string, path: string): Promise<void> {
     setPending(key);
-    const res = await api.post(path);
-    setPending(null);
-    if (!res.ok && res.status === 401) {
-      onSignedOut();
-      return;
+    try {
+      const res = await api.post(path);
+      if (!res.ok) {
+        if (res.status === 401) {
+          onSignedOut();
+          return;
+        }
+        setError('could not revoke');
+        return;
+      }
+      await load();
+    } catch {
+      setError('could not revoke');
+    } finally {
+      setPending(null);
     }
-    await load();
   }
 
   if (error) return <p role="alert">{error}</p>;
@@ -112,14 +127,11 @@ export function Grants({ onSignedOut, onBack }: Props) {
                 <td>{lastUsedAt ?? 'never'}</td>
                 <td data-testid={`client-revoked-${client.clientId}`}>{client.revokedAt ?? 'no'}</td>
                 <td>
-                  <button
-                    type="button"
-                    data-testid={`revoke-client-${client.clientId}`}
+                  <RevokeButton
+                    testId={`revoke-client-${client.clientId}`}
                     disabled={client.revokedAt !== null || pending === `client-${client.clientId}`}
-                    onClick={() => revoke(`client-${client.clientId}`, `/clients/${encodeURIComponent(client.clientId)}/revoke`)}
-                  >
-                    Revoke
-                  </button>
+                    onRevoke={() => revoke(`client-${client.clientId}`, `/clients/${encodeURIComponent(client.clientId)}/revoke`)}
+                  />
                 </td>
               </tr>
             ))}
@@ -136,7 +148,7 @@ export function Grants({ onSignedOut, onBack }: Props) {
               <th>Repository</th>
               <th>Scopes</th>
               <th>Active tokens</th>
-              <th>Live sessions</th>
+              <th>Live sessions (not tracked)</th>
               <th>Last used</th>
               <th>Revoked</th>
               <th />
@@ -153,14 +165,11 @@ export function Grants({ onSignedOut, onBack }: Props) {
                 <td>{grant.lastUsedAt ?? 'never'}</td>
                 <td>{grant.revokedAt ?? 'no'}</td>
                 <td>
-                  <button
-                    type="button"
-                    data-testid={`revoke-grant-${grant.grantId}`}
+                  <RevokeButton
+                    testId={`revoke-grant-${grant.grantId}`}
                     disabled={grant.revokedAt !== null || pending === `grant-${grant.grantId}`}
-                    onClick={() => revoke(`grant-${grant.grantId}`, `/grants/${encodeURIComponent(grant.grantId)}/revoke`)}
-                  >
-                    Revoke
-                  </button>
+                    onRevoke={() => revoke(`grant-${grant.grantId}`, `/grants/${encodeURIComponent(grant.grantId)}/revoke`)}
+                  />
                 </td>
               </tr>
             ))}
@@ -190,14 +199,11 @@ export function Grants({ onSignedOut, onBack }: Props) {
                 <td>{grant.lastUsedAt ?? 'never'}</td>
                 <td>{grant.revokedAt ?? 'no'}</td>
                 <td>
-                  <button
-                    type="button"
-                    data-testid={`revoke-grant-${grant.grantId}`}
+                  <RevokeButton
+                    testId={`revoke-grant-${grant.grantId}`}
                     disabled={grant.revokedAt !== null || pending === `grant-${grant.grantId}`}
-                    onClick={() => revoke(`grant-${grant.grantId}`, `/grants/${encodeURIComponent(grant.grantId)}/revoke`)}
-                  >
-                    Revoke
-                  </button>
+                    onRevoke={() => revoke(`grant-${grant.grantId}`, `/grants/${encodeURIComponent(grant.grantId)}/revoke`)}
+                  />
                 </td>
               </tr>
             ))}
@@ -225,14 +231,11 @@ export function Grants({ onSignedOut, onBack }: Props) {
                 <td>{session.lastSeenAt}</td>
                 <td>{session.revokedAt ?? 'no'}</td>
                 <td>
-                  <button
-                    type="button"
-                    data-testid={`revoke-operator-session-${session.ref}`}
+                  <RevokeButton
+                    testId={`revoke-operator-session-${session.ref}`}
                     disabled={session.revokedAt !== null || pending === `session-${session.ref}`}
-                    onClick={() => revoke(`session-${session.ref}`, `/operator-sessions/${encodeURIComponent(session.ref)}/revoke`)}
-                  >
-                    Revoke
-                  </button>
+                    onRevoke={() => revoke(`session-${session.ref}`, `/operator-sessions/${encodeURIComponent(session.ref)}/revoke`)}
+                  />
                 </td>
               </tr>
             ))}

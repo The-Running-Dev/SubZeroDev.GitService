@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, type DeclarationListRow } from './api.ts';
+import { api, loadResource, type DeclarationListRow } from './api.ts';
 
 const SELECTED_DECLARATION_KEY = 'szg-console-selected-declaration';
 
@@ -21,17 +21,13 @@ export function Landing({ onSignedOut, onNavigateGrants }: Props) {
   const [selected, setSelected] = useState<string | null>(() => localStorage.getItem(SELECTED_DECLARATION_KEY));
 
   useEffect(() => {
-    let cancelled = false;
-    api.get<readonly DeclarationListRow[]>('/declarations').then((res) => {
-      if (cancelled) return;
-      if (!res.ok) {
-        setError('could not load declarations');
-        return;
-      }
-      setRows(res.body);
+    const cancelledRef = { current: false };
+    loadResource<readonly DeclarationListRow[]>('/declarations', cancelledRef, {
+      onSuccess: setRows,
+      onError: () => setError('could not load declarations'),
     });
     return () => {
-      cancelled = true;
+      cancelledRef.current = true;
     };
   }, []);
 
