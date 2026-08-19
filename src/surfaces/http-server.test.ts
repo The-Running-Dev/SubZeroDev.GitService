@@ -192,6 +192,16 @@ test('/version returns the contract fingerprint with a valid credential', async 
   });
 });
 
+test('S19.2 — /version reports the console fingerprint too, distinct from the contract fingerprint', async () => {
+  await withServer({}, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/version`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { contractFingerprint: string; consoleFingerprint: string };
+    assert.equal(body.consoleFingerprint, NO_CONSOLE_FINGERPRINT);
+    assert.notEqual(body.consoleFingerprint, body.contractFingerprint);
+  });
+});
+
 test('/health answers 401 without a credential', async () => {
   await withServer({}, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/health`);

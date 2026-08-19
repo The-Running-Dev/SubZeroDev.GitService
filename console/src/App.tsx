@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { createElement, useEffect, useState } from 'react';
 import { api, type SessionEnvelope } from './api.ts';
 import { Enrol } from './Enrol.tsx';
 import { Login } from './Login.tsx';
@@ -8,8 +8,28 @@ import { Grants } from './Grants.tsx';
 import { Audit } from './Audit.tsx';
 import { Health } from './Health.tsx';
 import { ParkedOperations } from './ParkedOperations.tsx';
+import type { ConsoleViewRegistration } from './view-registry.ts';
 
-type Screen = 'loading' | 'enrol' | 'login' | 'totp-reenrol' | 'landing' | 'grants' | 'audit' | 'health' | 'parked-operations';
+type BuiltinScreen = 'loading' | 'enrol' | 'login' | 'totp-reenrol' | 'landing' | 'grants' | 'audit' | 'health' | 'parked-operations';
+
+/**
+ * A registered view is addressed by id rather than joining the `Screen`
+ * union with one member per view — the union would have to grow every time
+ * a consumer registers a new one, which is exactly the coupling S19.5's "no
+ * registered view names a declaration it belongs to" is designed to avoid
+ * one level up.
+ */
+interface RegisteredViewScreen {
+  readonly kind: 'registered-view';
+  readonly viewId: string;
+  readonly declarationId: string;
+}
+
+type Screen = BuiltinScreen | RegisteredViewScreen;
+
+export interface AppProps {
+  readonly views?: readonly ConsoleViewRegistration[];
+}
 
 /**
  * S18.12's "shows the enrolment screen and no other" without a new
@@ -30,7 +50,7 @@ async function resolveInitialScreen(): Promise<Screen> {
   return 'login';
 }
 
-export function App() {
+export function App({ views = [] }: AppProps) {
   const [screen, setScreen] = useState<Screen>('loading');
 
   useEffect(() => {
@@ -61,13 +81,30 @@ export function App() {
   if (screen === 'parked-operations') {
     return <ParkedOperations onSignedOut={() => setScreen('login')} onBack={() => setScreen('landing')} />;
   }
+  if (typeof screen === 'object' && screen.kind === 'registered-view') {
+    const view = views.find((v) => v.id === screen.viewId);
+    // Unreachable through `onNavigateView`, which only ever names a view
+    // `Landing` just filtered from this same `views` array — kept as a
+    // typed fallback rather than a non-null assertion.
+    if (!view) return <p role="alert">unknown view: {screen.viewId}</p>;
+    return (
+      <>
+        <button type="button" data-testid="registered-view-back" onClick={() => setScreen('landing')}>
+          Back
+        </button>
+        {createElement(view.render, { key: `${screen.viewId}:${screen.declarationId}`, declarationId: screen.declarationId })}
+      </>
+    );
+  }
   return (
     <Landing
+      views={views}
       onSignedOut={() => setScreen('login')}
       onNavigateGrants={() => setScreen('grants')}
       onNavigateAudit={() => setScreen('audit')}
       onNavigateHealth={() => setScreen('health')}
       onNavigateParkedOperations={() => setScreen('parked-operations')}
+      onNavigateView={(viewId, declarationId) => setScreen({ kind: 'registered-view', viewId, declarationId })}
     />
   );
 }

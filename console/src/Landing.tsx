@@ -1,14 +1,17 @@
 import { useEffect, useState } from 'react';
 import { api, loadResource, type DeclarationListRow } from './api.ts';
+import { eligibleViews, type ConsoleViewRegistration } from './view-registry.ts';
 
 const SELECTED_DECLARATION_KEY = 'szg-console-selected-declaration';
 
 interface Props {
+  readonly views: readonly ConsoleViewRegistration[];
   readonly onSignedOut: () => void;
   readonly onNavigateGrants: () => void;
   readonly onNavigateAudit: () => void;
   readonly onNavigateHealth: () => void;
   readonly onNavigateParkedOperations: () => void;
+  readonly onNavigateView: (viewId: string, declarationId: string) => void;
 }
 
 /**
@@ -17,8 +20,14 @@ interface Props {
  * operation (`clone.lastOperationAt`). Selecting a row sets the repository
  * dimension for every later view; `localStorage` is what makes that survive
  * a reload rather than living only in this component's state.
+ *
+ * S19.4: a registered view's nav button is offered only once a declaration
+ * is selected and only when that declaration's own `capabilityGrant`
+ * contains every capability the view declares — `eligibleViews` reads the
+ * selected row's grant, never a second, view-owned notion of which
+ * declaration it belongs to (S19.5).
  */
-export function Landing({ onSignedOut, onNavigateGrants, onNavigateAudit, onNavigateHealth, onNavigateParkedOperations }: Props) {
+export function Landing({ views, onSignedOut, onNavigateGrants, onNavigateAudit, onNavigateHealth, onNavigateParkedOperations, onNavigateView }: Props) {
   const [rows, setRows] = useState<readonly DeclarationListRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(() => localStorage.getItem(SELECTED_DECLARATION_KEY));
@@ -46,6 +55,9 @@ export function Landing({ onSignedOut, onNavigateGrants, onNavigateAudit, onNavi
 
   if (error) return <p role="alert">{error}</p>;
   if (rows === null) return <p>Loading…</p>;
+
+  const selectedRow = selected ? (rows.find((row) => row.declaration.id === selected) ?? null) : null;
+  const eligible = selectedRow ? eligibleViews(views, selectedRow.declaration.capabilityGrant) : [];
 
   return (
     <main>
@@ -93,6 +105,12 @@ export function Landing({ onSignedOut, onNavigateGrants, onNavigateAudit, onNavi
         </tbody>
       </table>
       {selected && <p data-testid="selected-declaration">Selected: {selected}</p>}
+      {selectedRow &&
+        eligible.map((view) => (
+          <button key={view.id} type="button" data-testid={`nav-view-${view.id}`} onClick={() => onNavigateView(view.id, selectedRow.declaration.id)}>
+            {view.title}
+          </button>
+        ))}
     </main>
   );
 }

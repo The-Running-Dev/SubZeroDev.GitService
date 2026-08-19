@@ -84,6 +84,7 @@ export interface DeclarationListRow {
     readonly host: string;
     readonly cloneUrl: string;
     readonly pinned: boolean;
+    readonly capabilityGrant: readonly string[];
     readonly [key: string]: unknown;
   };
   readonly clone: {
