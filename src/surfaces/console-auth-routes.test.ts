@@ -55,6 +55,7 @@ async function withServer<T>(volume: string, fn: (baseUrl: string, identity: Ope
     provisioningPending: async () => (await identity.provisioningState()) === 'pending',
     auditChain: async () => ({ verifiedThrough: null, headHash: null, mirroredHeadHash: null, retainedAnchors: [], chainBreak: null }),
     authorization: createStubAuthorization(new Map([[OPERATOR_API_TOKEN, 'operator-api' as never]])),
+    audit: createAudit({ volumeRoot: volume, clock: systemClock }),
     identity,
     sessionAbsoluteSeconds: 43_200,
     declarations: createStubDeclarations(),

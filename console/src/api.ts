@@ -137,3 +137,67 @@ export interface GrantsView {
   readonly grants: readonly GrantView[];
   readonly operatorSessions: readonly OperatorSessionListing[];
 }
+
+export interface AuditRecordDto {
+  readonly sequence: number;
+  readonly at: string;
+  readonly operationId: string | null;
+  readonly declarationId: string | null;
+  readonly generation: number | null;
+  readonly tool: string | null;
+  readonly actorRef: { readonly kind: string; readonly subject: string };
+  readonly context: string;
+  readonly form: string;
+  readonly previousHash: string | null;
+  readonly hash: string;
+  readonly [key: string]: unknown;
+}
+
+export interface RetainedAnchorDto {
+  readonly segment: number;
+  readonly terminalSequence: number;
+  readonly terminalHash: string;
+  readonly retainedAt: string;
+}
+
+export interface AuditChainBreakDto {
+  readonly atSequence: number;
+  readonly expectedHash: string;
+  readonly foundHash: string | null;
+}
+
+export interface AuditChainStateDto {
+  readonly verifiedThrough: number | null;
+  readonly headHash: string | null;
+  readonly mirroredHeadHash: string | null;
+  readonly retainedAnchors: readonly RetainedAnchorDto[];
+  readonly chainBreak: AuditChainBreakDto | null;
+}
+
+export interface AuditPageDto {
+  readonly records: readonly AuditRecordDto[];
+  readonly nextCursor: string | null;
+  readonly chain: AuditChainStateDto;
+}
+
+export interface AuditFilter {
+  readonly declarationId: string;
+  readonly tool: string;
+  readonly actorSubject: string;
+  readonly form: string;
+  readonly from: string;
+  readonly to: string;
+}
+
+export function auditQueryPath(filter: AuditFilter, cursor: string | null): string {
+  const params = new URLSearchParams();
+  if (filter.declarationId) params.set('declarationId', filter.declarationId);
+  if (filter.tool) params.set('tool', filter.tool);
+  if (filter.actorSubject) params.set('actorSubject', filter.actorSubject);
+  if (filter.form) params.set('form', filter.form);
+  if (filter.from) params.set('from', filter.from);
+  if (filter.to) params.set('to', filter.to);
+  if (cursor) params.set('cursor', cursor);
+  const query = params.toString();
+  return query ? `/audit?${query}` : '/audit';
+}

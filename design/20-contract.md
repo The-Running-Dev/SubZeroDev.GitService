@@ -3080,22 +3080,31 @@ failing credential names the declaration it was recorded against directly in its
 | `/parked-operations/{operationId}/resolve` | `POST` | bearer | no |
 | `/failing-credentials/{credentialRef}/{declarationId}/clear` | `POST` | bearer | yes |
 
+**Audit trail (`audit-routes.ts`)** — the audit view (S33), under `audit.read`. No repository
+dimension: `declarationId` narrows the query as a filter, the same as `tool` and `actorSubject`,
+rather than naming the one repository the call acts on — a query with none set spans every
+declaration's trail, which a path segment could not express.
+
+| Path | Method | Credential |
+|---|---|---|
+| `/audit` | `GET` | cookie |
+
 **OAuth and the MCP transport** — see the table immediately below (resolves U5). No repository
 dimension except the protected-resource metadata document and the MCP transport itself, both of
 which name a `declarationId` directly in their path; `/oauth/authorize`'s `GET` step also carries a
 `resource` query parameter naming one, but the table below classifies routes by path rather than by
 query, consistent with every other row here.
 
-**The closed set, and the count S18.14 asks for.** Twenty-five routes above carry no repository
+**The closed set, and the count S18.14 asks for.** Twenty-six routes above carry no repository
 dimension — the three liveness/version/health routes, the six authentication routes, the two
 declaration listing/creation routes, the six grants/authorization routes, the two
-parked-operations routes, and the six no-dimension OAuth/MCP routes below (`/.well-known/oauth-authorization-server`,
+parked-operations routes, `/audit`, and the six no-dimension OAuth/MCP routes below (`/.well-known/oauth-authorization-server`,
 `/oauth/register`, `/oauth/authorize` ×2 methods, `/oauth/token`, `/oauth/revoke`). This is the
 closed set; nothing may be added to it without a contract amendment naming why the new route has no
 repository to scope to. The remaining ten routes each carry a `declarationId` (or the equivalent —
 `/failing-credentials/{credentialRef}/{declarationId}/clear`'s second segment) directly in their
 path: the seven declaration-management and tool routes above, `/failing-credentials/.../clear`, the
-protected-resource metadata document, and the MCP transport itself. Thirty-five routes in total.
+protected-resource metadata document, and the MCP transport itself. Thirty-six routes in total.
 
 #### OAuth endpoints and the MCP transport (resolves U5)
 

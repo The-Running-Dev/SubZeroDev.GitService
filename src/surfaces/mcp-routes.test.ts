@@ -99,6 +99,7 @@ async function withServer<T>(volume: string, fn: (handle: ServerHandle) => Promi
     provisioningPending: async () => (await identity.provisioningState()) === 'pending',
     auditChain: async () => ({ verifiedThrough: null, headHash: null, mirroredHeadHash: null, retainedAnchors: [], chainBreak: null }),
     authorization,
+    audit: createAudit({ volumeRoot: volume, clock: systemClock }),
     identity,
     sessionAbsoluteSeconds: 43_200,
     declarations,

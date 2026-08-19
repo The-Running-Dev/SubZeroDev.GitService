@@ -15,8 +15,14 @@ import { E2E_BASE_URL, E2E_PASSWORD, E2E_PROVISIONING_SECRET, E2E_SUBJECT, E2E_V
  * session and the same declared `e2e-repo` — a fresh test would need its own
  * sign-in, and the whole point of this file's single-test shape is that the
  * enrolment secrets it captures are only ever available once.
+ *
+ * S33.6 continues after S32.3 signs the operator back out — `run-server.ts`
+ * seeds a real aged-out, anchored segment into this same fixture instance's
+ * audit trail before the server ever starts, so the trail this step reads is
+ * long enough to exercise retention, not merely the handful of records this
+ * test's own actions produced.
  */
-test('S18.12/S18.13/S18.10/S18.2/S31.4/S31.5/S32.1/S32.2/S32.3/S32.4 — enrolment, every sign-in path, the lockout round trip, the landing view, and the grants view against a real repository', async ({ page }) => {
+test('S18.12/S18.13/S18.10/S18.2/S31.4/S31.5/S32.1/S32.2/S32.3/S32.4/S33.2/S33.3/S33.5/S33.6 — enrolment, every sign-in path, the lockout round trip, the landing view, the grants view and the audit view against a real repository', async ({ page }) => {
   // S18.12 — a brand new instance shows the enrolment screen and no other.
   await page.goto('/');
   await expect(page.getByTestId('provisioning-secret')).toBeVisible();
@@ -333,4 +339,63 @@ test('S18.12/S18.13/S18.10/S18.2/S31.4/S31.5/S32.1/S32.2/S32.3/S32.4 — enrolme
   // them out: the incident case the design names by name.
   await liveSessionRows.getByRole('button', { name: 'Revoke' }).click();
   await expect(page.getByTestId('login-subject')).toBeVisible();
+
+  // --- S33 — the audit trail, read from the console, with its integrity shown inline ---
+
+  // The revoke above signed the operator out; S33 needs its own live session,
+  // through the authenticator S31's re-enrolment left active.
+  await page.getByTestId('login-subject').fill(E2E_SUBJECT);
+  await page.getByTestId('login-password').fill(E2E_PASSWORD);
+  await page.getByTestId('login-totp').fill(currentTotpCode(newTotpSecret));
+  await page.getByRole('button', { name: 'Sign in' }).click();
+  await expect(page.getByTestId('declaration-list')).toBeVisible();
+
+  await page.getByTestId('nav-audit').click();
+  await expect(page.getByTestId('audit-record-list')).toBeVisible();
+
+  // S33.3 — chain state renders inline with the records: a verified sequence,
+  // and — because `run-server.ts` seeded a real aged-out segment before this
+  // instance ever started — at least one retained anchor covering it.
+  const verifiedThroughText = await page.getByTestId('chain-verified-through').textContent();
+  expect(Number(verifiedThroughText)).toBeGreaterThan(0);
+  const anchorCountText = await page.getByTestId('chain-anchor-count').textContent();
+  expect(Number(anchorCountText), 'S33.6: the seeded trail has aged a segment out behind a retained anchor').toBeGreaterThan(0);
+  await expect(page.getByTestId('chain-anchor-list')).toBeVisible();
+
+  // S33.2 — filtering by actor narrows the records, and the filter still
+  // renders records from before retention pruned their own segment: the
+  // seeded rows are `e2e-seed`'s, this operator's own sign-ins are
+  // `E2E_SUBJECT`'s, and narrowing to one excludes the other.
+  await page.getByTestId('audit-filter-actor').fill(E2E_SUBJECT);
+  await page.getByTestId('audit-search').click();
+  await expect(page.getByTestId('audit-record-list')).toBeVisible();
+  const filteredRows = page.locator('[data-testid="audit-record-list"] tbody tr[data-testid^="audit-record-row-"]');
+  await expect(filteredRows.first()).toBeVisible();
+  const filteredActors = await filteredRows.allTextContents();
+  expect(filteredActors.some((row) => row.includes('e2e-seed'))).toBe(false);
+
+  const noMatch = await page.evaluate(async () => {
+    const res = await fetch('/audit?declarationId=no-such-repository', { credentials: 'same-origin' });
+    return { status: res.status, body: await res.json() };
+  });
+  expect(noMatch.status, 'a filter combination matching nothing is an empty result, not an error').toBe(200);
+  expect((noMatch.body as { records: unknown[] }).records.length).toBe(0);
+
+  // S33.5 — a real operator API token, issued from the grants view with
+  // every scope, still cannot reach the audit route: no `OperatorScope`
+  // names `audit.read`, so this is console-only by construction, not merely
+  // by omission.
+  const auditBearerCheck = await page.evaluate(async () => {
+    const csrfToken = document.cookie.match(/(?:^|; )szg_csrf=([^;]+)/)?.[1] ?? '';
+    const issued = await fetch('/grants/tokens', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+      body: JSON.stringify({ scopes: ['read', 'write', 'raw', 'schedule'] }),
+    });
+    const { value } = (await issued.json()) as { value: string };
+    const res = await fetch('/audit', { credentials: 'omit', headers: { Authorization: `Bearer ${value}` } });
+    return res.status;
+  });
+  expect(auditBearerCheck, 'an operator-api bearer token, even with every scope, cannot authenticate /audit').toBe(401);
 });
