@@ -1,5 +1,5 @@
-import { Fragment, useEffect, useState } from 'react';
-import { api, auditQueryPath, type AuditFilter, type AuditPageDto, type AuditRecordDto } from './api.ts';
+import { Fragment, useEffect, useMemo, useState } from 'react';
+import { auditQueryPath, loadResource, type AuditFilter, type AuditPageDto, type AuditRecordDto } from './api.ts';
 
 interface Props {
   readonly onSignedOut: () => void;
@@ -8,6 +8,8 @@ interface Props {
 
 const EMPTY_FILTER: AuditFilter = { declarationId: '', tool: '', actorSubject: '', form: '', from: '', to: '' };
 
+// Mirrors `AUDIT_RECORD_FORMS` in `src/audit/types.ts` — kept as a literal copy because
+// the console bundle does not import server-side modules; update both together.
 const RECORD_FORMS = ['call', 'authorization-rejection', 'hatch-intent', 'hatch-outcome', 'file-watcher', 'identity-event', 'lease-takeover'];
 
 function ChainSummary({ chain }: { readonly chain: AuditPageDto['chain'] }) {
@@ -62,30 +64,42 @@ function RecordRow({ record }: { readonly record: AuditRecordDto }) {
   );
 }
 
+function isFiltered(f: AuditFilter): boolean {
+  return f.declarationId !== '' || f.tool !== '' || f.actorSubject !== '' || f.form !== '' || f.from !== '' || f.to !== '';
+}
+
+/** `datetime-local` rejects a value carrying milliseconds or a `Z` designator (`filter.from`/`to` store full IsoUtcTimestamp) — this renders the same instant in the local format the input will accept. */
+function toDatetimeLocalValue(iso: string): string {
+  if (!iso) return '';
+  const date = new Date(iso);
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
 /**
  * S33 — the audit trail read from the console, narrowed by declaration, tool,
  * actor and time window, with chain integrity shown alongside the records
  * rather than as a separate view. `chain.chainBreak`, when present, is
  * rendered as a marker row at the sequence it names — the records either
- * side of it still render, matching S33.4's "does not fail closed".
+ * side of it still render, matching S33.4's "does not fail closed". When the
+ * loaded filter narrows the trail, the marker's position is relative to the
+ * whole trail, not the filtered records around it, so the row says so.
  */
 export function Audit({ onSignedOut, onBack }: Props) {
   const [filter, setFilter] = useState<AuditFilter>(EMPTY_FILTER);
+  const [appliedFilter, setAppliedFilter] = useState<AuditFilter>(EMPTY_FILTER);
   const [page, setPage] = useState<AuditPageDto | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function load(next: AuditFilter): Promise<void> {
+  function load(next: AuditFilter, cursor: string | null, cancelledRef: { readonly current: boolean } = { current: false }): Promise<void> {
     setError(null);
-    const res = await api.get<AuditPageDto>(auditQueryPath(next, null));
-    if (!res.ok) {
-      if (res.status === 401) {
-        onSignedOut();
-        return;
-      }
-      setError('could not load the audit trail');
-      return;
-    }
-    setPage(res.body);
+    return loadResource<AuditPageDto>(auditQueryPath(next, cursor), cancelledRef, {
+      onSuccess: (body) => {
+        setPage((prev) => (cursor !== null && prev ? { ...body, records: [...prev.records, ...body.records] } : body));
+        setAppliedFilter(next);
+      },
+      onError: (status) => (status === 401 ? onSignedOut() : setError('could not load the audit trail')),
+    });
   }
 
   function updateFilter(patch: Partial<AuditFilter>): void {
@@ -93,12 +107,17 @@ export function Audit({ onSignedOut, onBack }: Props) {
   }
 
   useEffect(() => {
-    void load(EMPTY_FILTER);
+    const cancelledRef = { current: false };
+    void load(EMPTY_FILTER, null, cancelledRef);
+    return () => {
+      cancelledRef.current = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const records = page ? [...page.records].sort((a, b) => a.sequence - b.sequence) : [];
+  const records = useMemo(() => (page ? [...page.records].sort((a, b) => a.sequence - b.sequence) : []), [page]);
   const chainBreak = page?.chain.chainBreak ?? null;
+  const chainBreakOutsideFilter = isFiltered(appliedFilter);
   let breakRendered = false;
 
   return (
@@ -111,7 +130,7 @@ export function Audit({ onSignedOut, onBack }: Props) {
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          void load(filter);
+          void load(filter, null);
         }}
       >
         <label>
@@ -139,11 +158,21 @@ export function Audit({ onSignedOut, onBack }: Props) {
         </label>
         <label>
           From
-          <input data-testid="audit-filter-from" type="datetime-local" value={filter.from} onChange={(event) => updateFilter({ from: event.target.value ? new Date(event.target.value).toISOString() : '' })} />
+          <input
+            data-testid="audit-filter-from"
+            type="datetime-local"
+            value={toDatetimeLocalValue(filter.from)}
+            onChange={(event) => updateFilter({ from: event.target.value ? new Date(event.target.value).toISOString() : '' })}
+          />
         </label>
         <label>
           To
-          <input data-testid="audit-filter-to" type="datetime-local" value={filter.to} onChange={(event) => updateFilter({ to: event.target.value ? new Date(event.target.value).toISOString() : '' })} />
+          <input
+            data-testid="audit-filter-to"
+            type="datetime-local"
+            value={toDatetimeLocalValue(filter.to)}
+            onChange={(event) => updateFilter({ to: event.target.value ? new Date(event.target.value).toISOString() : '' })}
+          />
         </label>
         <button type="submit" data-testid="audit-search">
           Search
@@ -180,7 +209,10 @@ export function Audit({ onSignedOut, onBack }: Props) {
                 <Fragment key={record.sequence}>
                   {renderBreakHere && (
                     <tr data-testid="audit-record-list-break">
-                      <td colSpan={6}>Chain break at sequence {chainBreak!.atSequence}</td>
+                      <td colSpan={6}>
+                        Chain break at sequence {chainBreak!.atSequence}
+                        {chainBreakOutsideFilter && ' (outside the current filter — position is relative to the full trail, not these records)'}
+                      </td>
                     </tr>
                   )}
                   <RecordRow record={record} />
@@ -189,11 +221,20 @@ export function Audit({ onSignedOut, onBack }: Props) {
             })}
             {chainBreak && !breakRendered && (
               <tr data-testid="audit-record-list-break">
-                <td colSpan={6}>Chain break at sequence {chainBreak.atSequence}</td>
+                <td colSpan={6}>
+                  Chain break at sequence {chainBreak.atSequence}
+                  {chainBreakOutsideFilter && ' (outside the current filter — position is relative to the full trail, not these records)'}
+                </td>
               </tr>
             )}
           </tbody>
         </table>
+      )}
+
+      {page?.nextCursor && (
+        <button type="button" data-testid="audit-load-more" onClick={() => void load(appliedFilter, page.nextCursor)}>
+          Load more
+        </button>
       )}
     </main>
   );
