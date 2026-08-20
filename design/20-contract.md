@@ -10,8 +10,10 @@ types and signatures only.
 Two conventions carry the whole document and are stated once.
 
 **Nominal strings.** Every constrained string is a branded type, so a raw `string` never reaches a
-field that has an invariant. Each brand has a constructor that is the only way to make one, and
-the constructor is where the invariant is checked.
+field that has an invariant. A brand's constructor is the only way to make one, and the
+constructor is where the invariant is checked. `HttpsUrl` is the one deliberate exception, for the
+reasons given under *Identifiers and constrained strings*. Declared in `src/shared/brands.ts`; the
+two lines below are repeated as the notation the rest of this document is written in.
 
 ```ts
 declare const BRAND: unique symbol;
@@ -20,7 +22,8 @@ type Brand<T, B extends string> = T & { readonly [BRAND]: B };
 
 **Typed failure, not thrown failure.** L2 domain functions return `ToolResult`, per the design.
 Every other module returns `Outcome<T, E>` with an enumerated `E`. Nothing in this contract
-throws as a control-flow mechanism, and no function returns a bare `Error` or a string.
+throws as a control-flow mechanism, and no function returns a bare `Error` or a string. Declared
+in `src/shared/outcome.ts`, and likewise repeated below as notation.
 
 ```ts
 type Outcome<T, E> =
@@ -37,41 +40,11 @@ members (`?`) appear only in `ToolResult`, whose shape the design fixes verbatim
 
 ### Identifiers and constrained strings
 
-```ts
-type DeclarationId      = Brand<string, 'DeclarationId'>;
-type Generation         = Brand<number, 'Generation'>;
-type GrantEpoch         = Brand<number, 'GrantEpoch'>;
-type CredentialRef      = Brand<string, 'CredentialRef'>;
-type RegistryToolName   = Brand<string, 'RegistryToolName'>;
-type ModuleTargetName   = Brand<string, 'ModuleTargetName'>;
-type HttpOperationName  = Brand<string, 'HttpOperationName'>;
-type OperationId        = Brand<string, 'OperationId'>;
-type ScheduledJobId     = Brand<string, 'ScheduledJobId'>;
-type SessionId          = Brand<string, 'SessionId'>;
-type ClientId           = Brand<string, 'ClientId'>;
-type GrantId            = Brand<string, 'GrantId'>;
-type TokenId            = Brand<string, 'TokenId'>;
-type OutboxRowId        = Brand<string, 'OutboxRowId'>;
-type ConsoleViewId      = Brand<string, 'ConsoleViewId'>;
-type Subject            = Brand<string, 'Subject'>;
-type IsoUtcTimestamp    = Brand<string, 'IsoUtcTimestamp'>;
-type Sha256Hex          = Brand<string, 'Sha256Hex'>;
-type GitSha             = Brand<string, 'GitSha'>;
-type BranchName         = Brand<string, 'BranchName'>;
-type RepoRelativePath   = Brand<string, 'RepoRelativePath'>;
-type PathPrefix         = Brand<string, 'PathPrefix'>;
-type ClonePath          = Brand<string, 'ClonePath'>;
-type WatchedFileName    = Brand<string, 'WatchedFileName'>;
-type RemoteHost         = Brand<string, 'RemoteHost'>;
-type CloneUrl           = Brand<string, 'CloneUrl'>;
-type HttpsUrl           = Brand<string, 'HttpsUrl'>;
-type McpResourceUri     = Brand<string, 'McpResourceUri'>;
-type BearerToken        = Brand<string, 'BearerToken'>;
-type SaltedHash         = Brand<string, 'SaltedHash'>;
-type EnvVarName         = Brand<string, 'EnvVarName'>;
-```
+Declared in `src/shared/brands.ts`, along with `Brand` itself, every constructor named below, and
+the `ValidationFailure` a failed construction returns.
 
-The invariant each brand carries, and where it is checked:
+A brand is a claim that a value has already been checked. The declaration cannot say what was
+checked, or by whom, and that is the only part worth writing down:
 
 | Brand | Invariant | Checked by |
 |---|---|---|
@@ -79,32 +52,50 @@ The invariant each brand carries, and where it is checked:
 | `Generation` | integer, `>= 1` | `generation()` |
 | `GrantEpoch` | integer, `>= 0` | `grantEpoch()` |
 | `CredentialRef` | `^[a-z0-9][a-z0-9._-]{0,63}$` | `credentialRef()` |
-| `RegistryToolName` | `^[a-z][a-z0-9_]{0,63}$`, no `blog_` prefix on a base tool | compiler |
+| `RegistryToolName` | `^[a-z][a-z0-9_]{0,63}$`, no `blog_` prefix on a base tool | compiler (**B7**) |
 | `IsoUtcTimestamp` | RFC 3339, `Z` suffix, millisecond precision | `isoUtcTimestamp()` |
 | `Sha256Hex` | `^[0-9a-f]{64}$` | `sha256Hex()` |
 | `GitSha` | `^[0-9a-f]{40}$` | `gitSha()` |
-| `RepoRelativePath` | non-empty, no leading `/`, no segment `..`, no `;`, not `.`, not `-A`, not `--all` | `repoRelativePath()` |
-| `PathPrefix` | a `RepoRelativePath` ending in `/`, or a `RepoRelativePath` naming one file | `pathPrefix()` |
-| `CloneUrl` | parses as an https URL or an scp-style remote, and its host is on the deployment allowlist | `cloneUrl()` |
-| `HttpsUrl` | absolute, scheme `https` | `httpsUrl()` |
+| `RepoRelativePath` | non-empty, no leading `/`, no `..` segment, no `;`, not `.`, `-A` or `--all` | `repoRelativePath()` |
+| `PathPrefix` | a `RepoRelativePath`; any valid one reads as both a directory prefix and a single file | `pathPrefix()` |
+| `WatchedFileName` | non-empty basename, no separator, not `.` or `..` | `watchedFileName()` |
+| `CloneUrl` | parses as an https or scp-style remote, and its host is on the deployment allowlist | `cloneUrl()` |
 | `McpResourceUri` | `/mcp/{DeclarationId}` | `mcpResourceUri()` |
+| `BranchName` | a ref name git will not read as an option — see the defect note below | **nothing — see below** |
 | `SaltedHash` | opaque, and never equal to the value it hashes | authorization, operator identity |
 
-```ts
-declare function declarationId(value: string): Outcome<DeclarationId, ValidationFailure>;
-declare function generation(value: number): Outcome<Generation, ValidationFailure>;
-declare function grantEpoch(value: number): Outcome<GrantEpoch, ValidationFailure>;
-declare function credentialRef(value: string): Outcome<CredentialRef, ValidationFailure>;
-declare function isoUtcTimestamp(value: string): Outcome<IsoUtcTimestamp, ValidationFailure>;
-declare function sha256Hex(value: string): Outcome<Sha256Hex, ValidationFailure>;
-declare function gitSha(value: string): Outcome<GitSha, ValidationFailure>;
-declare function branchName(value: string): Outcome<BranchName, ValidationFailure>;
-declare function repoRelativePath(value: string): Outcome<RepoRelativePath, ValidationFailure>;
-declare function pathPrefix(value: string): Outcome<PathPrefix, ValidationFailure>;
-declare function cloneUrl(value: string, allowed: readonly RemoteHost[]): Outcome<CloneUrl, ValidationFailure>;
-declare function httpsUrl(value: string): Outcome<HttpsUrl, ValidationFailure>;
-declare function mcpResourceUri(value: string): Outcome<McpResourceUri, ValidationFailure>;
+`cloneUrlHost()` is exported beside `cloneUrl()` because a clone URL's host is checked twice against
+two different lists — the deployment allowlist here, and the credential reference's own allowed-host
+list in remote operations. There is one host-reading function so the two guards cannot come to
+disagree about what the host *is*.
 
+Every remaining brand — `OperationId`, `SessionId`, `ClientId`, `GrantId`, `TokenId`, `OutboxRowId`,
+`ScheduledJobId`, `ModuleTargetName`, `HttpOperationName`, `ConsoleViewId`, `Subject`, `ClonePath`,
+`RemoteHost`, `BearerToken`, `EnvVarName` — carries no format rule. Each is minted by `randomUUID()`
+or read back from the row it was stored in, and the brand exists only so one identifier cannot be
+passed where another is meant. A constructor for these would have nothing to check.
+
+**`HttpsUrl` is constructed by cast, and that is the contract's position rather than an oversight**
+(amended 2026-08-20; see `design/90-decisions.md`). It has no constructor. Its five production sites
+divide into two kinds and neither is improved by one: the deployment webhook is checked for an
+`https://` scheme at load and the process exits fatally if it is not, and the OIDC authorize URL is
+built from a `URL` object and is well-formed by construction. The remaining three are values GitHub's
+API reported — a pull request URL, a check's details URL — which the service echoes and displays but
+never executes. A constructor there would restate a claim the upstream already made, and would have
+no safe branch to take when it failed. **E5** is unaffected: it constrains *when* a published URL may
+be returned in a success position, not whether the string parses.
+
+**`BranchName` has no constructor and should have one.** This is a defect in the tree, not in the
+contract. The gap matters because a branch name is not merely displayed — it reaches a git argument
+vector directly, and `RepositoryConfig.baseBranch` is read from the managed repository's own config
+file, which this service explicitly does not own. Argument vectors prevent shell injection but not
+git's own option parsing: a value beginning with `-` is read by git as a flag rather than a ref.
+Sites that interpolate into `refs/heads/${branch}` are incidentally safe; a bare positional is not.
+`branchName()` must therefore reject any value git would not accept as a ref name, and must reject a
+leading `-` whether or not git would. Until it exists, no caller may assume a `BranchName` has been
+checked.
+
+```ts
 interface ValidationFailure {
   readonly field: string;
   readonly rule: string;
@@ -112,63 +103,49 @@ interface ValidationFailure {
 }
 ```
 
+`ValidationFailure` stays written out here because it is the one shape a caller pattern-matches on
+across every module boundary that constructs a brand, and its three fields are a promise about
+diagnosis: which field, which rule, and the value as received — never a rendered message, so the
+surface that reports it decides the wording.
+
 ### JSON
 
-```ts
-type JsonPrimitive = string | number | boolean | null;
-interface JsonArray extends ReadonlyArray<JsonValue> {}
-interface JsonObject { readonly [key: string]: JsonValue }
-type JsonValue = JsonPrimitive | JsonArray | JsonObject;
-type JsonSchema = Brand<JsonObject, 'JsonSchema'>;
-```
+Declared in `src/contract/json.ts`.
+
+`JsonValue` is the wire type: what crosses a surface boundary, what a tool schema describes, and
+what a persisted blob holds. `JsonSchema` is branded rather than a bare `JsonObject` because the
+brand records that the compiler accepted the object *as a schema* — it stops an arbitrary object
+being passed where a validated schema is meant. Canonical serialisation of these values is the
+compiler's, and it is load-bearing twice over: the registry fingerprint and the audit record hash
+are both taken over it, so a change to canonicalisation changes both (see **S1**, **B3**).
 
 ### Capabilities and the lattice
 
-```ts
-type ContentCapability = `content.${string}`;
+Declared in `src/contract/capabilities.ts`.
 
-type DeclarationScopedCapability =
-  | 'repo.read'
-  | 'git.local.write'
-  | 'git.remote.write'
-  | 'git.raw'
-  | 'host.pr.read'
-  | 'host.pr.write'
-  | 'host.checks.read'
-  | 'scheduler.manage'
-  | 'scheduler.read'
-  | ContentCapability;
+Five branded capability sets exist so the lattice layers cannot be substituted for one another. They
+are the same underlying set type, and the brands are the only thing preventing a ceiling from being
+passed where an effective grant is expected — the mistake would otherwise typecheck and silently
+widen authority. The intersection rule itself is **A1**: an effective set is a subset of
+`contract ∩ ceiling ∩ session`, and of the declaration grant for every capability whose scope is
+`declaration`. No code path adds a member at runtime.
 
-type InstanceScopedCapability =
-  | 'declaration.manage'
-  | 'auth.manage'
-  | 'audit.read'
-  | 'attention.resolve';
+`ContentCapability` is an open template type rather than an enumeration because content families are
+named by the consumer's own declarations, not by this service. It is the one capability class this
+document cannot enumerate, and that openness is deliberate — it is also why `capabilityScopeOf` must
+be total over `CapabilityName` rather than a lookup table that could miss a case.
 
-type CapabilityName = DeclarationScopedCapability | InstanceScopedCapability;
-type CapabilityScope = 'declaration' | 'instance';
-type CapabilitySet = ReadonlySet<CapabilityName>;
-
-type ContractCapabilitySet = Brand<CapabilitySet, 'Layer1'>;
-type DeploymentCeiling     = Brand<CapabilitySet, 'Layer2'>;
-type DeclarationGrant      = Brand<CapabilitySet, 'Layer3'>;
-type SessionGrant          = Brand<CapabilitySet, 'Layer4'>;
-type EffectiveGrant        = Brand<CapabilitySet, 'Effective'>;
-
-declare function capabilityScopeOf(capability: CapabilityName): CapabilityScope;
-declare function hostSupportedCapabilities(host: HostKind): CapabilitySet;
-```
-
-The `host.*` capabilities are present in `hostSupportedCapabilities('github')` and absent from
-`hostSupportedCapabilities('generic')`.
+`capabilityScopeOf` decides which of the two enforcement paths a capability takes: declaration-scoped
+capabilities are additionally checked against the declaration's own grant, instance-scoped ones are
+not, because no declaration grants them. `hostSupportedCapabilities` carries **A5** — every `host.*`
+capability is present for `'github'` and absent for `'generic'`, so a generic-host declaration cannot
+hold one however it was written.
 
 ### Scopes
 
-```ts
-type McpScope = 'read' | 'write' | 'raw' | 'schedule';
-type OperatorScope = McpScope;
-type Scope = McpScope | OperatorScope;
-```
+Declared in `src/contract/capabilities.ts`. `OperatorScope` is an alias of `McpScope`, not a parallel
+vocabulary — adding a value to one adds it to both, which is the intended coupling rather than an
+accident to be refactored apart.
 
 **U2, resolved 2026-08-09 by S13.** `OperatorScope` carries the same four values as `McpScope` —
 `read`, `write`, `raw`, `schedule` — gating the same declaration-scoped capability classes an
@@ -180,133 +157,64 @@ token can exercise them. See `design/90-decisions.md`, 2026-08-09.
 
 ### Declaration
 
-```ts
-type HostKind = 'github' | 'generic';
-type DeclarationState = 'active' | 'orphaned';
+Declared in `src/declarations/types.ts`.
 
-interface RepositoryIdentity {
-  readonly gitUserName: string;
-  readonly gitUserEmail: string;
-}
+A `Declaration` is the unit of authority. Everything a caller could set that widens what the service
+will do lives here and nowhere else — that is **A8**, and it is re-checked at every amendment.
 
-interface FileWatcherConfig {
-  readonly planTool: RegistryToolName;
-  readonly applyTool: RegistryToolName;
-  readonly autoMerge: boolean;
-}
+`Declaration.capabilityGrant` is a branded `DeclarationGrant`, while `DeclareInput` and `AmendInput`
+take a plain array of declaration-scoped capabilities. The asymmetry is the point: branding happens
+at the boundary, under the module's own validation, so a caller cannot hand in a set that already
+claims to be a grant. For the same reason the inputs admit only `DeclarationScopedCapability` — the
+four instance-scoped capabilities are unreachable from a declaration by construction, not by check.
 
-interface Declaration {
-  readonly id: DeclarationId;
-  readonly generation: Generation;
-  readonly cloneUrl: CloneUrl;
-  readonly host: HostKind;
-  readonly credentialRef: CredentialRef;
-  readonly capabilityGrant: DeclarationGrant;
-  readonly writablePathPrefixes: readonly PathPrefix[];
-  readonly pinned: boolean;
-  readonly fileWatcher: FileWatcherConfig | null;
-  readonly identity: RepositoryIdentity;
-  readonly state: DeclarationState;
-  readonly grantEpoch: GrantEpoch;
-  readonly createdAt: IsoUtcTimestamp;
-  readonly updatedAt: IsoUtcTimestamp;
-}
+`AmendInput.fileWatcher` is three-valued on purpose: `undefined` leaves it alone, `null` removes it,
+a value sets it. `id`, `generation`, `host` and `state` are absent from `AmendInput` because the
+design makes each immutable for the life of a generation — changing any of them is a new generation,
+not an amendment.
 
-interface DeclareInput {
-  readonly id: DeclarationId;
-  readonly cloneUrl: CloneUrl;
-  readonly host: HostKind;
-  readonly credentialRef: CredentialRef;
-  readonly capabilityGrant: readonly DeclarationScopedCapability[];
-  readonly writablePathPrefixes: readonly PathPrefix[];
-  readonly pinned: boolean;
-  readonly fileWatcher: FileWatcherConfig | null;
-  readonly identity: RepositoryIdentity;
-}
-
-interface AmendInput {
-  readonly cloneUrl: CloneUrl | null;
-  readonly credentialRef: CredentialRef | null;
-  readonly capabilityGrant: readonly DeclarationScopedCapability[] | null;
-  readonly writablePathPrefixes: readonly PathPrefix[] | null;
-  readonly pinned: boolean | null;
-  readonly fileWatcher: FileWatcherConfig | null | undefined;
-  readonly identity: RepositoryIdentity | null;
-}
-```
-
-`AmendInput.fileWatcher` is three-valued on purpose: `undefined` leaves it alone, `null` removes
-it, a value sets it. `id`, `generation`, `host` and `state` are absent from `AmendInput` because
-the design makes each immutable for the life of a generation.
-
-```ts
-interface OrphanReport {
-  readonly declarationId: DeclarationId;
-  readonly generation: Generation;
-  readonly cancelledJobs: readonly ScheduledJobId[];
-  readonly revokedGrants: readonly GrantId[];
-  readonly retainedJournalEntries: readonly OperationId[];
-  readonly cloneLeftOnDisk: boolean;
-  readonly fileWatcherStopped: boolean;
-}
-```
+`OrphanReport` enumerates what orphaning actually did, and its shape is an argument against reading
+orphaning as deletion. `cloneLeftOnDisk` and `retainedJournalEntries` exist because **R7** forbids
+discarding work: an orphaned declaration stops being operable, but its clone, its journal history and
+its audit trail remain. A report where those fields were absent would let a caller assume a cleanup
+that never happens.
 
 ### RepositoryConfig
 
-```ts
-interface RepositoryConfig {
-  readonly baseBranch: BranchName;
-  readonly requiredChecks: readonly string[];
-  readonly deployWorkflow: string | null;
-  readonly branchPrefixes: readonly string[];
-}
+Declared in `src/declarations/types.ts`, with `REPOSITORY_CONFIG_DEFAULTS` beside it.
 
-declare const REPOSITORY_CONFIG_DEFAULTS: RepositoryConfig;
-```
+This is the one configuration the service reads from *inside* the managed repository, which fixes
+both its power and its limits. Every field defaults, so a declaration whose repository carries no
+config file at all is fully operable. It carries no capability, scope, path prefix, credential
+reference or remote — **A8**. It is re-read from the working tree on every operation that needs it
+and never cached — **D3** — so a repository can change its own base branch without the service being
+restarted or amended.
 
-Every field defaults, so a declaration with no config file at all is fully operable. This type
-carries no capability, scope, path prefix, credential reference or remote — see invariant A8.
+Because the file is repository-controlled and this service does not own repository contents, every
+field here is untrusted input. `baseBranch` is typed `BranchName` in this contract and is the same
+defect the brand table records: the tree currently declares it `string`, which is why its consumers
+cast at each point of use, and one of those points passes it to a git argument vector as a bare
+positional. The contract's typing is the correct one; the field is untrusted precisely because of
+where it comes from, so it is exactly the field that should be constructed and checked rather than
+asserted.
 
 ### Clone
 
-```ts
-type CloneState =
-  | 'absent'
-  | 'materialising'
-  | 'ready'
-  | 'dirty'
-  | 'recovery-pending'
-  | 'needs-attention'
-  | 'evicted';
+Declared in `src/clone/types.ts`.
 
-interface Clone {
-  readonly declarationId: DeclarationId;
-  readonly generation: Generation;
-  readonly state: CloneState;
-  readonly path: ClonePath;
-  readonly sizeBytes: number;
-  readonly lastOperationAt: IsoUtcTimestamp | null;
-  readonly observedRemote: CloneUrl | null;
-  readonly attentionReason: string | null;
-}
-```
+`CloneState` is re-derived from disk at boot and the stored value is never trusted as a source of
+truth — **D1**. That is the whole reason the state is persisted at all: it is a cache for reporting,
+not a fact. Three of the seven states are terminal only in the sense that something outside the clone
+must act — `recovery-pending` waits on a resume step, `needs-attention` waits on an operator, and
+`evicted` waits on the next materialisation. `attentionReason` is free text because it is shown to a
+person and never branched on.
 
 `safeToEvict` is deliberately absent from this type. It is derived by `CloneStore.isSafeToEvict` at
 eviction time and never stored — see invariant D2.
 
-```ts
-interface PreState {
-  readonly branch: BranchName | null;
-  readonly headSha: GitSha | null;
-  readonly upstreamSha: GitSha | null;
-  readonly indexDigest: Sha256Hex;
-  readonly worktreeDigest: Sha256Hex;
-}
-
-interface ObservedGitState extends PreState {
-  readonly observedAt: IsoUtcTimestamp;
-}
-```
+Declared in `src/clone/types.ts`. `ObservedGitState` is `PreState` plus the moment it was observed;
+the split exists because a journal entry stores the pre-state without the observation time, while a
+live comparison needs to know how stale the reading is.
 
 **U8's resolution, 2026-08-08.** `indexDigest` and `worktreeDigest` are each `SHA256_hex(canonical(entries))`,
 reusing the same deep key-sorted-JSON canonicalisation U9 fixed for the audit record hash
@@ -328,388 +236,162 @@ not an implementation detail:
 
 Both commands read the index and the working tree; neither writes to the object database.
 
-```ts
-type SafeToEvictVerdict =
-  | { readonly safe: true }
-  | { readonly safe: false; readonly blockers: readonly EvictionBlocker[] };
+Declared in `src/clone/types.ts`, with `LockHandle` and `ActivePin` in `src/locks/types.ts`.
 
-type EvictionBlocker =
-  | { readonly kind: 'pinned' }
-  | { readonly kind: 'worktree-dirty' }
-  | { readonly kind: 'branch-ahead-of-upstream'; readonly branch: BranchName; readonly ahead: number }
-  | { readonly kind: 'unreachable-commits'; readonly base: BranchName; readonly count: number }
-  | { readonly kind: 'stash-present'; readonly count: number }
-  | { readonly kind: 'open-journal-entry'; readonly operationId: OperationId }
-  | { readonly kind: 'active-operations'; readonly count: number }
-  | { readonly kind: 'corrupt-tree' };
+`SafeToEvictVerdict` carries its blockers rather than returning a bare boolean because every one of
+the eight blockers names work that would be destroyed by evicting — and **R7** forbids discarding a
+commit, a stash, an untracked file or an unpushed branch. The list is what lets an operator see why a
+clone is holding disk rather than being told only that it is. `safeToEvict` is deliberately absent
+from `Clone` itself: it is computed at eviction time and never stored — **D2** — because a stored
+verdict is wrong the moment anything writes to the tree.
 
-interface CloneHandle {
-  readonly clone: Clone;
-  readonly materialisationLock: LockHandle;
-  readonly activePin: ActivePin;
-}
+`corrupt-tree` is the one blocker that can be overridden, via `CorruptTreeOverride`. That asymmetry is
+intentional: the other seven name recoverable work, so overriding them would destroy it, whereas a
+corrupt tree names work that is already unreadable. The override is a separate type rather than a
+boolean parameter so it cannot be passed positionally by mistake.
 
-interface CorruptTreeOverride {
-  readonly permitCorruptTree: boolean;
-}
-
-interface EvictionOutcome {
-  readonly declarationId: DeclarationId;
-  readonly evicted: boolean;
-  readonly freedBytes: number;
-  readonly blockers: readonly EvictionBlocker[];
-}
-```
+`CloneHandle` bundles the clone with the locks held over it, so the two cannot be separated by a
+caller. **C3** governs how long they are held — a mutating operation holds the materialisation lock
+for its whole duration, a read releases it once the clone is `ready`.
 
 ### Actors, profiles and sessions
 
-```ts
-type ActorKind = 'operator' | 'mcp' | 'scheduler' | 'watcher' | 'recovery';
+Declared across `src/shared/actor.ts` (`ActorKind`, `ActorRef`), `src/declarations/types.ts`
+(`SessionKind`, `ActorProfile`, `STRIPPED_FOR_UNATTENDED`) and `src/shared/session.ts` (`Session`).
 
-interface ActorRef {
-  readonly kind: ActorKind;
-  readonly subject: Subject;
-  readonly clientId: ClientId | null;
-  readonly grantId: GrantId | null;
-}
+`ActorKind` has five members and `SessionKind` four: `recovery` is an actor that never holds a
+session, because a resume step runs as an ordinary dispatch under the lifecycle module's authority
+rather than under anyone's grant — **R8**. Any code treating the two as the same enumeration is
+wrong, and the separate declarations are what prevent it.
 
-type SessionKind = 'operator' | 'mcp' | 'scheduler' | 'watcher';
-
-interface ActorProfile {
-  readonly kind: SessionKind;
-  readonly capabilities: CapabilitySet;
-  readonly strippedPathPrefixes: readonly PathPrefix[];
-}
-
-declare const STRIPPED_FOR_UNATTENDED: readonly PathPrefix[];
-
-interface Session {
-  readonly id: SessionId;
-  readonly kind: SessionKind;
-  readonly actorRef: ActorRef;
-  readonly repositoryBinding: DeclarationId | null;
-  readonly grant: SessionGrant;
-  readonly writablePathPrefixes: readonly PathPrefix[];
-  readonly frozenAtEpoch: GrantEpoch;
-}
-```
+`Session.frozenAtEpoch` is what makes a grant a snapshot rather than a live query. It is compared
+against the declaration's `grantEpoch` before every handler invocation, and a moved epoch forces a
+recomputation that can only narrow — **A3** with **A2**. A session therefore cannot gain authority
+between calls, only lose it.
 
 `STRIPPED_FOR_UNATTENDED` is `.github/workflows/`, `.config/`, `tools/`, `build/`. It is the
 `strippedPathPrefixes` of the `mcp`, `scheduler` and `watcher` profiles; the `operator` profile's
 is empty. `repositoryBinding` is non-null for `mcp` and `watcher`, null for `operator`, and null
 for `scheduler` because a scheduler session binds per job rather than per session.
 
-```ts
-interface OperatorSession {
-  readonly id: SessionId;
-  readonly subject: Subject;
-  readonly createdAt: IsoUtcTimestamp;
-  readonly lastSeenAt: IsoUtcTimestamp;
-  readonly idleExpiresAt: IsoUtcTimestamp;
-  readonly absoluteExpiresAt: IsoUtcTimestamp;
-  readonly revokedAt: IsoUtcTimestamp | null;
-  /** S31 — mirrors `operator_credential.totp_reenrol_required` at the moment this session was read, so a caller knows to route to re-enrolment without a second query. */
-  readonly totpReenrolRequired: boolean;
-}
-```
+Declared in `src/operator-identity/operator-identity.ts`.
+
+An `OperatorSession` is distinct from `Session` above: this is the console's cookie-authenticated
+sitting, whereas `Session` is the per-call authority snapshot. It expires two ways at once — idle and
+absolute — and revocation is a written timestamp rather than a deleted row, per **S7**, so a revoked
+session stays visible in the audit of what happened.
 
 ### Authorization records
 
-```ts
-type GrantKind = 'mcp' | 'operator-api';
-type TokenKind = 'access' | 'refresh';
-
-interface OAuthClient {
-  readonly clientId: ClientId;
-  readonly redirectUris: readonly HttpsUrl[];
-  readonly registeredAt: IsoUtcTimestamp;
-  readonly revokedAt: IsoUtcTimestamp | null;
-}
-
-interface Grant {
-  readonly grantId: GrantId;
-  readonly kind: GrantKind;
-  readonly clientId: ClientId | null;
-  readonly subject: Subject;
-  readonly resource: McpResourceUri | null;
-  readonly declarationId: DeclarationId | null;
-  readonly generation: Generation | null;
-  readonly scopes: readonly Scope[];
-  readonly createdAt: IsoUtcTimestamp;
-  readonly lastUsedAt: IsoUtcTimestamp | null;
-  readonly revokedAt: IsoUtcTimestamp | null;
-}
-
-interface Token {
-  readonly jti: TokenId;
-  readonly grantId: GrantId;
-  readonly kind: TokenKind;
-  readonly verifierHash: SaltedHash;
-  readonly issuedAt: IsoUtcTimestamp;
-  readonly expiresAt: IsoUtcTimestamp;
-  readonly revokedAt: IsoUtcTimestamp | null;
-}
-
-interface IssuedToken {
-  readonly jti: TokenId;
-  readonly value: BearerToken;
-  readonly expiresAt: IsoUtcTimestamp;
-}
-
-interface GrantView {
-  readonly grant: Grant;
-  readonly client: OAuthClient | null;
-  readonly activeTokens: number;
-  readonly liveSessions: number;
-}
-```
+Declared in `src/authorization/types.ts`. `GrantView` is additionally mirrored console-side in
+`console/src/api.ts`, which is a deliberate second copy across the HTTP seam rather than a shared
+import — the console must not import from L4.
 
 `resource`, `declarationId` and `generation` are non-null exactly when `kind` is `mcp`, and null
-exactly when it is `operator-api`. `clientId` is null for an `operator-api` grant. `IssuedToken` is
-the only type in this contract carrying a token value, and nothing persists it.
+exactly when it is `operator-api`; `clientId` is null for an `operator-api` grant. That correlation is
+not expressible in the declaration and is the field discipline a reader most needs: an `mcp` grant is
+bound to one repository at one generation, an `operator-api` grant is bound to neither and takes its
+repository from the route instead.
+
+**`IssuedToken` is the only value-bearing type in this contract, and nothing persists it** — **S6**.
+`Token` holds a `verifierHash` and never a token value; the value is returned once, at issue, and is
+irrecoverable afterwards. Revocation writes a timestamp and never deletes a row, and no cascade is
+written as a batch — liveness is walked upward at check time, per **S7**. `GrantView`'s `activeTokens`
+and `liveSessions` are therefore counts computed at read time, not stored columns that could disagree
+with the rows they describe.
 
 ### Operation journal
 
-```ts
-type JournalEntryState = 'intended' | 'applied' | 'settled' | 'attention';
-type OperationContextKind = 'normal' | 'repair' | 'recovery' | 'hatch';
-type JournalStepState = 'applied';
+Declared in `src/journal/types.ts`.
 
-interface JournalStep {
-  readonly name: string;
-  readonly state: JournalStepState;
-  readonly at: IsoUtcTimestamp;
-}
-
-interface OperationJournalEntry {
-  readonly operationId: OperationId;
-  readonly declarationId: DeclarationId;
-  readonly generation: Generation;
-  readonly tool: RegistryToolName;
-  readonly input: JsonValue;
-  readonly actorRef: ActorRef;
-  readonly scheduledJobId: ScheduledJobId | null;
-  readonly context: OperationContextKind;
-  readonly preState: PreState;
-  readonly steps: readonly JournalStep[];
-  readonly state: JournalEntryState;
-  readonly attentionReason: string | null;
-  readonly startedAt: IsoUtcTimestamp;
-  readonly updatedAt: IsoUtcTimestamp;
-}
-
-interface JournalBeginInput {
-  readonly operationId: OperationId;
-  readonly declarationId: DeclarationId;
-  readonly generation: Generation;
-  readonly tool: RegistryToolName;
-  readonly input: JsonValue;
-  readonly actorRef: ActorRef;
-  readonly scheduledJobId: ScheduledJobId | null;
-  readonly context: OperationContextKind;
-  readonly preState: PreState;
-}
-```
+The journal is what makes recovery possible, so its ordering guarantees matter more than its shape.
+`begin` commits before the first side effect, and if it fails no side effect occurs — **R1**. Every
+call mutating state outside the local clone appends a step and commits it *before* the call it
+describes — **R2**. Both are write-ahead rules: the record of intent always precedes the act.
 
 `JournalStepState` admits only `applied`, because that is the only step state the design names and
-the only one recovery reads. A step's name, rather than a second state, records how far an
-operation progressed.
+the only one recovery reads. A step's **name**, rather than a second state, records how far an
+operation progressed — this is U3's resolution, and `resume` predicates read `entry.tool`,
+`entry.input` and `entry.preState` rather than any step state. An entry whose `steps` contains an
+`applied` step never classifies as `nothing-happened` — **R5**.
 
-`input` is scrubbed by `Exec.scrubJson` before it reaches this type.
+`input` is scrubbed by `Exec.scrubJson` before it reaches this type, which is where **S5** is
+enforced for the journal: no secret value reaches a persisted row.
+
+`unsettled` selects on `(declarationId, generation)`, so an entry from a previous era is never a
+recovery candidate — **R4**. That is why `generation` is on the entry at all.
 
 ### Recovery
 
-```ts
-interface RecoveryResumeStep {
-  readonly tool: RegistryToolName;
-  readonly input: JsonValue;
-}
+Declared in `src/recovery/types.ts`, with `TerminalState` in `src/journal/types.ts`.
 
-interface RecoveryDescriptor {
-  readonly tool: RegistryToolName;
-  readonly expectedPostState: (entry: OperationJournalEntry, observed: ObservedGitState) => boolean;
-  readonly resume: ((entry: OperationJournalEntry) => RecoveryResumeStep) | null;
-}
+A `RecoveryDescriptor` is registered per tool, and the catalogue is populated by registration rather
+than by import so that L1 does not depend on L2 — **B2**. `expectedPostState` is a pure predicate
+over the journalled entry and a fresh observation; `resume` is `null` for an operation that cannot be
+safely re-driven, and a `null` resume is what turns an ambiguous entry into `park` rather than a
+retry.
 
-type RecoveryClassification =
-  | { readonly verdict: 'nothing-happened' }
-  | { readonly verdict: 'completed'; readonly terminal: TerminalState | null }
-  | { readonly verdict: 'resume'; readonly step: RecoveryResumeStep }
-  | { readonly verdict: 'park'; readonly reason: string };
-```
+The four verdicts are exhaustive and ordered by how much is known: `nothing-happened` and `completed`
+are decided, `resume` is decided and actionable, `park` is the honest admission that neither could be
+established. **R7** is why `park` exists at all — no recovery path may discard work, so when the
+classifier cannot prove what happened it must stop rather than guess. Classification itself reads no
+git state and performs no I/O, and the same arguments always yield the same verdict — **R3**.
 
 ### Scheduled jobs
 
-```ts
-type ScheduledJobStatus =
-  | 'pending'
-  | 'running'
-  | 'done'
-  | 'skipped'
-  | 'cancelled'
-  | 'needs-attention';
+Declared in `src/scheduler/types.ts`.
 
-type OnMissedPolicy =
-  | { readonly mode: 'catch_up' }
-  | { readonly mode: 'skip_if_older_than'; readonly seconds: number };
+`frozenGrant` is the field that makes a scheduled job safe. A job carries the capability set as it
+stood when the job was created, so a job cannot gain authority by sitting in the queue while a
+declaration is amended. It is a `CapabilitySet` rather than a branded layer because it is not a
+lattice layer — it is a captured snapshot that the dispatch intersection then treats as one more
+bound.
 
-interface ScheduledJob {
-  readonly id: ScheduledJobId;
-  readonly declarationId: DeclarationId;
-  readonly generation: Generation;
-  readonly tool: RegistryToolName;
-  readonly input: JsonValue;
-  readonly notBefore: IsoUtcTimestamp;
-  readonly onMissed: OnMissedPolicy;
-  readonly frozenGrant: CapabilitySet;
-  readonly status: ScheduledJobStatus;
-  readonly reason: string | null;
-  readonly createdBy: ActorRef;
-  readonly createdAt: IsoUtcTimestamp;
-  readonly updatedAt: IsoUtcTimestamp;
-}
+`onMissed` has no default and is required at creation. That is a deliberate refusal to choose for the
+caller: `catch_up` and `skip_if_older_than` differ in whether a late fire is better than no fire, and
+that is a judgement about the operation, not about scheduling.
 
-interface CreateJobInput {
-  readonly declarationId: DeclarationId;
-  readonly tool: RegistryToolName;
-  readonly input: JsonValue;
-  readonly notBefore: IsoUtcTimestamp;
-  readonly onMissed: OnMissedPolicy;
-}
+`ScheduledJob` carries no `operationId` — the correlation runs the other way, through
+`OperationJournalEntry.scheduledJobId`, so one job can produce several journalled attempts without
+the job row being rewritten. `ScheduledJobCreateInput` carries no `declarationId`: the
+declaration-scoped dispatch context is the only source of that binding, so a caller cannot name a
+different declaration in the payload. `ScheduledJobListInput.status` is null to list every status.
+`ScheduledJobCancelInput.reason` must contain at least one non-whitespace character.
+`ScheduledJob.reason` is set for `skipped`, `cancelled` and `needs-attention`, and null otherwise.
 
-interface ScheduledJobCreateInput {
-  readonly tool: RegistryToolName;
-  readonly input: JsonValue;
-  readonly notBefore: IsoUtcTimestamp;
-  readonly onMissed: OnMissedPolicy;
-}
-
-interface ScheduledJobCreateData {
-  readonly job: ScheduledJob;
-}
-
-interface ScheduledJobListInput {
-  readonly status: ScheduledJobStatus | null;
-}
-
-interface ScheduledJobListData {
-  readonly jobs: readonly ScheduledJob[];
-}
-
-interface ScheduledJobCancelInput {
-  readonly id: ScheduledJobId;
-  readonly reason: string;
-}
-
-interface ScheduledJobCancelData {
-  readonly job: ScheduledJob;
-}
-```
-
-`onMissed` has no default and is required at creation. `ScheduledJob` carries no `operationId`; the
-correlation runs the other way, through `OperationJournalEntry.scheduledJobId`.
-`ScheduledJobCreateInput` carries no `declarationId`: the declaration-scoped dispatch context is the
-only source of that binding, so the caller cannot name a different declaration in the payload.
-`ScheduledJobListInput.status` is null to list every status. `ScheduledJobCancelInput.reason` must
-contain at least one non-whitespace character. `ScheduledJob.reason` is set for `skipped`,
-`cancelled` and `needs-attention`; it is null for the other states.
+`tool` names a registry entry annotated `schedulable`, checked at creation, at fire time and at boot
+re-validation — **B6**. Checking three times is not redundancy: a declaration can be amended between
+any two of them. At boot, a `running` job is never simply fired again — **R10** — and
+`resolveRunningAtBoot` performs no git or host I/O deciding what to do with it — **R9**.
 
 ### Audit
 
-```ts
-type AuditRecordForm =
-  | 'call'
-  | 'authorization-rejection'
-  | 'hatch-intent'
-  | 'hatch-outcome'
-  | 'file-watcher'
-  | 'identity-event'
-  | 'lease-takeover';
+Declared in `src/audit/types.ts`.
 
-interface AuditRecordBase {
-  readonly sequence: number;
-  readonly at: IsoUtcTimestamp;
-  readonly operationId: OperationId | null;
-  readonly declarationId: DeclarationId | null;
-  readonly generation: Generation | null;
-  readonly tool: RegistryToolName | null;
-  readonly actorRef: ActorRef;
-  readonly context: OperationContextKind;
-  readonly previousHash: Sha256Hex | null;
-  readonly hash: Sha256Hex;
-}
+`AuditRecord` is `AuditRecordBase` intersected with a discriminated `AuditRecordBody`, and
+`AuditRecordForm` is that discriminant. The intersection is what makes the record flat rather than
+nested, which matters because the canonical serialisation below hashes the flattened form — a nested
+body would hash differently and the two representations must never both exist.
 
-type IdentityEvent =
-  | 'enrolment'
-  | 'recovery-code-used'
-  | 'break-glass-used'
-  | 'totp-reenrolled'
-  | 'oidc-subject-rejected'
-  | 'session-revoked'
-  | 'token-issued'
-  | 'client-revoked'
-  | 'grant-revoked'
-  | 'token-revoked'
-  | 'failing-credential-cleared'
-  | 'outbox-row-cleared'
-  | 'parked-operation-settled';
+`AuditAppendInput` omits `sequence`, `previousHash` and `hash` because a caller may not supply them.
+Every append passes through one writer, which assigns all three; sequence numbers are contiguous
+within a segment and each record's `previousHash` equals its predecessor's `hash` — **S1**. A caller
+that could set them could forge a chain.
 
-type AuditRecordBody =
-  | { readonly form: 'call'; readonly resultKind: ResultKind; readonly changedPaths: readonly RepoRelativePath[] }
-  | { readonly form: 'authorization-rejection'; readonly missing: readonly CapabilityName[]; readonly rejectedPath: RepoRelativePath | null }
-  | { readonly form: 'hatch-intent'; readonly argv: readonly string[] }
-  | { readonly form: 'hatch-outcome'; readonly resultKind: ResultKind; readonly changedPaths: readonly RepoRelativePath[] | null }
-  | { readonly form: 'file-watcher'; readonly file: WatchedFileName; readonly outcome: WatchedFileOutcome }
-  | { readonly form: 'identity-event'; readonly event: IdentityEvent }
-  | { readonly form: 'lease-takeover'; readonly previousHolder: InstanceLease };
+**`Audit.append` never throws and never rejects** — **S3**. It returns `AuditAppendOutcome`, and
+`appended: false` is an ordinary value, because an audit failure must not convert a successful
+operation into a failed one. The single exception is the `git.raw` intent line, whose caller treats
+`appended: false` as fatal to the call: **S9** requires that line to be written before the child
+process starts, so if it cannot be written the process must not start.
 
-type AuditRecord = AuditRecordBase & AuditRecordBody;
-type AuditAppendInput = Omit<AuditRecordBase, 'sequence' | 'previousHash' | 'hash'> & AuditRecordBody;
+`RetainedAnchor` is what makes retention safe. A segment is never deleted before its terminal hash is
+written as an anchor — **S2** — so pruning old audit data shortens the chain without breaking the
+ability to verify what remains. `AuditChainBreak` is reported and never fatal — **S4** — which is why
+`AuditChainState` is a field on `HealthReport` and on every `AuditPage` rather than a boot failure:
+an operator must be able to read the trail that reveals the break.
 
-type AuditAppendFailure = 'write-failed' | 'segment-rotation-failed' | 'volume-full';
-
-type AuditAppendOutcome =
-  | { readonly appended: true; readonly sequence: number }
-  | { readonly appended: false; readonly reason: AuditAppendFailure };
-
-interface RetainedAnchor {
-  readonly segment: number;
-  readonly terminalSequence: number;
-  readonly terminalHash: Sha256Hex;
-  readonly retainedAt: IsoUtcTimestamp;
-}
-
-interface AuditChainBreak {
-  readonly atSequence: number;
-  readonly expectedHash: Sha256Hex;
-  readonly foundHash: Sha256Hex | null;
-}
-
-interface AuditChainState {
-  readonly verifiedThrough: number | null;
-  readonly headHash: Sha256Hex | null;
-  readonly mirroredHeadHash: Sha256Hex | null;
-  readonly retainedAnchors: readonly RetainedAnchor[];
-  readonly chainBreak: AuditChainBreak | null;
-}
-
-interface AuditQuery {
-  readonly declarationId: DeclarationId | null;
-  readonly tool: RegistryToolName | null;
-  readonly actorSubject: Subject | null;
-  readonly form: AuditRecordForm | null;
-  readonly from: IsoUtcTimestamp | null;
-  readonly to: IsoUtcTimestamp | null;
-  readonly limit: number;
-  readonly cursor: string | null;
-}
-
-interface AuditPage {
-  readonly records: readonly AuditRecord[];
-  readonly nextCursor: string | null;
-  readonly chain: AuditChainState;
-}
-```
+`AuditQuery.cursor` is an opaque string; a caller may compare it for equality and pass it back, and
+may not parse it. `limit` has no null form because an unbounded audit query is not offered.
 
 **Canonical serialisation (resolves U9).** `hash` is `SHA256_hex(canonical(record))`, where
 `record` is the full flattened `AuditRecord` — `AuditRecordBase` merged with whichever
@@ -754,70 +436,24 @@ the same parser.
 
 ### File watcher
 
-```ts
-type WatchedFileStage = 'inbox' | 'processing' | 'processed' | 'failed';
+Declared in `src/watcher/types.ts`, except `WatchedFileOutcome`, which lives in `src/audit/types.ts`
+because an audit record body carries it — the outcome is a thing the trail records, and the watcher is
+only its producer.
 
-interface FileWatcherPlanInput {
-  readonly sourceFile: WatchedFileName;
-  readonly content: string;
-}
+`WatchedFileStage` names four directories, and the directory *is* the state: there is no separate
+status column, so a crash cannot desynchronise the two. **D6** is what makes that safe — during
+delivery and interrupted-claim recovery a watched file is never deleted, and every terminal path moves
+it to `processed/` or `failed/`. Retention may delete only `processed/` files past their window, never
+`failed/` ones. A file found in `processing/` at startup is moved to `failed/` and never reprocessed —
+**D8** — because the process that claimed it cannot be asked what it managed to do.
 
-interface FileWatcherPullRequestPlan {
-  readonly title: string;
-  readonly body: string;
-}
+`WatchedFileCandidate.isSymlink` exists so the candidate can be *refused* rather than silently
+skipped: the stat is link-preserving, so a symlink is never a candidate — **D7**.
 
-interface FileWatcherPlanData<TPlan extends JsonValue = JsonValue> {
-  readonly branch: BranchName;
-  readonly commitMessage: string;
-  readonly pullRequest: FileWatcherPullRequestPlan;
-  readonly permittedPaths: readonly RepoRelativePath[];
-  readonly plan: TPlan;
-}
-
-interface FileWatcherApplyInput<TPlan extends JsonValue = JsonValue> {
-  readonly permittedPaths: readonly RepoRelativePath[];
-  readonly plan: TPlan;
-}
-
-interface FileWatcherApplyData {
-  readonly changedPaths: readonly RepoRelativePath[];
-}
-
-type WatchedFileOutcome =
-  | { readonly kind: 'succeeded'; readonly pullRequest: PullRequestRef }
-  | { readonly kind: 'rejected'; readonly step: string; readonly result: ResultKind; readonly reason: string }
-  | { readonly kind: 'interrupted-claim'; readonly reason: string };
-
-interface WatchedFileCandidate {
-  readonly declarationId: DeclarationId;
-  readonly file: WatchedFileName;
-  readonly stage: WatchedFileStage;
-  readonly sizeBytes: number;
-  readonly isSymlink: boolean;
-}
-
-interface PendingPullRequest {
-  readonly declarationId: DeclarationId;
-  readonly number: number;
-  readonly branch: BranchName;
-  readonly openedAt: IsoUtcTimestamp;
-  readonly sourceFile: WatchedFileName;
-}
-
-interface PendingPullRequestList {
-  readonly entries: readonly PendingPullRequest[];
-}
-
-interface WatchTickReport {
-  readonly declarationId: DeclarationId;
-  readonly skipped: 'clone-not-clean' | 'clone-needs-attention' | null;
-  readonly claimed: WatchedFileName | null;
-  readonly outcome: WatchedFileOutcome | null;
-  readonly reconciled: readonly PendingPullRequest[];
-  readonly stillPending: readonly PendingPullRequest[];
-}
-```
+`FileWatcherPlanData` and `FileWatcherApplyInput` are generic in `TPlan` because the plan is the
+consumer's, not this service's. The service fixes the envelope — branch, commit message, pull request,
+permitted paths — and treats `plan` as opaque JSON it carries from one tool to the other without
+inspecting.
 
 `FileWatcherConfig.planTool` and `applyTool` are two registry entries that together form the one
 logical target described by the design. The plan tool consumes the claimed file after strict UTF-8
@@ -853,14 +489,7 @@ success; no later git or host step is dispatched.
 
 ### Instance lease
 
-```ts
-interface InstanceLease {
-  readonly instanceId: string;
-  readonly bootId: string;
-  readonly hostName: string;
-  readonly startedAt: IsoUtcTimestamp;
-}
-```
+Declared in `src/lifecycle/lease.ts`.
 
 Written once at acquisition and never refreshed. Exclusion is the OS lock; the contents only name
 the holder.
@@ -873,111 +502,49 @@ instance is a takeover to be reported rather than a refusal — see the boot pat
 
 ### The result envelope
 
-```ts
-type ResultKind =
-  | 'success'
-  | 'validation'
-  | 'precondition'
-  | 'conflict'
-  | 'authorization'
-  | 'upstream'
-  | 'timeout'
-  | 'infrastructure';
+Declared across `src/shared/result-kind.ts` (`ResultKind`, `Finding`, `isError`) and
+`src/result/envelope.ts` (`Diagnostics`, `ToolResult`, `ReadStamp`, and the eight constructors).
+The split is a layering one: `ResultKind` is named by modules that must not depend on the envelope,
+so the kind lives lower than the type that carries it.
 
-interface Finding {
-  readonly path: string;
-  readonly rule: string;
-  readonly message: string;
-}
+`ToolResult` is the one type in this contract whose optional members are `?` rather than `| null`,
+because the design fixes its shape verbatim as the wire form an MCP client receives. Everything else
+uses `null` for "absent".
 
-interface Diagnostics {
-  readonly operationId: OperationId | null;
-  readonly declarationId: DeclarationId | null;
-  readonly generation: Generation | null;
-  readonly durationMs: number;
-}
+**`ok` and `kind` are not independent**: `result.ok === (result.kind === 'success')` — **E1**. They
+both exist because `ok` is what a client branches on and `kind` is what it reports, and the invariant
+is what stops them drifting apart.
 
-interface ToolResult<TData = never> {
-  readonly ok: boolean;
-  readonly kind: ResultKind;
-  readonly summary: string;
-  readonly data?: TData;
-  readonly findings?: readonly Finding[];
-  readonly diagnostics?: Diagnostics;
-}
+**`isError` is true exactly for `upstream`, `timeout` and `infrastructure`** — **E2** — and false for
+the other five. The division is not severity but *attribution*: the five non-error kinds say the call
+was understood and refused, the three error kinds say the service or something upstream of it failed.
+A client may retry the second group and must not blindly retry the first.
 
-declare function isError(kind: ResultKind): boolean;
+The eight constructors exist so that no call site assembles an envelope by hand — each fixes the
+`kind`/`ok` pairing and the shape of what accompanies it, which is what makes **E1** and **E2**
+structural rather than a rule to be remembered. `conflict` takes the lock holder, `authorization` the
+missing capabilities, `upstream` a retry hint, `timeout` the limit that was hit: the accompanying data
+is the part a caller needs to act, and a bare summary string would lose it.
 
-declare function success<TData>(summary: string, data: TData, diagnostics: Diagnostics): ToolResult<TData>;
-declare function validation(summary: string, findings: readonly Finding[]): ToolResult<never>;
-declare function precondition(summary: string, findings: readonly Finding[]): ToolResult<never>;
-declare function conflict(summary: string, holder: LockHolder | null): ToolResult<never>;
-declare function authorization(summary: string, missing: readonly CapabilityName[]): ToolResult<never>;
-declare function upstream(summary: string, retryAfterSeconds: number | null): ToolResult<never>;
-declare function timeout(summary: string, limitSeconds: number): ToolResult<never>;
-declare function infrastructure(summary: string): ToolResult<never>;
-
-interface ReadStamp {
-  readonly lastSettledOperationId: OperationId | null;
-  readonly mutationInFlight: boolean;
-}
-```
-
-`isError` returns true for `upstream`, `timeout` and `infrastructure`, and false for the other
-five. Every read operation's `TData` includes a `ReadStamp`, whose `mutationInFlight` is scoped to
-the declaration being read rather than to the process-wide mutex.
+Every read operation's `TData` includes a `ReadStamp`, and its `mutationInFlight` is scoped to the
+declaration being read rather than to the process-wide mutex — **E4**. A reader of one repository must
+not be told a mutation is in flight because an unrelated repository is being written.
 
 ### Notification
 
-```ts
-type NotificationSeverity = 'attention' | 'info';
+Declared in `src/journal/types.ts` (`NotificationSeverity`, `TerminalState`, `MaintenanceSummary`,
+`NotificationRequest`) and `src/notifier/types.ts` (`OutboxRowStatus`, `OutboxRow`, `DeliveryReport`),
+with `RetentionReport` in `src/shared/retention.ts`.
 
-type TerminalState =
-  | { readonly kind: 'merge-conflict'; readonly branch: BranchName; readonly headSha: GitSha; readonly baseSha: GitSha }
-  | { readonly kind: 'required-check-failed'; readonly check: string; readonly pullRequest: PullRequestRef }
-  | { readonly kind: 'wait-timeout'; readonly waitedSeconds: number; readonly tool: RegistryToolName }
-  | { readonly kind: 'operation-parked'; readonly operationId: OperationId; readonly reason: string }
-  | { readonly kind: 'file-watcher-failed'; readonly file: WatchedFileName; readonly reason: string };
-
-interface MaintenanceSummary {
-  readonly kind: 'maintenance-pass';
-  readonly releasedBytes: number;
-  readonly evictedDeclarations: readonly DeclarationId[];
-  readonly prunedByModule: readonly RetentionReport[];
-}
-
-interface NotificationRequest {
-  readonly severity: NotificationSeverity;
-  readonly declarationId: DeclarationId | null;
-  readonly subject: TerminalState | MaintenanceSummary;
-  readonly summary: string;
-}
-
-type OutboxRowStatus = 'pending' | 'in-flight' | 'delivered' | 'failed';
-
-interface OutboxRow {
-  readonly id: OutboxRowId;
-  readonly severity: NotificationSeverity;
-  readonly declarationId: DeclarationId | null;
-  readonly payload: JsonValue;
-  readonly status: OutboxRowStatus;
-  readonly attempts: number;
-  readonly lastAttemptAt: IsoUtcTimestamp | null;
-  readonly lastError: string | null;
-  readonly createdAt: IsoUtcTimestamp;
-  readonly deliveredAt: IsoUtcTimestamp | null;
-}
-
-interface DeliveryReport {
-  readonly delivered: number;
-  readonly failed: number;
-  readonly stillPending: number;
-  readonly errors: readonly NotifierError[];
-}
-```
+The split follows the transaction boundary rather than the subject matter. A `NotificationRequest` is
+written *with* the state change it describes, in one transaction — **R6** — so it belongs to the
+journal; the outbox row is what the notifier later delivers, and delivery is a separate concern that
+must never be able to fail the operation.
 
 Every `TerminalState` is `attention` severity; `MaintenanceSummary` is `info`, one per pass rather
-than one per clone.
+than one per clone. `TerminalState` is the closed set of ways an operation can end with nothing
+further the service can do on its own — each variant names what a person would need to know to unblock
+it, which is why each carries its own identifying detail rather than a shared free-text reason.
 
 **`in-flight` is a claim, not a report of progress.** A delivery pass is `SELECT` → send → write back,
 and the send is the slow part, so a row stays `pending` on disk for the whole webhook round trip. Two
@@ -1016,62 +583,35 @@ it". Both are descriptions of a pass that continues, which is what a report is.
 
 ### Volume, retention and maintenance
 
-```ts
-type VolumeConsumer =
-  | 'clones'
-  | 'audit-log'
-  | 'structured-store'
-  | 'backups-and-snapshots'
-  | 'watcher-files';
+Declared across `src/store/volume-usage.ts` (`VolumeConsumer`, `VolumeUsage`),
+`src/store/structured-store.ts` (`StoreTableName`), `src/shared/retention.ts` (`MaintenanceReason`,
+`RetentionReport`) and `src/lifecycle/boot.ts` (`MaintenanceReport`).
 
-type StoreTableName =
-  | 'schema_migration'
-  | 'declaration'
-  | 'clone'
-  | 'oauth_client'
-  | 'grant'
-  | 'token'
-  | 'operator_credential'
-  | 'operator_recovery_code'
-  | 'operator_session'
-  | 'scheduled_job'
-  | 'journal_entry'
-  | 'journal_step'
-  | 'notification_outbox'
-  | 'audit_chain_head'
-  | 'audit_retained_anchor'
-  | 'credential_failure_mark';
+`VolumeConsumer` and `StoreTableName` are closed sets so that usage accounting is total: every byte on
+the volume is attributed to exactly one consumer, and adding a table without adding it here is a
+compile error rather than a silent gap in the report. That is the point of enumerating them.
 
-interface VolumeUsage {
-  readonly totalBytes: number;
-  readonly usedBytes: number;
-  readonly usedPercent: number;
-  readonly byConsumer: Readonly<Record<VolumeConsumer, number>>;
-  readonly storeByTable: Readonly<Record<StoreTableName, number>>;
-}
+`RetentionReport.skipped` carries *why* rows survived a pass, and it exists because a retention pass
+that deletes nothing is indistinguishable from one that failed unless it says what it declined to
+touch. Store retention ends in an incremental vacuum, and the pass reports bytes returned to the
+filesystem rather than rows deleted — **D4** — because rows deleted is not what an operator watching a
+full volume needs to know. Every automatically-pruning window has exactly one owning module, and the
+lifecycle module calls each with no mutation lock held — **D5**.
 
-type MaintenanceReason = 'scheduled' | 'watermark' | 'operator-requested';
-
-interface RetentionReport {
-  readonly module: string;
-  readonly deletedRows: number;
-  readonly freedBytes: number;
-  readonly skipped: readonly string[];
-}
-
-interface MaintenanceReport {
-  readonly reason: MaintenanceReason;
-  readonly startedAt: IsoUtcTimestamp;
-  readonly finishedAt: IsoUtcTimestamp;
-  readonly perModule: readonly RetentionReport[];
-  readonly evictions: readonly EvictionOutcome[];
-  readonly usageBefore: VolumeUsage;
-  readonly usageAfter: VolumeUsage;
-}
-```
+`MaintenanceReport` carries usage before and after so a pass's effect is legible without a second
+query, and `evictions` are `EvictionOutcome`s rather than a count — an eviction that was refused, and
+what blocked it, is the part worth reading.
 
 ### Deployment configuration
 
+These stay written out rather than becoming pointers, because **there is no `DeploymentConfig` in the
+tree to point at**. No composition root assembles one yet; each module instead carries a local,
+overridable default citing this section by name — `src/journal/journal.ts`'s `journalSettledDays`,
+`src/notifier/notifier.ts`'s `outboxDeliveredDays`, `src/scheduler/scheduler.ts`'s `terminalJobDays`,
+and the `remoteHostAllowlist`, `ceiling`, `admission` and `notifierWebhook` values read from the
+environment in `src/server.ts`. This is the "entity with no code representation" case, and the
+scaffold below is the only statement of the shape those defaults are converging on. When a real
+`DeploymentConfig` is wired, this block becomes a pointer and the local defaults stop being local.
 ```ts
 interface RetentionWindows {
   readonly auditSegmentBytes: number;
@@ -1166,69 +706,31 @@ limit, so adding a tool can never silently inherit a result-size budget.
 
 ### Contract types (L0)
 
-```ts
-type ToolExecutionClass = 'read' | 'mutating' | 'monitoring-wait';
-type FileWatcherPhase = false | 'plan' | 'apply';
+Declared in `src/contract/tool-declaration.ts`.
 
-interface ToolAnnotations {
-  readonly schedulable: boolean;
-  readonly fileWatcher: FileWatcherPhase;
-  readonly untrustedOutput: boolean;
-}
+This is L0, the layer the whole authority model rests on: a `ToolDeclaration` is the *only* place a
+tool's capabilities, scopes and limits are stated, and the compiled registry is what a deployment
+executes. Nothing at runtime may add to it — **A1** — so a capability absent here is unreachable.
 
-interface ToolLimits {
-  readonly timeoutSeconds: number;
-  readonly maxResultBytes: number;
-}
+`CompiledRegistry.fingerprint` is verified at boot alongside the console asset manifest, and a
+mismatch refuses to start — **B3**. That is what makes the registry a released artifact rather than
+something assembled per process. Every entry has exactly one executor registered for its
+`ExecutionTarget`, also verified at boot — **B5** — so a declaration cannot name a target nothing
+implements. The compiler itself is absent from the runtime image — **B8**.
 
-type ExecutionTarget =
-  | { readonly kind: 'module'; readonly target: ModuleTargetName }
-  | { readonly kind: 'http'; readonly operation: HttpOperationName };
+`SanitisedManifest` is the *outward* view and deliberately carries less than `CompiledRegistry`: names,
+capabilities, scopes and execution class, with no schemas, limits or targets. It exists so a client can
+be told what a deployment offers without being told how it dispatches.
 
-interface ToolDeclaration {
-  readonly name: RegistryToolName;
-  readonly description: string;
-  readonly inputSchema: JsonSchema;
-  readonly outputSchema: JsonSchema;
-  readonly scopes: readonly Scope[];
-  readonly capabilities: readonly CapabilityName[];
-  readonly capabilityScope: CapabilityScope;
-  readonly executionClass: ToolExecutionClass;
-  readonly annotations: ToolAnnotations;
-  readonly limits: ToolLimits;
-  readonly target: ExecutionTarget;
-}
+`ExecutionTarget` is a discriminated union rather than a string because the two kinds are dispatched by
+different adapters at different layers, and collapsing them to a name would put the routing decision in
+a string comparison at the call site.
 
-interface CompiledRegistry {
-  readonly fingerprint: Sha256Hex;
-  readonly compiledAt: IsoUtcTimestamp;
-  readonly entries: readonly ToolDeclaration[];
-  readonly contractCapabilitySet: ContractCapabilitySet;
-}
-
-interface ManifestEntry {
-  readonly name: RegistryToolName;
-  readonly capabilities: readonly CapabilityName[];
-  readonly scopes: readonly Scope[];
-  readonly executionClass: ToolExecutionClass;
-}
-
-interface SanitisedManifest {
-  readonly fingerprint: Sha256Hex;
-  readonly tools: readonly ManifestEntry[];
-}
-
-interface GeneratedDocumentation {
-  readonly markdown: string;
-}
-
-interface CompilerArtifact {
-  readonly registry: CompiledRegistry;
-  readonly manifest: SanitisedManifest;
-  readonly fingerprint: Sha256Hex;
-  readonly documentation: GeneratedDocumentation;
-}
-```
+`ToolLimits.maxResultBytes` has no default anywhere in the system — every declaration must carry an
+explicit positive limit, so adding a tool can never silently inherit a result-size budget.
+`ToolAnnotations.untrustedOutput` marks a tool returning author-controlled text; `schedulable` is what
+**B6** checks a scheduled job's tool against; `fileWatcher` carries the phase, and a plan entry's
+no-clone dispatch behaviour follows from that annotation rather than from its target name.
 
 A file-watcher plan entry has a `module` target, `executionClass: 'read'`, no capabilities,
 `scopes: ['write']`, `capabilityScope: 'declaration'`, and annotations `{ schedulable: false,
@@ -1273,13 +775,29 @@ declares.
 Three storage kinds, per the design. Only the structured store has a schema; the audit log is JSONL
 holding one `AuditRecord` per line, and the working clones are directories.
 
+**This section is source, not description, and is the one place in this document where shape stays
+deliberately.** `scripts/generate-migration-0001.ts` reads the markdown between the
+*Persisted schemas* and *Public signatures* headings, extracts the `sql` blocks below in order,
+and renders `src/store/migration-0001.ts` from them; `npm run check:migration` verifies in CI that
+the committed migration still matches this text verbatim. The heading names, the block count and the
+block contents are therefore load-bearing — replacing these blocks with a pointer to the migration
+would invert the dependency and break the check. The generator runs by hand rather than in the
+build, because migration 0001 is immutable once released: its checksum is recorded in
+`schema_migration`, so regenerating it against an amended contract would silently change a released
+migration.
+
 **The migration story, stated once because it is the same for every table.** Migrations are
 explicit, numbered and forward-only. The store is copied to a timestamped backup **before** any
-migration runs, and the three most recent copies are retained. Every table below is created by
-migration `0001` against an empty store, so for the first release "what happens to existing data"
+migration runs, and the three most recent copies are retained — **D9**. Every table below is created
+by migration `0001` against an empty store, so for the first release "what happens to existing data"
 is: there is none. Thereafter a migration may add a table, add a nullable column, or add an index;
 it may not drop or narrow a column that a retained pre-migration copy's schema depends on, because
 definition-of-done item 18's rollback restores that copy alongside the previous image.
+
+A contract amendment after release is therefore written as the next hand-written migration rather
+than as an edit to the blocks below. `src/store/migration-0002.ts` is the first of these: it adds
+`operator_credential.totp_pending_secret_sealed` for S31, documented in prose beside the
+`operator_credential` block rather than inside it, since that block is migration 0001's frozen text.
 
 ```sql
 CREATE TABLE schema_migration (
@@ -1598,48 +1116,16 @@ Grouped by module, in the layer order the design fixes. Internal helpers are out
 
 ### L1 — clock
 
-```ts
-interface Clock {
-  now(): IsoUtcTimestamp;
-  monotonicMs(): number;
-}
-```
+Declared in `src/clock/clock.ts`. Two readings, not one: `now()` is wall-clock and may jump, and is
+what gets persisted; `monotonicMs()` never jumps and is what durations and timeouts are measured
+with. Nothing may derive a duration by subtracting two `now()` readings.
 
 The envelope constructors and `isError` are declared under `### The result envelope`.
 
 ### L1 — exec
 
-```ts
-interface CredentialBinding {
-  readonly ref: CredentialRef;
-  readonly declarationId: DeclarationId;
-  readonly variableName: EnvVarName;
-  readonly username: string | null;
-}
-
-interface ExecRequest {
-  readonly argv: readonly string[];
-  readonly cwd: ClonePath;
-  readonly timeoutSeconds: number;
-  readonly credential: CredentialBinding | null;
-  readonly signal: AbortSignal;
-}
-
-interface ExecResult {
-  readonly exitCode: number;
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly durationMs: number;
-  readonly timedOut: boolean;
-}
-
-interface Exec {
-  runGit(request: ExecRequest): Promise<Outcome<ExecResult, ExecError>>;
-  runGh(request: ExecRequest): Promise<Outcome<ExecResult, ExecError>>;
-  scrub(text: string): string;
-  scrubJson(value: JsonValue): JsonValue;
-}
-```
+Declared in `src/exec/exec.ts`. This is the only module in the service that starts a child process,
+which is what makes it the enforcement point for **S5**.
 
 `argv` is a vector, never a string, and there is no shell. The executable is fixed by which runner
 is called, never by an element of `argv`. `credential` names an environment variable; the value is
@@ -1650,36 +1136,20 @@ global configuration with a neutral home directory.
 
 ### L1 — locks
 
-```ts
-interface LockHolder {
-  readonly operationId: OperationId;
-  readonly declarationId: DeclarationId;
-  readonly tool: RegistryToolName;
-  readonly heldSince: IsoUtcTimestamp;
-}
+Declared in `src/locks/locks.ts`, with `LockHolder`, `LockHandle`, `ActivePin` and `WaitAdmission` in
+`src/locks/types.ts`.
 
-interface LockHandle {
-  readonly holder: LockHolder;
-  release(): void;
-}
+Three separate mechanisms live here and they are not interchangeable. The two locks are mutual
+exclusion — at most one mutation lock is held process-wide at any instant (**C1**), and whenever both
+are held the materialisation lock was acquired first and they are released in reverse order (**C2**).
+The pin is not a lock at all: it is a refcount that keeps a clone from being evicted underneath a
+running operation (**C4**), which is why it never awaits and never fails (**C5**) — a pin that could
+block would be a lock, and a pin that could fail would leave a caller with no safe action. Admission
+is a third thing again: a counter, taking neither mutex, gating how many lock-free monitoring waits a
+session may hold.
 
-interface ActivePin {
-  release(): void;
-}
-
-interface WaitAdmission {
-  release(): void;
-}
-
-interface Locks {
-  acquireMutation(holder: LockHolder, waitMs: number, signal: AbortSignal): Promise<Outcome<LockHandle, LockError>>;
-  acquireMaterialisation(declarationId: DeclarationId, holder: LockHolder, waitMs: number, signal: AbortSignal): Promise<Outcome<LockHandle, LockError>>;
-  pinActiveOperation(declarationId: DeclarationId): ActivePin;
-  activeOperationCount(declarationId: DeclarationId): number;
-  currentMutationHolder(): LockHolder | null;
-  admitLockFreeWait(sessionId: SessionId): Outcome<WaitAdmission, LockError>;
-}
-```
+Every handle releases by method rather than by the caller tracking state, and each `release` is
+idempotent, because the unwind path after a failure must be safe to run twice.
 
 `pinActiveOperation` never waits and never fails. `currentMutationHolder` is what scopes
 `ReadStamp.mutationInFlight` to a declaration rather than to the mutex.
@@ -1698,37 +1168,26 @@ counters live beside
 
 ### L1 — declarations
 
-```ts
-interface DeclarationFilter {
-  readonly state: DeclarationState | null;
-  readonly hasFileWatcher: boolean | null;
-}
+Declared in `src/declarations/declarations.ts`, with `DeclarationFilter` in
+`src/declarations/types.ts`.
 
-interface Declarations {
-  get(id: DeclarationId): Promise<Declaration | null>;
-  getGeneration(id: DeclarationId, generation: Generation): Promise<Declaration | null>;
-  list(filter: DeclarationFilter): Promise<readonly Declaration[]>;
+This module owns the authority model, and six of the nine **A** invariants name it as responsible.
+`effectiveGrant` takes all four layers and returns a set rather than a boolean, because the epoch
+check needs the recomputed set and not just a verdict. Each capability's own scope decides whether
+layer 3 participates in its intersection; an instance-scoped capability intersects layers 1, 2 and 4
+only, which is why `declaration` may be null — a null declaration is a legitimate call, not a missing
+argument.
 
-  declare(input: DeclareInput, actor: ActorRef): Promise<Outcome<Declaration, DeclarationError>>;
-  amend(id: DeclarationId, patch: AmendInput, actor: ActorRef): Promise<Outcome<Declaration, DeclarationError>>;
-  orphan(id: DeclarationId, actor: ActorRef): Promise<Outcome<OrphanReport, DeclarationError>>;
-  remove(id: DeclarationId, actor: ActorRef): Promise<Outcome<void, DeclarationError>>;
+`effectiveWritablePrefixes` may only narrow: its result is a subset of the declaration's own prefixes
+and contains nothing under the profile's stripped set — **A4**. No layer adds a prefix.
 
-  effectiveGrant(
-    contract: ContractCapabilitySet,
-    ceiling: DeploymentCeiling,
-    declaration: Declaration | null,
-    session: SessionGrant,
-  ): EffectiveGrant;
+`bumpGrantEpoch` takes a `StoreTransaction` rather than opening its own, because an epoch bump must
+commit with the amendment that caused it; a bump that could land separately would leave sessions
+frozen at an epoch that never corresponded to a stored grant.
 
-  effectiveWritablePrefixes(declaration: Declaration, profile: ActorProfile): readonly PathPrefix[];
-
-  bumpGrantEpoch(id: DeclarationId, tx: StoreTransaction): Outcome<GrantEpoch, DeclarationError>;
-  remoteHostAllowlist(): readonly RemoteHost[];
-
-  revalidateFileWatchers(): Promise<Outcome<void, DeclarationError>>;
-}
-```
+`revalidateFileWatchers` re-checks every active declaration's plan/apply tool pair against the current
+registry at boot. It returns the first mismatch found, not a full report, because boot fails closed on
+the first one either way.
 
 `effectiveGrant` takes all four layers and returns a set rather than a boolean, because the epoch
 check needs the recomputed set and not just a verdict. Each capability's own scope decides whether
@@ -1742,24 +1201,8 @@ first mismatch found, not a full report, because boot fails closed on the first 
 
 ### L1 — credentials
 
-```ts
-type MutableEnv = Map<EnvVarName, string>;
-
-interface CredentialFailureMark {
-  readonly ref: CredentialRef;
-  readonly declarationId: DeclarationId;
-  readonly reason: string;
-  readonly markedAt: IsoUtcTimestamp;
-}
-
-interface CredentialResolver {
-  resolveInto(ref: CredentialRef, declarationId: DeclarationId, env: MutableEnv): Promise<Outcome<CredentialBinding, CredentialError>>;
-  allowedHosts(ref: CredentialRef): Promise<Outcome<readonly RemoteHost[], CredentialError>>;
-  markFailing(ref: CredentialRef, declarationId: DeclarationId, reason: string): Promise<void>;
-  clearFailing(ref: CredentialRef, declarationId: DeclarationId, actor: ActorRef | null): Promise<void>;
-  listFailing(): Promise<readonly CredentialFailureMark[]>;
-}
-```
+Declared in `src/credentials/credentials.ts`, with `MutableEnv` and `CredentialFailureMark` in
+`src/credentials/types.ts`.
 
 **`clearFailing`'s `actor` is `null` on its one internal caller (S34).** `resolveInto` clears a mark
 itself the moment it observes a secret rewritten since the mark was taken — no operator is involved,
@@ -1797,35 +1240,11 @@ particular spelling beyond its being stable within one call.
 
 ### L1 — structured store
 
-```ts
-type SqlParameter = string | number | bigint | null | Uint8Array;
+Declared in `src/store/structured-store.ts`.
 
-interface StoreTransaction {
-  readonly id: string;
-  run(sql: string, ...parameters: readonly SqlParameter[]): void;
-  all(sql: string, ...parameters: readonly SqlParameter[]): readonly unknown[];
-}
-
-interface BackupStamp {
-  readonly at: IsoUtcTimestamp;
-  readonly ageSeconds: number;
-}
-
-interface StructuredStore {
-  open(): Promise<Outcome<void, StoreError>>;
-  integrityCheck(): Promise<Outcome<void, StoreError>>;
-  backupBeforeMigration(): Promise<Outcome<IsoUtcTimestamp, StoreError>>;
-  migrate(): Promise<Outcome<number, StoreError>>;
-  transaction<T>(work: (tx: StoreTransaction) => Promise<T>): Promise<Outcome<T, StoreError>>;
-  snapshot(): Promise<Outcome<IsoUtcTimestamp, StoreError>>;
-  incrementalVacuum(): Promise<Outcome<number, StoreError>>;
-  usageByTable(): Promise<Outcome<Readonly<Record<StoreTableName, number>>, StoreError>>;
-  newestSnapshot(): Promise<BackupStamp | null>;
-  newestPreMigrationBackup(): Promise<BackupStamp | null>;
-  runRetention(): Promise<RetentionReport>;
-  close(): Promise<void>;
-}
-```
+`SqlParameter` is a closed union rather than `unknown` because it is the boundary where a value stops
+being a domain type and becomes a bound parameter; widening it would let an object reach the driver
+and be coerced in a way no invariant covers.
 
 `incrementalVacuum` returns the bytes actually returned to the filesystem, which is what the
 maintenance pass reports rather than the rows it deleted.
@@ -1854,22 +1273,11 @@ and a participant that can already write can already observe its own effects.
 
 ### L1 — clone store
 
-```ts
-interface CloneStore {
-  ensure(declaration: Declaration, holder: LockHolder, signal: AbortSignal): Promise<Outcome<CloneHandle, CloneStoreError>>;
-  describe(declarationId: DeclarationId): Promise<Outcome<Clone, CloneStoreError>>;
-  deriveAllStatesFromDisk(): Promise<readonly Clone[]>;
-  observeGitState(declarationId: DeclarationId): Promise<Outcome<ObservedGitState, CloneStoreError>>;
-  isSafeToEvict(declarationId: DeclarationId, acrossAllGenerations: boolean): Promise<Outcome<SafeToEvictVerdict, CloneStoreError>>;
-  evictIfSafe(declarationId: DeclarationId): Promise<Outcome<EvictionOutcome, CloneStoreError>>;
-  remove(declarationId: DeclarationId, override: CorruptTreeOverride, actor: ActorRef): Promise<Outcome<void, CloneStoreError>>;
-  markAttention(declarationId: DeclarationId, reason: string): Promise<Outcome<void, CloneStoreError>>;
-  clearAttention(declarationId: DeclarationId, actor: ActorRef): Promise<Outcome<void, CloneStoreError>>;
-  readVolumeUsage(): Promise<Outcome<VolumeUsage, CloneStoreError>>;
-  requestMaintenance(reason: MaintenanceReason): void;
-  runRetention(): Promise<RetentionReport>;
-}
-```
+Declared in `src/clone/clone-store.ts`.
+
+`ensure` returns a `CloneHandle` rather than a `Clone` because possession of the clone and possession
+of the locks over it cannot be separated — see **C3**. `deriveAllStatesFromDisk` is what **D1** names:
+boot re-derives every state from disk and never trusts the stored value.
 
 `acrossAllGenerations` is `true` for the adoption check and `false` for eviction: adoption asks
 whether any era left work in the tree, eviction asks about the current one.
@@ -1882,27 +1290,7 @@ path, where eviction must not run.
 
 ### L1 — journal
 
-```ts
-interface Journal {
-  begin(input: JournalBeginInput): Promise<Outcome<OperationJournalEntry, JournalError>>;
-  appendStep(operationId: OperationId, name: string): Promise<Outcome<void, JournalError>>;
-  markApplied(operationId: OperationId): Promise<Outcome<void, JournalError>>;
-  settle(operationId: OperationId, notify: NotificationRequest | null): Promise<Outcome<void, JournalError>>;
-  park(operationId: OperationId, reason: string): Promise<Outcome<void, JournalError>>;
-
-  classify(
-    entry: OperationJournalEntry,
-    observed: ObservedGitState,
-    descriptor: RecoveryDescriptor | null,
-  ): RecoveryClassification;
-
-  unsettled(declarationId: DeclarationId, generation: Generation): Promise<Outcome<readonly OperationJournalEntry[], JournalError>>;
-  allUnsettled(): Promise<Outcome<readonly OperationJournalEntry[], JournalError>>;
-  findByScheduledJob(jobId: ScheduledJobId): Promise<Outcome<OperationJournalEntry | null, JournalError>>;
-  parked(): Promise<Outcome<readonly OperationJournalEntry[], JournalError>>;
-  runRetention(): Promise<RetentionReport>;
-}
-```
+Declared in `src/journal/journal.ts`.
 
 `classify` is pure, reads no git state and performs no I/O — the clone store owns the observation,
 the journal owns the rule. `settle` takes the notification because the outbox row and the state
@@ -1911,28 +1299,18 @@ change commit in one transaction; `null` is the ordinary case. `appendStep` writ
 
 ### L1 — recovery catalogue
 
-```ts
-interface RecoveryCatalogue {
-  register(descriptor: RecoveryDescriptor): Outcome<void, RecoveryCatalogueError>;
-  lookup(tool: RegistryToolName): RecoveryDescriptor | null;
-  registeredTools(): ReadonlySet<RegistryToolName>;
-}
-```
+Declared in `src/recovery/catalogue.ts`.
 
 Populated by the composition root. It never imports a domain module.
 
 ### L1 — audit
 
-```ts
-interface Audit {
-  append(input: AuditAppendInput): Promise<AuditAppendOutcome>;
-  query(filter: AuditQuery): Promise<Outcome<AuditPage, AuditError>>;
-  verify(): Promise<AuditChainState>;
-  chainState(): Promise<AuditChainState>;
-  runRetention(): Promise<RetentionReport>;
-  close(): Promise<void>;
-}
-```
+Declared in `src/audit/audit.ts`.
+
+`append` returns `AuditAppendOutcome` rather than an `Outcome`, and that difference is deliberate: an
+audit failure is data the caller reads, never a failure that propagates — **S3**. `verify` walks the
+chain and `chainState` reports the last known result; they are separate members because verification
+is expensive and boot must be able to report a state without repeating it.
 
 `close` releases the module's own handle on the structured store, mirroring `StructuredStore.close`.
 The lifecycle module calls it during shutdown: a module that opens a resource is the module that
@@ -1944,16 +1322,7 @@ which is what assigns `sequence`, `previousHash` and `hash`.
 
 ### L1 — notifier
 
-```ts
-interface Notifier {
-  enqueue(request: NotificationRequest, tx: StoreTransaction): void;
-  deliverPending(): Promise<DeliveryReport>;
-  redriveUndelivered(): Promise<DeliveryReport>;
-  listFailed(): Promise<readonly OutboxRow[]>;
-  clearFailed(id: OutboxRowId, actor: ActorRef): Promise<Outcome<void, NotifierError>>;
-  runRetention(): Promise<RetentionReport>;
-}
-```
+Declared in `src/notifier/notifier.ts`.
 
 `enqueue` is synchronous and takes a transaction, so the row and the settle commit together.
 Delivery happens afterwards and never blocks the operation it describes.
@@ -1966,42 +1335,16 @@ already audit in.
 
 ### L1 — lifecycle
 
-```ts
-interface BootJobReport {
-  readonly markedDone: readonly ScheduledJobId[];
-  readonly markedNeedsAttention: readonly ScheduledJobId[];
-  readonly returnedToPending: readonly ScheduledJobId[];
-  readonly leftRunning: readonly ScheduledJobId[];
-}
+Declared in `src/lifecycle/boot.ts`, with `BootJobReport` composed from the scheduler's own types in
+`src/scheduler/types.ts`.
 
-interface RevalidationReport {
-  readonly jobsParked: readonly ScheduledJobId[];
-  readonly entriesParked: readonly OperationId[];
-}
+`BootReport` is a record of what boot found and decided, not a status: every field names something
+that could have gone differently, and boot returning successfully with a non-empty
+`revalidation.entriesParked` or `recoveryPending` is an ordinary outcome rather than a warning. That
+is why they are lists rather than counts — an operator needs to know *which*.
 
-interface BootReport {
-  readonly lease: InstanceLease;
-  readonly leaseSelfTestPassed: boolean;
-  readonly registryFingerprint: Sha256Hex;
-  readonly consoleFingerprint: Sha256Hex;
-  readonly migrationsApplied: number;
-  readonly provisioningPending: boolean;
-  readonly auditChain: AuditChainState;
-  readonly jobsResolved: BootJobReport;
-  readonly revalidation: RevalidationReport;
-  readonly clones: readonly Clone[];
-  readonly recoveryPending: readonly DeclarationId[];
-}
-
-type ShutdownReason = 'signal' | 'fatal' | 'operator';
-
-interface Lifecycle {
-  boot(): Promise<Outcome<BootReport, BootError>>;
-  runMaintenance(reason: MaintenanceReason): Promise<MaintenanceReport>;
-  recoverDeclaration(declarationId: DeclarationId): Promise<Outcome<readonly RecoveryClassification[], BootError>>;
-  shutdown(reason: ShutdownReason): Promise<void>;
-}
-```
+`leaseSelfTestPassed` is reported separately from the lease itself because holding the lease and
+having proved the volume excludes are different facts, and only the second is evidence **C7** holds.
 
 `recoverDeclaration` is the lazy pass, called on first use and by the background sweep. Any resume
 step it runs goes through the injected dispatch and takes the global mutation lock for itself,
@@ -2011,20 +1354,7 @@ Boot step 1's lock is taken through an injected seam, because the failure it mus
 property of the volume rather than of this code, and a volume that does not exclude cannot be
 produced on demand in a test:
 
-```ts
-interface LeaseGuard {
-  release(): void;
-}
-
-type LeaseAcquisition =
-  | { readonly acquired: true; readonly guard: LeaseGuard }
-  | { readonly acquired: false };
-
-interface LockAcquirer {
-  acquire(lockPath: string): LeaseAcquisition;
-  childIsRefused(lockPath: string): boolean;
-}
-```
+Declared in `src/lifecycle/lease.ts`.
 
 `childIsRefused` spawns a **real second process** that attempts the same lock and reports whether
 it was refused. A child rather than a second acquire from this process, because the property
@@ -2038,46 +1368,27 @@ per this section's opening rule.
 
 ### L2 — git operations
 
-```ts
-interface CallContext {
-  readonly operationId: OperationId;
-  readonly declarationId: DeclarationId | null;
-  readonly generation: Generation | null;
-  readonly cloneRoot: ClonePath | null;
-  readonly actorRef: ActorRef;
-  readonly capabilities: EffectiveGrant;
-  readonly writablePathPrefixes: readonly PathPrefix[];
-  readonly context: OperationContextKind;
-  readonly scheduledJobId: ScheduledJobId | null;
-  readonly deadline: IsoUtcTimestamp;
-  readonly signal: AbortSignal;
-}
+Declared in `src/git/git-operations.ts`, with `CallContext` and `DomainOperation` in
+`src/shared/call-context.ts` and the input/output and rejection types in `src/git/types.ts`.
 
-type DomainOperation<TInput, TData> = (ctx: CallContext, input: TInput) => Promise<ToolResult<TData>>;
+`CallContext` is the whole of a call's authority, assembled by the dispatch pipeline and never
+amended by a handler. Three of its fields admit `null` and each `null` means something specific
+rather than "missing": a null `declarationId` and `generation` mark an instance-scoped call, and a
+null `cloneRoot` marks a call dispatched with no clone materialised — the file-watcher plan phase,
+which takes neither lock (**C3**, **D11**). A handler receiving a null `cloneRoot` may not fall back
+to a default path; there is no repository to fall back to.
 
-type PathRejection =
-  | { readonly kind: 'malformed'; readonly rule: string }
-  | { readonly kind: 'outside-allowlist'; readonly prefixes: readonly PathPrefix[] }
-  | { readonly kind: 'stripped-by-profile'; readonly prefix: PathPrefix };
+`capabilities` is an `EffectiveGrant`, already intersected. A handler checks membership and never
+recomputes the intersection, which is what keeps **A1** in one place.
 
-interface GitOperations {
-  readonly status: DomainOperation<RepoStatusInput, RepoStatusData>;
-  readonly log: DomainOperation<GitLogInput, GitLogData>;
-  readonly branches: DomainOperation<BranchesInput, BranchesData>;
-  readonly health: DomainOperation<RepoHealthInput, RepoHealthData>;
-  readonly diff: DomainOperation<GitDiffInput, GitDiffData>;
-  readonly stage: DomainOperation<GitStageInput, GitStageData>;
-  readonly commit: DomainOperation<GitCommitInput, GitCommitData>;
-  readonly restorePaths: DomainOperation<RestorePathsInput, RestorePathsData>;
-  readonly push: DomainOperation<GitPushInput, GitPushData>;
-  readonly fetch: DomainOperation<GitFetchInput, GitFetchData>;
-  readonly syncBase: DomainOperation<SyncBaseInput, SyncBaseData>;
-  readonly raw: DomainOperation<GitRawInput, GitRawData>;
+`DomainOperation` returns `ToolResult` rather than `Outcome` because L2 is the layer the design fixes
+as envelope-returning; every other module returns `Outcome` with an enumerated error. That boundary is
+deliberate and is the one place the two conventions meet.
 
-  loadRepositoryConfig(ctx: CallContext): Promise<Outcome<RepositoryConfig, GitOperationsError>>;
-  validateWritePath(ctx: CallContext, path: string): Outcome<RepoRelativePath, PathRejection>;
-}
-```
+`PathRejection`'s three variants exist because they map to *different result kinds*: `malformed` maps
+to `validation`, while `outside-allowlist` and `stripped-by-profile` map to `authorization` and are
+audited. Collapsing them to one rejection would lose that distinction, and the audit record naming the
+rejected path is the signal of an unattended actor probing its unlock paths.
 
 `validateWritePath` returns `malformed` for `-A`, `--all`, `.`, and any path containing `..` or
 `;`, which the pipeline maps to `validation`. The other two map to `authorization` and are audited,
@@ -2089,13 +1400,7 @@ The twelve operations' input and output types were initially **named above but n
 because the design did not determine them. The slice-specific U1 resolutions below are their
 complete declarations. What the design and the brief fixed before those resolutions:
 
-```ts
-interface GitStageInput { readonly paths: readonly RepoRelativePath[] }
-interface RestorePathsInput { readonly paths: readonly RepoRelativePath[] }
-interface GitCommitInput { readonly message: string }
-interface GitLogInput { readonly ref: BranchName | null }
-interface GitRawInput { readonly argv: readonly string[] }
-```
+Declared in `src/git/types.ts`.
 
 `GitLogInput.ref` defaults to `origin/<baseBranch>` when null, never to `HEAD`. `GitRawInput.argv`
 is rejected before the process starts when it selects an executable, injects configuration, writes
@@ -2107,90 +1412,8 @@ reads remain reachable except for the file, blob, global, system and editor form
 declaration's repository-local configuration. There is no force flag anywhere in `GitPushInput`,
 and there is no reset, clean, rebase or branch-delete operation on this interface.
 
-**S6 resolves U1 for the five read operations.** Their input and output types, fixed here:
-
-```ts
-interface RepoStatusInput {}
-
-interface RepoStatusEntry {
-  readonly path: RepoRelativePath;
-  readonly staged: boolean;
-}
-
-interface RepoStatusData {
-  readonly branch: BranchName;
-  readonly baseBranch: BranchName;
-  readonly dirty: boolean;
-  readonly parkedOffBase: boolean;
-  readonly ahead: number;
-  readonly behind: number;
-  readonly changedPaths: readonly RepoStatusEntry[];
-  readonly observedRemote: CloneUrl | null;
-  readonly readStamp: ReadStamp;
-}
-
-interface GitLogEntry {
-  readonly sha: GitSha;
-  readonly authorName: string;
-  readonly authorEmail: string;
-  readonly authorDate: IsoUtcTimestamp;
-  readonly subject: string;
-}
-
-interface GitLogData {
-  readonly ref: BranchName;
-  readonly commits: readonly GitLogEntry[];
-  readonly readStamp: ReadStamp;
-}
-
-interface BranchesInput {}
-
-interface BranchSummary {
-  readonly name: BranchName;
-  readonly current: boolean;
-  readonly ahead: number;
-  readonly behind: number;
-  readonly lastCommitAt: IsoUtcTimestamp | null;
-}
-
-interface BranchesData {
-  readonly baseBranch: BranchName;
-  readonly branches: readonly BranchSummary[];
-  readonly readStamp: ReadStamp;
-}
-
-interface RepoHealthInput {}
-
-interface StaleBranchSummary {
-  readonly count: number;
-  readonly names: readonly BranchName[];
-}
-
-interface RepoHealthData {
-  readonly branch: BranchName;
-  readonly baseBranch: BranchName;
-  readonly dirty: boolean;
-  readonly parkedOffBase: boolean;
-  readonly ahead: number;
-  readonly behind: number;
-  readonly commitsLast7Days: number;
-  readonly daysSinceLastCommit: number | null;
-  readonly staleBranches: StaleBranchSummary;
-  readonly readStamp: ReadStamp;
-}
-
-interface GitDiffInput {
-  readonly staged: boolean;
-  readonly paths: readonly RepoRelativePath[] | null;
-}
-
-interface GitDiffData {
-  readonly diff: string;
-  readonly checkClean: boolean;
-  readonly checkOutput: string;
-  readonly readStamp: ReadStamp;
-}
-```
+**S6 resolves U1 for the five read operations.** Their input and output types are declared in
+`src/git/types.ts`.
 
 `RepoHealthData` carries no GitHub-derived field — no PR count, deploy status or check pass rate.
 `GitOperations` (L2) depends on L1 only; folding host data into this tool would give it a dependency
@@ -2218,23 +1441,7 @@ declared consumer yet, and the annotation is easy to flip on a future tool that 
 
 **S7 resolves U1 for the three local mutating operations** — `git_stage`, `git_commit`,
 `git_restore_paths`. `GitStageInput`, `RestorePathsInput` and `GitCommitInput` are already fixed
-above; their output types, fixed here:
-
-```ts
-interface GitStageData {
-  readonly staged: readonly RepoRelativePath[];
-}
-
-interface GitCommitData {
-  readonly sha: GitSha;
-  readonly branch: BranchName;
-  readonly changedPaths: readonly RepoRelativePath[];
-}
-
-interface RestorePathsData {
-  readonly restored: readonly RepoRelativePath[];
-}
-```
+above; their output types are declared alongside them in `src/git/types.ts`.
 
 None of the three carries a `ReadStamp` — that field exists so a caller can tell whether what it
 read was stable under a concurrent mutation, and a mutating call is itself the thing every read's
@@ -2261,36 +1468,7 @@ clone only, with no network call, and the design's per-declaration path-allowlis
 machinery is what bounds their cost, not a longer cap.
 
 **S9 resolves U1 for the three remote operations** — `git_push`, `git_fetch`, `sync_base`. Their
-input and output types, fixed here:
-
-```ts
-interface GitPushInput {
-  readonly branch: BranchName | null;
-}
-
-interface GitPushData {
-  readonly branch: BranchName;
-  readonly headSha: GitSha;
-  readonly alreadyUpToDate: boolean;
-}
-
-interface GitFetchInput {}
-
-interface GitFetchData {
-  readonly baseBranch: BranchName;
-  readonly upstreamSha: GitSha | null;
-  readonly updatedRefs: readonly BranchName[];
-}
-
-interface SyncBaseInput {}
-
-interface SyncBaseData {
-  readonly baseBranch: BranchName;
-  readonly headSha: GitSha;
-  readonly upstreamSha: GitSha;
-  readonly fastForwarded: boolean;
-}
-```
+input and output types are declared in `src/git/types.ts`.
 
 `GitPushInput.branch` defaults to the checked-out branch when null. **It carries no force option**,
 and no other field of any of the three admits one — the absence is a fixed property of the input
@@ -2324,17 +1502,8 @@ transfer, not a local `git add`. None is `schedulable`: a scheduled bare push wi
 own has no declared consumer, and S16's held operations are where that question is actually
 answered.
 
-**S15 resolves U1 for `git_raw`.** Its input was fixed above; its output is:
-
-```ts
-interface GitRawData {
-  readonly exitCode: number;
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly durationMs: number;
-  readonly changedPaths: readonly RepoRelativePath[];
-}
-```
+**S15 resolves U1 for `git_raw`.** Its input was fixed above; `GitRawData` is declared in
+`src/git/types.ts`.
 
 `stdout` and `stderr` are scrubbed before they enter the result. A successful `GitRawData` carries
 `exitCode: 0`; a non-zero child exit maps to an error envelope rather than successful data.
@@ -2364,47 +1533,14 @@ repository-authored content.
 
 ### L2 — composites
 
-```ts
-interface Composites {
-  readonly prepareBranch: DomainOperation<PrepareBranchInput, PrepareBranchData>;
-  readonly reconcileAfterMerge: DomainOperation<ReconcileAfterMergeInput, ReconcileAfterMergeData>;
-}
-```
+Declared in `src/composites/composites.ts`.
 
 Each operation's `RecoveryDescriptor` is held separately and registered into the recovery catalogue
 by the composition root, matching `GitOperations` and `HostOperations`. Every sub-step that mutates
 outside the local clone calls `Journal.appendStep` before making the call.
 
-**S12 resolves U1 for the two composites.** Their input and output types, fixed here:
-
-```ts
-interface PrepareBranchInput {
-  readonly branch: BranchName;
-}
-
-type PrepareBranchAction = 'reused-existing' | 'created-from-remote-base' | 'fast-forwarded-then-created' | 'rebased-preserved-commits';
-
-interface PrepareBranchData {
-  readonly branch: BranchName;
-  readonly baseBranch: BranchName;
-  readonly branchHeadSha: GitSha;
-  readonly baseSha: GitSha;
-  readonly preservedCommits: readonly GitSha[];
-  readonly action: PrepareBranchAction;
-}
-
-interface ReconcileAfterMergeInput {
-  readonly pullRequestNumber: number;
-  readonly expectedHeadSha: GitSha | null;
-}
-
-interface ReconcileAfterMergeData {
-  readonly baseBranch: BranchName;
-  readonly baseSha: GitSha;
-  readonly mergeCommitSha: GitSha;
-  readonly deletedBranch: BranchName | null;
-}
-```
+**S12 resolves U1 for the two composites.** Their input and output types are declared in
+`src/composites/types.ts`.
 
 `PrepareBranchInput` carries only the branch name — not `TODO-NEXT.md` §7.3's `slug`/`kind`, which is
 blog-specific branch-naming policy this repository does not own (`00-brief.md`: "general git-workflow
@@ -2446,145 +1582,24 @@ composite's effect is fully visible in `ObservedGitState`.
 
 ### L2 — host adapter
 
-```ts
-interface PullRequestRef {
-  readonly number: number;
-  readonly url: HttpsUrl;
-  readonly branch: BranchName;
-}
+Declared in `src/host/host-operations.ts` and `src/host/types.ts`, with the GitHub implementation in
+`src/host/github-adapter.ts`.
 
-type PullRequestState = 'open' | 'merged' | 'closed';
+**The absence of a merge method is the contract's most load-bearing statement about this module**, and
+it is a property of the interface rather than a runtime refusal: there is no merge or rebase member to
+call, so the host's own auto-merge is the only path by which anything merges. A future amendment adding
+one would be a change of policy, not an addition of convenience.
 
-interface PullRequestStatus {
-  readonly ref: PullRequestRef;
-  readonly state: PullRequestState;
-  readonly headSha: GitSha;
-  readonly baseSha: GitSha;
-  readonly mergeCommitSha: GitSha | null;
-  readonly mergeable: boolean | null;
-  readonly autoMergeEnabled: boolean;
-}
-
-interface CheckStatus {
-  readonly name: string;
-  readonly conclusion: 'success' | 'failure' | 'cancelled' | 'skipped' | 'pending';
-  readonly detailsUrl: HttpsUrl | null;
-}
-
-interface DeployStatus {
-  readonly workflow: string;
-  readonly commitSha: GitSha;
-  readonly conclusion: 'success' | 'failure' | 'cancelled' | 'pending';
-  readonly detailsUrl: HttpsUrl | null;
-}
-
-interface HostComment {
-  readonly author: string;
-  readonly body: string;
-  readonly createdAt: IsoUtcTimestamp;
-}
-
-interface RequestBudget {
-  readonly remaining: number;
-  readonly resetsAt: IsoUtcTimestamp | null;
-}
-
-interface HostAdapter {
-  readonly kind: HostKind;
-  createPullRequest(ctx: CallContext, input: CreatePullRequestInput): Promise<Outcome<PullRequestRef, HostError>>;
-  readPullRequest(ctx: CallContext, number: number): Promise<Outcome<PullRequestStatus, HostError>>;
-  listPullRequests(ctx: CallContext, state: PullRequestState | null): Promise<Outcome<readonly PullRequestStatus[], HostError>>;
-  readPullRequestComments(ctx: CallContext, number: number): Promise<Outcome<readonly HostComment[], HostError>>;
-  enableAutoMerge(ctx: CallContext, number: number): Promise<Outcome<void, HostError>>;
-  readChecks(ctx: CallContext, ref: GitSha): Promise<Outcome<readonly CheckStatus[], HostError>>;
-  readDeployStatus(ctx: CallContext, workflow: string, ref: GitSha): Promise<Outcome<DeployStatus, HostError>>;
-  remainingBudget(ref: CredentialRef): RequestBudget;
-}
-
-interface HostOperations {
-  readonly createPullRequest: DomainOperation<CreatePullRequestInput, PrOpenData>;
-  readonly readPullRequest: DomainOperation<PrStatusInput, PrStatusData>;
-  readonly listPullRequests: DomainOperation<PrListInput, PrListData>;
-  readonly readPullRequestComments: DomainOperation<PrCommentsInput, PrCommentsData>;
-  readonly enableAutoMerge: DomainOperation<PrEnableAutoMergeInput, PrEnableAutoMergeData>;
-  readonly readChecks: DomainOperation<ChecksStatusInput, ChecksStatusData>;
-  readonly awaitChecks: DomainOperation<ChecksAwaitInput, ChecksAwaitData>;
-}
-```
+The adapter is the only module that reaches a host API, which is why `host.*` capabilities are absent
+from `hostSupportedCapabilities('generic')` — **A5**. A generic-host declaration cannot hold one, so
+nothing here is reachable for it.
 
 `HostComment.body` is author-controlled text carried as data; the tool returning it is annotated
 `untrustedOutput`. There is no merge method and no rebase method on this interface, and by design
 there never will be — the host's own auto-merge is the only merge path.
 
 **S10 resolves U1 for the host tools**, `CreatePullRequestInput` included. Their input and output
-types, fixed here:
-
-```ts
-interface CreatePullRequestInput {
-  readonly title: string;
-  readonly body: string;
-  readonly headBranch: BranchName | null;
-  readonly draft: boolean;
-}
-
-interface PrOpenData {
-  readonly ref: PullRequestRef;
-}
-
-interface PrStatusInput {
-  readonly number: number;
-}
-
-interface PrStatusData {
-  readonly status: PullRequestStatus;
-}
-
-interface PrListInput {
-  readonly state: PullRequestState | null;
-}
-
-interface PrListData {
-  readonly pullRequests: readonly PullRequestStatus[];
-}
-
-interface PrCommentsInput {
-  readonly number: number;
-}
-
-interface PrCommentsData {
-  readonly comments: readonly HostComment[];
-}
-
-interface PrEnableAutoMergeInput {
-  readonly number: number;
-}
-
-interface PrEnableAutoMergeData {
-  readonly number: number;
-  readonly autoMergeEnabled: boolean;
-}
-
-interface ChecksStatusInput {
-  readonly ref: GitSha | null;
-}
-
-interface ChecksStatusData {
-  readonly ref: GitSha;
-  readonly checks: readonly CheckStatus[];
-}
-
-interface ChecksAwaitInput {
-  readonly ref: GitSha | null;
-  readonly timeoutSeconds: number;
-}
-
-interface ChecksAwaitData {
-  readonly ref: GitSha;
-  readonly checks: readonly CheckStatus[];
-  readonly concluded: boolean;
-  readonly waitedSeconds: number;
-}
-```
+types are declared in `src/host/types.ts`.
 
 `CreatePullRequestInput` carries **no base branch**. The base is the declaration's `baseBranch`, for
 the reason `git_push` takes no remote: an input-supplied base would let a caller open a pull request
@@ -2640,35 +1655,7 @@ registry, where it is checkable, rather than as a runtime refusal.
 
 ### L2 — scheduler
 
-```ts
-interface SkippedJob {
-  readonly id: ScheduledJobId;
-  readonly reason: string;
-}
-
-interface TickReport {
-  readonly fired: readonly ScheduledJobId[];
-  readonly skipped: readonly SkippedJob[];
-  readonly cancelled: readonly SkippedJob[];
-}
-
-interface SchedulerOperations {
-  readonly create: DomainOperation<ScheduledJobCreateInput, ScheduledJobCreateData>;
-  readonly list: DomainOperation<ScheduledJobListInput, ScheduledJobListData>;
-  readonly cancel: DomainOperation<ScheduledJobCancelInput, ScheduledJobCancelData>;
-}
-
-interface Scheduler {
-  create(input: CreateJobInput, ctx: CallContext): Promise<Outcome<ScheduledJob, SchedulerError>>;
-  list(declarationId: DeclarationId | null, status: ScheduledJobStatus | null): Promise<readonly ScheduledJob[]>;
-  cancel(id: ScheduledJobId, ctx: CallContext, reason: string): Promise<Outcome<ScheduledJob, SchedulerError>>;
-  cancelForDeclaration(declarationId: DeclarationId, reason: string, tx: StoreTransaction): readonly ScheduledJobId[];
-  tick(now: IsoUtcTimestamp): Promise<TickReport>;
-  resolveRunningAtBoot(): Promise<BootJobReport>;
-  revalidatePending(registry: CompiledRegistry): Promise<readonly ScheduledJobId[]>;
-  runRetention(): Promise<RetentionReport>;
-}
-```
+Declared in `src/scheduler/scheduler.ts`, with its types in `src/scheduler/types.ts`.
 
 Constructed with `Dispatch` injected; it never imports the pipeline. `resolveRunningAtBoot`
 classifies from the journal alone and runs no resume step and no git or host I/O.
@@ -2705,15 +1692,7 @@ turned into caller-authored sequencing.
 
 ### L2 — watcher
 
-```ts
-interface Watcher {
-  start(): Promise<Outcome<void, WatcherError>>;
-  stop(): Promise<void>;
-  recoverInterruptedClaims(): Promise<readonly WatchTickReport[]>;
-  tick(): Promise<readonly WatchTickReport[]>;
-  runRetention(): Promise<RetentionReport>;
-}
-```
+Declared in `src/watcher/watcher.ts`.
 
 Constructed with `Dispatch` injected, exactly as the scheduler is. Every git and host step goes
 through that dispatch, so the watcher depends on neither `GitOperations` nor `HostAdapter`.
@@ -2734,26 +1713,13 @@ consumer naming conventions of its own.
 
 ### L3 — module adapter
 
-```ts
-type ModuleHandler = (ctx: CallContext, input: JsonValue) => Promise<ToolResult<JsonValue>>;
-
-interface ModuleAdapter {
-  register(target: ModuleTargetName, handler: ModuleHandler): Outcome<void, ModuleAdapterError>;
-  invoke(target: ModuleTargetName, ctx: CallContext, input: JsonValue): Promise<ToolResult<JsonValue>>;
-  registeredTargets(): ReadonlySet<ModuleTargetName>;
-}
-```
+Declared in `src/module-adapter/module-adapter.ts`.
 
 The catalogue is populated by registration at composition time. It never imports a handler.
 
 ### L3 — http adapter
 
-```ts
-interface HttpAdapter {
-  invoke(operation: HttpOperationName, ctx: CallContext, input: JsonValue, limits: ToolLimits): Promise<ToolResult<JsonValue>>;
-  declaredOperations(): ReadonlySet<HttpOperationName>;
-}
-```
+Declared in `src/http/http-adapter.ts`.
 
 Its one consumer is published-URL verification of a managed repository, which is unauthenticated,
 so the adapter takes no credential dependency and its L1-only dependency list stands.
@@ -2762,17 +1728,7 @@ so the adapter takes no credential dependency and its L1-only dependency list st
 interface fixes no `register` method — one real consumer, fixed internally by the factory rather than
 a pluggable catalogue, is what "its one consumer" above already says.
 
-```ts
-interface VerifyPublishedUrlInput {
-  readonly url: HttpsUrl;
-  readonly expectedCommitSha: GitSha;
-}
-
-interface VerifyPublishedUrlData {
-  readonly url: HttpsUrl;
-  readonly commitSha: GitSha;
-}
-```
+Declared in `src/http/http-adapter.ts`.
 
 **The convention this operation reads is a lower-bound decision, not a design fact the brief or
 `10-design.md` fixes anywhere:** the published URL is expected to answer a 200 whose JSON body carries
@@ -2801,24 +1757,17 @@ justified amending `git_commit` above.
 
 ### L4 — dispatch pipeline
 
-```ts
-interface DispatchRequest {
-  readonly toolName: RegistryToolName;
-  readonly input: JsonValue;
-  readonly session: Session;
-  readonly declarationId: DeclarationId | null;
-  readonly scheduledJobId: ScheduledJobId | null;
-  readonly context: OperationContextKind;
-  readonly signal: AbortSignal;
-}
+Declared in `src/dispatch/dispatch-pipeline.ts`.
 
-type Dispatch = (request: DispatchRequest) => Promise<ToolResult<JsonValue>>;
+This is where a call acquires its authority and its locks, and three invariants name it as
+responsible. The epoch check runs before every handler invocation, and a moved epoch forces a
+recomputation that can only narrow — **A3** with **A2**. `visibleTools` and `dispatch` apply the *same*
+predicate: a tool absent from the first returns `authorization` from the second and never reaches a
+handler — **A9**. That is one predicate written once, not two that must be kept in agreement.
 
-interface DispatchPipeline {
-  readonly dispatch: Dispatch;
-  visibleTools(session: Session, declaration: Declaration | null): readonly ToolDeclaration[];
-}
-```
+The pipeline mints the `operationId`; no caller supplies one. That is what makes **R1** enforceable —
+`Journal.begin` commits before the first side effect, against an identifier the caller could not have
+pre-registered.
 
 `visibleTools` is what `tools/list` returns and what the console filters views against. A tool the
 session may not call is absent from it, not merely refused by `dispatch`.
@@ -2831,53 +1780,11 @@ supplies an `operationId`.
 
 ### L4 — authorization
 
-```ts
-interface ClientRegistrationRequest {
-  readonly redirectUris: readonly HttpsUrl[];
-  readonly clientName: string;
-}
+Declared in `src/authorization/authorization.ts`, with its records in `src/authorization/types.ts`.
 
-interface RefreshedTokens {
-  readonly access: IssuedToken;
-  readonly refresh: IssuedToken;
-}
-
-interface McpGrantInput {
-  readonly clientId: ClientId;
-  readonly subject: Subject;
-  readonly resource: McpResourceUri;
-  readonly declarationId: DeclarationId;
-  readonly generation: Generation;
-  readonly scopes: readonly McpScope[];
-}
-
-interface IssuedMcpGrant {
-  readonly grant: Grant;
-  readonly access: IssuedToken;
-  readonly refresh: IssuedToken;
-}
-
-interface Authorization {
-  registerClient(request: ClientRegistrationRequest): Promise<Outcome<OAuthClient, AuthorizationError>>;
-  getClient(clientId: ClientId): Promise<OAuthClient | null>;
-  issueMcpGrant(input: McpGrantInput, actor: ActorRef): Promise<Outcome<IssuedMcpGrant, AuthorizationError>>;
-  establishMcpSession(bearer: BearerToken, resource: McpResourceUri): Promise<Outcome<Session, AuthorizationError>>;
-  verifyOperatorApiToken(bearer: BearerToken): Promise<Outcome<Session, AuthorizationError>>;
-  issueOperatorApiToken(subject: Subject, scopes: readonly OperatorScope[], actor: ActorRef): Promise<Outcome<IssuedToken, AuthorizationError>>;
-  refresh(bearer: BearerToken): Promise<Outcome<RefreshedTokens, AuthorizationError>>;
-
-  recomputeSessionGrant(session: Session, declaration: Declaration | null): Outcome<Session, AuthorizationError>;
-  grantIsLive(grantId: GrantId): Promise<boolean>;
-
-  listGrants(kind: GrantKind | null): Promise<readonly GrantView[]>;
-  revokeClient(clientId: ClientId, actor: ActorRef): Promise<Outcome<void, AuthorizationError>>;
-  revokeGrant(grantId: GrantId, actor: ActorRef): Promise<Outcome<void, AuthorizationError>>;
-  revokeToken(jti: TokenId, actor: ActorRef): Promise<Outcome<void, AuthorizationError>>;
-  revokeGrantsForResource(declarationId: DeclarationId, generation: Generation, tx: StoreTransaction): readonly GrantId[];
-  revokeBearerToken(bearer: BearerToken, actor: ActorRef): Promise<Outcome<void, AuthorizationError>>;
-  runRetention(): Promise<RetentionReport>;
-}
-```
+Every method here is shaped by **S6** and **S7**: a token value exists only in the `IssuedToken`
+returned at issue, and revocation writes a timestamp rather than deleting a row. Nothing in this
+interface can return a stored token value, because none is stored.
 
 `revokeBearerToken` is `/oauth/revoke`'s (RFC 7009) one call: the client presents the opaque value it holds, not the `TokenId` it was never given, so revocation has to resolve by hash the same way `establishMcpSession` and `refresh` already do rather than by id.
 
@@ -2900,108 +1807,28 @@ replay finds no code to exchange rather than reaching the store twice.
 
 ### L4 — operator identity
 
-```ts
-type ProvisioningState = 'pending' | 'complete';
-
-interface EnrolmentRequest {
-  readonly provisioningSecret: string;
-  readonly subject: Subject;
-  readonly password: string;
-}
-
-interface EnrolmentResult {
-  readonly totpSecret: string;
-  readonly recoveryCodes: readonly string[];
-}
-
-interface LocalLoginRequest {
-  readonly subject: Subject;
-  readonly password: string;
-  readonly totpCode: string;
-}
-
-interface OidcRedirect {
-  readonly authorizeUrl: HttpsUrl;
-  readonly state: string;
-}
-
-/** S31.1. `totpSecret` is the freshly generated, not-yet-committed secret — the same base32 shape `EnrolmentResult.totpSecret` already returns, displayed once so the operator can add it to an authenticator app before `completeTotpReenrol` asks for a code against it. */
-interface TotpReenrolStart {
-  readonly totpSecret: string;
-}
-
-interface OperatorIdentity {
-  provisioningState(): Promise<ProvisioningState>;
-  enrol(request: EnrolmentRequest): Promise<Outcome<EnrolmentResult, OperatorIdentityError>>;
-
-  loginLocal(request: LocalLoginRequest): Promise<Outcome<OperatorSession, OperatorIdentityError>>;
-  loginWithRecoveryCode(subject: Subject, password: string, code: string): Promise<Outcome<OperatorSession, OperatorIdentityError>>;
-  loginWithBreakGlass(token: string): Promise<Outcome<OperatorSession, OperatorIdentityError>>;
-
-  beginOidc(): Promise<Outcome<OidcRedirect, OperatorIdentityError>>;
-  completeOidc(code: string, state: string): Promise<Outcome<OperatorSession, OperatorIdentityError>>;
-
-  /** S31.1/S31.4. Generates and seals a fresh TOTP secret without committing it, so the old secret keeps authenticating until `completeTotpReenrol` proves the operator captured the new one. Callable whether or not `totp_reenrol_required` is set — a lockout is what forces it, not what permits it. */
-  beginTotpReenrol(sessionId: SessionId): Promise<Outcome<TotpReenrolStart, OperatorIdentityError>>;
-  /** S31.1/S31.4. Verifies `totpCode` against the pending secret `beginTotpReenrol` sealed, and only on success: commits it as `totp_secret_sealed`, clears `totp_reenrol_required`, and writes an `identity-event` carrying `'totp-reenrolled'`. A wrong code leaves the old secret authenticating and the pending secret in place, so a mistyped code costs a retry, not the whole enrolment. */
-  completeTotpReenrol(sessionId: SessionId, totpCode: string): Promise<Outcome<void, OperatorIdentityError>>;
-
-  touch(sessionId: SessionId): Promise<Outcome<OperatorSession, OperatorIdentityError>>;
-  logout(sessionId: SessionId): Promise<Outcome<void, OperatorIdentityError>>;
-  revokeSession(sessionId: SessionId, actor: ActorRef): Promise<Outcome<void, OperatorIdentityError>>;
-  listSessions(): Promise<readonly OperatorSession[]>;
-  runRetention(): Promise<RetentionReport>;
-}
-```
+Declared in `src/operator-identity/operator-identity.ts`.
 
 `EnrolmentResult` is the only place the TOTP secret and the recovery codes exist in the clear, and
 it is returned exactly once. The store holds hashes.
 
 ### L0 — contract types and compiler
 
-```ts
-interface ContractAuthoring {
-  tool(declaration: ToolDeclaration): ToolDeclaration;
-}
-
-interface Compiler {
-  compile(declarations: readonly ToolDeclaration[]): Outcome<CompilerArtifact, readonly CompilerError[]>;
-  fingerprint(registry: CompiledRegistry): Sha256Hex;
-}
-```
+Declared in `src/contract/compiler.ts`, over the types in `src/contract/tool-declaration.ts`.
 
 The compiler is build-time only and is not present at runtime.
 
 ### L5 — surfaces
 
 Surfaces expose nothing inward. Three things about them are contract-level rather than
-implementation:
+implementation.
 
-```ts
-declare const MCP_RESOURCE_URI_TEMPLATE: '/mcp/{declarationId}';
+`LivenessReport`, `VersionReport` and `HealthReport` are declared in `src/surfaces/http-server.ts`.
 
-interface LivenessReport {
-  readonly ready: boolean;
-  readonly commitSha: GitSha;
-}
-
-interface VersionReport {
-  readonly commitSha: GitSha;
-  readonly contractFingerprint: Sha256Hex;
-  readonly consoleFingerprint: Sha256Hex;
-}
-
-interface HealthReport {
-  readonly ready: boolean;
-  readonly provisioningPending: boolean;
-  readonly version: VersionReport;
-  readonly auditChain: AuditChainState;
-  readonly failedOutboxRows: number;
-  readonly failingCredentialRefs: readonly CredentialFailureMark[];
-  readonly parkedOperations: number;
-  readonly volume: VolumeUsage;
-}
-```
+`MCP_RESOURCE_URI_TEMPLATE` has no named declaration in the tree. The template it fixes —
+`/mcp/{declarationId}` — is enforced by `MCP_RESOURCE_URI_PATTERN` in `src/shared/brands.ts`, which is
+`mcpResourceUri()`'s own rule, and constructed at the two call sites in `src/surfaces/mcp-routes.ts`.
+The pattern is the authority; the template is how to read it.
 
 `LivenessReport` is the **only** payload served without authentication, on `/healthz`. It carries
 readiness and the running commit and nothing else. `VersionReport` and `HealthReport` are
@@ -3009,14 +1836,14 @@ authenticated console routes: the fingerprints, the chain state, the failing cre
 and the volume breakdown are all operator data, and item 15's companion check reaches the catalogue
 through an authenticated `tools/list` rather than through the probe.
 
-A bearer route accepts no cookie and a cookie route accepts no bearer. The route table itself is
-not fixed here — see `## Unresolved`.
+A bearer route accepts no cookie and a cookie route accepts no bearer — **E6** — except for the four
+rows S34 marks `bearer or cookie`, explained beneath the table below.
 
-**Three paths are fixed, ahead of that table, because they already ship**: `LivenessReport` on
-`GET /healthz` unauthenticated, `VersionReport` on `GET /version`, and `HealthReport` on
-`GET /health`, the latter two authenticated. U4 still owns the rest of the route table, but these
-three are externally observable — an operator's monitoring binds to them — so U4 resolving later
-must accept them rather than rename a live endpoint.
+**Three paths were fixed ahead of the route table because they already shipped**: `LivenessReport` on
+`GET /healthz` unauthenticated, `VersionReport` on `GET /version`, and `HealthReport` on `GET /health`.
+They are externally observable — an operator's monitoring binds to them — so U4, resolving later, had
+to accept them rather than rename a live endpoint. It did; they appear unchanged in the first block of
+the table that follows.
 
 #### The HTTP API route table (resolves U4, S18.1/S18.14)
 
@@ -3141,6 +1968,14 @@ path: the seven declaration-management and tool routes above, `/failing-credenti
 protected-resource metadata document, and the MCP transport itself. Thirty-eight routes in total.
 
 #### OAuth endpoints and the MCP transport (resolves U5)
+
+These two stay written out rather than becoming pointers, because there is no declaration in the tree
+to point at. Both are **wire shapes fixed by RFC**, not internal types: they are served as object
+literals from `src/surfaces/mcp-routes.ts` at `/.well-known/oauth-protected-resource/mcp/{id}` and
+`/.well-known/oauth-authorization-server`, and asserted from the outside by
+`src/surfaces/mcp-routes.test.ts`. The snake_case member names are the RFCs', which is the clearest
+signal that what is fixed here is a document a third-party client parses rather than a type this
+service passes around. `SUPPORTED_SCOPES` in that file is what fills `scopes_supported`.
 
 ```ts
 interface ProtectedResourceMetadata {
