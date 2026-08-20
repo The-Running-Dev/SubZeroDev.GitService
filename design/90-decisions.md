@@ -245,8 +245,6 @@ re-running the same real test, or building the second-session self-test mechanis
 ## Open
 <Things noticed mid-slice that were deliberately not acted on. Move them out or delete them; do not let this section rot.>
 
-- **`eligibleViews` (`console/src/view-registry.ts`) filters on a declaration's raw `capabilityGrant`, not the operator session's effective grant.** Found in S19 code review. The server's real gate (`isVisible`/`effectiveGrant`, `src/dispatch/dispatch-pipeline.ts`) additionally narrows by contract, ceiling and session; the console only sees one of those four layers. Masked today because operator sessions hold the full grant until S13 lands durable, narrower per-session grants — at which point a registered view's nav button could show for a view the operator's session can't actually use. No fix applied: the console has no route today that returns an operator's effective grant, and adding one is outside S19's `Touches`. Revisit when S13 lands.
-
 ---
 
 ### 2026-08-14 — S28.4's bind-mount lease refusal does not reproduce on current Docker Desktop
