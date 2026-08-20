@@ -14,37 +14,31 @@ import { randomUUID } from 'node:crypto';
  * sidecar, which needs a Docker daemon and takes materially longer than the
  * unit suite.
  *
- * **This asserts a vulnerability, not a guarantee.** S30.5–S30.7 are written
- * to demonstrate that boot's lease self-test does not fire on a filesystem
- * whose locking is genuinely absent across independent client sessions — a
- * finding, not a defence. A later change that makes S30.5 or S30.6 fail (the
- * guard starting to refuse the mount it currently waves through) is a fix,
- * not a regression.
+ * **This asserts a vulnerability, not a guarantee.** S30.5–S30.7 demonstrate
+ * that boot's lease self-test does not fire on a filesystem whose locking is
+ * genuinely absent across independent client sessions — a finding, not a
+ * defence. A later change that makes S30.5 or S30.6 fail (the guard starting
+ * to refuse the mount it currently waves through) is a fix, not a
+ * regression.
  *
  * **S30.2 is the control** — a container-managed named volume, same image,
  * same command as every other run here — and is the only test in this file
  * that runs unconditionally. Without it, any outcome below is attributable
  * to the harness rather than to the mount under it.
  *
- * **S30.5–S30.7 are marked `skip` on this host, with the reason stated
- * rather than the tests deleted or faked.** Run for real on 2026-08-19
- * against a Samba sidecar (`dperson/samba` 4.12.2 and, separately,
- * `ghcr.io/servercontainers/samba` 4.23.8) mounted via Docker's `local`
- * volume driver (`--opt type=cifs`) with `nobrl`: the real production image,
- * booting against that mount, fails before any lock-exclusivity behaviour is
- * reachable. `node:sqlite`'s `BEGIN EXCLUSIVE`/`CREATE TABLE` sequence that
- * `lease.ts`'s `openLocked` runs on every boot commits its journal by
- * `unlink()`-ing the `-journal` file, and the CIFS client
- * (`kernel 7.0.12-linuxkit`, this machine's Docker Desktop VM) returns
- * `EOPNOTSUPP` for that unlink whenever the mount carries `nobrl` — confirmed
- * independent of `nosharesock`, and independent of which Samba server or
- * server-side locking/oplock settings were tried. This is a different,
- * earlier failure than `design/90-decisions.md`'s 2026-08-19 entry describes
- * (two containers both reaching `ready: true`): that entry's environment is
- * not reproducible with what is available here. The new finding is recorded
- * in the decision log's own 2026-08-19 entry alongside it, and `S30.4`–`S30.8`
- * are left unmet — not silently marked passing — until a host is found where
- * the mount itself does not break `node:sqlite` outright.
+ * **S30.5–S30.7 run for real** against a `dperson/samba` sidecar started by
+ * this file, mounted twice via Docker's `local` volume driver
+ * (`--opt type=cifs`) with `nobrl,nosharesock` — one CIFS volume per
+ * container, so each gets its own client session rather than sharing the
+ * host's. `nosharesock` is load-bearing: without it, the two containers'
+ * mounts share one kernel CIFS session and local lock bookkeeping correctly
+ * refuses the second boot (`lease-held`), which proves session-sharing
+ * exclusion, not the cross-session exclusion `S30.5` asks about.
+ * `design/90-decisions.md`'s 2026-08-19 entry records an earlier attempt on
+ * this same kernel (`7.0.12-linuxkit`) that saw `node:sqlite`'s
+ * journal-commit `unlink()` fail `EOPNOTSUPP` before reaching this point;
+ * that did not reproduce here — see the decision log's later entry for what
+ * changed and what did not.
  *
  * **S30.9** — configurations this file does not exercise, and why:
  *   - NFS: Docker Desktop's Linux VM kernel carries no NFSv3 client
@@ -83,14 +77,14 @@ function runAllowingFailure(command: string, args: readonly string[]): void {
   spawnSync(command, args, { cwd: repoRoot, encoding: 'utf8', timeout: 30_000 });
 }
 
-async function pollHealthz(deadlineMs: number): Promise<{ ready: boolean; commitSha: string }> {
+async function pollHealthzOn(healthPort: number, deadlineMs: number): Promise<{ ready: boolean; commitSha: string }> {
   const start = Date.now();
   let attempts = 0;
   let lastError: unknown;
   while (Date.now() - start < deadlineMs) {
     attempts += 1;
     try {
-      const response = await fetch(`http://localhost:${port}/healthz`);
+      const response = await fetch(`http://localhost:${healthPort}/healthz`);
       const body = (await response.json()) as { ready: boolean; commitSha: string };
       return body;
     } catch (error) {
@@ -99,6 +93,10 @@ async function pollHealthz(deadlineMs: number): Promise<{ ready: boolean; commit
     }
   }
   throw new Error(`/healthz never answered after ${attempts} attempts (${deadlineMs}ms): ${String(lastError)}`);
+}
+
+async function pollHealthz(deadlineMs: number): Promise<{ ready: boolean; commitSha: string }> {
+  return pollHealthzOn(port, deadlineMs);
 }
 
 test('S30.2 — control: a container-managed named volume boots and serves', async () => {
@@ -145,25 +143,107 @@ test('S30.2 — control: a container-managed named volume boots and serves', asy
   }
 });
 
-const SQLITE_OVER_NOBRL_CIFS_BLOCKED =
-  'blocked: node:sqlite\'s journal-commit unlink() returns EOPNOTSUPP over a CIFS mount carrying nobrl ' +
-  'on this host (kernel 7.0.12-linuxkit, both dperson/samba 4.12.2 and ghcr.io/servercontainers/samba ' +
-  '4.23.8) — the real image cannot boot against this mount at all, so no lock-exclusivity behaviour is ' +
-  'reachable. See design/90-decisions.md, 2026-08-19.';
+const sambaContainerName = `s30-verify-samba-${runId}`;
+const sambaNetworkName = `s30-verify-net-${runId}`;
+const volumeNameA = `s30-verify-cifs-a-${runId}`;
+const volumeNameB = `s30-verify-cifs-b-${runId}`;
+const containerNameA = `s30-verify-cifs-a-${runId}`;
+const containerNameB = `s30-verify-cifs-b-${runId}`;
+const portA = 18082;
+const portB = 18083;
 
-test(
-  'S30.5 — two independent CIFS/nobrl client sessions both boot and both report ready:true',
-  { skip: SQLITE_OVER_NOBRL_CIFS_BLOCKED },
-  () => {},
-);
+function startSambaSidecar(): string {
+  run('docker', ['network', 'create', sambaNetworkName]);
+  run('docker', [
+    'run',
+    '-d',
+    '--name',
+    sambaContainerName,
+    '--network',
+    sambaNetworkName,
+    'dperson/samba',
+    '-u',
+    'testuser;testpass',
+    '-s',
+    'data;/share;yes;no;no;testuser',
+  ]);
+  // dperson/samba creates /share as root:root 0755; testuser (uid 1000) needs
+  // write access for the CIFS mounts below to do anything at all.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const chmod = spawnSync('docker', ['exec', '-u', 'root', sambaContainerName, 'chmod', '777', '/share'], {
+      encoding: 'utf8',
+      timeout: 5_000,
+    });
+    if (chmod.status === 0) break;
+    spawnSync('sleep', ['0.5']);
+  }
+  return run('docker', ['inspect', '-f', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', sambaContainerName]);
+}
 
-test('S30.6 — boot\'s self-test passes on both sides of that run', { skip: SQLITE_OVER_NOBRL_CIFS_BLOCKED }, () => {});
+test('S30.5/S30.6 — two independent CIFS/nobrl client sessions both boot, and boot\'s self-test passes on both sides', async () => {
+  const commitSha = run('git', ['rev-parse', 'HEAD']);
+  const credentialMountA = mkdtempSync(path.join(os.tmpdir(), 's30-cifs-credentials-a-'));
+  const credentialMountB = mkdtempSync(path.join(os.tmpdir(), 's30-cifs-credentials-b-'));
 
-test(
-  'S30.7 — lease-self-test-child.ts, run inside the lock-holding container, exits CHILD_REFUSED_EXIT_CODE',
-  { skip: SQLITE_OVER_NOBRL_CIFS_BLOCKED },
-  () => {},
-);
+  run('docker', ['build', '--build-arg', `GIT_COMMIT_SHA=${commitSha}`, '-t', imageTag, '.'], { timeoutMs: 10 * 60_000 });
+  const sambaIp = startSambaSidecar();
+
+  const cifsOpts = `username=testuser,password=testpass,vers=3.0,nobrl,nosharesock`;
+  run('docker', ['volume', 'create', '--driver', 'local', '--opt', 'type=cifs', '--opt', `device=//${sambaIp}/data`, '--opt', `o=${cifsOpts}`, volumeNameA]);
+  run('docker', ['volume', 'create', '--driver', 'local', '--opt', 'type=cifs', '--opt', `device=//${sambaIp}/data`, '--opt', `o=${cifsOpts}`, volumeNameB]);
+
+  try {
+    run('docker', [
+      'run', '-d', '--name', containerNameA, '-p', `${portA}:8080`,
+      '-v', `${volumeNameA}:/data`, '-v', `${credentialMountA}:/credentials:ro`,
+      '-e', 'REMOTE_HOST_ALLOWLIST=', '-e', 'DEPLOYMENT_CEILING=', '-e', `PUBLIC_ORIGIN=http://localhost:${portA}`,
+      imageTag,
+    ]);
+    const healthA = await pollHealthzOn(portA, 30_000);
+    assert.equal(healthA.ready, true, 'S30.5: the first independent CIFS/nobrl session must boot and serve');
+
+    run('docker', [
+      'run', '-d', '--name', containerNameB, '-p', `${portB}:8080`,
+      '-v', `${volumeNameB}:/data`, '-v', `${credentialMountB}:/credentials:ro`,
+      '-e', 'REMOTE_HOST_ALLOWLIST=', '-e', 'DEPLOYMENT_CEILING=', '-e', `PUBLIC_ORIGIN=http://localhost:${portB}`,
+      imageTag,
+    ]);
+    const healthB = await pollHealthzOn(portB, 30_000);
+    assert.equal(healthB.ready, true, 'S30.5: the second independent CIFS/nobrl session must also boot and serve — the split-brain finding');
+
+    // Re-check A: S30.6 is that neither side's self-test fired lease-not-exclusive
+    // and exited, not merely that each answered once before the other started.
+    const healthAAgain = await pollHealthzOn(portA, 5_000);
+    assert.equal(healthAAgain.ready, true, "S30.6: the first container's self-test must still show ready — it did not exit lease-not-exclusive");
+    const runningA = run('docker', ['inspect', '-f', '{{.State.Running}}', containerNameA]);
+    const runningB = run('docker', ['inspect', '-f', '{{.State.Running}}', containerNameB]);
+    assert.equal(runningA, 'true', "S30.6: the first container must still be running, not exited lease-not-exclusive");
+    assert.equal(runningB, 'true', "S30.6: the second container must still be running, not exited lease-not-exclusive");
+
+    // S30.7: run the self-test child inside the mount A already holds, as its
+    // own step rather than through boot. It shares A's CIFS client session,
+    // so it must see A's own held lock and refuse — CHILD_REFUSED_EXIT_CODE.
+    const child = spawnSync(
+      'docker',
+      ['exec', containerNameA, 'node', '--disable-warning=ExperimentalWarning', '/app/src/lifecycle/lease-self-test-child.ts', '/data/lease.lock'],
+      { encoding: 'utf8', timeout: 15_000 },
+    );
+    assert.equal(child.status, 3, `S30.7: lease-self-test-child.ts must exit CHILD_REFUSED_EXIT_CODE (3) inside the lock-holding container; got ${child.status}`);
+  } finally {
+    const logsA = spawnSync('docker', ['logs', containerNameA], { encoding: 'utf8', timeout: 10_000 }).stdout;
+    const logsB = spawnSync('docker', ['logs', containerNameB], { encoding: 'utf8', timeout: 10_000 }).stdout;
+    if (process.env.S30_VERBOSE) console.log(logsA, logsB);
+    runAllowingFailure('docker', ['rm', '-f', containerNameA]);
+    runAllowingFailure('docker', ['rm', '-f', containerNameB]);
+    runAllowingFailure('docker', ['volume', 'rm', '-f', volumeNameA]);
+    runAllowingFailure('docker', ['volume', 'rm', '-f', volumeNameB]);
+    runAllowingFailure('docker', ['rm', '-f', sambaContainerName]);
+    runAllowingFailure('docker', ['network', 'rm', sambaNetworkName]);
+    runAllowingFailure('docker', ['rmi', '-f', imageTag]);
+    rmSync(credentialMountA, { recursive: true, force: true });
+    rmSync(credentialMountB, { recursive: true, force: true });
+  }
+});
 
 /**
  * S30.4 and S30.9's coverage record. Not an assertion about the filesystem —
@@ -173,7 +253,7 @@ test(
  */
 interface MountOutcome {
   readonly configuration: string;
-  readonly outcome: 'served' | 'lease-held' | 'lease-not-exclusive' | 'served-twice' | 'not-exercised' | 'blocked';
+  readonly outcome: 'served' | 'lease-held' | 'lease-not-exclusive' | 'served-twice' | 'not-exercised';
   readonly evidence: string;
 }
 
@@ -189,9 +269,9 @@ const MOUNT_OUTCOMES: readonly MountOutcome[] = [
     evidence: 'design/90-decisions.md, 2026-08-14 — real Windows host, Docker Desktop 4.86, carried forward rather than re-run (this host is not Windows)',
   },
   {
-    configuration: 'CIFS/SMB share mounted nobrl, forced-independent client sessions',
-    outcome: 'blocked',
-    evidence: 'design/90-decisions.md, 2026-08-19 (this entry) — SQLITE_OVER_NOBRL_CIFS_BLOCKED, above',
+    configuration: 'CIFS/SMB share mounted nobrl, forced-independent client sessions (nosharesock)',
+    outcome: 'served-twice',
+    evidence: 'S30.5/S30.6, this file, this run — the split-brain finding C7 exists to prevent, reached against a real filesystem',
   },
   {
     configuration: 'NFS share mounted nolock (NFSv3) or NFSv4 with no locking equivalent',

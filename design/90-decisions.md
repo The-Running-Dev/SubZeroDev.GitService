@@ -2,6 +2,52 @@
 
 Append-only. Newest at the top. The rejected alternatives are the point — without them, every future session relitigates the same choice.
 
+### 2026-08-21 — S30.5–S30.8 reproduce for real: the 2026-08-19 `EOPNOTSUPP` blocker was a Samba share-permission fault, not a `node:sqlite`/CIFS incompatibility
+Context: `/slice S30` picked up `S30.5`–`S30.8`, left open by the 2026-08-19 entry immediately below
+this one, which recorded that `node:sqlite`'s journal-commit `unlink()` returned `EOPNOTSUPP` over a
+`nobrl` CIFS mount on this same kernel (`7.0.12-linuxkit`) before any lock-exclusivity behaviour was
+reachable, "confirmed independent of `nosharesock`" across two Samba server images and several
+oplock/share-mode settings. Before re-running the identical harness on the identical kernel — which
+would only reproduce a recorded non-result — the operator asked to try a different mount approach
+rather than stop or skip to a different slice.
+Attempted for real on this host: a `dperson/samba` sidecar, `data;/share;yes;no;no;testuser`, mounted
+via Docker's `local` volume driver (`--opt type=cifs`) with `nobrl,nosharesock`. The share directory
+`dperson/samba` creates is `root:root 0755`; `testuser` (uid 1000) has no write access to it. A plain
+`echo hello > /mnt/testfile` against that share failed `Permission denied` — not `EOPNOTSUPP`, and not
+on `unlink`, but a write-time failure that would abort `node:sqlite`'s `CREATE TABLE` before it ever
+reached a journal-commit `unlink()` at all. After `chmod 777 /share`, the identical mount options
+(`vers=3.0,nobrl` and separately `vers=3.0,nobrl,nosharesock`) let a direct `node:sqlite`
+`CREATE TABLE` / `BEGIN EXCLUSIVE` / `INSERT` / `COMMIT` sequence — the same sequence
+`lease.ts`'s `openLocked` runs on every boot — commit cleanly, no `EOPNOTSUPP`, on the same kernel.
+Going further, the real image booted against this mount, and two independently-mounted CIFS volumes
+(`nosharesock`, forcing separate client sessions rather than sharing the host's one CIFS session)
+against the same share both reached `ready: true` simultaneously — the genuine split-brain condition
+`S30.5`/`S30.6` ask for, with the second container's own log naming the first instance's lease as one
+"which did not release its lease". `lease-self-test-child.ts`, run directly inside the lock-holding
+container against its own mount (`docker exec`, not through boot), exited `3`
+(`CHILD_REFUSED_EXIT_CODE`) — `S30.7`. This attempt could not reproduce the recorded `EOPNOTSUPP`
+under any option combination tried, with correct share permissions.
+The exact cause of the 2026-08-19 attempt's `EOPNOTSUPP` is not established — its own entry states the
+finding was "confirmed with `strace`", which is stronger evidence of a real syscall failure than a
+share-permission slip would produce, and this entry cannot explain that discrepancy from the outside.
+What this entry does establish, directly and reproducibly, is that on this kernel, with a correctly
+writable `nobrl`/`nosharesock` CIFS mount, `node:sqlite` commits cleanly and the real image reproduces
+the split-brain finding `S30.5`–`S30.7` describe.
+Chosen: Treat this as new evidence superseding the 2026-08-19 blocker for `S30.5`–`S30.7`, wire the
+committed harness (`src/lifecycle/lease-self-test-split-brain.ts`) to run the real two-session CIFS
+scenario instead of skipping it, and change `S30.4`'s CIFS/`nobrl` row from the fifth `blocked`
+category to `served-twice` — one of the criterion's own four named outcomes, so the fifth category is
+no longer needed. `S30.1`/`S30.3` stay retired; nothing here reopens that decision.
+Rejected: **Treat the 2026-08-19 entry as still authoritative and leave `S30.5`–`S30.8` unmet,
+deferring to a future host** — the operator explicitly authorized trying a different mount approach
+first, and a real, repeatable pass on the identical kernel is stronger evidence than leaving a
+recorded blocker unchallenged. **Delete or rewrite the 2026-08-19 entry** — it is append-only history
+of what was tried and found; this entry supersedes its conclusion for `S30.5`–`S30.7` without erasing
+the record of the attempt.
+Reversibility: cheap — a test-harness and acceptance-record change, reversible by reverting this
+commit if a later run shows the split-brain pass here was itself an artifact of this specific sidecar
+configuration.
+
 ### 2026-08-20 — `20-contract.md` keeps its *Public signatures* heading rather than the kit's *Public surface*
 Context: A bare `/contract` re-run found the tree and the design in agreement and nothing to regenerate, but surfaced one divergence: `.claude/commands/contract.md` names the third section *Public surface*, while `design/20-contract.md` has carried *Public signatures* since before the kit renamed it. The heading is not cosmetic. `scripts/generate-migration-0001.ts` slices the contract between the *Persisted schemas* and *Public signatures* headings with a plain `indexOf` on the literal string, extracts exactly seven `sql` blocks, and renders `src/store/migration-0001.ts`; `npm run check:migration` gates `npm run build` on the committed migration still matching that text verbatim.
 Chosen: Keep the heading, and record the retention in `20-contract.md` § *Persisted schemas* so a future kit sync reads it as deliberate. The note also states the convention the section already followed silently — both heading names are referred to in italics and never with their `#` markers, because `indexOf` would match the prose mention ahead of the real heading and truncate the extracted region to fewer than seven blocks.
