@@ -2,6 +2,12 @@
 
 Append-only. Newest at the top. The rejected alternatives are the point — without them, every future session relitigates the same choice.
 
+### 2026-08-20 — `20-contract.md` keeps its *Public signatures* heading rather than the kit's *Public surface*
+Context: A bare `/contract` re-run found the tree and the design in agreement and nothing to regenerate, but surfaced one divergence: `.claude/commands/contract.md` names the third section *Public surface*, while `design/20-contract.md` has carried *Public signatures* since before the kit renamed it. The heading is not cosmetic. `scripts/generate-migration-0001.ts` slices the contract between the *Persisted schemas* and *Public signatures* headings with a plain `indexOf` on the literal string, extracts exactly seven `sql` blocks, and renders `src/store/migration-0001.ts`; `npm run check:migration` gates `npm run build` on the committed migration still matching that text verbatim.
+Chosen: Keep the heading, and record the retention in `20-contract.md` § *Persisted schemas* so a future kit sync reads it as deliberate. The note also states the convention the section already followed silently — both heading names are referred to in italics and never with their `#` markers, because `indexOf` would match the prose mention ahead of the real heading and truncate the extracted region to fewer than seven blocks.
+Rejected: **Rename the heading and update `generate-migration-0001.ts` and `check-migration-matches-contract.ts` in the same commit.** This aligns with the kit but churns the toolchain around migration 0001, which is immutable once released — its checksum is recorded in `schema_migration`. The rename is safe only because the block contents are untouched, which makes it a naming preference paid for with risk against a frozen artifact. **Carry the divergence upstream and rename the kit instead.** Not rejected on the merits, but it is `/kit-sync`'s to propose against `~/.agent-kit`, not this command's to decide for every repository that installed the kit; nothing here is blocked while it is unresolved.
+Reversibility: cheap — the note is one paragraph, and the rename stays available if the kit ever hard-requires the newer name.
+
 ### 2026-08-20 — `/slices` owns retiring a closed slice out of `## Outstanding`, and did so for six
 Context: S18, S31, S32, S33, S34 and S19 all had closed issues (#32, #126, #127, #128, #129, #33) and
 all had shipped — `console/src/` carries every one of the seven views — yet all six still carried
