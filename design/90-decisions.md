@@ -2,6 +2,34 @@
 
 Append-only. Newest at the top. The rejected alternatives are the point — without them, every future session relitigates the same choice.
 
+### 2026-08-20 — `/slices` owns retiring a closed slice out of `## Outstanding`, and did so for six
+Context: S18, S31, S32, S33, S34 and S19 all had closed issues (#32, #126, #127, #128, #129, #33) and
+all had shipped — `console/src/` carries every one of the seven views — yet all six still carried
+full bodies under `## Outstanding` in `30-slices.md`. The document's own *How this document is kept*
+defines the move (body retired, index row added under `## Landed`) but named no owner, and no command
+claimed it: `.claude/commands/reconcile.md` puts `30-slices.md` out of scope entirely, and
+`.claude/commands/track.md` reads the two sections without moving anything between them. The cost was
+not false drift — `Test-DesignDrift.ps1` reported `Slices compared: 10, Findings: 0`, because the ids
+genuinely matched — it was that the document answered "what is left?" with ten slices when four
+remained, and every reader and command that asks gets that answer from here.
+Chosen: `/slices` owns the move, in both directions, and the rule in *How this document is kept* now
+says so and says why — it is the only command that writes this file, so a closed slice is retired
+here or nowhere. The six were retired in this pass: index rows added, bodies deleted. S18 is pinned to
+**#32**, the original in the S-slice numbering block, not the later duplicate #134; both are closed
+and both fully ticked, and #134 is left alone rather than edited.
+Rejected: **Give the move to `/track`** — it is the command that observes an issue close, which is the
+natural trigger, but it would then be editing the document it exists to compare the tracker against,
+and `/reconcile`'s own stated reason for staying out of this file ("if this command has just rewritten
+it, the two were never independent") applies with exactly the same force. **Leave the bodies in place
+and report the gap each run** — costs nothing to do and recurs on every `/kit-help` and every
+`/slices` re-run, which is a standing tax to avoid one decision. **Move the six under `## Landed`
+with their `Acceptance` blocks intact** — contradicts the document's stated reason for retiring rather
+than copying (the second copy is the one that rots) and would hand `Test-DesignDrift.ps1` landed
+criteria to compare that `/track` explicitly tells it not to.
+Reversibility: cheap — the six bodies are in this commit's parent and the accepted criteria are on the
+six closed issues, which is the argument the retire rule already rests on.
+---
+
 ### 2026-08-20 — The registry entry tables in `20-contract.md` become generated output, not hand-maintained prose
 Context: eleven markdown tables across the L2 and L3 sections state each tool's target, capabilities,
 scopes, execution class, annotations and limits — all of which are `ToolDeclaration` values already
