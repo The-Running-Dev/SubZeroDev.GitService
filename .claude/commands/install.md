@@ -3,12 +3,12 @@ description: Install or upgrade the agent kit in a repository. Usage - /install 
 argument-hint: <other repo path>
 ---
 
-<!-- companion:start -->
+<!-- companion:declared:start -->
 **Per-repo companion:** `.claude/commands/install-local.md`. Read it now, if it exists — an absent,
 empty, or frontmatter-only file is no companion, and this file then stands alone.
 It may override: `extra-steps`, `tightened-authorization`. It may never override anything in
 [`.claude/COMPANIONS.md`](../COMPANIONS.md) § *Never*, which is also where these categories are defined.
-<!-- companion:end -->
+<!-- companion:declared:end -->
 
 Install the agent kit. **$1** is the other end — the target if you are running this from the kit, the kit if you are running this from a target.
 

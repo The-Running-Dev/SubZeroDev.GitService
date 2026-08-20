@@ -2,12 +2,12 @@
 description: Lift the design freeze — delete design/FROZEN.md, then run one reconciliation pass
 ---
 
-<!-- companion:start -->
+<!-- companion:declared:start -->
 **Per-repo companion:** `.claude/commands/unfreeze-local.md`. Read it now, if it exists — an absent,
 empty, or frontmatter-only file is no companion, and this file then stands alone.
 It may override: `vocabulary`, `document-map`, `extra-steps`. It may never override anything in
 [`.claude/COMPANIONS.md`](../COMPANIONS.md) § *Never*, which is also where these categories are defined.
-<!-- companion:end -->
+<!-- companion:declared:end -->
 
 Lift the freeze `/freeze` set. This command runs unattended, without a confirmation prompt — that is a deliberate policy in this repository (`AGENTS.md`, *The design freeze*), not an oversight, so do not add one back.
 

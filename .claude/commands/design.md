@@ -2,12 +2,12 @@
 description: Produce or revise the design doc from the brief
 ---
 
-<!-- companion:start -->
+<!-- companion:declared:start -->
 **Per-repo companion:** `.claude/commands/design-local.md`. Read it now, if it exists — an absent,
 empty, or frontmatter-only file is no companion, and this file then stands alone.
 It may override: `vocabulary`, `document-map`, `extra-steps`. It may never override anything in
 [`.claude/COMPANIONS.md`](../COMPANIONS.md) § *Never*, which is also where these categories are defined.
-<!-- companion:end -->
+<!-- companion:declared:end -->
 
 ## Stop if `design/` is frozen
 
@@ -42,7 +42,7 @@ Things that cannot be resolved without information I have not given you. Ask the
 
 Rules:
 - No code. No file layouts. No package names beyond what a decision required.
-- Every decision that survives goes into `design/90-decisions.md` in the logged format.
+- Every decision that survives goes into `design/90-decisions.md` in the logged format. Where this repository's own `design/state/` exists, writing it also follows the record-writing sequence in `design/10-design.md` § *Record* — not restated here.
 - If the brief is too thin to design against, stop and say what is missing rather than inventing requirements.
 
 ## Re-run

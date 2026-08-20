@@ -3,12 +3,12 @@ description: Implement one slice. Usage - /slice S3, or /slice for the next one
 argument-hint: [slice id, omit for the next]
 ---
 
-<!-- companion:start -->
+<!-- companion:declared:start -->
 **Per-repo companion:** `.claude/commands/slice-local.md`. Read it now, if it exists — an absent,
 empty, or frontmatter-only file is no companion, and this file then stands alone.
 It may override: `vocabulary`, `document-map`, `extra-steps`, `gate-commands`. It may never override anything in
 [`.claude/COMPANIONS.md`](../COMPANIONS.md) § *Never*, which is also where these categories are defined.
-<!-- companion:end -->
+<!-- companion:declared:end -->
 
 Implement one slice from `design/30-slices.md`. The slice is **$1**, where that names one. Where it is empty — or, invoked outside Claude Code, still the literal `$1` — select it as below first.
 
@@ -41,6 +41,8 @@ Stop and ask rather than choosing when:
 
 Before writing code, read `design/20-contract.md` for every signature you will touch. The contract is authoritative — if what you need is not in it, stop.
 
+**Where this repository's own `design/state/` exists**, establishing what is currently true about a unit you are about to touch reads that unit's closure (`design/10-design.md` § *Orient*) rather than the corpus, and `design/90-decisions.md` is not opened to establish it. **Where it is absent** — every installed target, and this repository before the mechanism existed — behaviour is today's: read the files and the contract as this section already describes (I27).
+
 Sequence:
 
 1. **Branch.** `git status --short` must be clean and on the default branch before you touch anything; uncommitted work that is not this slice's is not yours to stash or discard (`AGENTS.md`, *Safe start*) — stop and say so instead. Create and check out `slice/S<n>` from the default branch's latest. **Refuse to implement on the default branch** — `/pr` refuses to open a PR from it, and the branch is one command away.
@@ -49,7 +51,7 @@ Sequence:
 4. Implement against the contract signatures exactly. No signature drift, no added parameters, no widened return types.
 5. Run the tests. Run the full suite, not just the new tests.
 6. **Commit, then push.** Stage by named path — never `git add -A`, `git add .`, or a bare directory (`AGENTS.md`, *Git and delivery*).
-7. **Open the pull request. Never as a draft.** Carved out of the authorization rule the same as pushing the branch (`AGENTS.md`, *Git and delivery*). Title it from the slice name; the body can be minimal, since `/pr` writes the real description in this same session and runs the gates and the review threads after it. Check for an existing open PR on this branch first and do not open a second one.
+7. **Open the pull request. Never as a draft.** Carved out of the authorization rule the same as pushing the branch (`AGENTS.md`, *Git and delivery*). Title it from the slice name and **write the real description now**, in the shape `.claude/commands/pr.md` § *Phase 1* fixes — not a placeholder telling the reader to run `/pr` for the real one. A PR body that describes nothing is the same split the no-draft rule exists to prevent: "opened" and "actually reviewable" become two states someone has to reconcile by hand, and a reviewer who arrives in between has nothing to read. `Verified` is the one section that legitimately says the gates have not run yet, because they have not; `/pr` replaces it verbatim in this same session and then works the review threads. Check for an existing open PR on this branch first and do not open a second one.
 8. **Tick the `Done when` boxes** on the matching issue for every id this run confirms met. Carved out the same way (`AGENTS.md`, *Tracking work*) — the report in step 9 and the tick are the same claim now, not two.
 9. Report **by criterion id**: which are met, which are not and why, anything you had to decide that the contract did not determine, and the branch name and PR URL.
 

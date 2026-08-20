@@ -2,12 +2,12 @@
 description: Discover this repository's gates, run them, and report honestly what did and did not run
 ---
 
-<!-- companion:start -->
+<!-- companion:declared:start -->
 **Per-repo companion:** `.claude/commands/verify-local.md`. Read it now, if it exists — an absent,
 empty, or frontmatter-only file is no companion, and this file then stands alone.
 It may override: `vocabulary`, `extra-steps`, `gate-commands`. It may never override anything in
 [`.claude/COMPANIONS.md`](../COMPANIONS.md) § *Never*, which is also where these categories are defined.
-<!-- companion:end -->
+<!-- companion:declared:end -->
 
 Run the checks this repository actually has, and report the result without softening it.
 
@@ -25,6 +25,18 @@ workflow file for that comment; each step it precedes is a discovered gate, name
 step's own `name:`. **A step without the flag is not a gate this command owns**, even if it
 happens to run something useful — do not add it to the report on your own judgement, and
 do not drop the flag from a step that is still meant to gate the repository.
+
+**Which steps carry the flag.** Flag a step when its failure means the *repository* is
+broken, and its `run:` block translates to a local invocation. In practice that is the
+typechecks, linters, test suites, parse checks, packaging assertions and smoke probes —
+the steps that return a verdict on the tree. It is **not** checkout, toolchain setup,
+dependency installation, credential preconditions, container start/stop, image save/load,
+publishing or deployment steps, or `uses:`-only steps that run no command of their own.
+Those can fail, and CI goes red when they do, but they fail as plumbing rather than as a
+judgement on the code, and a report listing them describes the runner instead of the
+repository. When a step both prepares and asserts, flag it only if the assertion is the
+point of the step.
+
 
 **Check the cache first.** `tools/Test-GatesCache.ps1 -RepoRoot <repo>` hashes the files
 this discovery reads (every workflow's full content — so a flag added, moved, or removed
@@ -45,19 +57,30 @@ their local equivalents:
 |---|---|
 | `Parse-check PowerShell scripts` | Parse every `*.ps1` with `[System.Management.Automation.Language.Parser]::ParseFile`, as the step does |
 | `Run Pester tests` | `Invoke-Pester -Path tools -Output Detailed -PassThru` |
+| `Validate the core/companion split` | `./tools/Test-Companion.ps1` |
+| `Check the design state against the tree` | `./tools/Test-DesignState.ps1` |
 
 A repository can gain, lose, or rename flagged steps over time — re-derive this table from
-the workflow files rather than trusting a memorized list; the two rows above describe this
+the workflow files rather than trusting a memorized list; the four rows above describe this
 repository's steps as of this writing, not a fixed schema.
+
+**Two of those steps exit 2 as well as 0 and 1, and 2 is not a failure — it is the third
+list.** `Test-Companion.ps1` and `Test-DesignState.ps1` both distinguish *ran and found
+something* from *could not run at all*, and the exit code is how they say which: 0 is `Passed`,
+1 is `Failed`, and **2 is `DidNotRun`, with the script's own could-not-evaluate reasons as the
+`reason`**. Folding 2 into `Failed` loses the distinction the three lists exist for; folding it
+into `Passed` is the substitution this whole command exists to prevent. Either way CI is red —
+the workflow fails the step on 1 and 2 alike — and that is a separate question from which list
+the gate belongs in here.
 
 Then look for anything else the repository ships that is not CI-gated. These are optional —
 worth running and worth naming if run, but their absence from CI means they never enter the
 "did not run because it did not run" failure mode the flag exists to close:
 
 ```powershell
-Get-Content package.json | Select-String '"scripts"' -Context 0,20
-Get-ChildItem . -Filter *.sln, *.csproj -Recurse -Depth 2
-Get-ChildItem build -Filter *.ps1
+if (Test-Path package.json) { Get-Content package.json | Select-String '"scripts"' -Context 0,20 }
+Get-ChildItem . -Include *.sln, *.csproj -Recurse -Depth 2
+if (Test-Path build) { Get-ChildItem build -Filter *.ps1 }
 Test-Path docs.ps1
 ```
 
@@ -88,6 +111,10 @@ Did not run:      <gate> — <why: tool missing, Docker down, no such script>
   point of discovering gates by flag instead of by looking: a flagged step cannot be
   silently absent from the report the way a gate nobody thought to search for could be.
   Cross-check the list you are about to write against the flags you found before finishing.
+- **A gate that reported *could not evaluate* is named in the third list, never the first.**
+  `Test-DesignState.ps1` exiting 2 means the design state was not read — an absent state set,
+  an unparseable record, a projector that would not run, an unauthenticated `gh`. Its
+  `reason` is the script's own could-not-evaluate output, quoted, not a paraphrase.
 - **Quote failures.** Paste the failing output into the artifact's `detail` field. A summary of a failure is a claim about a failure — `Test-VerifyReport.ps1` rejects a `detail` too short to plausibly be pasted output.
 - **Never write "all checks pass"** unless every discovered gate is in the first list. If anything is in the third list, the honest sentence names it: *"the three that ran passed; the documentation build did not run because Docker is unavailable."*
 - **A gate that cannot run locally is not a gate you may report on.** Say so, and say that the corresponding CI check on the pull request is where the answer will come from.

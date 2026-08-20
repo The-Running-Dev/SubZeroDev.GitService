@@ -207,6 +207,100 @@ Describe 'Sync-Kit' {
         }
     }
 
+    Context 'target content matching the pre-#20 encoding-corruption pattern (#42)' {
+
+        BeforeAll {
+            function New-CorruptedPair {
+                <#
+                Simulates what a24541e's missing StandardOutputEncoding baked into a target's
+                on-disk bytes before that fix: the recorded blob's UTF-8 bytes, mis-decoded
+                under code page 437 (the host the bug report came from), written straight to
+                the target file - not a real local edit, but byte-for-byte different from the
+                recorded blob all the same.
+                #>
+                param([Parameter(Mandatory)][string] $Name)
+
+                $kit = New-GitRepo -Path (Join-Path $TestDrive "kit-$Name")
+                $target = New-GitRepo -Path (Join-Path $TestDrive "target-$Name")
+                $correctText = "line one em dash `u{2014} end`n"
+                $baseSha = Add-GitCommit -Path $kit -RelPath 'tools/Foo.ps1' -Content $correctText -Message 'base'
+                Write-KitJson -TargetRepo $target -RecordedSha $baseSha
+
+                $cp437 = [System.Text.Encoding]::GetEncoding(437)
+                $corruptedText = $cp437.GetString([System.Text.Encoding]::UTF8.GetBytes($correctText))
+                $dir = Join-Path $target 'tools'
+                New-Item -ItemType Directory -Path $dir -Force | Out-Null
+                $targetPath = Join-Path $dir 'Foo.ps1'
+                [System.IO.File]::WriteAllText($targetPath, $corruptedText, [System.Text.UTF8Encoding]::new($false))
+
+                $headText = "$correctText more`n"
+                Add-GitCommit -Path $kit -RelPath 'tools/Foo.ps1' -Content $headText -Message 'head' | Out-Null
+
+                [pscustomobject]@{
+                    Kit = $kit; Target = $target; BaseSha = $baseSha
+                    TargetPath = $targetPath; CorrectText = $correctText; CorruptedText = $corruptedText; HeadText = $headText
+                }
+            }
+        }
+
+        It 'is still Divergent-Skipped by default, but the Detail names the corruption pattern' {
+            $f = New-CorruptedPair -Name 'corrupt-detect'
+
+            $report = & $script:ScriptPath -TargetRepo $f.Target -KitRoot $f.Kit -RecordedSha $f.BaseSha -DryRun
+            $row = $report | Where-Object Path -eq 'tools/Foo.ps1'
+
+            $row.Status | Should -Be 'Divergent-Skipped'
+            $row.Detail | Should -Match 'pre-#20'
+            $row.Detail | Should -Match 'RepairCorruption'
+        }
+
+        It 'a genuine ASCII-only local edit is never flagged as this corruption pattern' {
+            $kit = New-GitRepo -Path (Join-Path $TestDrive 'kit-ascii-edit')
+            $target = New-GitRepo -Path (Join-Path $TestDrive 'target-ascii-edit')
+            $baseSha = Add-GitCommit -Path $kit -RelPath 'tools/Foo.ps1' -Content "base`n" -Message 'base'
+            Write-KitJson -TargetRepo $target -RecordedSha $baseSha
+            $dir = Join-Path $target 'tools'
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $dir 'Foo.ps1'), "base, edited`n", [System.Text.UTF8Encoding]::new($false))
+            Add-GitCommit -Path $kit -RelPath 'tools/Foo.ps1' -Content "base`nmore`n" -Message 'head' | Out-Null
+
+            $report = & $script:ScriptPath -TargetRepo $target -KitRoot $kit -RecordedSha $baseSha -DryRun -RepairCorruption
+            $row = $report | Where-Object Path -eq 'tools/Foo.ps1'
+
+            $row.Status | Should -Be 'Divergent-Skipped'
+            $row.Detail | Should -Not -Match 'pre-#20'
+            [System.IO.File]::ReadAllText((Join-Path $dir 'Foo.ps1')) | Should -Be "base, edited`n"
+        }
+
+        It '-RepairCorruption reports WouldRepairedCorruption and writes nothing in a dry run' {
+            $f = New-CorruptedPair -Name 'corrupt-dryrun'
+
+            $report = & $script:ScriptPath -TargetRepo $f.Target -KitRoot $f.Kit -RecordedSha $f.BaseSha -DryRun -RepairCorruption
+            $row = $report | Where-Object Path -eq 'tools/Foo.ps1'
+
+            $row.Status | Should -Be 'WouldRepairedCorruption'
+            [System.IO.File]::ReadAllText($f.TargetPath) | Should -Be $f.CorruptedText
+        }
+
+        It '-RepairCorruption without -DryRun overwrites the corrupted file with the kit''s head content' {
+            $f = New-CorruptedPair -Name 'corrupt-apply'
+
+            $report = & $script:ScriptPath -TargetRepo $f.Target -KitRoot $f.Kit -RecordedSha $f.BaseSha -RepairCorruption
+            $row = $report | Where-Object Path -eq 'tools/Foo.ps1'
+
+            $row.Status | Should -Be 'RepairedCorruption'
+            [System.IO.File]::ReadAllText($f.TargetPath) | Should -Be $f.HeadText
+        }
+
+        It 'without -RepairCorruption, the corrupted file is left untouched even on a real (non-dry-run) sync' {
+            $f = New-CorruptedPair -Name 'corrupt-untouched'
+
+            & $script:ScriptPath -TargetRepo $f.Target -KitRoot $f.Kit -RecordedSha $f.BaseSha | Out-Null
+
+            [System.IO.File]::ReadAllText($f.TargetPath) | Should -Be $f.CorruptedText
+        }
+    }
+
     Context 'Invoke-GitRaw decodes git output as UTF-8 regardless of the console default' {
 
         BeforeAll {

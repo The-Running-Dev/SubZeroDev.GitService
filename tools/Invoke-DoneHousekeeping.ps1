@@ -72,6 +72,18 @@ function Invoke-Git {
     return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($out -join "`n") }
 }
 
+function Get-WorktreeBlockingPath {
+    # `git branch -d` refuses a branch checked out in another worktree with
+    # "cannot delete branch '<name>' used by worktree at '<path>'" - distinct from
+    # refusing an unmerged branch, and the remedy (`git worktree remove <path>`) is
+    # different too, so callers need the path, not just a generic failure.
+    param([string]$GitOutput)
+    if ($GitOutput -match "used by worktree at '([^']+)'") {
+        return $Matches[1]
+    }
+    return $null
+}
+
 $stashed = $false
 $stashRef = $null
 
@@ -157,9 +169,12 @@ if (-not $SkipPull) {
 $pruneResult = Invoke-Git -GitArgs @('fetch', '--prune', 'origin') -WorkingDir $repoRootResolved
 $prunedLines = @(($pruneResult.Output -split "`n") | Where-Object { $_ -match '\[deleted\]' })
 
-$mergedResult = Invoke-Git -GitArgs @('branch', '--merged', $DefaultBranch) -WorkingDir $repoRootResolved
+# `git branch --merged` prefixes the current branch with "* " and any branch checked
+# out in another worktree with "+ " - the latter survived a TrimStart('*', ' ') that
+# only stripped the former. for-each-ref has no decoration to strip in the first place.
+$mergedResult = Invoke-Git -GitArgs @('for-each-ref', '--format=%(refname:short)', "--merged=$DefaultBranch", 'refs/heads') -WorkingDir $repoRootResolved
 $mergedBranches = @(($mergedResult.Output -split "`n") |
-    ForEach-Object { $_.TrimStart('*', ' ') } |
+    ForEach-Object { $_.Trim() } |
     Where-Object { $_ -and $_ -ne $DefaultBranch })
 
 $candidates = [System.Collections.Generic.List[object]]::new()
@@ -184,7 +199,15 @@ foreach ($branch in $DeleteBranches) {
     if ($deleteResult.ExitCode -eq 0) {
         $deleted.Add($branch)
     } else {
-        $refused.Add([pscustomobject]@{ Branch = $branch; Reason = $deleteResult.Output })
+        $blockingPath = Get-WorktreeBlockingPath -GitOutput $deleteResult.Output
+        if ($blockingPath) {
+            $refused.Add([pscustomobject]@{
+                Branch = $branch
+                Reason = "Checked out in another worktree at '$blockingPath' - run 'git worktree remove $blockingPath' first, not deleted."
+            })
+        } else {
+            $refused.Add([pscustomobject]@{ Branch = $branch; Reason = $deleteResult.Output })
+        }
     }
 }
 

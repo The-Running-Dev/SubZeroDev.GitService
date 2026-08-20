@@ -68,12 +68,12 @@ BeforeAll {
         if (-not $CompanionPath) { $CompanionPath = ".claude/commands/$Name-local.md" }
         $cats = ($Categories | ForEach-Object { "``$_``" }) -join ', '
         $block = @(
-            '<!-- companion:start -->'
+            '<!-- companion:declared:start -->'
             "**Per-repo companion:** ``$CompanionPath``. Read it now, if it exists — an absent,"
             'empty, or frontmatter-only file is no companion, and this file then stands alone.'
             "It may override: $cats. It may never override anything in"
             '[`.claude/COMPANIONS.md`](../COMPANIONS.md) § *Never*, which is also where these categories are defined.'
-            '<!-- companion:end -->'
+            '<!-- companion:declared:end -->'
         ) -join "`n"
 
         $body = @("---", "description: fixture $Name", "---", "")
@@ -85,6 +85,19 @@ BeforeAll {
     function New-CoreWithoutBlock {
         param([Parameter(Mandatory)][string] $Repo, [Parameter(Mandatory)][string] $Name)
         Write-Fixture -Repo $Repo -RelPath ".claude/commands/$Name.md" -Content "---`ndescription: fixture $Name`n---`n`nDo the $Name thing.`n"
+    }
+
+    # The bare form means projected (AGENTS.md, *Marked regions*), so a core still carrying it
+    # is indistinguishable from one with no fence at all - MissingBlock, not a parsed block.
+    function New-CoreWithBareBlock {
+        param([Parameter(Mandatory)][string] $Repo, [Parameter(Mandatory)][string] $Name)
+        $block = @(
+            '<!-- companion:start -->'
+            "**Per-repo companion:** ``.claude/commands/$Name-local.md``."
+            'It may override: `vocabulary`.'
+            '<!-- companion:end -->'
+        ) -join "`n"
+        Write-Fixture -Repo $Repo -RelPath ".claude/commands/$Name.md" -Content "---`ndescription: fixture $Name`n---`n`n$block`n`nDo the $Name thing.`n"
     }
 }
 
@@ -201,6 +214,17 @@ Describe 'Test-Companion — negative cases, one per rule' {
         $r.State | Should -Be 'Invalid'
         $r.Findings.Rule | Should -Contain 'MissingBlock'
         Get-CompanionExitCode -State $r.State | Should -Be 1
+    }
+
+    It 'MissingBlock — a core carrying the bare (projected) form rather than the declared form' {
+        $repo = New-Fixture -Name 'neg-bare-block'
+        New-CoreWithBareBlock -Repo $repo -Name 'slice'
+
+        $r = Invoke-CompanionCheck -TargetRepo $repo
+
+        $r.State | Should -Be 'Invalid'
+        $r.Findings.Rule | Should -Contain 'MissingBlock'
+        $r.CoreCount | Should -Be 1
     }
 
     It 'DuplicateBlock — a core with two fenced blocks' {

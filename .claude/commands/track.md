@@ -3,12 +3,12 @@ description: Sync design/ into GitHub issues and milestones. Idempotent - safe t
 argument-hint: [milestone name]
 ---
 
-<!-- companion:start -->
+<!-- companion:declared:start -->
 **Per-repo companion:** `.claude/commands/track-local.md`. Read it now, if it exists — an absent,
 empty, or frontmatter-only file is no companion, and this file then stands alone.
 It may override: `vocabulary`, `document-map`, `tightened-authorization`. It may never override anything in
 [`.claude/COMPANIONS.md`](../COMPANIONS.md) § *Never*, which is also where these categories are defined.
-<!-- companion:end -->
+<!-- companion:declared:end -->
 
 ## Stop if `design/` is frozen
 
@@ -125,6 +125,22 @@ For each bullet under `## Open` in `design/90-decisions.md`:
 
 **Creating a milestone is carved out of the authorization rule**, the same as an issue (`AGENTS.md`, *Tracking work*). Create it and attach the issues named, and say what you did. Deleting one is not carved out.
 
+## Refresh the work mirror
+
+`/track` is the sole writer of a `WorkRef` (`AGENTS.md`, *Tracking work*; I28). Run it after the issue and milestone sync above, in the same invocation:
+
+```powershell
+pwsh ./tools/Update-WorkMirror.ps1
+```
+
+It writes `design/state/work/<issue>.md` records and nothing else — never an issue, a label, a milestone, or git. Report its outcome the same way you would any other gate:
+
+- Exit 0 — say how many `WorkRef` records were written.
+- Exit 2 — say which issues could not be read and why (`gh` missing or unauthenticated is the ordinary case); no mirror is written on this path, and none of the existing ones are touched.
+- While `design/FROZEN.md` exists it does not run at all, which is expected — `/track` does not run during a freeze either, per *Stop if `design/` is frozen* above.
+
+Where the script is unavailable, say so and name the mirror refresh as a step that **did not run**, the same convention `Test-DesignDrift.ps1`'s unavailability already follows above.
+
 ## Bugs and stories are not synced
 
 `/track` only syncs *from* `design/`. A **bug** has no upstream document — the issue is its origin — and a **story** that is not a slice of an existing design has none either. Both are filed by hand from `.github/ISSUE_TEMPLATE/`, which carries the same narrative-then-agent-block shape pre-filled.
@@ -152,6 +168,7 @@ GitHub Projects v2 needs the `project` token scope, which `repo` does not includ
 - Issues closed, with numbers and titles
 - Slices whose criteria drifted from their issue
 - Open items removed from `90-decisions.md`
+- The work mirror refresh: how many `WorkRef` records were written, or why it did not run
 - Whether a matching project was found or created, and what was added to it
 - Anything skipped, and why
 

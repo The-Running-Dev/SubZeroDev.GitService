@@ -3,18 +3,18 @@ description: Triage a pull request's review comments, fix what is valid, and res
 argument-hint: [pr number]
 ---
 
-<!-- companion:start -->
+<!-- companion:declared:start -->
 **Per-repo companion:** `.claude/commands/resolve-local.md`. Read it now, if it exists — an absent,
 empty, or frontmatter-only file is no companion, and this file then stands alone.
 It may override: `vocabulary`, `tightened-authorization`. It may never override anything in
 [`.claude/COMPANIONS.md`](../COMPANIONS.md) § *Never*, which is also where these categories are defined.
-<!-- companion:end -->
+<!-- companion:declared:end -->
 
 Work the review comments on pull request **$1** — the current branch's PR if no number is given.
 
 **`/pr` runs this as its final phase**, once review has landed on the pull request it took to merge-ready. This file owns the procedure — the query, the classes, the order of operations; `/pr` owns only where the sequence sits. Invoked on its own, it does exactly the same thing against any pull request named.
 
-**Resolving a thread is an external write, but this repository delegates it** (`AGENTS.md`, *Git and delivery*): once a thread is classified `Defect` and the fix satisfying it is pushed, resolve it without asking first. This delegation covers execution only — classification itself still runs on the merit of the claim, and `Ambiguous` threads are still brought individually. This delegation is unavailable in a repository this account does not own; there, ask before resolving anything, per that same section.
+**Resolving a thread, and replying to one, are both external writes.** Whether either needs a prompt is set by the target repository's own `AGENTS.md`, not by this file — this repository delegates both together (`AGENTS.md`, *Git and delivery*): once a thread is classified and its fix or reply is ready, post the reply and resolve without asking first. This delegation covers execution only — classification, and drafting the fix or reply, always run on the merit of the claim with no prompt either way, and `Ambiguous` threads are still brought individually regardless of delegation. Where the target repository's own `AGENTS.md` does not delegate replying and resolving — including any repository this account does not own — ask before posting a reply or resolving anything, per that same section.
 
 ### Gates for automatic resolution
 
@@ -34,10 +34,14 @@ A thread is resolved without asking only if **all four** named gates pass. Uncer
 `gh pr view --json reviewRequests,latestReviews` **does not show conversation threads.** An automated reviewer can leave threads that block merge and appear nowhere in that listing — this has cost real time, and it is why the query is written out here:
 
 ```bash
+OWNER="$(gh repo view --json owner --jq .owner.login)"
+REPO="$(gh repo view --json name --jq .name)"
+PR_NUMBER="${1:-$(gh pr view --json number --jq .number)}"
+
 gh api graphql --paginate -f query='
-query($endCursor: String) {
-  repository(owner:"OWNER", name:"REPO") {
-    pullRequest(number:N) {
+query($endCursor: String, $owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
       reviewThreads(first:100, after:$endCursor) {
         pageInfo { hasNextPage endCursor }
         nodes {
@@ -47,7 +51,7 @@ query($endCursor: String) {
       }
     }
   }
-}'
+}' -f owner="$OWNER" -f repo="$REPO" -F number="$PR_NUMBER"
 ```
 
 `--paginate` walks `reviewThreads`' own `pageInfo` to exhaustion — a PR with more than 100 threads is not silently truncated. Each thread's nested `comments` connection paginates separately and `--paginate` does not reach it: if a thread's `comments.pageInfo.hasNextPage` comes back `true`, its first 10 comments are not the whole conversation, and it needs its own follow-up query, looped on that thread's `comments.pageInfo.endCursor` until `hasNextPage` is `false`, before it can be classified:
@@ -82,7 +86,7 @@ Produce one scannable table — every thread, one row, its `PRRT_…` node id in
 | **Already decided** | Contradicts a recorded decision | Reply, link the decision-log entry or ADR. Do not relitigate |
 | **Ambiguous** | Two readings are both defensible | **Bring to me individually.** Do not guess |
 
-Act on the four clear classes without further prompting. **Bring only the ambiguous ones for sign-off, one at a time** — that is proportionate: a twenty-comment automated review must not become twenty round trips, but nothing debatable gets resolved on your judgement alone.
+Classify and draft the fix or reply for the four clear classes without further prompting — that work runs on the merit of the claim, not on delegation. **Posting the reply, like resolving, follows the delegation named above:** where the target repository delegates it, post and resolve without asking; where it is silent or unavailable, bring the prepared reply and resolution for sign-off before posting either. **Bring only the ambiguous ones for sign-off, one at a time** — that is proportionate: a twenty-comment automated review must not become twenty round trips, but nothing debatable gets resolved on your judgement alone.
 
 ## Order of operations
 
@@ -95,7 +99,7 @@ This sequence is the safeguard. Do not reorder it.
 
 **Never resolve a thread you did not address.** Resolving is how a blocking finding becomes invisible — it is the one action here that cannot be noticed afterwards. Leave anything ambiguous, contested, or merely replied-to **open**, and say so in your report.
 
-In a repository this account does not own, the delegation above is unavailable: fix and push, then ask before resolving anything, per `AGENTS.md`, *Git and delivery*.
+In a repository this account does not own, or one whose `AGENTS.md` does not delegate replying and resolving, the delegation above is unavailable: fix and push, then ask before posting a reply or resolving anything, per `AGENTS.md`, *Git and delivery*.
 
 ## Report
 
