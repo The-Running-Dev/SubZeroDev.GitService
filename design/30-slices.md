@@ -20,8 +20,11 @@ Three rules follow from that, and both `/track` and `tools/Test-DesignDrift.ps1`
 
 - **A landed row is never rewritten** — not the name, not the issue. A landed slice with a closed
   issue is finished, not drifted.
-- **A re-run appends under `## Outstanding` only.** It never resurrects a landed body, and never
-  renumbers or reuses a retired id.
+- **A re-run appends new slices under `## Outstanding`, and retires closed ones out of it.**
+  `/slices` owns both directions because it is the only command that writes this file — `/reconcile`
+  puts it out of scope entirely and `/track` only reads the two sections — so a slice whose issue has
+  closed is retired here or nowhere. A re-run never resurrects a landed body, and never renumbers or
+  reuses a retired id.
 - **Criteria are compared on ids, never on prose.** A landed slice carries no criteria here, so
   only its issue pin is checked.
 
@@ -100,10 +103,10 @@ claim in `10-design.md` that would have to change. That is `/design`'s, and it i
 
 **S18 is split the same way S17 was, and six of its criteria are retired rather than moved.** S18
 asked one session to stand up a user interface from nothing, ship five views on top of it, federate
-login against a real identity provider, and drive all of it through a browser. There is no user
-interface in this repository at all — no markup, no styles, no build for any of it — so the console
-S18 described as needing completion has not been started, and the slice was mis-sized by roughly the
-whole of its first half. `S18.3`, `S18.4`, `S18.5`, `S18.6`, `S18.7` and `S18.8` are **retired**, and
+login against a real identity provider, and drive all of it through a browser. At the split there
+was no user interface in this repository at all — no markup, no styles, no build for any of it — so
+the console S18 described as needing completion had not been started, and the slice was mis-sized by
+roughly the whole of its first half. `S18.3`, `S18.4`, `S18.5`, `S18.6`, `S18.7` and `S18.8` are **retired**, and
 their requirements carry new ids in S31 to S34, so `/track` reports a removal and an addition rather
 than silently treating one checkbox as another. S18 keeps `S18.1` and `S18.2`, both of which describe
 work that now sits in the first sub-slice; the criteria covering the parts that were never written
@@ -117,10 +120,9 @@ exist until S33 and S34. Both are reworded to what is checkable in the slice tha
 which is the case criterion ids exist for: prose moves, the checkbox keeps its meaning.
 
 S18 is also **renamed** — "The console is complete, and federated login works" described the whole
-of what has now become five slices. Issue [#32](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/32)
-still carries the old title, and issue [#33](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/33)
-still carries S19's old `Depends on`. Both are reported here rather than reconciled, the same way the
-two renamed landed rows below are.
+of what has now become five slices. Both issues have since been retitled and closed, and S18 and
+S19 are index rows above; the two landed rows that still carry a superseded name are the ones the
+note under that table names.
 
 **S32 has no retired predecessor, because nothing named it.** `10-design.md` § Console session
 requires a grants view — "revoke everything and re-authenticate is one screen during an incident" —
@@ -152,12 +154,12 @@ The capability lattice is the design's spine but is not observable until a sessi
 so it landed in two parts: the instance-scoped layers in S5, where declaration-management routes
 first need them, and discovery filtering in S6.
 
-**S28 runs first among what remains, because S2's proof was taken behind an injected seam.**
+**S28 ran first among what then remained, because S2's proof was taken behind an injected seam.**
 `LockAcquirer` exists precisely because a volume that does not exclude cannot be produced on demand
 in a test, so the property definition-of-done item 9 rests on has been demonstrated against a fake
 and never against the deployment the brief describes. Everything after it — the derived image, the
-parity migration, the rollback — assumes a container that has never been built. S29 follows it
-because invariant B1 has no enforcement at all today, and the seam it protects is the one
+parity migration, the rollback — assumed a container that had never been built. S29 followed it
+because invariant B1 had no enforcement at all, and the seam it protects is the one
 `MCP-NEXT.md` Phase 8 exists to eventually cut.
 
 **S30 no longer finishes what S28 could not; it establishes why nothing can, yet.** S28 shipped the
@@ -166,19 +168,25 @@ configuration. The *guard* behind item 9 — boot's refusal to serve on a filesy
 honour exclusion — turns out to be unreachable from any real filesystem in this environment, and the
 one real filesystem that does produce split-brain sails straight past it. S30 is therefore a
 measurement rather than a proof: it pins where single-instance ownership actually stops, and leaves a
-committed fixture that any future repair has to satisfy. It still runs ahead of S18 because it needs
+committed fixture that any future repair has to satisfy. It was placed ahead of S18 because it needs
 the image S28 built and nothing else, and because a boundary the system leans on is worth knowing
-before five more slices are written on top of it.
+before five more slices are written on top of it. **It is now the only console-era slice still
+outstanding**, and those five landed around it — so the ordering argument stands as the record of why
+it sits here, not as a claim about what runs next.
 
-**Among the console slices, the bet that has never been taken runs first and the external dependency
-runs second.** S18 is where a browser talks to this service for the first time: an ambient-authority
-cookie session, a double-submit token, and a bundle this repository has never built are all assumed
-to work together, and every later view is written on top of that assumption. S31 follows because a
-real identity provider is the console's one external dependency, and because it reopens the login
-surface S18 has just finished — a session later would be reopening it cold. S32, S33 and S34 are
-views over backends that already ship, so the risk in them is presentation rather than architecture;
-they are ordered smallest-first, and only S34's last criterion depends on the other three, because it
-is the one that counts every view.
+**Among the console slices, the bet that had never been taken ran first and the external dependency
+ran second.** S18 was where a browser talked to this service for the first time: an ambient-authority
+cookie session, a double-submit token, and a bundle this repository had never built were all assumed
+to work together, and every later view was written on top of that assumption. S31 followed because a
+real identity provider is the console's one external dependency, and because it reopened the login
+surface S18 had just finished — a session later would have been reopening it cold. S32, S33 and S34
+were views over backends that already shipped, so the risk in them was presentation rather than
+architecture; they were ordered smallest-first, and only S34's last criterion depended on the other
+three, because it is the one that counts every view.
+
+**What remains is S30, then S20, S21 and S22 in that order** — a measurement, then the parity
+migration, then the second repository, then the deployment gates. That is dependency order and not a
+risk argument: each of the last three names the one before it in `Depends on`.
 
 ## Contract gates
 
@@ -187,28 +195,21 @@ committed separately and before the handler work depending on it. **No slice may
 signature absent from the contract** — where a slice needs tools, amending the contract is its
 first acceptance criterion, not an implementation detail.
 
-Two gates are still live:
+**No gate is live.** `20-contract.md` § Unresolved records U4 resolved 2026-08-19 by S18 and U7
+resolved 2026-08-19 by S19, which were the last two. Nothing S30, S20, S21 or S22 needs is unfixed in
+the contract, so none of them opens with an amendment criterion. That section is the authority for
+which slice closed which gate and on what date; it is not restated here.
 
-| Gate | Blocks | Answered by |
-|---|---|---|
-| **U4** — the HTTP route table | S18 | S18 |
-| **U7** — the console element type and build entry | S18, S19 | S18 for the framework binding, the build entry and how the asset manifest is hashed; S19 for the published package |
-
-**U7 is answered in two parts, and the first part moved earlier than this table used to say.**
+**U7 was answered in two parts, and the first part moved earlier than this section used to say.**
 Invariant B3 has boot verify the console asset manifest and refuse to start on a mismatch, and the
 2026-08-03 decision fixing `consoleFingerprint` at the SHA-256 of the empty string did so on the
 stated ground that "the console does not exist until S19". That ground is wrong — the console's own
-views land at S18 — so leaving the fingerprint empty would ship real, runtime-swappable assets for
-the whole span between S18 and S19 under an invariant claiming to verify them. S18 therefore fixes
-the framework binding, the build entry and the manifest hash, and B3's console half stops being
-vacuous the moment there is anything to verify. S19 keeps what is genuinely its own: publishing the
-console as a versioned package a consumer's build can consume. `S19.1` is left as written and will
-be met by S18; that is drift for `/track` to report against its issue, not a criterion to rewrite
-here.
-
-The rest — U1, U2, U3, U5, U6, U8, U9 and U10 — were each resolved by the slice that needed them,
-between 2026-08-03 and 2026-08-11. `20-contract.md` § Unresolved carries which slice closed which,
-and on what date; it is not restated here.
+views land at S18 — so leaving the fingerprint empty would have shipped real, runtime-swappable
+assets for the whole span between S18 and S19 under an invariant claiming to verify them. S18
+therefore fixed the framework binding, the build entry and the manifest hash, and B3's console half
+stopped being vacuous the moment there was anything to verify. S19 kept what was genuinely its own:
+publishing the console as a versioned package a consumer's build can consume. `S19.1` was left as
+written and met by S18, which is why it is recorded here rather than in the criterion.
 
 ## A contradiction found while slicing, since resolved
 
@@ -244,6 +245,8 @@ Bodies retired; the closed issue is the record. Criteria are not re-derived from
 | **S15** | The escape hatch, and the six operations it can reach | [#29](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/29) |
 | **S16** | Held operations fire, or are cancelled with a reason | [#30](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/30) |
 | **S17** | A watched file becomes a pull request without widening authority | [#31](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/31) |
+| **S18** | The console opens, and the operator picks a repository | [#32](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/32) |
+| **S19** | A consumer can extend the console | [#33](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/33) |
 | **S23** | A consumer can declare a safe file-watcher protocol | [#92](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/92) |
 | **S24** | An unattended pull request is followed to its terminal state | [#93](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/93) |
 | **S25** | Expired structured records release real disk space | [#94](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/94) |
@@ -251,6 +254,10 @@ Bodies retired; the closed issue is the record. Criteria are not re-derived from
 | **S27** | Disk pressure releases only disposable clones, or refuses clearly | [#96](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/96) |
 | **S28** | The service ships as a container, and a second one refuses the volume | [#114](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/114) |
 | **S29** | The layering is enforced by a check, and every gate runs unattended | [#115](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/115) |
+| **S31** | Federated login, and a way back after a recovery code | [#126](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/126) |
+| **S32** | Revoking everything is one screen | [#127](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/127) |
+| **S33** | The trail is readable, and its integrity is visible in it | [#128](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/128) |
+| **S34** | The two states with no other exit become visible, and clearable | [#129](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/129) |
 
 Two rows carry a name this document changed after the issue was opened: #31 is titled "A dropped
 file becomes a pull request…" and #92 "A consumer can declare a safe content-drop protocol", both
@@ -318,226 +325,6 @@ stay as it is given these results — also `/design`'s.
 **`S30.1` and `S30.3` are retired, and the gaps they leave are deliberate.** Both asked boot to
 refuse a filesystem whose locking is absent, and boot demonstrably does not refuse it; the criteria
 that replace them measure what the check actually does instead. See *Criterion ids* above.
-
----
-
-## S18 — The console opens, and the operator picks a repository
-
-Delivers: the operator gets a console they can actually open. They set up their account on a brand
-new instance, sign in from a browser, see every repository the service manages alongside its current
-state, and pick the one they want to work on — and that choice is what every screen after it acts
-against.
-
-Touches: Surfaces (L5 — the console bundle, its build, how it is served, and the route table),
-Lifecycle (L1 — boot's console asset check).
-
-Depends on: S29. **Gated on U4, and on the framework-binding, build-entry and manifest-hashing parts
-of U7.**
-
-Acceptance:
-- S18.1 The HTTP route table is written into `20-contract.md` before any route this slice adds is
-  implemented, and it **records the routes that already ship rather than renaming them** —
-  `/auth/*`, `/declarations*` including the nested tool paths, `/grants*` including the revocation
-  paths, `/failing-credentials/*/clear`, `/parked-operations*`, `/healthz`, `/version`, `/health`,
-  `/mcp/*`, `/oauth/*` and `/.well-known/oauth-*`. Every row states its method, which of the two
-  credentials it accepts, and whether it carries a repository dimension. This closes U4.
-- S18.2 The landing view lists declarations with clone state, current branch, dirty flag and last
-  operation. Selecting one sets the repository dimension, and the selection survives a page reload.
-  A declaration that has never been cloned is listed with its state rather than omitted.
-- S18.9 The console is a bundle produced by this repository's own build and served by the existing
-  HTTP server. Serving it introduces **no unauthenticated route carrying repository, credential,
-  audit, volume or operator state**: fetched without a session it yields the shell and nothing else,
-  and every data route still answers `401`.
-- S18.10 An operator signs in from a real browser by password plus TOTP, by recovery code, and by
-  break-glass. The session cookie is `HttpOnly`, `Secure`, `SameSite=Lax` and host-scoped; a
-  mutating request presenting the cookie without the double-submit token is refused; and a bearer
-  token on a cookie route and a cookie on a bearer route are each refused, both demonstrated rather
-  than asserted.
-- S18.11 The built bundle's asset manifest hashes into the console fingerprint the version endpoint
-  reports, distinct from the contract fingerprint. **Changing one byte of a built asset makes boot
-  exit with `console-manifest-mismatch`.** Before this criterion that fingerprint is the SHA-256 of
-  the empty string, so invariant B3's console half has never rejected anything — and a validator
-  that has never failed is not known to constrain anything.
-- S18.12 A brand new instance with provisioning pending shows the enrolment screen and no other, the
-  screen demands the provisioning secret rather than treating the file's presence as authorisation,
-  the ten recovery codes are displayed exactly once, and the provisioning file is burned. Without
-  this the first operator on a fresh instance still has to enrol by hand against the API.
-- S18.13 Enrolment, all three sign-in paths and the landing view are driven end to end in a real
-  browser against a real repository. The browser run is what the criteria above are checked by;
-  a request-level test does not stand in for one.
-- S18.14 The route table names every route carrying no repository dimension — liveness, version,
-  health, authentication and OAuth — as an explicit closed set, and every other row in it carries
-  a declaration id. Both counts are stated. This is definition-of-done item 6's endpoint half; its
-  console half is `S18.2` and `S34.7`.
-
-Out of scope: OIDC and TOTP re-enrolment (S31); the grants view (S32); the audit view (S33); the
-health and parked-operations views (S34); consumer views and the published console package (S19);
-restyling. **`S18.3` through `S18.8` are retired** — their requirements carry new ids in S31 to S34,
-and the gaps here are deliberate.
-
----
-
-## S31 — Federated login, and a way back after a recovery code
-
-Delivers: the operator signs in through their own identity provider instead of a local password —
-and when they have had to burn a recovery code to get in, they can set up a fresh authenticator from
-the console instead of being marked as needing one forever with no way to do it.
-
-Touches: Operator identity (L4 — OIDC, TOTP re-enrolment), Surfaces (L5 — the login and account
-screens), Audit (L1 — the identity event).
-
-Depends on: S18.
-
-Acceptance:
-- S31.1 The TOTP re-enrolment signature is added to `20-contract.md` before it is implemented. None
-  exists: S4 only ever *sets* the re-enrolment flag, `'totp-reenrolled'` is already an
-  `identity-event` value nothing in the tree can produce, and the flag is write-only for the life of
-  the credential until this slice.
-- S31.2 OIDC against a real issuer authenticates the operator and establishes the same persisted
-  session a local login does — same cookie attributes, same idle and absolute lifetimes, same row in
-  the grants view. A returned subject that is not on the allowlist is refused, and the refusal is
-  audited.
-- S31.3 With the issuer genuinely unreachable — not disabled by configuration — local password plus
-  TOTP still authenticates. This is the failure-mode table's stated answer for a broken identity
-  provider, and configuration-disabling it would prove a different claim.
-- S31.4 An operator carrying the re-enrolment flag enrols a new TOTP secret from the console: the
-  old secret stops authenticating, the flag clears, and an `identity-event` record carrying
-  `'totp-reenrolled'` is written.
-- S31.5 The whole lockout round trip is driven end to end in a real browser — a recovery code
-  authenticates once, the same code is refused the second time, the operator is marked for
-  re-enrolment, completes it, and signs in with the new authenticator.
-
-Out of scope: a second operator account; mapping provider groups or roles to anything. The allowlist
-reduces a provider's many identities to the one operator and does nothing else.
-
----
-
-## S32 — Revoking everything is one screen
-
-Delivers: during an incident the operator sees every credential this service has issued — connected
-clients, the grants they hold, script tokens, and live sessions including their own — on a single
-screen, and revokes any of them from it, instead of working out which API call does what while
-something is going wrong.
-
-Touches: Surfaces (L5 — the grants view). **No backend change is expected**: S13 shipped the records
-and the revocation cascade and S14 the client registration. If a route turns out to be missing, that
-is a contract amendment and this slice stops and says so.
-
-Depends on: S18.
-
-Acceptance:
-- S32.1 The view lists registered clients, MCP grants, operator API tokens, and live sessions —
-  operator and MCP alike — each with when it was last used.
-- S32.2 Revoking any one of them from the view takes effect on the next call presenting it, and what
-  runs is S13's existing cascade rather than a second implementation: revoking a client revokes its
-  grants and their tokens, demonstrated from the view.
-- S32.3 The operator's own session is in the list and revoking it signs them out — the incident case
-  the design names, and the one a list that quietly excludes self would miss.
-- S32.4 The view is driven end to end in a real browser against an instance with a registered client
-  and a live MCP session, both of which are revoked from it.
-
-Out of scope: issuing grants or tokens from this view. S13's routes already mint them; this is the
-revocation screen the design asks for.
-
----
-
-## S33 — The trail is readable, and its integrity is visible in it
-
-Delivers: an operator working out what happened reads the audit trail from the console, narrows it
-to one repository, one tool, one actor or one span of time, and can see while reading whether the
-record in front of them is still provably intact.
-
-Touches: Surfaces (L5 — the audit view and its query route), Audit (L1 — `query` and `chainState`,
-both already shipped).
-
-Depends on: S18.
-
-Acceptance:
-- S33.1 The query route is added to `20-contract.md`'s route table before it is implemented, as a
-  cookie route under `audit.read`.
-- S33.2 The view filters by declaration, tool, actor and time window, and the four compose. A filter
-  combination matching nothing renders as an empty result, not an error.
-- S33.3 Chain state is shown **inline with the records**: which sequence verification reached, which
-  retained anchors cover segments that have aged out, and where a break sits if there is one.
-- S33.4 Against a deliberately broken chain the view marks the break at the right sequence and still
-  renders the records either side of it. A view that fails closed on a break shows the operator
-  nothing at exactly the moment the trail matters most.
-- S33.5 An operator API token presented as a bearer credential cannot reach the query route.
-  `OperatorScope` names no instance-level capability, so `audit.read` is console-only; this is where
-  that is demonstrated rather than only stated.
-- S33.6 The view is driven end to end in a real browser against a real repository with a trail long
-  enough that at least one segment has aged out behind an anchor.
-
-Out of scope: exporting the trail; an off-volume audit sink, which S22 records as an accepted risk
-with its costs.
-
----
-
-## S34 — The two states with no other exit become visible, and clearable
-
-Delivers: the operator sees the failures that otherwise only ever appear in logs — notifications
-that never got delivered, and credentials that have stopped working — and clears them from the
-console. They also see every operation the service stopped and set aside for a human, with what it
-expected to find and what it actually found, and can drive it to a resolution.
-
-Touches: Surfaces (L5 — the health and parked-operations views, and a route for the failed outbox
-rows), Notifier (L1 — `listFailed` and `clearFailed`, in the contract but not yet routed).
-
-Depends on: S31, S32 and S33. It carries the coverage criterion for every console view, so it runs
-after the last of them; nothing else in it needs the other three.
-
-Acceptance:
-- S34.1 The health view surfaces failed notification-outbox rows and failing credential references,
-  alongside the volume breakdown, parked count and audit chain state the health report already
-  carries. The outbox rows are listed, not merely counted — a count names no row to act on.
-- S34.2 Clearing a failing credential reference works from the view: the mark clears, the next
-  operation using that reference resolves it afresh, and the clearing is audited.
-- S34.3 Clearing a failed outbox row works from the view and is audited.
-- S34.4 The parked-operations view shows each parked entry's recorded pre-state, the observed current
-  state, and **which of the five compared fields moved** — rendered as the difference, not as two
-  digest strings for the operator to compare by eye.
-- S34.5 A declaration whose tree cannot be observed at all — the case a parked entry is most likely
-  to be sitting on — renders as unobservable with the entry still listed, rather than failing the
-  view.
-- S34.6 A parked entry is driven to both of the design's resolutions from the view: settled with the
-  clone returned to `ready`, and kept parked. The settling is audited against the operator who did
-  it.
-- S34.7 Every console view — enrolment, login, landing, grants, audit, health and
-  parked-operations — is driven end to end in a real browser against a real repository, and the set
-  exercised is counted and named. This is definition-of-done item 19, which the prior art records as
-  the only way two genuine bugs were found.
-
-Out of scope: repairing a working tree from the console. The design's way out of a parked operation
-is to settle it or keep it parked; a file browser or a shell is neither, and adding one would be the
-console growing an escape hatch of its own.
-
----
-
-## S19 — A consumer can extend the console
-
-Delivers: the base's console published as a versioned package, a derived build that consumes it, and
-a console fingerprint verified at startup.
-
-Touches: Surfaces (L5), Lifecycle (L1 — boot step 2), build tooling.
-
-Depends on: S34 and S28 — it extends a finished console, so it needs every base view, not only the
-shell. **Gated on the remaining half of U7**, the published package; S18 fixes the framework binding,
-the build entry and the manifest hash, so `S19.1` is already met when this slice starts.
-
-Acceptance:
-- S19.1 The element type and build entry are fixed in `20-contract.md` before the package is
-  published.
-- S19.2 A derived image's build produces a bundle whose asset manifest hashes into a console
-  fingerprint distinct from the contract fingerprint. Both are reported by the version endpoint.
-- S19.3 A runtime-swapped bundle makes boot exit with `console-manifest-mismatch` — the same shape
-  as a registry mismatch.
-- S19.4 A registered view declares its capabilities and receives the selected declaration. It
-  renders for a declaration whose grant contains them and is **absent** for one whose grant does
-  not.
-- S19.5 No registered view names a declaration it belongs to — asserted by the absence of any such
-  field in `ConsoleViewRegistration`.
-
-Out of scope: the blog consumer's own views (S20).
 
 ---
 
