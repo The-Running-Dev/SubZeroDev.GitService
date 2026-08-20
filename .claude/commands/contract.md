@@ -2,12 +2,12 @@
 description: Derive the interface contract from the design doc
 ---
 
-<!-- companion:start -->
+<!-- companion:declared:start -->
 **Per-repo companion:** `.claude/commands/contract-local.md`. Read it now, if it exists — an absent,
 empty, or frontmatter-only file is no companion, and this file then stands alone.
 It may override: `vocabulary`, `document-map`, `extra-steps`. It may never override anything in
 [`.claude/COMPANIONS.md`](../COMPANIONS.md) § *Never*, which is also where these categories are defined.
-<!-- companion:end -->
+<!-- companion:declared:end -->
 
 ## Stop if `design/` is frozen
 
@@ -46,12 +46,16 @@ Rules:
 - If the design doc does not determine a signature, do not invent it. List it under `## Unresolved` and stop.
 - **Do not restate a declaration the tree already carries.** Point at it and state what it cannot say.
 - No implementation. No comments explaining intent — the design doc carries intent. File paths are permitted **only** as the pointers this section requires.
-- Anything you add here that was not implied by the design doc gets a decision-log entry.
+- Anything you add here that was not implied by the design doc gets a decision-log entry. Where this repository's own `design/state/` exists, writing it also follows the record-writing sequence in `design/10-design.md` § *Record* — not restated here.
 
 ## Re-run
 
-Rewrites `design/20-contract.md` in full from the current `design/10-design.md` — there is no
-partial regeneration. A scaffold already replaced by a pointer to a materialised declaration
+`design/20-contract.md` is **repository-scoped**: a landed path's standing contract — the
+invariants and surface for work already shipped — stands as written and is never rewritten
+away because a later run covers a different path. A re-run regenerates the section(s) that
+correspond to the `design/10-design.md` pass that invoked it, and leaves every other landed
+path's content untouched — there is no whole-document rewrite that starts from a blank
+document. A scaffold already replaced by a pointer to a materialised declaration
 (*Semantics, not shape*, above) must stay a pointer; a re-run never turns it back into a
-scaffold. `## Unresolved` only ever shrinks between runs, as signatures get resolved — an
-entry a previous run resolved must never reappear.
+scaffold, landed path or not. `## Unresolved` only ever shrinks between runs, as signatures
+get resolved — an entry a previous run resolved must never reappear.

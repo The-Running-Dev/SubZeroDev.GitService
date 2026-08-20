@@ -9,6 +9,13 @@ This file is the mechanism. It is kit-owned and installed into every target, and
 single home for the category vocabulary, the never-list, and the absence rule. A core command
 file names *which categories* apply to it; it does not restate any of what is below.
 
+## The block is a declared region
+
+A core's fenced companion block is a **declared** marked region, id `companion` — `AGENTS.md`
+(*Marked regions*) owns what declared means and what the marker looks like, and neither is
+restated here. In short: hand-authored, never written by a generator, checked for presence and
+well-formedness the same as any other marked region.
+
 ## Why the split exists
 
 `/install`, `INSTALL.md` and `/kit-sync` used to spend real effort reconciling a target's local

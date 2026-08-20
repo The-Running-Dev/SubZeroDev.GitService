@@ -9,6 +9,10 @@
     .claude/commands/<name>-local.md. The core enumerates which categories the companion may
     override; COMPANIONS.md owns the category vocabulary and the never-list.
 
+    The core's fence is a declared marked region, id "companion" (AGENTS.md, *Marked regions*):
+    <!-- companion:declared:start --> ... <!-- companion:declared:end -->. The bare form means
+    projected, so a core carrying it rather than the declared form is nonconforming.
+
     None of that is checkable by reading the core files alone, which is the whole reason this
     script exists - AGENTS.md, *Verification*: "A schema or validator change is not done until
     it has rejected something."
@@ -19,7 +23,7 @@
 
     What is checked, per finding rule:
 
-      MissingBlock            A core has no <!-- companion:start --> ... :end fence
+      MissingBlock            A core has no <!-- companion:declared:start --> ... :end fence
       DuplicateBlock          A core has more than one
       WrongCompanionPath      The fence names a path other than <name>-local.md
       NoCategories            A core declares an empty override list
@@ -113,7 +117,7 @@ function Get-CoreDeclaration {
     param([Parameter(Mandatory)][string] $Path)
 
     $text = [System.IO.File]::ReadAllText($Path) -replace "`r`n", "`n"
-    $blocks = [regex]::Matches($text, '(?s)<!-- companion:start -->(.*?)<!-- companion:end -->')
+    $blocks = [regex]::Matches($text, '(?s)<!-- companion:declared:start -->(.*?)<!-- companion:declared:end -->')
     if ($blocks.Count -eq 0) { return $null }
 
     $body = $blocks[0].Groups[1].Value
@@ -203,7 +207,7 @@ function Invoke-CompanionCheck {
         $decl = Get-CoreDeclaration -Path $core.FullName
 
         if ($null -eq $decl) {
-            $findings.Add((New-CompanionFinding $rel 'MissingBlock' 'No <!-- companion:start --> block. Every core must declare what its companion may override, even when the answer is a short list.'))
+            $findings.Add((New-CompanionFinding $rel 'MissingBlock' 'No <!-- companion:declared:start --> block. Every core must declare what its companion may override, even when the answer is a short list.'))
             continue
         }
         $declarations[$name] = $decl.Categories

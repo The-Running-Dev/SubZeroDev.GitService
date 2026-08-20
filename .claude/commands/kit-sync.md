@@ -3,12 +3,12 @@ description: Clone or update the shared kit checkout at ~/.agent-kit, then run I
 argument-hint: [branch]
 ---
 
-<!-- companion:start -->
+<!-- companion:declared:start -->
 **Per-repo companion:** `.claude/commands/kit-sync-local.md`. Read it now, if it exists — an absent,
 empty, or frontmatter-only file is no companion, and this file then stands alone.
 It may override: `extra-steps`, `tightened-authorization`. It may never override anything in
 [`.claude/COMPANIONS.md`](../COMPANIONS.md) § *Never*, which is also where these categories are defined.
-<!-- companion:end -->
+<!-- companion:declared:end -->
 
 Get the kit itself onto disk, then reconcile it into this repository — the two steps `/install` needs, done back to back, without requiring the kit to already be checked out somewhere you point at.
 

@@ -3,12 +3,12 @@ description: Reproduce and fix a defect that has no slice — from a bug issue n
 argument-hint: [issue number, a description, or leave blank to auto-pick the highest-value open bug]
 ---
 
-<!-- companion:start -->
+<!-- companion:declared:start -->
 **Per-repo companion:** `.claude/commands/fix-local.md`. Read it now, if it exists — an absent,
 empty, or frontmatter-only file is no companion, and this file then stands alone.
 It may override: `vocabulary`, `document-map`, `extra-steps`, `gate-commands`, `tightened-authorization`. It may never override anything in
 [`.claude/COMPANIONS.md`](../COMPANIONS.md) § *Never*, which is also where these categories are defined.
-<!-- companion:end -->
+<!-- companion:declared:end -->
 
 Fix the defect named by **$1** — an issue number, a description, a failing test already in this session's context, or (with no argument and none of those) the highest-value open bug issue, picked automatically. `/slice` needs a slice id and a contract signature; a bug has neither, which is why this command exists as its own front door rather than an extension of `/slice`.
 
@@ -28,6 +28,10 @@ Before filing anything, branching, or editing: **reproduce the defect.** Write o
 
 Filing happens **after** reproducing, never before — filing first would put an unreproduced report into the tracker as a bug.
 
+## Orienting on the code you're fixing
+
+**Where this repository's own `design/state/` exists**, establishing what is currently true about the command or script the defect lives in reads that unit's closure (`design/10-design.md` § *Orient*) rather than the corpus, and `design/90-decisions.md` is not opened to establish it. Reading a closure is not writing to `design/`, so this does not relax the *Never* list below (I6). **Where `design/state/` is absent**, behaviour is today's: read the source directly (I27).
+
 ## Branch
 
 Derive `fix/<issue>-<slug>` from the issue number and title, **after the issue exists** — never before, since the branch name needs a real number.
@@ -38,7 +42,7 @@ Derive `fix/<issue>-<slug>` from the issue number and title, **after the issue e
 
 Implement against the issue's agent block. When it is satisfied:
 
-- **Push, then open the pull request. Never as a draft.** Carved out of the authorization rule the same as pushing the branch (`AGENTS.md`, *Git and delivery*).
+- **Push, then open the pull request. Never as a draft.** Carved out of the authorization rule the same as pushing the branch (`AGENTS.md`, *Git and delivery*). **Write the real description as you open it**, in the shape `.claude/commands/pr.md` § *Phase 1* fixes; a body deferring to a later `/pr` run leaves a reviewer who arrives first with nothing to read. `Verified` is the one section that says the gates have not run yet, and `/pr` replaces it verbatim.
 - **`/pr`** — same session. Writes the real description, runs this repository's gates and writes their three lists into the `Verified` section verbatim, and works the review threads once review lands. Fixing and resolving are delegated there — no ask required.
 
 This command does not carry a second copy of `/pr`'s rules, or of the gate and thread procedures it delegates to — it references them by name and hands off.

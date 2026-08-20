@@ -2,12 +2,12 @@
 description: Check the design docs against the tree, and decide the differences that are decisions
 ---
 
-<!-- companion:start -->
+<!-- companion:declared:start -->
 **Per-repo companion:** `.claude/commands/reconcile-local.md`. Read it now, if it exists — an absent,
 empty, or frontmatter-only file is no companion, and this file then stands alone.
 It may override: `vocabulary`, `document-map`, `extra-steps`. It may never override anything in
 [`.claude/COMPANIONS.md`](../COMPANIONS.md) § *Never*, which is also where these categories are defined.
-<!-- companion:end -->
+<!-- companion:declared:end -->
 
 ## Stop if `design/` is frozen
 
@@ -56,7 +56,7 @@ For each: which direction you recommend — the code changing to match the doc, 
 
 If a section found nothing, say "none" and move on. Do not manufacture a fork to have something to ask about.
 
-Once I have decided, apply the edits and append the decision-log entries. Nothing else.
+Once I have decided, apply the edits and append the decision-log entries — following the full record-writing sequence in `design/10-design.md` § *Record* where this repository's own `design/state/` exists. Nothing else beyond that sequence.
 
 ## Re-run
 
