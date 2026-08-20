@@ -2,6 +2,31 @@
 
 Append-only. Newest at the top. The rejected alternatives are the point — without them, every future session relitigates the same choice.
 
+### 2026-08-20 — The registry entry tables in `20-contract.md` become generated output, not hand-maintained prose
+Context: eleven markdown tables across the L2 and L3 sections state each tool's target, capabilities,
+scopes, execution class, annotations and limits — all of which are `ToolDeclaration` values already
+in the tree, and all of which boot already verifies by fingerprint (**B3**). The 2026-08-20
+materialisation pass left them untouched because they also double as the human-readable record of
+what each slice's U1 resolution admitted, and staged the question in `## Open` rather than answering
+it inside a pass scoped to `ts` scaffolds. `Single ownership`'s own test — could a reader recover this
+fact by reading the tree? — answers yes for every column in these tables: they are pure restatement,
+the exact shape *Single ownership* says rots.
+Chosen: generate the eleven tables from the tree's own `ToolDeclaration` values, on the same pattern
+`scripts/generate-migration-0001.ts` already establishes for the persisted-schema tables, with an
+integrity check comparing generated output against the committed contract text the same way the
+migration check does. The U1-admission framing that justified keeping them hand-written is not lost —
+it is not actually carried by the tables themselves (which state current tree shape, not the history
+of what was admitted and when); that provenance already lives in this file's own per-slice U1
+resolution entries, which is where it belongs and where it is not at risk of drifting from the tree.
+Rejected: **keep the tables hand-written** — the stated justification (recording what each slice's U1
+resolution admitted) is not something a shape-only table actually carries, so keeping them hand-written
+buys drift risk against a fingerprint-verified source of truth for no real provenance benefit.
+**Generate the tables but also keep a hand-written provenance column inside them** — reintroduces the
+same drift risk for the part of the table that cannot be generated, and duplicates what the decision
+log already records per slice.
+Reversibility: cheap — a generator and an integrity check, additive to the existing migration-0001
+tooling; the tables' current committed text is superseded by the generator's output, not deleted.
+
 ### 2026-08-20 — `httpsUrl()` is dropped from the contract; `branchName()` is kept and the tree owes it
 Context: the materialisation pass over `20-contract.md` found the preamble asserting that every brand
 has a constructor which is the only way to make one, while `src/shared/brands.ts` declares neither
@@ -287,16 +312,6 @@ not accept as a ref name and rejecting a leading `-` regardless, `baseBranch` ty
 its parse site, and the casts removed. Per the contract's own rule, the validator is not done until it
 has rejected something, with positive and negative counts stated. Fixed by the 2026-08-20 decision
 above as a contract position; the tree change is still owed and wants a bug issue.
-
-### 2026-08-20 — The registry entry tables in `20-contract.md` restate what the compiled registry already carries
-Eleven markdown tables across the L2 and L3 sections state each tool's target, capabilities, scopes,
-execution class, annotations and limits — all of which are `ToolDeclaration` values in the tree, and
-all of which boot already verifies by fingerprint (**B3**). They were left untouched by the 2026-08-20
-materialisation pass because they double as the human-readable record of what each slice's U1
-resolution admitted, which is the document's clearest statement of what authority the deployed surface
-has. Whether that justifies the second copy, or whether it should become a generated table checked the
-way migration 0001 is, is a real question and was deliberately not answered inside a pass scoped to
-`ts` scaffolds.
 
 ### 2026-08-14 — S28.4's bind-mount lease refusal does not reproduce on current Docker Desktop
 Context: `10-design.md` (§ mutation lock, restated at S28.4) asserts that "advisory locking over a
