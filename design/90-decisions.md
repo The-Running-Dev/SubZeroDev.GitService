@@ -2,6 +2,34 @@
 
 Append-only. Newest at the top. The rejected alternatives are the point — without them, every future session relitigates the same choice.
 
+### 2026-08-20 — `httpsUrl()` is dropped from the contract; `branchName()` is kept and the tree owes it
+Context: the materialisation pass over `20-contract.md` found the preamble asserting that every brand
+has a constructor which is the only way to make one, while `src/shared/brands.ts` declares neither
+`branchName()` nor `httpsUrl()` — the two brands are produced by unchecked `as` casts at more than
+twenty production sites. An audit of provenance split the two cases rather than confirming either
+half of the original framing. `HttpsUrl` has five sites: `server.ts` checks the deployment webhook
+for an `https://` scheme and exits fatally otherwise, `operator-identity.ts` builds its authorize URL
+from a `URL` object, and the three `github-adapter.ts` sites carry values GitHub's API reported which
+the service echoes or displays but never executes. `BranchName` is not analogous: no branch-name
+validation exists anywhere in the tree, `RepositoryConfig.baseBranch` is read from the managed
+repository's own config file behind only a `typeof === 'string'` check, and it reaches a git argument
+vector as a bare positional in `git-operations.ts`'s `['fetch', 'origin', baseBranch]`. Argument
+vectors stop shell injection but not git's own option parsing, which reads a leading `-` as a flag.
+Chosen: drop `httpsUrl()` from the contract and narrow the preamble's universal claim to name
+`HttpsUrl` as the one cast-constructed brand, with the reasoning recorded beside the brand table.
+Keep `branchName()` as a contract requirement the tree does not yet meet, recorded in the brand table
+as owed rather than quietly deleted, together with the related weakening of
+`RepositoryConfig.baseBranch` to `string` in `src/declarations/types.ts`.
+Rejected: requiring both constructors — `httpsUrl()` would restate a claim the upstream API already
+made and would have no safe branch to take on failure, so it buys type ceremony rather than safety.
+Rejected: dropping both and treating the `baseBranch` argv path as an unrelated defect — that accepts
+the framing the audit disproved, and leaves the one brand with a live execution path unvalidated by
+construction. Rejected: fixing the code inside this pass — the pass is a documentation
+materialisation, and a validator change is not done until it has rejected something, with counts
+stated, which is implementation work with its own tests.
+Reversibility: cheap for the contract text; the tree change `branchName()` implies is a small,
+well-bounded slice.
+
 ### 2026-08-19 — `GET /declarations` and every route that echoes a `Declaration` serialise `capabilityGrant` as a sorted array
 Context: implementing S19.4 ("a registered view... renders for a declaration whose grant contains
 them and is absent for one whose grant does not") found that the console has no way to see a
@@ -246,6 +274,29 @@ re-running the same real test, or building the second-session self-test mechanis
 <Things noticed mid-slice that were deliberately not acted on. Move them out or delete them; do not let this section rot.>
 
 ---
+
+### 2026-08-20 — `BranchName` is unvalidated by construction, and one site passes it to git as a bare positional
+`src/shared/brands.ts` declares no `branchName()`, `src/declarations/types.ts` weakens
+`RepositoryConfig.baseBranch` to `string`, and `src/git/git-operations.ts` casts at each point of use.
+The consequence is concrete rather than stylistic: `baseBranch` is read from the managed repository's
+own config file behind only a `typeof === 'string'` check and reaches
+`['fetch', 'origin', baseBranch]` as a bare positional, where a value beginning with `-` is parsed by
+git as an option rather than a ref. Sibling sites interpolating into `refs/heads/${branch}` are
+incidentally safe; that one is not. The fix is a checked `branchName()` rejecting anything git would
+not accept as a ref name and rejecting a leading `-` regardless, `baseBranch` typed `BranchName` at
+its parse site, and the casts removed. Per the contract's own rule, the validator is not done until it
+has rejected something, with positive and negative counts stated. Fixed by the 2026-08-20 decision
+above as a contract position; the tree change is still owed and wants a bug issue.
+
+### 2026-08-20 — The registry entry tables in `20-contract.md` restate what the compiled registry already carries
+Eleven markdown tables across the L2 and L3 sections state each tool's target, capabilities, scopes,
+execution class, annotations and limits — all of which are `ToolDeclaration` values in the tree, and
+all of which boot already verifies by fingerprint (**B3**). They were left untouched by the 2026-08-20
+materialisation pass because they double as the human-readable record of what each slice's U1
+resolution admitted, which is the document's clearest statement of what authority the deployed surface
+has. Whether that justifies the second copy, or whether it should become a generated table checked the
+way migration 0001 is, is a real question and was deliberately not answered inside a pass scoped to
+`ts` scaffolds.
 
 ### 2026-08-14 — S28.4's bind-mount lease refusal does not reproduce on current Docker Desktop
 Context: `10-design.md` (§ mutation lock, restated at S28.4) asserts that "advisory locking over a
