@@ -612,6 +612,13 @@ and the `remoteHostAllowlist`, `ceiling`, `admission` and `notifierWebhook` valu
 environment in `src/server.ts`. This is the "entity with no code representation" case, and the
 scaffold below is the only statement of the shape those defaults are converging on. When a real
 `DeploymentConfig` is wired, this block becomes a pointer and the local defaults stop being local.
+
+Two members have since acquired real declarations, and **those are the canonical copies**:
+`DiskWatermarks` in `src/store/volume-usage.ts` and `AdmissionLimits` in `src/locks/types.ts`. They
+are still written out below because this block is what the tree's own `DeploymentConfig.*` doc
+comments cite as the naming authority, and splitting two members out would break the single place
+the family can be read as one converging shape. Both declarations cite this section back, so the
+duplication is checkable in either direction rather than silent. Change them together.
 ```ts
 interface RetentionWindows {
   readonly auditSegmentBytes: number;
