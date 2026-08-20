@@ -334,19 +334,6 @@ re-running the same real test, or building the second-session self-test mechanis
 
 ---
 
-### 2026-08-20 — `BranchName` is unvalidated by construction, and one site passes it to git as a bare positional
-`src/shared/brands.ts` declares no `branchName()`, `src/declarations/types.ts` weakens
-`RepositoryConfig.baseBranch` to `string`, and `src/git/git-operations.ts` casts at each point of use.
-The consequence is concrete rather than stylistic: `baseBranch` is read from the managed repository's
-own config file behind only a `typeof === 'string'` check and reaches
-`['fetch', 'origin', baseBranch]` as a bare positional, where a value beginning with `-` is parsed by
-git as an option rather than a ref. Sibling sites interpolating into `refs/heads/${branch}` are
-incidentally safe; that one is not. The fix is a checked `branchName()` rejecting anything git would
-not accept as a ref name and rejecting a leading `-` regardless, `baseBranch` typed `BranchName` at
-its parse site, and the casts removed. Per the contract's own rule, the validator is not done until it
-has rejected something, with positive and negative counts stated. Fixed by the 2026-08-20 decision
-above as a contract position; the tree change is still owed and wants a bug issue.
-
 ### 2026-08-14 — S28.4's bind-mount lease refusal does not reproduce on current Docker Desktop
 Context: `10-design.md` (§ mutation lock, restated at S28.4) asserts that "advisory locking over a
 bind-mounted Windows path has historically been unreliable enough that two instances can both
