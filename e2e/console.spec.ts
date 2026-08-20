@@ -380,8 +380,11 @@ test('S18.12/S18.13/S18.10/S18.2/S31.4/S31.5/S32.1/S32.2/S32.3/S32.4/S33.2/S33.3
   // seeded rows are `e2e-seed`'s, this operator's own sign-ins are
   // `E2E_SUBJECT`'s, and narrowing to one excludes the other.
   await page.getByTestId('audit-filter-actor').fill(E2E_SUBJECT);
+  const filteredResponse = page.waitForResponse(
+    (res) => res.url().includes('/audit?') && res.url().includes(`actorSubject=${E2E_SUBJECT}`) && res.request().method() === 'GET',
+  );
   await page.getByTestId('audit-search').click();
-  await expect(page.getByTestId('audit-record-list')).toBeVisible();
+  await filteredResponse;
   const filteredRows = page.locator('[data-testid="audit-record-list"] tbody tr[data-testid^="audit-record-row-"]');
   await expect(filteredRows.first()).toBeVisible();
   const filteredActors = await filteredRows.allTextContents();
