@@ -329,24 +329,6 @@ Reversibility: cheap — a documentation/reporting decision, not a code change. 
 re-running the same real test, or building the second-session self-test mechanism if `/slices` (or
 `/design`) decides that guarantee is worth having.
 
-## Open
-<Things noticed mid-slice that were deliberately not acted on. Move them out or delete them; do not let this section rot.>
-
----
-
-### 2026-08-20 — `BranchName` is unvalidated by construction, and one site passes it to git as a bare positional
-`src/shared/brands.ts` declares no `branchName()`, `src/declarations/types.ts` weakens
-`RepositoryConfig.baseBranch` to `string`, and `src/git/git-operations.ts` casts at each point of use.
-The consequence is concrete rather than stylistic: `baseBranch` is read from the managed repository's
-own config file behind only a `typeof === 'string'` check and reaches
-`['fetch', 'origin', baseBranch]` as a bare positional, where a value beginning with `-` is parsed by
-git as an option rather than a ref. Sibling sites interpolating into `refs/heads/${branch}` are
-incidentally safe; that one is not. The fix is a checked `branchName()` rejecting anything git would
-not accept as a ref name and rejecting a leading `-` regardless, `baseBranch` typed `BranchName` at
-its parse site, and the casts removed. Per the contract's own rule, the validator is not done until it
-has rejected something, with positive and negative counts stated. Fixed by the 2026-08-20 decision
-above as a contract position; the tree change is still owed and wants a bug issue.
-
 ### 2026-08-14 — S28.4's bind-mount lease refusal does not reproduce on current Docker Desktop
 Context: `10-design.md` (§ mutation lock, restated at S28.4) asserts that "advisory locking over a
 bind-mounted Windows path has historically been unreliable enough that two instances can both
@@ -1990,3 +1972,13 @@ Context: S18 stands up the console bundle from nothing — `package.json` carrie
 Chosen: React + Vite for the console bundle (new `console/` workspace), matching `blog-mcp`'s own operator console — `AGENTS.md` names `blog-mcp` "load-bearing prior art, not inspiration" whose declaration format, capability profiles and other patterns are inherited, and its console is React (`design/00-brief.md`, twice). Vite emits a build manifest natively, which is what S18.11's asset-hash-into-fingerprint check reads. Playwright is added as a devDependency for S18.13's real-browser run, driving enrolment, all three sign-in paths and the landing view against the actual built bundle and a real HTTP server — nothing here stands in for the browser the criterion names.
 Rejected: **Preact + Vite** — same build tooling, smaller runtime, but diverges from the prior art's actual framework for no offsetting benefit once the choice is React's to make freely; nothing in this repository's own conventions prefers a smaller bundle over matching inherited patterns. **Vanilla TypeScript, no framework** — zero new runtime dependency, closest to the backend's own zero-framework convention (`90-decisions.md`, 2026-08-03's "no bundler, no test framework" for the *service*) — but that decision was scoped to what runs the backend process, not what a browser bundle needs; a framework-free console would hand-rolled view mounting and reactivity S19's pluggable `ConsoleViewRegistration` needs for free, for a repository already committed to years of maintenance.
 Reversibility: expensive once S19 publishes `ConsoleViewRegistration<TElement>` bound to React's element type — a later framework swap would be a breaking change for every consumer view. Cheap today, before any consumer exists.
+
+---
+
+## Open
+<Things noticed mid-slice that were deliberately not acted on. Move them out or delete them; do not let this section rot.>
+
+Empty as of 2026-08-21 — the heading previously sat mid-log with 201 resolved decisions trapped
+beneath it (2026-08-03 through 2026-08-19), an artifact of where it was first inserted rather than a
+backlog of unactioned items. Moved here, to the true end of the append-only log, with nothing under
+it.

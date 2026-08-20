@@ -1,6 +1,6 @@
 # Slices — SubZeroDev.Git
 
-Derived from `10-design.md` and `20-contract.md`. Thirty-four vertical slices. Each one ends
+Derived from `10-design.md` and `20-contract.md`. Thirty-eight vertical slices. Each one ends
 runnable: it goes from an entry point to persistence and leaves nothing half-wired.
 
 ## How this document is kept
@@ -124,6 +124,37 @@ of what has now become five slices. Both issues have since been retitled and clo
 S19 are index rows above; the two landed rows that still carry a superseded name are the ones the
 note under that table names.
 
+**S20 is split the same way S17 and S18 were, and four of its criteria are retired rather than
+moved.** S20 asked one session to build a consumer-extension seam that does not exist, invent a
+parity-measurement mechanism that does not exist, port sixteen authoring tools and two console
+screens across a repository boundary, name a file-watcher pair, and complete a naming cutover. Two
+of those were assumptions rather than work: `S20.1` reads as though a derived image's build could
+already merge its own declarations into the base's registry, and `S20.2` as though a fixture
+comparison already existed to run. Neither is true — `scripts/build-registry.ts` compiles one
+hardcoded declaration array with no merge point, `src/server.ts` registers every handler and
+recovery descriptor by hand, the runtime image deletes the compiler per **B8** so a derived image
+built from it has neither the compiler nor the base's declarations, and nothing anywhere in the tree
+captures or compares tool metadata. The slice was mis-sized by the whole of its first half, in the
+same way S18 was.
+
+`S20.1`, `S20.2`, `S20.5` and `S20.6` are **retired**, and their requirements carry new ids in S35
+to S38, so `/track` reports a removal and an addition rather than silently treating one checkbox as
+another. S20 keeps `S20.3` and `S20.4`, both of which describe work that stays in the narrowed
+slice; the two requirements that remain S20's own but were previously carried inside a retired
+criterion — the blog's own tools compiling into its derived image, and the parity comparison
+actually being run against it — are **appended as `S20.7` and `S20.8`**, on the same rule that put
+`S12.8` and `S18.8` where they sit.
+
+S20 is also **renamed**. "`SubZeroDev.Blog` runs as a consumer, with parity measured" now describes
+what S35, S36, S20, S37 and S38 achieve together, not what the narrowed slice delivers. Issue
+[#34](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/34) still carries the old
+title and the old criteria. It is open, so that is drift for `/track` to report and sync, not
+something this command reconciles.
+
+S35 to S38 are appended on the same rule as S23–S27 and S31–S34, and placed where their
+dependencies run rather than after S22 — S35 and S36 ahead of S20 because S20 cannot start without
+them, S37 and S38 after it because both need the blog's tools already migrated.
+
 **S32 has no retired predecessor, because nothing named it.** `10-design.md` § Console session
 requires a grants view — "revoke everything and re-authenticate is one screen during an incident" —
 and S18's own `Delivers` line said "the three remaining operator views", counting grants as already
@@ -184,9 +215,24 @@ were views over backends that already shipped, so the risk in them was presentat
 architecture; they were ordered smallest-first, and only S34's last criterion depended on the other
 three, because it is the one that counts every view.
 
-**What remains is S30, then S20, S21 and S22 in that order** — a measurement, then the parity
-migration, then the second repository, then the deployment gates. That is dependency order and not a
-risk argument: each of the last three names the one before it in `Depends on`.
+**S35 runs before the migration, because the migration was written against a seam that does not
+exist.** `10-design.md` § Where consumer extension attaches names two seams, and only one of them
+was ever built: S19 shipped the console half as a published package a consumer's build consumes,
+and nothing shipped the tool half at all. Everything the handover needs — sixteen tools compiling
+into one registry, one fingerprint over the extension, a consumer's handlers reachable from a
+pipeline that may not import them — rests on that unbuilt half, exactly the way every console slice
+rested on a bundle S18 had not yet served. It is proven against a small example consumer committed
+here rather than against the blog, so a defect in the seam surfaces on one declaration and one view
+rather than a third of the way through a two-repository migration. S36 follows it because a
+comparison that has never reported a difference cannot be the evidence definition-of-done item 17
+asks for, and building it after the migration would mean measuring parity with a tool the migration
+itself was the first to exercise.
+
+**What remains is S30, then S35, S36, S20, S37, S38, S21 and S22 in that order** — a measurement,
+then the extension seam, then the way to measure parity, then the blog's tools, its screens and its
+watched files, then the second repository, then the deployment gates. Everything from S35 onward is
+dependency order rather than a risk argument, with one exception already stated: S35 and S36 are
+placed ahead of S20 on risk as well, because both were assumptions inside it.
 
 ## Contract gates
 
@@ -195,10 +241,27 @@ committed separately and before the handler work depending on it. **No slice may
 signature absent from the contract** — where a slice needs tools, amending the contract is its
 first acceptance criterion, not an implementation detail.
 
-**No gate is live.** `20-contract.md` § Unresolved records U4 resolved 2026-08-19 by S18 and U7
-resolved 2026-08-19 by S19, which were the last two. Nothing S30, S20, S21 or S22 needs is unfixed in
-the contract, so none of them opens with an amendment criterion. That section is the authority for
-which slice closed which gate and on what date; it is not restated here.
+**One gate is live, and it is new.** `20-contract.md` § Unresolved records every U-item from U1 to
+U10 resolved, the last two on 2026-08-19 by S18 and S19; that section is the authority for which
+slice closed which gate and on what date, and it is not restated here. What it does not yet carry is
+the **consumer-extension seam for tools**. The contract fixes the console half — § Console view
+registration names the published build entry a consumer's own shell calls with its additional views
+— and fixes nothing for the other half: what the base publishes for a consumer's build to compile
+against, how a consumer supplies its own declarations, handlers and recovery descriptors, and how
+its build emits one registry over both sets. That is a new public interface, so it is a contract
+amendment rather than an implementation detail, and **`S35.1` is that amendment**. It is committed
+separately and before the rest of S35, exactly as every earlier gate was.
+
+Naming the gate here is not the same as recording it in § Unresolved, which is `/contract`'s to
+write. This document names what blocks a slice and the criterion that closes it; the amendment
+itself decides the shape.
+
+Nothing S30, S36, S20, S37, S38, S21 or S22 needs is unfixed in the contract, checked against it
+rather than remembered: S36's harness is a build-time script with no public interface, of the same
+kind as the migration and layering checks that already ship; S37 uses the console registration and
+filtering the contract already fixes; S38 uses the file-watcher plan/apply protocol U10 resolved;
+and S20's content capabilities are already admitted by the open `content.*` template type. None of
+them opens with an amendment criterion.
 
 **U7 was answered in two parts, and the first part moved earlier than this section used to say.**
 Invariant B3 has boot verify the console asset manifest and refuse to start on a mismatch, and the
@@ -328,31 +391,177 @@ that replace them measure what the check actually does instead. See *Criterion i
 
 ---
 
-## S20 — `SubZeroDev.Blog` runs as a consumer, with parity measured
+## S35 — A consumer can add its own tools
 
-Delivers: definition-of-done items 3 and 17. The blog's sixteen authoring tools stay its own domain
-code; the runtime, the contract and every repository-generic git operation come from here.
+Delivers: anyone building their own image on top of this service can add operations of their own and
+get one service offering both theirs and the base's, reached through one login and one console.
+Until now the only way to add an operation was to change the base itself, which is the thing the
+whole handover exists to stop needing.
 
-Touches: the derived image, the blog repository's own tools, parity fixtures.
+Touches: the contract's consumer-extension seam for tools, the composition root, the registry build,
+the container build, and a small example consumer committed here with its own image.
 
-Depends on: S19.
+Depends on: S19 and S28, both landed — the console half of the same seam, and the image a consumer
+builds from.
 
 Acceptance:
-- S20.1 The blog's authoring tools compile into the derived image's registry alongside the base's,
-  under one fingerprint.
-- S20.2 Tool metadata is compared against captured fixtures **per capability profile**, and the
-  comparison reports zero differences. "No loss of capability" is measured, not asserted.
+- S35.1 The contract is amended to fix the tool half of the consumer-extension seam: what the base
+  publishes for a consumer's build to compile against, how a consumer supplies its own declarations,
+  handlers and recovery descriptors, and how its build emits one registry over both sets. Committed
+  as its own change, before any criterion below.
+- S35.2 An example consumer committed in this repository builds an image from the base and boots it.
+  A session against that image lists every base tool plus the example's own, and both counts are
+  stated.
+- S35.3 That image reports one registry fingerprint covering both sets, and it differs from the base
+  image's. Replacing the built registry artifact inside the derived image makes boot refuse with the
+  same fingerprint-mismatch reason the base gives, stated by name.
+- S35.4 The compiler is absent from the derived image's runtime stage, proven by the same check the
+  base runs. **B8** holds across the extension, not only in the base.
+- S35.5 The example consumer's tool declares a capability the base does not. A declaration whose
+  grant omits that capability does not see the tool in a listing at all, rather than being refused
+  when it calls it.
+- S35.6 The example consumer registers one console screen through the published console package, and
+  it renders in the derived image's console for a declaration holding its capability. That image's
+  console fingerprint covers the screen: a bundle swapped after the build refuses to boot.
+- S35.7 Building and booting the derived image runs unattended alongside the base's own container
+  gate, and fails that gate when the seam is broken.
+
+Out of scope: the blog — no blog tool, screen, rename or declaration appears here. Parity fixtures,
+which are S36's. Changing which tools the base itself ships. Publishing the base to a package
+registry: the example consumer builds from the image and the workspace it sits in, and whether the
+base is ever published outward is a deployment question this slice does not answer.
+
+---
+
+## S36 — Parity is measured, and the measurement has failed
+
+Delivers: anyone claiming a migration lost nothing can point at a comparison that ran and said what
+changed, instead of at an assertion. The operations an image offers are recorded for each kind of
+caller and checked against that record, so an operation that quietly disappeared, narrowed, or
+changed what it accepts is named — rather than discovered later by whoever needed it.
+
+Touches: a capture-and-compare harness, committed fixtures for the base image, and the gates.
+
+Depends on: S35 — the comparison has to read a derived image as well as a base one.
+
+Acceptance:
+- S36.1 Tool metadata is captured from a built image once per actor profile the service defines, and
+  committed as a fixture. The number of profiles captured is stated and equals the number defined.
+- S36.2 Comparing an unchanged image against its own fixtures reports zero differences, for every
+  profile.
+- S36.3 The comparison has **failed**, deliberately, in three distinct ways: a tool removed, a
+  tool's required capabilities narrowed, and a tool's accepted input changed. Each produces a
+  reported difference naming the tool and what changed, with the counts stated. A comparison that
+  has only ever reported zero differences is not known to compare anything.
+- S36.4 An addition is reported as an addition and does not fail a run, because a derived image
+  legitimately offers a superset of the base's tools. A removal fails.
+- S36.5 A capture records what a caller of that profile would actually be shown rather than the
+  whole registry: a tool that profile cannot see is absent from its fixture, and a capability change
+  hiding a tool from one profile alone shows up as a removal in that profile's comparison only.
+- S36.6 The harness runs unattended against the base image's own fixtures alongside the other gates.
+
+Out of scope: the blog's fixtures and the cutover comparison, both S20's. Comparing anything other
+than tool metadata — behaviour parity is not measured here and is not claimed.
+
+---
+
+## S20 — The blog's authoring tools run on this runtime
+
+Delivers: definition-of-done items 3 and 17, for the tools. The blog's own authoring work — creating
+and updating posts, adding tags, authors and hub entries, running its publishing gates — stops
+needing a server built for the blog alone and runs on the one that serves every repository. Whoever
+publishes to the blog keeps everything they could do before, under names that say what an operation
+does rather than which repository it came from.
+
+Touches: the blog repository's own tools and its derived image, and the parity fixtures for it.
+
+Depends on: S35, S36.
+
+Acceptance:
 - S20.3 Every generic tool carries an operation-descriptive name and no `blog_` prefix, and the blog
   migrates to the new names in the same cutover — no aliases, no deprecation window.
 - S20.4 The blog's content capabilities appear under the `content.*` prefix and are absent from
   every other declaration's grant.
-- S20.5 The blog's authoring views render for the blog declaration and are absent for every other
-  one.
-- S20.6 The blog's file watcher names its own plan/apply authoring pair. The plan decides the
-  repository path from the file's front matter, and the watcher chooses no path.
+- S20.7 The blog's sixteen authoring tools compile into its derived image's registry alongside the
+  base's, under one fingerprint. Both counts are stated, and the base's own set is unchanged by the
+  extension. **Appended, though it runs before `S20.3`** — it carries the half of the retired
+  `S20.1` that is genuinely this slice's, once S35 has built the seam the rest of it assumed.
+- S20.8 Tool metadata is captured from the blog's current server before cutover, per its own
+  capability tiers, and compared against the derived image's capture per this service's profiles.
+  The mapping between the two profile vocabularies is stated rather than assumed. The comparison
+  reports **no capability loss**; every difference it does report is an addition, or a rename
+  covered by `S20.3`, and each is named individually. "No loss of capability" is measured, not
+  asserted.
 
 Out of scope: changing blog domain behaviour. This is a migration, and any behaviour change makes
-the parity comparison meaningless.
+the parity comparison meaningless. The blog's console screens (S37) and its watched files (S38);
+both need these tools migrated first.
+
+**`S20.1`, `S20.2`, `S20.5` and `S20.6` are retired, and the gaps they leave are deliberate.** The
+first two named a seam and a measurement that did not exist and are now S35 and S36; the last two
+are whole slices of their own, S37 and S38. See *Criterion ids* above.
+
+---
+
+## S37 — The blog's authoring screens appear, and only for the blog
+
+Delivers: whoever wrote and published posts from the blog's own console does it from this service's
+console instead, against the repository they have selected — and those screens are simply not there
+when they have selected any other one.
+
+Touches: the blog's two authoring screens, ported onto the published console package and taking the
+selected repository as an input, and the blog's derived image bundle.
+
+Depends on: S20.
+
+Acceptance:
+- S37.1 The blog's post-list and compose screens render in the derived image's console when the blog
+  declaration is selected.
+- S37.2 Both are absent for a second declaration in the same running instance, and their absence
+  follows from that declaration's grant lacking the content capabilities each screen declares —
+  never from a check against a declaration name. Demonstrated with two declarations live at once.
+- S37.3 Neither screen assumes a single repository: each acts against the selected declaration, and
+  no request either makes omits the repository.
+- S37.4 A post is created and published through the console in a real browser, end to end against a
+  real repository, and the resulting change is visible on the remote.
+- S37.5 The derived image's console fingerprint covers both screens: a bundle swapped after the
+  build refuses to boot, the same way the base's does.
+
+Out of scope: restyling the base console — a derived image is not forbidden from doing so, and this
+slice does not. Adding a file view or content editor to the base console; the brief left that open
+and it stays open.
+
+---
+
+## S38 — The blog's watched files become pull requests
+
+Delivers: someone can drop a finished post file into a folder for the blog and get a pull request
+from it, with no git client, no console and no agent involved — the headless delivery the blog has
+today, running on this service instead.
+
+Touches: the blog's plan and apply authoring pair in its derived image, and the blog declaration's
+watcher configuration.
+
+Depends on: S20.
+
+Acceptance:
+- S38.1 The blog declaration names its own plan and apply tools, both compiled into its derived
+  image's registry and each annotated for its phase.
+- S38.2 The plan decides the repository path from the file's own front matter, and the watcher
+  chooses no path. Demonstrated with two files whose front matter routes them to different paths in
+  one run.
+- S38.3 The pair's plan schemas are byte-for-byte equal after canonical serialisation. A
+  deliberately mismatched pair is refused at declaration and again at boot re-validation, and each
+  refusal reason is stated by name.
+- S38.4 A complete file dropped into the blog's inbox reaches an open pull request unattended, and
+  the file ends in `processed/`.
+- S38.5 A file whose front matter does not satisfy the plan tool's schema never reaches a git
+  command, ends in `failed/` with a sibling reason file naming what was wrong, and is not retried.
+- S38.6 The apply tool refuses a path outside the declaration's effective allowlist whoever
+  dispatched it, including when a session calls it directly rather than through the watcher.
+
+Out of scope: changing the watcher mechanism, which is generic and landed in S23. A second
+consumer's plan/apply pair. Widening what the blog's plan tool may decide beyond a repository path.
 
 ---
 
