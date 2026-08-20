@@ -793,6 +793,8 @@ build, because migration 0001 is immutable once released: its checksum is record
 `schema_migration`, so regenerating it against an amended contract would silently change a released
 migration.
 
+**The *Public signatures* heading deliberately retains the older kit name.** `.claude/commands/contract.md` now calls this document's third section *Public surface*. Renaming it here would break the extraction above, because the generator locates this section's end by that literal string and `npm run check:migration` gates the build on the result; the rename would also have to churn the toolchain around a released, checksummed migration to buy nothing. The divergence from the kit is known and retained, not an oversight — a kit sync must not silently correct it. Prose in this section refers to both headings in italics and never with their `#` markers, because the generator's search would match the mention rather than the heading and silently truncate the extracted region. See `design/90-decisions.md`, 2026-08-20.
+
 **The migration story, stated once because it is the same for every table.** Migrations are
 explicit, numbered and forward-only. The store is copied to a timestamped backup **before** any
 migration runs, and the three most recent copies are retained — **D9**. Every table below is created
