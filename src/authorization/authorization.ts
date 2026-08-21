@@ -240,7 +240,12 @@ const SCOPE_CAPABILITIES: Readonly<Record<OperatorScope, readonly CapabilityName
   schedule: ['scheduler.manage', 'scheduler.read'],
 };
 
-function expandScopes(scopes: readonly OperatorScope[], contractCapabilitySet: ContractCapabilitySet): Session['grant'] {
+/**
+ * Exported so `src/contract/tool-parity.ts` (S36) can compute the widest grant
+ * an `mcp` session can actually hold — the same scope-to-capability mapping
+ * `establishMcpSession` uses, not a second copy of it that could drift.
+ */
+export function expandScopes(scopes: readonly OperatorScope[], contractCapabilitySet: ContractCapabilitySet): Session['grant'] {
   const granted = new Set<CapabilityName>();
   for (const scope of scopes) {
     for (const capability of SCOPE_CAPABILITIES[scope] ?? []) {

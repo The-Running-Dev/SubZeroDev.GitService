@@ -1,0 +1,2126 @@
+[
+  {
+    "profile": "operator",
+    "tools": [
+      {
+        "name": "checks_await",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "timeoutSeconds": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "ref",
+            "timeoutSeconds"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "checks_status",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "ref"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_branches",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_commit",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_diff",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "staged": {
+              "type": "boolean"
+            },
+            "paths": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "staged",
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_fetch",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_log",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_push",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_raw",
+        "capabilities": [
+          "git.raw"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "argv"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_restore_paths",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_stage",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_comments",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_enable_auto_merge",
+        "capabilities": [
+          "host.pr.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_list",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "open",
+                "merged",
+                "closed",
+                null
+              ]
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_open",
+        "capabilities": [
+          "host.pr.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "headBranch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "draft": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "body",
+            "headBranch",
+            "draft"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_status",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "prepare_branch",
+        "capabilities": [
+          "git.local.write",
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "reconcile_after_merge",
+        "capabilities": [
+          "git.local.write",
+          "git.remote.write",
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pullRequestNumber": {
+              "type": "number"
+            },
+            "expectedHeadSha": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pullRequestNumber",
+            "expectedHeadSha"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "repo_health",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "repo_status",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_cancel",
+        "capabilities": [
+          "scheduler.manage"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_create",
+        "capabilities": [
+          "scheduler.manage"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "input": {},
+            "notBefore": {
+              "type": "string"
+            },
+            "onMissed": {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "catch_up",
+                    "skip_if_older_than"
+                  ]
+                },
+                "seconds": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "mode"
+              ]
+            }
+          },
+          "required": [
+            "tool",
+            "input",
+            "notBefore",
+            "onMissed"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_list",
+        "capabilities": [
+          "scheduler.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "pending",
+                "running",
+                "done",
+                "skipped",
+                "cancelled",
+                "needs-attention",
+                null
+              ]
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "sync_base",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "verify_published_url",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "expectedCommitSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "url",
+            "expectedCommitSha"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ]
+  },
+  {
+    "profile": "mcp",
+    "tools": [
+      {
+        "name": "checks_await",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "timeoutSeconds": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "ref",
+            "timeoutSeconds"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "checks_status",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "ref"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_branches",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_commit",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_diff",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "staged": {
+              "type": "boolean"
+            },
+            "paths": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "staged",
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_fetch",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_log",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_push",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_raw",
+        "capabilities": [
+          "git.raw"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "argv"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_restore_paths",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_stage",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_comments",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_enable_auto_merge",
+        "capabilities": [
+          "host.pr.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_list",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "open",
+                "merged",
+                "closed",
+                null
+              ]
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_open",
+        "capabilities": [
+          "host.pr.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "headBranch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "draft": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "body",
+            "headBranch",
+            "draft"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_status",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "prepare_branch",
+        "capabilities": [
+          "git.local.write",
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "reconcile_after_merge",
+        "capabilities": [
+          "git.local.write",
+          "git.remote.write",
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pullRequestNumber": {
+              "type": "number"
+            },
+            "expectedHeadSha": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pullRequestNumber",
+            "expectedHeadSha"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "repo_health",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "repo_status",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_cancel",
+        "capabilities": [
+          "scheduler.manage"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_create",
+        "capabilities": [
+          "scheduler.manage"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "input": {},
+            "notBefore": {
+              "type": "string"
+            },
+            "onMissed": {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "catch_up",
+                    "skip_if_older_than"
+                  ]
+                },
+                "seconds": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "mode"
+              ]
+            }
+          },
+          "required": [
+            "tool",
+            "input",
+            "notBefore",
+            "onMissed"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_list",
+        "capabilities": [
+          "scheduler.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "pending",
+                "running",
+                "done",
+                "skipped",
+                "cancelled",
+                "needs-attention",
+                null
+              ]
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "sync_base",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "verify_published_url",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "expectedCommitSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "url",
+            "expectedCommitSha"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ]
+  },
+  {
+    "profile": "scheduler",
+    "tools": [
+      {
+        "name": "checks_await",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "timeoutSeconds": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "ref",
+            "timeoutSeconds"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "checks_status",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "ref"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_branches",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_commit",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_diff",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "staged": {
+              "type": "boolean"
+            },
+            "paths": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "staged",
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_fetch",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_log",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_push",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_raw",
+        "capabilities": [
+          "git.raw"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "argv"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_restore_paths",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_stage",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_comments",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_enable_auto_merge",
+        "capabilities": [
+          "host.pr.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_list",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "open",
+                "merged",
+                "closed",
+                null
+              ]
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_open",
+        "capabilities": [
+          "host.pr.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "headBranch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "draft": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "body",
+            "headBranch",
+            "draft"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_status",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "prepare_branch",
+        "capabilities": [
+          "git.local.write",
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "reconcile_after_merge",
+        "capabilities": [
+          "git.local.write",
+          "git.remote.write",
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pullRequestNumber": {
+              "type": "number"
+            },
+            "expectedHeadSha": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pullRequestNumber",
+            "expectedHeadSha"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "repo_health",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "repo_status",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_cancel",
+        "capabilities": [
+          "scheduler.manage"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_create",
+        "capabilities": [
+          "scheduler.manage"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "input": {},
+            "notBefore": {
+              "type": "string"
+            },
+            "onMissed": {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "catch_up",
+                    "skip_if_older_than"
+                  ]
+                },
+                "seconds": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "mode"
+              ]
+            }
+          },
+          "required": [
+            "tool",
+            "input",
+            "notBefore",
+            "onMissed"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_list",
+        "capabilities": [
+          "scheduler.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "pending",
+                "running",
+                "done",
+                "skipped",
+                "cancelled",
+                "needs-attention",
+                null
+              ]
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "sync_base",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "verify_published_url",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "expectedCommitSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "url",
+            "expectedCommitSha"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ]
+  },
+  {
+    "profile": "watcher",
+    "tools": [
+      {
+        "name": "checks_await",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "timeoutSeconds": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "ref",
+            "timeoutSeconds"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "checks_status",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "ref"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_branches",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_commit",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_diff",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "staged": {
+              "type": "boolean"
+            },
+            "paths": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "staged",
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_fetch",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_log",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_push",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_raw",
+        "capabilities": [
+          "git.raw"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "argv"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_restore_paths",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_stage",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_comments",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_enable_auto_merge",
+        "capabilities": [
+          "host.pr.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_list",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "open",
+                "merged",
+                "closed",
+                null
+              ]
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_open",
+        "capabilities": [
+          "host.pr.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "headBranch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "draft": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "body",
+            "headBranch",
+            "draft"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_status",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "prepare_branch",
+        "capabilities": [
+          "git.local.write",
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "reconcile_after_merge",
+        "capabilities": [
+          "git.local.write",
+          "git.remote.write",
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pullRequestNumber": {
+              "type": "number"
+            },
+            "expectedHeadSha": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pullRequestNumber",
+            "expectedHeadSha"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "repo_health",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "repo_status",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_cancel",
+        "capabilities": [
+          "scheduler.manage"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_create",
+        "capabilities": [
+          "scheduler.manage"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "input": {},
+            "notBefore": {
+              "type": "string"
+            },
+            "onMissed": {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "catch_up",
+                    "skip_if_older_than"
+                  ]
+                },
+                "seconds": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "mode"
+              ]
+            }
+          },
+          "required": [
+            "tool",
+            "input",
+            "notBefore",
+            "onMissed"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_list",
+        "capabilities": [
+          "scheduler.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "pending",
+                "running",
+                "done",
+                "skipped",
+                "cancelled",
+                "needs-attention",
+                null
+              ]
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "sync_base",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "verify_published_url",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "expectedCommitSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "url",
+            "expectedCommitSha"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ]
+  }
+]
