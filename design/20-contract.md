@@ -757,6 +757,48 @@ sits, and it enforces its own, per D14.
 
 `untrustedOutput` is the annotation the prior art puts on a tool returning author-controlled text.
 
+### Tool registry extension (L0/L1, published build entry)
+
+The tool half of the consumer-extension seam (`design/10-design.md` § *Where consumer extension
+attaches*), fixed by S35 as the console half's counterpart, mirroring § *Console view
+registration*'s shape rather than inventing a second one.
+
+Published from `src/composition-root/compose.ts`, exporting `composeAndStart(options?:
+ComposeOptions)`. `src/server.ts` is the base's own consumption of this entry — it calls
+`composeAndStart()` with no options — the same relationship `console/src/main.tsx` has to
+`createConsole()`. A consumer's own composition root imports `composeAndStart` directly and
+supplies its own `ComposeOptions`; it does not go through `src/server.ts`.
+
+```ts
+export interface ComposeOptions {
+  readonly buildDir?: string;
+  readonly consoleDir?: string;
+  readonly extraToolDeclarations?: readonly ToolDeclaration[];
+  readonly extraModuleHandlers?: readonly { readonly target: ModuleTargetName; readonly handler: ModuleHandler }[];
+  readonly extraRecoveryDescriptors?: readonly RecoveryDescriptor[];
+}
+```
+
+`extraToolDeclarations` is unioned with `PRODUCTION_TOOL_DECLARATIONS` before compilation — there
+is no field for removing or replacing a base declaration, which is what keeps the base's own set
+unchanged by any extension. A consumer's own `build-registry`-equivalent script compiles that
+union through the same `compiler` the base's `scripts/build-registry.ts` uses (imported at build
+time only — **B8** holds across the extension, since `compose.ts` itself never imports the
+compiler, only the already-compiled artifact its `buildDir` option points at) and emits its own
+`registry.json`/`registry.json.sha256` under a `buildDir` distinct from the base's own — so a
+derived image reports one registry fingerprint covering both sets, and that fingerprint differs
+from the base image's own (S35.3) unless the consumer added nothing.
+
+`extraModuleHandlers` and `extraRecoveryDescriptors` are registered into the module adapter and
+the recovery catalogue *after* every base registration, so a target or tool name colliding with a
+base one is refused by the same fatal `duplicate-registration` a base-internal collision already
+is, rather than silently shadowing it.
+
+`consoleDir` lets a consumer's own console build (built against the published
+`@subzerodev-git/console` package, per § *Console view registration*) sit at a different path than
+the base's `console/dist`; `buildDir` does the same for the registry artifact. Both default to the
+base's own layout, which is what `src/server.ts`'s no-options call relies on.
+
 ### Console view registration (L5, published package)
 
 Declared in `console/src/view-registry.ts`, exported from the package's build entry

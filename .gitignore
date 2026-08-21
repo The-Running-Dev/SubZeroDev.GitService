@@ -1,7 +1,7 @@
 node_modules/
 build/
 volume/
-console/dist/
+**/console/dist/
 test-results/
 
 # Per-machine Claude Code settings; the tracked settings.json is deliberate
