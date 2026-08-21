@@ -1,0 +1,3418 @@
+[
+  {
+    "profile": "operator",
+    "tools": [
+      {
+        "name": "blog_add_author",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            },
+            "name": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "imageUrl": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "name"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_add_hub_entry",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "hub": {
+              "type": "string",
+              "enum": [
+                "lucifer-chronicles",
+                "ai-assisted-engineering",
+                "state-of-dev",
+                "game-engine"
+              ]
+            },
+            "title": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "href": {
+              "type": "string",
+              "pattern": "^\\/[a-z0-9-]+\\/$"
+            },
+            "label": {
+              "type": "string"
+            },
+            "position": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "hub",
+            "title",
+            "description",
+            "href"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_add_tag",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            },
+            "label": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "label",
+            "description"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_auto_merge",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "headSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_branches",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_check_status",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "required": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_commit",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "feat",
+                "fix",
+                "docs",
+                "chore",
+                "refactor",
+                "style",
+                "test",
+                "build",
+                "ci"
+              ]
+            },
+            "scope": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "coAuthor": {
+              "type": "string"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_create_branch",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "blog",
+                "content",
+                "fix",
+                "feature",
+                "docs"
+              ]
+            },
+            "checkoutExisting": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_create_post",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "tags": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "date": {
+              "type": "string"
+            },
+            "authors": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "authorDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "imageUrl": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ]
+              }
+            },
+            "tagDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "permalink": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ]
+              }
+            },
+            "truncateAfter": {
+              "type": "string"
+            },
+            "overwrite": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "description",
+            "slug",
+            "body",
+            "tags"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_create_pr",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "base": {
+              "type": "string"
+            },
+            "head": {
+              "type": "string"
+            },
+            "draft": {
+              "type": "boolean"
+            },
+            "labels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "title",
+            "body"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_delete_post",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "slug"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_deploy_status",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "mergeCommitSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mergeCommitSha"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_diff",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "staged": {
+              "type": "boolean"
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_get_post",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_list_authors",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_list_posts",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "tag": {
+              "type": "string"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_list_prs",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 100
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_list_tags",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_log",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 200
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_parse_markdown",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_pr_comments",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "unresolvedOnly": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_pr_status",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_preflight",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_prepare_publish_branch",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "blog",
+                "content",
+                "fix",
+                "feature",
+                "docs"
+              ]
+            },
+            "checkoutExisting": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_publish_report",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "slug": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_push",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": "string"
+            },
+            "setUpstream": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_reconcile_after_merge",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "expectedHeadSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_repo_health",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_repo_status",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_reset_stage",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_restore_paths",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_run_artifact_check",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "outputPath": {
+              "type": "string"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_run_doc_gate",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "treatWarningsAsErrors": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_stage",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_sync_base",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "base": {
+              "type": "string"
+            },
+            "ffOnly": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_update_post",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "frontMatter": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "tags": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "authors": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "date": {
+                  "type": "string"
+                },
+                "slug": {
+                  "type": "string"
+                }
+              }
+            },
+            "authorDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "imageUrl": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ]
+              }
+            },
+            "tagDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "permalink": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ]
+              }
+            },
+            "allowSlugChange": {
+              "type": "boolean"
+            },
+            "compatibilityRouteAdded": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "slug"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_validate_hubs",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_validate_posts",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowSlugChange": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_verify_published_url",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "mergeCommitSha": {
+              "type": "string"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "expectStrings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "mergeCommitSha"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_wait_for_checks",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "required": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "pollSeconds": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_wait_for_deploy",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "mergeCommitSha": {
+              "type": "string"
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "mergeCommitSha"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_wait_for_merge",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      }
+    ]
+  },
+  {
+    "profile": "mcp",
+    "tools": [
+      {
+        "name": "blog_add_author",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            },
+            "name": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "imageUrl": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "name"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_add_hub_entry",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "hub": {
+              "type": "string",
+              "enum": [
+                "lucifer-chronicles",
+                "ai-assisted-engineering",
+                "state-of-dev",
+                "game-engine"
+              ]
+            },
+            "title": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "href": {
+              "type": "string",
+              "pattern": "^\\/[a-z0-9-]+\\/$"
+            },
+            "label": {
+              "type": "string"
+            },
+            "position": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "hub",
+            "title",
+            "description",
+            "href"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_add_tag",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            },
+            "label": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "label",
+            "description"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_auto_merge",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "headSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_branches",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_check_status",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "required": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_commit",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "feat",
+                "fix",
+                "docs",
+                "chore",
+                "refactor",
+                "style",
+                "test",
+                "build",
+                "ci"
+              ]
+            },
+            "scope": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "coAuthor": {
+              "type": "string"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_create_branch",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "blog",
+                "content",
+                "fix",
+                "feature",
+                "docs"
+              ]
+            },
+            "checkoutExisting": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_create_post",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "tags": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "date": {
+              "type": "string"
+            },
+            "authors": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "authorDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "imageUrl": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ]
+              }
+            },
+            "tagDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "permalink": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ]
+              }
+            },
+            "truncateAfter": {
+              "type": "string"
+            },
+            "overwrite": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "description",
+            "slug",
+            "body",
+            "tags"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_create_pr",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "base": {
+              "type": "string"
+            },
+            "head": {
+              "type": "string"
+            },
+            "draft": {
+              "type": "boolean"
+            },
+            "labels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "title",
+            "body"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_delete_post",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "slug"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_deploy_status",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "mergeCommitSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mergeCommitSha"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_diff",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "staged": {
+              "type": "boolean"
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_get_post",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_list_authors",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_list_posts",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "tag": {
+              "type": "string"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_list_prs",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 100
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_list_tags",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_log",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 200
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_parse_markdown",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_pr_comments",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "unresolvedOnly": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_pr_status",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_preflight",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_prepare_publish_branch",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "blog",
+                "content",
+                "fix",
+                "feature",
+                "docs"
+              ]
+            },
+            "checkoutExisting": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_publish_report",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "slug": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_push",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": "string"
+            },
+            "setUpstream": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_reconcile_after_merge",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "expectedHeadSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_repo_health",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_repo_status",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_reset_stage",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_restore_paths",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_run_artifact_check",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "outputPath": {
+              "type": "string"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_run_doc_gate",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "treatWarningsAsErrors": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_stage",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_sync_base",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "base": {
+              "type": "string"
+            },
+            "ffOnly": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_update_post",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "frontMatter": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "tags": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "authors": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "date": {
+                  "type": "string"
+                },
+                "slug": {
+                  "type": "string"
+                }
+              }
+            },
+            "authorDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "imageUrl": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ]
+              }
+            },
+            "tagDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "permalink": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ]
+              }
+            },
+            "allowSlugChange": {
+              "type": "boolean"
+            },
+            "compatibilityRouteAdded": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "slug"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_validate_hubs",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_validate_posts",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowSlugChange": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_verify_published_url",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "mergeCommitSha": {
+              "type": "string"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "expectStrings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "mergeCommitSha"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_wait_for_checks",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "required": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "pollSeconds": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_wait_for_deploy",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "mergeCommitSha": {
+              "type": "string"
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "mergeCommitSha"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_wait_for_merge",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      }
+    ]
+  },
+  {
+    "profile": "scheduler",
+    "tools": [
+      {
+        "name": "blog_auto_merge",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "headSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_branches",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_cancel_scheduled_job",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_check_status",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "required": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_create_pr",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "base": {
+              "type": "string"
+            },
+            "head": {
+              "type": "string"
+            },
+            "draft": {
+              "type": "boolean"
+            },
+            "labels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "title",
+            "body"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_deploy_status",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "mergeCommitSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mergeCommitSha"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_get_post",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_list_authors",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_list_posts",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "tag": {
+              "type": "string"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_list_prs",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 100
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_list_scheduled_jobs",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "auto-merge-enabled",
+                "merged",
+                "skipped",
+                "cancelled",
+                "needs-attention"
+              ]
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_list_tags",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_log",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 200
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_parse_markdown",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_pr_comments",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "unresolvedOnly": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_pr_status",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_preflight",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_publish_report",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "slug": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_push",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": "string"
+            },
+            "setUpstream": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_reconcile_after_merge",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "expectedHeadSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_repo_health",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_repo_status",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_run_artifact_check",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "outputPath": {
+              "type": "string"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_run_doc_gate",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "treatWarningsAsErrors": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_schedule_publish",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "headSha": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "scheduledAt": {
+              "type": "string",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+            },
+            "onMissed": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "mode": {
+                      "type": "string",
+                      "const": "catch_up"
+                    }
+                  },
+                  "required": [
+                    "mode"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "mode": {
+                      "type": "string",
+                      "const": "skip_if_older_than"
+                    },
+                    "seconds": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "mode",
+                    "seconds"
+                  ]
+                }
+              ]
+            }
+          },
+          "required": [
+            "pr",
+            "headSha",
+            "scheduledAt",
+            "onMissed"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_validate_hubs",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_validate_posts",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowSlugChange": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_verify_published_url",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "mergeCommitSha": {
+              "type": "string"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "expectStrings": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "mergeCommitSha"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_wait_for_checks",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "required": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "pollSeconds": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_wait_for_deploy",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "mergeCommitSha": {
+              "type": "string"
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "mergeCommitSha"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_wait_for_merge",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      }
+    ]
+  },
+  {
+    "profile": "watcher",
+    "tools": [
+      {
+        "name": "blog_add_author",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            },
+            "name": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "imageUrl": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "name"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_add_hub_entry",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "hub": {
+              "type": "string",
+              "enum": [
+                "lucifer-chronicles",
+                "ai-assisted-engineering",
+                "state-of-dev",
+                "game-engine"
+              ]
+            },
+            "title": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "href": {
+              "type": "string",
+              "pattern": "^\\/[a-z0-9-]+\\/$"
+            },
+            "label": {
+              "type": "string"
+            },
+            "position": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "hub",
+            "title",
+            "description",
+            "href"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_add_tag",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            },
+            "label": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "label",
+            "description"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_auto_merge",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "headSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_branches",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_commit",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "feat",
+                "fix",
+                "docs",
+                "chore",
+                "refactor",
+                "style",
+                "test",
+                "build",
+                "ci"
+              ]
+            },
+            "scope": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "coAuthor": {
+              "type": "string"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_create_branch",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "blog",
+                "content",
+                "fix",
+                "feature",
+                "docs"
+              ]
+            },
+            "checkoutExisting": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_create_post",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "tags": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "date": {
+              "type": "string"
+            },
+            "authors": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "authorDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "imageUrl": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ]
+              }
+            },
+            "tagDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "permalink": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ]
+              }
+            },
+            "truncateAfter": {
+              "type": "string"
+            },
+            "overwrite": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "description",
+            "slug",
+            "body",
+            "tags"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_create_pr",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "base": {
+              "type": "string"
+            },
+            "head": {
+              "type": "string"
+            },
+            "draft": {
+              "type": "boolean"
+            },
+            "labels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "title",
+            "body"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_delete_post",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "slug"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_diff",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "staged": {
+              "type": "boolean"
+            },
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_get_post",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_list_authors",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_list_posts",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "tag": {
+              "type": "string"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_list_prs",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 100
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_list_tags",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_log",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 200
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_parse_markdown",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_pr_comments",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "unresolvedOnly": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_pr_status",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_preflight",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_prepare_publish_branch",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "blog",
+                "content",
+                "fix",
+                "feature",
+                "docs"
+              ]
+            },
+            "checkoutExisting": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_push",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": "string"
+            },
+            "setUpstream": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_reconcile_after_merge",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "expectedHeadSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_repo_health",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_repo_status",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_reset_stage",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_restore_paths",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_run_artifact_check",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "outputPath": {
+              "type": "string"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_run_doc_gate",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "treatWarningsAsErrors": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_stage",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_sync_base",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "base": {
+              "type": "string"
+            },
+            "ffOnly": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_update_post",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "frontMatter": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "tags": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "authors": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "date": {
+                  "type": "string"
+                },
+                "slug": {
+                  "type": "string"
+                }
+              }
+            },
+            "authorDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "imageUrl": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ]
+              }
+            },
+            "tagDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "permalink": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ]
+              }
+            },
+            "allowSlugChange": {
+              "type": "boolean"
+            },
+            "compatibilityRouteAdded": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "slug"
+          ],
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_validate_hubs",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      },
+      {
+        "name": "blog_validate_posts",
+        "capabilities": [],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowSlugChange": {
+              "type": "boolean"
+            }
+          },
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      }
+    ]
+  }
+]
