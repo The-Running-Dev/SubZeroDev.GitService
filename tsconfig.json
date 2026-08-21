@@ -16,5 +16,12 @@
     "noEmit": true,
     "resolveJsonModule": true
   },
-  "include": ["src/**/*.ts", "scripts/**/*.ts"]
+  "include": ["src/**/*.ts", "scripts/**/*.ts"],
+  // S20's blog-parity scripts import a sibling repository checkout
+  // (SubZeroDev.Blog) outside this tsconfig's module context; excluded from
+  // the base's own typecheck gate for the same reason e2e/ gets its own
+  // tsconfig rather than folding into this one -- they run standalone
+  // (node --disable-warning=... scripts/generate-blog-tool-parity-fixtures.ts),
+  // not through `npm run typecheck`.
+  "exclude": ["scripts/generate-blog-tool-parity-fixtures.ts", "scripts/check-blog-tool-parity.ts"]
 }

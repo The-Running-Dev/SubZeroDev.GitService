@@ -1,0 +1,3878 @@
+[
+  {
+    "profile": "operator",
+    "tools": [
+      {
+        "name": "add_author",
+        "capabilities": [
+          "content.author.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            },
+            "name": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "imageUrl": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "name"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "add_hub_entry",
+        "capabilities": [
+          "content.hub.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "hub": {
+              "type": "string",
+              "enum": [
+                "lucifer-chronicles",
+                "ai-assisted-engineering",
+                "state-of-dev",
+                "game-engine"
+              ]
+            },
+            "title": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "href": {
+              "type": "string",
+              "pattern": "^/[a-z0-9-]+/$"
+            },
+            "label": {
+              "type": "string"
+            },
+            "position": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "hub",
+            "title",
+            "description",
+            "href"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "add_tag",
+        "capabilities": [
+          "content.tag.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            },
+            "label": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "label",
+            "description"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "checks_await",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "timeoutSeconds": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "ref",
+            "timeoutSeconds"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "checks_status",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "ref"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "create_post",
+        "capabilities": [
+          "content.post.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            },
+            "date": {
+              "type": "string"
+            },
+            "authors": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "authorDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "imageUrl": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "tagDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "permalink": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "truncateAfter": {
+              "type": "string"
+            },
+            "overwrite": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "description",
+            "slug",
+            "body",
+            "tags"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "delete_post",
+        "capabilities": [
+          "content.post.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "slug"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "deploy_status",
+        "capabilities": [
+          "content.gitUtility.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "mergeCommitSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mergeCommitSha"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "get_post",
+        "capabilities": [
+          "content.post.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_branches",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_commit",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_diff",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "staged": {
+              "type": "boolean"
+            },
+            "paths": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "staged",
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_fetch",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_log",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_push",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_raw",
+        "capabilities": [
+          "git.raw"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "argv"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_restore_paths",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_stage",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "list_authors",
+        "capabilities": [
+          "content.author.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "list_posts",
+        "capabilities": [
+          "content.post.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "tag": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "list_tags",
+        "capabilities": [
+          "content.tag.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "parse_markdown",
+        "capabilities": [
+          "content.markdown.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_comments",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_enable_auto_merge",
+        "capabilities": [
+          "host.pr.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_list",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "open",
+                "merged",
+                "closed",
+                null
+              ]
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_open",
+        "capabilities": [
+          "host.pr.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "headBranch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "draft": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "body",
+            "headBranch",
+            "draft"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_status",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "preflight",
+        "capabilities": [
+          "content.gate.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "prepare_branch",
+        "capabilities": [
+          "git.local.write",
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "publish_report",
+        "capabilities": [
+          "content.gitUtility.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "slug": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "reconcile_after_merge",
+        "capabilities": [
+          "git.local.write",
+          "git.remote.write",
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pullRequestNumber": {
+              "type": "number"
+            },
+            "expectedHeadSha": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pullRequestNumber",
+            "expectedHeadSha"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "repo_health",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "repo_status",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "run_artifact_check",
+        "capabilities": [
+          "content.gate.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "outputPath": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "run_doc_gate",
+        "capabilities": [
+          "content.gate.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "treatWarningsAsErrors": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_cancel",
+        "capabilities": [
+          "scheduler.manage"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_create",
+        "capabilities": [
+          "scheduler.manage"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "input": {},
+            "notBefore": {
+              "type": "string"
+            },
+            "onMissed": {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "catch_up",
+                    "skip_if_older_than"
+                  ]
+                },
+                "seconds": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "mode"
+              ]
+            }
+          },
+          "required": [
+            "tool",
+            "input",
+            "notBefore",
+            "onMissed"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_list",
+        "capabilities": [
+          "scheduler.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "pending",
+                "running",
+                "done",
+                "skipped",
+                "cancelled",
+                "needs-attention",
+                null
+              ]
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "sync_base",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "unstage_paths",
+        "capabilities": [
+          "content.gitUtility.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "update_post",
+        "capabilities": [
+          "content.post.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "frontMatter": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "tags": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "authors": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "date": {
+                  "type": "string"
+                },
+                "slug": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "authorDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "imageUrl": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "tagDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "permalink": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "allowSlugChange": {
+              "type": "boolean"
+            },
+            "compatibilityRouteAdded": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "slug"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "validate_hubs",
+        "capabilities": [
+          "content.validation.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "validate_posts",
+        "capabilities": [
+          "content.validation.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowSlugChange": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "verify_published_url",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "expectedCommitSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "url",
+            "expectedCommitSha"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "wait_for_deploy",
+        "capabilities": [
+          "content.gitUtility.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "mergeCommitSha": {
+              "type": "string"
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "mergeCommitSha"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "wait_for_merge",
+        "capabilities": [
+          "content.gitUtility.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ]
+  },
+  {
+    "profile": "mcp",
+    "tools": [
+      {
+        "name": "checks_await",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "timeoutSeconds": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "ref",
+            "timeoutSeconds"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "checks_status",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "ref"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_branches",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_commit",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_diff",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "staged": {
+              "type": "boolean"
+            },
+            "paths": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "staged",
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_fetch",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_log",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_push",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_raw",
+        "capabilities": [
+          "git.raw"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "argv"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_restore_paths",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_stage",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_comments",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_enable_auto_merge",
+        "capabilities": [
+          "host.pr.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_list",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "open",
+                "merged",
+                "closed",
+                null
+              ]
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_open",
+        "capabilities": [
+          "host.pr.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "headBranch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "draft": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "body",
+            "headBranch",
+            "draft"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_status",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "prepare_branch",
+        "capabilities": [
+          "git.local.write",
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "reconcile_after_merge",
+        "capabilities": [
+          "git.local.write",
+          "git.remote.write",
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pullRequestNumber": {
+              "type": "number"
+            },
+            "expectedHeadSha": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pullRequestNumber",
+            "expectedHeadSha"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "repo_health",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "repo_status",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_cancel",
+        "capabilities": [
+          "scheduler.manage"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_create",
+        "capabilities": [
+          "scheduler.manage"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "input": {},
+            "notBefore": {
+              "type": "string"
+            },
+            "onMissed": {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "catch_up",
+                    "skip_if_older_than"
+                  ]
+                },
+                "seconds": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "mode"
+              ]
+            }
+          },
+          "required": [
+            "tool",
+            "input",
+            "notBefore",
+            "onMissed"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_list",
+        "capabilities": [
+          "scheduler.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "pending",
+                "running",
+                "done",
+                "skipped",
+                "cancelled",
+                "needs-attention",
+                null
+              ]
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "sync_base",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "verify_published_url",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "expectedCommitSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "url",
+            "expectedCommitSha"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ]
+  },
+  {
+    "profile": "scheduler",
+    "tools": [
+      {
+        "name": "add_author",
+        "capabilities": [
+          "content.author.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            },
+            "name": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "imageUrl": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "name"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "add_hub_entry",
+        "capabilities": [
+          "content.hub.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "hub": {
+              "type": "string",
+              "enum": [
+                "lucifer-chronicles",
+                "ai-assisted-engineering",
+                "state-of-dev",
+                "game-engine"
+              ]
+            },
+            "title": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "href": {
+              "type": "string",
+              "pattern": "^/[a-z0-9-]+/$"
+            },
+            "label": {
+              "type": "string"
+            },
+            "position": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "hub",
+            "title",
+            "description",
+            "href"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "add_tag",
+        "capabilities": [
+          "content.tag.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            },
+            "label": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "label",
+            "description"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "checks_await",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "timeoutSeconds": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "ref",
+            "timeoutSeconds"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "checks_status",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "ref"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "create_post",
+        "capabilities": [
+          "content.post.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            },
+            "date": {
+              "type": "string"
+            },
+            "authors": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "authorDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "imageUrl": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "tagDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "permalink": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "truncateAfter": {
+              "type": "string"
+            },
+            "overwrite": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "description",
+            "slug",
+            "body",
+            "tags"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "delete_post",
+        "capabilities": [
+          "content.post.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "slug"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "deploy_status",
+        "capabilities": [
+          "content.gitUtility.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "mergeCommitSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mergeCommitSha"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "get_post",
+        "capabilities": [
+          "content.post.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_branches",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_commit",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_diff",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "staged": {
+              "type": "boolean"
+            },
+            "paths": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "staged",
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_fetch",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_log",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_push",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_raw",
+        "capabilities": [
+          "git.raw"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "argv"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_restore_paths",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_stage",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "list_authors",
+        "capabilities": [
+          "content.author.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "list_posts",
+        "capabilities": [
+          "content.post.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "tag": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "list_tags",
+        "capabilities": [
+          "content.tag.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "parse_markdown",
+        "capabilities": [
+          "content.markdown.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_comments",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_enable_auto_merge",
+        "capabilities": [
+          "host.pr.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_list",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "open",
+                "merged",
+                "closed",
+                null
+              ]
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_open",
+        "capabilities": [
+          "host.pr.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "headBranch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "draft": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "body",
+            "headBranch",
+            "draft"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_status",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "preflight",
+        "capabilities": [
+          "content.gate.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "prepare_branch",
+        "capabilities": [
+          "git.local.write",
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "publish_report",
+        "capabilities": [
+          "content.gitUtility.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "slug": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "reconcile_after_merge",
+        "capabilities": [
+          "git.local.write",
+          "git.remote.write",
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pullRequestNumber": {
+              "type": "number"
+            },
+            "expectedHeadSha": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pullRequestNumber",
+            "expectedHeadSha"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "repo_health",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "repo_status",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "run_artifact_check",
+        "capabilities": [
+          "content.gate.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "outputPath": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "run_doc_gate",
+        "capabilities": [
+          "content.gate.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "treatWarningsAsErrors": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_cancel",
+        "capabilities": [
+          "scheduler.manage"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_create",
+        "capabilities": [
+          "scheduler.manage"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "input": {},
+            "notBefore": {
+              "type": "string"
+            },
+            "onMissed": {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "catch_up",
+                    "skip_if_older_than"
+                  ]
+                },
+                "seconds": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "mode"
+              ]
+            }
+          },
+          "required": [
+            "tool",
+            "input",
+            "notBefore",
+            "onMissed"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_list",
+        "capabilities": [
+          "scheduler.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "pending",
+                "running",
+                "done",
+                "skipped",
+                "cancelled",
+                "needs-attention",
+                null
+              ]
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "sync_base",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "unstage_paths",
+        "capabilities": [
+          "content.gitUtility.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "update_post",
+        "capabilities": [
+          "content.post.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "frontMatter": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "tags": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "authors": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "date": {
+                  "type": "string"
+                },
+                "slug": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "authorDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "imageUrl": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "tagDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "permalink": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "allowSlugChange": {
+              "type": "boolean"
+            },
+            "compatibilityRouteAdded": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "slug"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "validate_hubs",
+        "capabilities": [
+          "content.validation.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "validate_posts",
+        "capabilities": [
+          "content.validation.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowSlugChange": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "verify_published_url",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "expectedCommitSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "url",
+            "expectedCommitSha"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "wait_for_deploy",
+        "capabilities": [
+          "content.gitUtility.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "mergeCommitSha": {
+              "type": "string"
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "mergeCommitSha"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "wait_for_merge",
+        "capabilities": [
+          "content.gitUtility.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ]
+  },
+  {
+    "profile": "watcher",
+    "tools": [
+      {
+        "name": "add_author",
+        "capabilities": [
+          "content.author.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            },
+            "name": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "imageUrl": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "name"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "add_hub_entry",
+        "capabilities": [
+          "content.hub.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "hub": {
+              "type": "string",
+              "enum": [
+                "lucifer-chronicles",
+                "ai-assisted-engineering",
+                "state-of-dev",
+                "game-engine"
+              ]
+            },
+            "title": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "href": {
+              "type": "string",
+              "pattern": "^/[a-z0-9-]+/$"
+            },
+            "label": {
+              "type": "string"
+            },
+            "position": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "hub",
+            "title",
+            "description",
+            "href"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "add_tag",
+        "capabilities": [
+          "content.tag.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            },
+            "label": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "label",
+            "description"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "checks_await",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "timeoutSeconds": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "ref",
+            "timeoutSeconds"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "checks_status",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "ref"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "create_post",
+        "capabilities": [
+          "content.post.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            },
+            "date": {
+              "type": "string"
+            },
+            "authors": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "authorDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "imageUrl": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "tagDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "permalink": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "truncateAfter": {
+              "type": "string"
+            },
+            "overwrite": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "description",
+            "slug",
+            "body",
+            "tags"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "delete_post",
+        "capabilities": [
+          "content.post.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "slug"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "deploy_status",
+        "capabilities": [
+          "content.gitUtility.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "mergeCommitSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mergeCommitSha"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "get_post",
+        "capabilities": [
+          "content.post.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_branches",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_commit",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "message"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_diff",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "staged": {
+              "type": "boolean"
+            },
+            "paths": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "staged",
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_fetch",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_log",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_push",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_raw",
+        "capabilities": [
+          "git.raw"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "argv"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_restore_paths",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "git_stage",
+        "capabilities": [
+          "git.local.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "list_authors",
+        "capabilities": [
+          "content.author.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "list_posts",
+        "capabilities": [
+          "content.post.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "tag": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "list_tags",
+        "capabilities": [
+          "content.tag.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "parse_markdown",
+        "capabilities": [
+          "content.markdown.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_comments",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_enable_auto_merge",
+        "capabilities": [
+          "host.pr.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_list",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "open",
+                "merged",
+                "closed",
+                null
+              ]
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_open",
+        "capabilities": [
+          "host.pr.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "headBranch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "draft": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "body",
+            "headBranch",
+            "draft"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pr_status",
+        "capabilities": [
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "preflight",
+        "capabilities": [
+          "content.gate.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "prepare_branch",
+        "capabilities": [
+          "git.local.write",
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "branch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "publish_report",
+        "capabilities": [
+          "content.gitUtility.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "slug": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "reconcile_after_merge",
+        "capabilities": [
+          "git.local.write",
+          "git.remote.write",
+          "host.pr.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pullRequestNumber": {
+              "type": "number"
+            },
+            "expectedHeadSha": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pullRequestNumber",
+            "expectedHeadSha"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "repo_health",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "repo_status",
+        "capabilities": [
+          "repo.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "run_artifact_check",
+        "capabilities": [
+          "content.gate.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "outputPath": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "run_doc_gate",
+        "capabilities": [
+          "content.gate.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "treatWarningsAsErrors": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_cancel",
+        "capabilities": [
+          "scheduler.manage"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_create",
+        "capabilities": [
+          "scheduler.manage"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "input": {},
+            "notBefore": {
+              "type": "string"
+            },
+            "onMissed": {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "catch_up",
+                    "skip_if_older_than"
+                  ]
+                },
+                "seconds": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "mode"
+              ]
+            }
+          },
+          "required": [
+            "tool",
+            "input",
+            "notBefore",
+            "onMissed"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "scheduled_job_list",
+        "capabilities": [
+          "scheduler.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "enum": [
+                "pending",
+                "running",
+                "done",
+                "skipped",
+                "cancelled",
+                "needs-attention",
+                null
+              ]
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "sync_base",
+        "capabilities": [
+          "git.remote.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "unstage_paths",
+        "capabilities": [
+          "content.gitUtility.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "update_post",
+        "capabilities": [
+          "content.post.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "frontMatter": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "tags": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "authors": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "date": {
+                  "type": "string"
+                },
+                "slug": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "authorDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "imageUrl": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "tagDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "permalink": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "allowSlugChange": {
+              "type": "boolean"
+            },
+            "compatibilityRouteAdded": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "slug"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "validate_hubs",
+        "capabilities": [
+          "content.validation.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "validate_posts",
+        "capabilities": [
+          "content.validation.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowSlugChange": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "verify_published_url",
+        "capabilities": [
+          "host.checks.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "expectedCommitSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "url",
+            "expectedCommitSha"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "wait_for_deploy",
+        "capabilities": [
+          "content.gitUtility.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "mergeCommitSha": {
+              "type": "string"
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "mergeCommitSha"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "wait_for_merge",
+        "capabilities": [
+          "content.gitUtility.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "pr"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ]
+  }
+]
