@@ -20,4 +20,5 @@ test('npm run build chains typecheck and every check:* gate, including check:lay
   assert.ok(steps.includes('npm run check:layering'), `build script missing check:layering: ${buildScript}`);
   assert.ok(steps.includes('npm run check:migration'), `build script missing check:migration: ${buildScript}`);
   assert.ok(steps.includes('npm run check:layer-direction'), `build script missing check:layer-direction: ${buildScript}`);
+  assert.ok(steps.includes('npm run check:parity'), `build script missing check:parity: ${buildScript}`);
 });

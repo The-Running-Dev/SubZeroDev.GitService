@@ -33,6 +33,10 @@ COPY playwright.config.ts ./
 # (`scripts/check-migration-matches-contract.ts`) — a build-time-only
 # dependency. `design/` never reaches the `runtime` stage below.
 COPY design ./design
+# `check:parity` compares the current build against the committed base-image
+# fixture (`scripts/check-tool-parity.ts`) — build-time-only, like `design/`
+# above. `fixtures/` never reaches the `runtime` stage below.
+COPY fixtures ./fixtures
 RUN npm run build
 
 FROM builder AS trimmed
