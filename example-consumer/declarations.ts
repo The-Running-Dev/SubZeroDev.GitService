@@ -9,7 +9,7 @@ import { success } from '../src/result/envelope.ts';
  * S35's example consumer — proof that a consumer can add its own tool on top
  * of the base's `PRODUCTION_TOOL_DECLARATIONS`, per `20-contract.md` §
  * *Tool registry extension*. One trivial read tool, `example_note_echo`,
- * declaring a capability (`content.example-note`) the base does not: S35.5
+ * declaring a capability (`content.exampleNote.read`) the base does not: S35.5
  * is exercised by the existing, unmodified `tools/list` visibility filter
  * (`src/dispatch/dispatch-pipeline.ts`'s `isVisible`) rather than by any new
  * mechanism.

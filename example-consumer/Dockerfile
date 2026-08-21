@@ -22,7 +22,13 @@ COPY package.json package-lock.json ./
 COPY console/package.json ./console/package.json
 COPY example-consumer/package.json ./example-consumer/package.json
 COPY example-consumer/console/package.json ./example-consumer/console/package.json
-RUN npm ci
+# The two extra COPYs above (needed for this workspace's own deps) shift this
+# layer's cache key away from the base Dockerfile's own `RUN npm ci`, so a
+# BuildKit layer-cache hit against the base's build (built first, same CI job)
+# is never available here. The cache mount is keyed by id/target, not by the
+# preceding instruction chain, so it still reuses npm's package cache the base
+# build just populated even though the layer itself can't be reused.
+RUN --mount=type=cache,target=/root/.npm npm ci
 COPY tsconfig.json ./
 COPY scripts ./scripts
 COPY src ./src
