@@ -4,15 +4,20 @@ import ts from 'typescript';
 
 /**
  * Invariant B8: "The compiler is absent from the runtime image." Builds the
- * real module graph starting from the runtime entrypoint (`src/server.ts`)
- * using the TypeScript compiler API, and fails the build if
+ * real module graph starting from the runtime entrypoint (`src/server.ts` by
+ * default) using the TypeScript compiler API, and fails the build if
  * `src/contract/compiler.ts` is reachable from it. This is the check the
  * fingerprint-mismatch acceptance criterion in `30-slices.md` § S1 requires:
  * "A check fails the build if any runtime module imports the compiler."
+ *
+ * Takes one optional CLI argument: a runtime entrypoint path (relative to the
+ * caller's cwd, or absolute), defaulting to `src/server.ts`. S35.4 reuses
+ * this same check against `example-consumer/server.ts` — "the same check the
+ * base runs" — rather than a second, separately-maintained copy of it.
  */
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const runtimeEntrypoint = path.join(repoRoot, 'src', 'server.ts');
+const runtimeEntrypoint = process.argv[2] ? path.resolve(process.cwd(), process.argv[2]) : path.join(repoRoot, 'src', 'server.ts');
 const forbiddenModule = path.join(repoRoot, 'src', 'contract', 'compiler.ts');
 
 function normalise(filePath: string): string {
@@ -44,4 +49,4 @@ if (violation) {
   process.exit(1);
 }
 
-console.log(`check-no-compiler-in-runtime: OK — ${reachable.length} runtime module(s) reachable from server.ts, none is the compiler`);
+console.log(`check-no-compiler-in-runtime: OK — ${reachable.length} runtime module(s) reachable from ${path.relative(process.cwd(), runtimeEntrypoint)}, none is the compiler`);

@@ -3,7 +3,9 @@
   "private": true,
   "type": "module",
   "workspaces": [
-    "console"
+    "console",
+    "example-consumer",
+    "example-consumer/console"
   ],
   "engines": {
     "node": ">=22.6.0"

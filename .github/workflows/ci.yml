@@ -8,9 +8,10 @@
 # `npm run build` chains typecheck, the registry build and every `check:*`
 # gate (`check:layering`, `check:migration`, `check:layer-direction`) — the
 # same chain the Dockerfile's `builder` stage runs, so this is the one place
-# that ordering is stated. Out of scope: running the gates for the derived
-# consumer image (S20), and any deployment step — this is the repository's
-# own CI, not the service's execution mechanism.
+# that ordering is stated. Out of scope: any deployment step — this is the
+# repository's own CI, not the service's execution mechanism. S35's derived
+# example-consumer image gets its own build-and-boot step below, alongside
+# the base's own container gate — the ordering S35.7 asks for.
 #
 # `push` is restricted to `main` (issue #122): a branch with an open pull
 # request already gets every commit gated by `pull_request` below, so a
@@ -86,3 +87,34 @@ jobs:
       # verification: true
       - name: Build S28's container image
         run: docker build --build-arg GIT_COMMIT_SHA=${{ github.sha }} -t subzerodev-git:ci .
+
+      # verification: true
+      # S35.7 — the derived example-consumer image builds and boots
+      # unattended alongside the base's own container gate above, and fails
+      # this job the same way a broken seam does locally: a compile error in
+      # `example-consumer/scripts/build-registry.ts` fails the `docker build`
+      # step; a tampered or mismatched registry/console artifact fails boot,
+      # which this step catches by requiring "listening on" in the logs
+      # within the timeout rather than merely that the container started.
+      - name: Build and boot S35's example-consumer image
+        run: |
+          docker build --build-arg GIT_COMMIT_SHA=${{ github.sha }} -f example-consumer/Dockerfile -t subzerodev-git-example-consumer:ci .
+          docker run -d --name example-consumer-ci -p 18080:8080 -e PUBLIC_ORIGIN=http://localhost:18080 subzerodev-git-example-consumer:ci
+          for attempt in $(seq 1 15); do
+            if docker logs example-consumer-ci 2>&1 | grep -q "server: listening on"; then
+              echo "example-consumer booted"
+              docker rm -f example-consumer-ci
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' example-consumer-ci)" != "true" ]; then
+              echo "example-consumer exited before reporting ready" >&2
+              docker logs example-consumer-ci >&2
+              docker rm -f example-consumer-ci
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "example-consumer did not report ready within 15s" >&2
+          docker logs example-consumer-ci >&2
+          docker rm -f example-consumer-ci
+          exit 1

@@ -1,0 +1,14 @@
+{
+  "name": "@subzerodev-git/example-consumer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build:registry": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/build-registry.ts",
+    "build:console": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/build-console-manifest.ts",
+    "check:layering": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON ../scripts/check-no-compiler-in-runtime.ts server.ts",
+    "build": "npm run typecheck && npm run build:registry && npm run build:console && npm run check:layering",
+    "start": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON server.ts"
+  }
+}
