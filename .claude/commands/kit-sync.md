@@ -69,7 +69,7 @@ Everything `INSTALL.md` phase 3 already requires, plus:
 - Force-push, reset, or discard uncommitted work in `~/.agent-kit`. It is shared across every repository that runs this command.
 - Hardcode a source URL as a fallback. Absent `kit.json` means asking, once.
 - Write, rewrite, or delete this repository's `.claude/commands/*-local.md`. They are the reason a routine sync can take every core outright; a sync that edited them would be reconciling the very thing the split moved out of its way.
-- Commit or push anything in *this* repository — same as `/install`, this stops at the phase 3 report, and applies only after sign-off.
+- Commit to, or push to, *this* repository's default branch. Delivery is `INSTALL.md` phase 4 step 8's feature branch and pull request, unchanged by syncing from a branch — this command adds nothing to it and does not restate it.
 
 ## Re-run
 

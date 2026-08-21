@@ -68,9 +68,9 @@ This is the mechanical backstop for everything above — the phase-2 rules say w
 
 ## Phase 3 — What must not happen, in any target
 
-Same list as `INSTALL.md`'s, and unattended does not relax it — if anything it matters more, since nothing here waits for a human to notice a mistake before it repeats across the next repository:
+`INSTALL.md`'s list, and unattended does not relax it — if anything it matters more, since nothing here waits for a human to notice a mistake before it repeats across the next repository. **One entry is tightened rather than inherited**, and it is the first:
 
-- No commit, no push, no pull request, in any target.
+- **No commit, no push, no pull request, in any target** — this is stricter than `INSTALL.md` phase 4 step 8, which delivers on a feature branch. Attended, one target, that branch is reviewable before anything else happens to it. Unattended, across every sibling repository, it is a pull request per repo that nobody asked for, opened faster than anyone can read them, on repositories whose forks this pass has already declined to answer. The write surface below is the whole of what an unattended pass leaves behind, and it stops at the working tree.
 - No `git add -A`, `git add .`, or bare-directory add — this command does not stage anything at all.
 - No deletion without approval, including proposed `agent.md` prunes — leave those unpruned and listed, not silently applied.
 - No write to a target's `settings.json`, `settings.local.json`, or `launch.json` beyond the (skipped, per phase 2) `SessionEnd` and `UserPromptSubmit` hooks.
