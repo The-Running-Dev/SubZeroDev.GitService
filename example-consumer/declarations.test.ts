@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { systemClock } from '../src/clock/clock.ts';
 import { compiler } from '../src/contract/compiler.ts';
+import { captureToolParity } from '../src/contract/tool-parity.ts';
 import { PRODUCTION_TOOL_DECLARATIONS } from '../src/composition-root/production-declarations.ts';
 import { createModuleAdapter, toModuleHandler } from '../src/module-adapter/module-adapter.ts';
 import { createDispatchPipeline } from '../src/dispatch/dispatch-pipeline.ts';
@@ -112,6 +113,22 @@ test('S35.2/S35.3 — the union of base and example-consumer declarations compil
   assert.equal(EXTRA_TOOL_DECLARATIONS.length, 1, 'example-consumer extra tool count');
   assert.equal(unionResult.value.registry.entries.length, 26, 'union registry carries both counts, one entry list');
   assert.notEqual(unionResult.value.fingerprint, baseResult.value.fingerprint, "the derived fingerprint differs from the base image's own");
+});
+
+test("S39.7 — a session of the 'mcp' profile against the example consumer's derived image sees example_note_echo; the profile's tool count states the before/after difference", () => {
+  const baseResult = compiler.compile(PRODUCTION_TOOL_DECLARATIONS);
+  assert.equal(baseResult.ok, true);
+  const unionResult = compiler.compile([...PRODUCTION_TOOL_DECLARATIONS, ...EXTRA_TOOL_DECLARATIONS]);
+  assert.equal(unionResult.ok, true);
+  if (!baseResult.ok || !unionResult.ok) return;
+
+  const baseMcp = captureToolParity(baseResult.value.registry).find((s) => s.profile === 'mcp')!;
+  const derivedMcp = captureToolParity(unionResult.value.registry).find((s) => s.profile === 'mcp')!;
+
+  assert.equal(baseMcp.tools.length, 25, "the base image's own mcp tool count, unaffected by the consumer's extension");
+  assert.equal(derivedMcp.tools.length, 26, "the derived image's mcp tool count — exactly one more than the base's");
+  assert.ok(!baseMcp.tools.some((t) => t.name === 'example_note_echo'), 'absent from the base — it has no content.* capability at all');
+  assert.ok(derivedMcp.tools.some((t) => t.name === 'example_note_echo'), "S39: present once content.exampleNote.read reaches mcp via the 'read' scope — zero visible before this slice");
 });
 
 test('S35.5 — example_note_echo is visible only once the declaration grants content.exampleNote.read, alongside the base tools its own grant already covers', async () => {

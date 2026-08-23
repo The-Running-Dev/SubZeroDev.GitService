@@ -12,4 +12,5 @@ export type CompilerError = ModuleErrorBase &
     | { readonly code: 'annotation-contradiction'; readonly name: RegistryToolName; readonly rule: string }
     | { readonly code: 'reserved-name'; readonly name: RegistryToolName }
     | { readonly code: 'limit-exceeds-cap'; readonly name: RegistryToolName; readonly cap: number }
+    | { readonly code: 'capability-unscopable'; readonly name: RegistryToolName; readonly capability: CapabilityName }
   );

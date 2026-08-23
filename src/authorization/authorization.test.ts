@@ -6,12 +6,12 @@ import { systemClock } from '../clock/clock.ts';
 import { createAudit } from '../audit/audit.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
-import type { ContractCapabilitySet, DeploymentCeiling } from '../contract/capabilities.ts';
+import { capabilityScopeOf, type CapabilityName, type ContractCapabilitySet, type DeploymentCeiling } from '../contract/capabilities.ts';
 import type { BearerToken, RemoteHost, Subject } from '../shared/brands.ts';
 import type { ActorRef } from '../shared/actor.ts';
 import { createDeclarations, type Declarations } from '../declarations/declarations.ts';
 import type { Declaration } from '../declarations/types.ts';
-import { createAuthorization } from './authorization.ts';
+import { createAuthorization, expandScopes } from './authorization.ts';
 
 const GITHUB_ALLOWLIST = ['github.com'] as unknown as readonly RemoteHost[];
 
@@ -137,6 +137,80 @@ test("S13.1 — a scoped token's session grant carries only its own scope's capa
     assert.equal(grant.has('git.raw'), false, "a 'read'-only token must not carry 'raw' capability");
     assert.equal(grant.has('git.local.write'), false, "a 'read'-only token must not carry 'write' capability");
   });
+});
+
+test("S39.3 — a content.* capability's read and write halves stay reachable, and separable, from the read and write scopes", async () => {
+  await migratedVolume(async (volume) => {
+    const ceiling = new Set([...(FULL_CEILING as unknown as ReadonlySet<string>), 'content.post.read', 'content.post.write']) as unknown as ContractCapabilitySet;
+    const auth = authFor(volume, ceiling);
+
+    const readIssued = await auth.issueOperatorApiToken('reader' as Subject, ['read'], ACTOR);
+    assert.equal(readIssued.ok, true);
+    if (!readIssued.ok) return;
+    const readVerified = await auth.verifyOperatorApiToken(readIssued.value.value);
+    assert.equal(readVerified.ok, true);
+    if (!readVerified.ok) return;
+    const readGrant = readVerified.value.grant as unknown as ReadonlySet<string>;
+    assert.equal(readGrant.has('content.post.read'), true, "a 'read'-scoped token must carry the content read capability");
+    assert.equal(readGrant.has('content.post.write'), false, "a 'read'-scoped token must not carry the content write capability");
+
+    const writeIssued = await auth.issueOperatorApiToken('writer' as Subject, ['write'], ACTOR);
+    assert.equal(writeIssued.ok, true);
+    if (!writeIssued.ok) return;
+    const writeVerified = await auth.verifyOperatorApiToken(writeIssued.value.value);
+    assert.equal(writeVerified.ok, true);
+    if (!writeVerified.ok) return;
+    const writeGrant = writeVerified.value.grant as unknown as ReadonlySet<string>;
+    assert.equal(writeGrant.has('content.post.write'), true, "a 'write'-scoped token must carry the content write capability");
+    assert.equal(writeGrant.has('content.post.read'), false, "a 'write'-scoped token must not carry the content read capability");
+  });
+});
+
+test('S39.4 — a session holding only raw and schedule sees no content capability whatsoever', async () => {
+  await migratedVolume(async (volume) => {
+    const ceiling = new Set([...(FULL_CEILING as unknown as ReadonlySet<string>), 'content.post.read', 'content.post.write']) as unknown as ContractCapabilitySet;
+    const auth = authFor(volume, ceiling);
+
+    const issued = await auth.issueOperatorApiToken('escape-hatch' as Subject, ['raw', 'schedule'], ACTOR);
+    assert.equal(issued.ok, true);
+    if (!issued.ok) return;
+    const verified = await auth.verifyOperatorApiToken(issued.value.value);
+    assert.equal(verified.ok, true);
+    if (!verified.ok) return;
+    const grant = verified.value.grant as unknown as ReadonlySet<string>;
+    assert.equal(grant.has('content.post.read'), false, 'raw+schedule must not reach a content family by naming it after either');
+    assert.equal(grant.has('content.post.write'), false, 'raw+schedule must not reach a content family by naming it after either');
+    assert.equal(grant.has('git.raw'), true);
+    assert.equal(grant.has('scheduler.manage'), true);
+  });
+});
+
+test('S39.6/A10 — expandScopes(all four scopes, contract) equals the declaration-scoped members of contract, over a registry carrying a content.* capability of each tail', () => {
+  const contract = new Set([
+    ...(FULL_CEILING as unknown as ReadonlySet<CapabilityName>),
+    'content.post.read',
+    'content.gitUtility.write',
+  ]) as unknown as ContractCapabilitySet;
+
+  const expanded = expandScopes(['read', 'write', 'raw', 'schedule'], contract);
+  const declarationScoped = new Set([...(contract as unknown as ReadonlySet<CapabilityName>)].filter((c) => capabilityScopeOf(c) === 'declaration'));
+
+  assert.deepEqual([...(expanded as unknown as ReadonlySet<string>)].sort(), [...declarationScoped].sort());
+});
+
+test('S39.6/A10, demonstrated — a capability the rule cannot place breaks the equality expandScopes is supposed to hold', () => {
+  // 'content.post.delete' reaches the contract set only via a widened
+  // string; the compiler's capability-unscopable check (S39.2) is what
+  // stops this from happening for real. This test demonstrates why A10 is
+  // stated as an equality: it is capable of failing, not merely true by
+  // construction.
+  const contract = new Set([...(FULL_CEILING as unknown as ReadonlySet<CapabilityName>), 'content.post.delete' as CapabilityName]) as unknown as ContractCapabilitySet;
+
+  const expanded = expandScopes(['read', 'write', 'raw', 'schedule'], contract);
+  const declarationScoped = new Set([...(contract as unknown as ReadonlySet<CapabilityName>)].filter((c) => capabilityScopeOf(c) === 'declaration'));
+
+  assert.notDeepEqual([...(expanded as unknown as ReadonlySet<string>)].sort(), [...declarationScoped].sort());
+  assert.equal((expanded as unknown as ReadonlySet<string>).has('content.post.delete'), false, 'the unplaceable capability is silently absent from the expansion — the exact failure A10 exists to catch at build time instead');
 });
 
 test('S13.3 — the raw token value exists only in the returned IssuedToken; no stored row contains it', async () => {

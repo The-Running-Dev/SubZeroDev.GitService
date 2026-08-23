@@ -150,6 +150,7 @@ test('every CompilerError variant is exercised by the self-test fixtures (defini
     'annotation-contradiction',
     'reserved-name',
     'limit-exceeds-cap',
+    'capability-unscopable',
   ];
   const covered = new Set(SELF_TEST_FIXTURES.map((f) => f.expected));
   for (const code of allCodes) {
