@@ -9,13 +9,15 @@ It may override: `extra-steps`, `tightened-authorization`. It may never override
 [`.claude/COMPANIONS.md`](../COMPANIONS.md) § *Never*, which is also where these categories are defined.
 <!-- companion:declared:end -->
 
-Housekeeping for the end of a piece of work: get back to the default branch, remove the local branches that are done, and drop remote-tracking refs for branches deleted on the remote.
+Housekeeping for the end of a piece of work: get back to the default branch, remove the local branches that are done, and drop remote-tracking refs for branches deleted on the remote. It always ends by handing off to `/track` — see *Hand off to `/track`* below.
 
 **Branch deletion here is carved out of the authorization rule** (`AGENTS.md`, *Git and delivery*) — but only for branches this command independently confirms via `git branch --merged`. It runs automatically, without waiting to be asked, and does not block on a confirmation prompt for that list.
 
 ## Run automatically, don't wait to be asked
 
 Run this command's housekeeping as soon as a merge is on the table — either because a PR was just merged in this session (e.g. as `/pr`'s or `/resolve`'s outcome), or because a `git log` / `gh pr list` check surfaces a branch that merged some other way. Don't wait for the user to type `/done`.
+
+The handoff at the end is part of the same automatic behaviour. `/track` follows every run — it is not asked for, and it is not conditional on how much this run cleaned up.
 
 ## Run the mechanical half
 
@@ -60,11 +62,38 @@ Report after acting, not before — this is a summary of what happened, not a re
 - Branches deleted, and the PR each merged through where known (`Deleted`)
 - Any branch left alone, and which named gate it failed — **Merged** or **SafeDelete** (`Refused`), or unmerged work that stopped the run before candidates were even built
 
+## Hand off to `/track` — always
+
+`/track` follows every run of this command. **It is not run here.** `AGENTS.md` § *Session
+boundaries* puts a fresh session between a merge and `/track`, and this command normally runs in
+the session that just merged the branch it is deleting — precisely the session that boundary
+exists to keep out. So end the session rather than chaining, with the banner that boundary
+requires:
+
+```
+===============================
+Session Boundary — Do Not Carry Into /track
+Next: /track, Fresh Session, sonnet/medium
+===============================
+```
+
+Emit it on every run that got past the hard stop, **including a run that deleted nothing**.
+`/track` reconciles `design/` against the tracker; whether a branch was deleted has no bearing on
+whether that reconciliation is owed, and making the handoff conditional on a non-empty candidate
+list is how it silently stops happening. Two cases do not hand off:
+
+- **`Stopped: true`.** Nothing merged was cleaned up and the unaccounted-for work is the only
+  thing to report. Report it and stop.
+- **`design/FROZEN.md` exists.** `/track` refuses during a freeze (`AGENTS.md` § *The design
+  freeze*), so pointing the user at it is not a handoff. Say the handoff is held by the freeze
+  and report the marker's `Frozen because` and `Lifts when` lines verbatim.
+
 ## Never
 
 - Delete a branch `--merged` does not confirm without a separate ask, even if `gh pr list` shows it merged.
 - Touch a remote branch. This command prunes local refs to already-deleted remotes; it does not delete anything on `origin` itself.
 - Discard uncommitted changes. Stashing is the only concession `-AutoStash` makes, and it is never popped automatically.
+- Run `/track` in this session. The handoff is a banner, not a chain — the fresh session is the whole point of it (`AGENTS.md`, *Session boundaries*).
 
 ## Re-run
 
