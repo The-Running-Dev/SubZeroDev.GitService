@@ -350,6 +350,8 @@ Bodies retired; the closed issue is the record. Criteria are not re-derived from
 | **S34** | The two states with no other exit become visible, and clearable | [#129](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/129) |
 | **S35** | A consumer can add its own tools | [#155](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/155) |
 | **S36** | Parity is measured, and the measurement has failed | [#156](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/156) |
+| **S20** | The blog's authoring tools run on this runtime | [#34](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/34) |
+| **S39** | A consumer's own operations are reachable from an agent | [#171](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/171) |
 
 Two rows carry a name this document changed after the issue was opened: #31 is titled "A dropped
 file becomes a pull request…" and #92 "A consumer can declare a safe content-drop protocol", both
@@ -359,97 +361,6 @@ edited — reported here rather than reconciled.
 ---
 
 ## Outstanding
-
-## S39 — A consumer's own operations are reachable from an agent
-
-Delivers: an agent working through this service can reach a consumer's own operations — writing a
-post, running its publishing gates — and not only the repository-generic ones. Until now a consumer
-could add operations, be granted them, and have them build cleanly, while every agent that connected
-saw none of them; the console saw them, which is why nobody noticed until the operations were
-counted. And anyone adding an operation the service cannot decide how to reach is told so when they
-build it, instead of shipping something invisible to the callers it was written for.
-
-Touches: the capability type, the scope-to-capability expansion in authorization, the compiler's
-error set, and the invariant assertion in the parity harness.
-
-Depends on: S35 and S36, both landed — the consumer whose operation this makes reachable, and the
-harness A10's equality is asserted in.
-
-Acceptance:
-- S39.1 A `content.*` capability whose final segment is neither `read` nor `write`, written as a
-  literal in a tool declaration, fails the repository's own typecheck gate. Both directions are
-  shown: a conforming name of each tail compiles.
-- S39.2 The same malformed name reaching the declaration array as a widened `string`, where the type
-  cannot catch it, fails `compile` with `capability-unscopable` naming the tool and the offending
-  capability. Its `resultKind` is `validation` and `isError` is false, as for the other eight.
-- S39.3 An MCP session holding only the `read` scope sees a tool declaring a `content.*` read
-  capability in a listing and can call it, and does not see a tool declaring the write one at all. A
-  session holding only `write` sees the second and not the first. Read and write stay separable for
-  content, which is the property the rejected fifth scope would have collapsed.
-- S39.4 A session holding only `raw` and `schedule` sees no content tool whatsoever. The escape hatch
-  and the scheduler are not reachable by naming a capability family after them.
-- S39.5 The nine fixed declaration-scoped literals expand exactly as they did before, pinned
-  name-by-name against the existing table — `scheduler.read` reaches `schedule` and never `read`. A
-  later attempt to derive all nine from their tails fails this criterion rather than silently
-  widening what a `read`-scoped token reaches.
-- S39.6 **A10** is asserted rather than described: `expandScopes(['read','write','raw','schedule'],
-  contract)` equals the declaration-scoped members of the contract set, run against a registry
-  carrying a `content.*` capability of each tail. Adding a capability the rule cannot place makes the
-  assertion fail, demonstrated.
-- S39.7 A session of the `mcp` profile against the example consumer's derived image sees that
-  consumer's own tool. The `mcp` profile's tool count for that image is stated before and after this
-  slice, and the difference is exactly the consumer's content-capability tools — which numbered zero
-  visible before.
-- S39.8 Comparing the base image against its committed parity fixtures still reports zero differences
-  for every profile. The base declares no `content.*` capability, so any change to its own visible
-  surface would mean one of the nine fixed literals moved.
-
-Out of scope: re-measuring the blog's parity, which is `S20.8` and is the criterion this slice
-exists to unblock. Adding a fifth content-shaped scope, or changing which scope reaches any of the
-nine fixed literals — both rejected on 2026-08-23, and reopening either is a contract change rather
-than an implementation choice. Adding a dispatch-time check against `ToolDeclaration.scopes`:
-withdrawn on the same date, and scopes stay enforced only at session establishment. Validating the
-deployment ceiling, where a malformed name is inert because it can never reach the contract set.
-
----
-
-## S20 — The blog's authoring tools run on this runtime
-
-Delivers: definition-of-done items 3 and 17, for the tools. The blog's own authoring work — creating
-and updating posts, adding tags, authors and hub entries, running its publishing gates — stops
-needing a server built for the blog alone and runs on the one that serves every repository. Whoever
-publishes to the blog keeps everything they could do before, under names that say what an operation
-does rather than which repository it came from.
-
-Touches: the blog repository's own tools and its derived image, and the parity fixtures for it.
-
-Depends on: S35, S36.
-
-Acceptance:
-- S20.3 Every generic tool carries an operation-descriptive name and no `blog_` prefix, and the blog
-  migrates to the new names in the same cutover — no aliases, no deprecation window.
-- S20.4 The blog's content capabilities appear under the `content.*` prefix and are absent from
-  every other declaration's grant.
-- S20.7 The blog's sixteen authoring tools compile into its derived image's registry alongside the
-  base's, under one fingerprint. Both counts are stated, and the base's own set is unchanged by the
-  extension. **Appended, though it runs before `S20.3`** — it carries the half of the retired
-  `S20.1` that is genuinely this slice's, once S35 has built the seam the rest of it assumed.
-- S20.8 Tool metadata is captured from the blog's current server before cutover, per its own
-  capability tiers, and compared against the derived image's capture per this service's profiles.
-  The mapping between the two profile vocabularies is stated rather than assumed. The comparison
-  reports **no capability loss**; every difference it does report is an addition, or a rename
-  covered by `S20.3`, and each is named individually. "No loss of capability" is measured, not
-  asserted.
-
-Out of scope: changing blog domain behaviour. This is a migration, and any behaviour change makes
-the parity comparison meaningless. The blog's console screens (S37) and its watched files (S38);
-both need these tools migrated first.
-
-**`S20.1`, `S20.2`, `S20.5` and `S20.6` are retired, and the gaps they leave are deliberate.** The
-first two named a seam and a measurement that did not exist and are now S35 and S36; the last two
-are whole slices of their own, S37 and S38. See *Criterion ids* above.
-
----
 
 ## S37 — The blog's authoring screens appear, and only for the blog
 
