@@ -64,8 +64,8 @@ One slice, one branch, one session. Do not start slice N+1 because you noticed s
 1. **`/slice S3`**, or bare **`/slice`** for the lowest-numbered slice that is neither closed nor fully ticked and whose dependencies are done. Branches, states criteria by id, writes failing tests first, implements against the contract, commits, pushes, opens the PR — **never as a draft** — ticks the `Done when` boxes it confirms, and ends by reporting the ids it believes are met.
 2. **`/pr`** — same session, and the whole of the rest of the branch's life. Three phases in order: writes the real description onto the PR `/slice` opened; runs the gates and puts their three lists — the one that matters is *did not run* — into the `Verified` section **verbatim**, fixing nothing; then works the review threads automatically, fix → push → confirm checks on the **new** head → only then resolve. Resolving is delegated, no ask required (`AGENTS.md`, *Git and delivery*).
 3. **Merge** — the user's, unless this repository's instruction file explicitly delegates it.
-4. **`/track`** — **new session**, after the merge. Closes the issue if every box is ticked.
-5. **`/done`** — any time after the merge. Switches back to the default branch, deletes the now-merged local slice branch (and any other local branch already merged), and prunes remote-tracking refs for branches gone from `origin`. Optional housekeeping, not a pipeline step — nothing downstream depends on it.
+4. **`/done`** — right after the merge, in the same session. Switches back to the default branch, deletes the now-merged local slice branch (and any other local branch already merged), and prunes remote-tracking refs for branches gone from `origin`. It does not end the loop on its own: every run hands off to `/track`, and it never runs `/track` itself.
+5. **`/track`** — **new session**, after `/done`. Closes the issue if every box is ticked.
 
 `/verify` and `/resolve` are phases 2 and 3 of `/pr` and own their own procedure; both stay callable on their own when you want the gates run against a tree, or threads worked on a PR `/pr` did not open.
 
