@@ -100,6 +100,11 @@ function sendJson(res: ServerResponse, status: number, body: unknown, headers: R
   res.end(payload);
 }
 
+function sendNoContent(res: ServerResponse): void {
+  res.writeHead(204, { 'Cache-Control': 'no-store' });
+  res.end();
+}
+
 function sendHtml(res: ServerResponse, status: number, body: string): void {
   res.writeHead(status, {
     'Content-Type': 'text/html; charset=utf-8',
@@ -553,6 +558,17 @@ async function handleMcpTransport(deps: McpRoutesDependencies, req: IncomingMess
   }
   const rpcId = body.id;
   const method = body.method;
+
+  // JSON-RPC 2.0: a message with no `id` member is a notification and must
+  // never receive a response, `notifications/initialized` being the one the
+  // MCP spec mandates every client send right after `initialize` — a client
+  // SDK that gets an error reply here (as any method here would otherwise
+  // produce) treats it as fatal and aborts the connection before ever
+  // reaching `tools/list`.
+  if (!('id' in body)) {
+    sendNoContent(res);
+    return;
+  }
 
   if (method === 'initialize') {
     const bearer = bearerFrom(req);
