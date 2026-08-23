@@ -135,6 +135,36 @@ named by the consumer's own declarations, not by this service. It is the one cap
 document cannot enumerate, and that openness is deliberate — it is also why `capabilityScopeOf` must
 be total over `CapabilityName` rather than a lookup table that could miss a case.
 
+**Openness is bounded at the tail, not at the head.** A content capability's *family* is the
+consumer's to name; its final segment is not, and must be `read` or `write`. The constraint is not
+decoration: it is the only thing that lets a rule decide, for a name this document has never seen,
+which coarse scope reaches it — see `### Scopes` below, and **A10**. Without it an open capability
+class is unreachable from any scope-bearing surface by construction, which is not a restriction
+anyone chose but the absence of a decision, and it fails silently: the tool compiles, the ceiling
+admits it, the declaration grants it, and the `mcp` and `operator-api` surfaces still cannot see it.
+The console, scheduler and watcher can, because those three build a grant from the contract set
+directly and never pass through a scope — which is why the gap survived review and needed a
+measurement to surface.
+
+The tail rule is **already load-bearing and was so before it was written down**. `compiler.ts`'s
+`isReadCapability` decides read-ness by that same suffix, and `annotation-contradiction` rejects a
+`read` execution class declaring a capability that fails it. Fixing the rule here does not impose a
+convention on consumers; it states one the compiler has been enforcing against for a class it could
+not name, and makes the type carry what a predicate was inferring.
+
+It is enforced at two points, and neither is sufficient alone. `ContentCapability`'s own declaration
+constrains the tail, so a malformed name written as a literal — which is how every tool declaration
+in this repository and in a consumer package is authored — fails to typecheck. A name that reached
+the declaration array as a widened `string` typechecks anyway, and is caught at compile time by
+`capability-unscopable` (see `### Compiler` under *Error semantics*). The type is the cheap check and
+the compiler is the total one.
+
+The rule binds the tail only. `content.post.read` and `content.gitUtility.write` are well-formed
+however deep the family goes, and nothing constrains what sits between the prefix and the tail. A
+family needing neither a read nor a write — an escape hatch, a scheduled hold — is not expressed as
+a content capability at all: `git.raw` and `scheduler.manage` already exist for exactly those, and
+inventing a third tail would put a second escape hatch outside **A6**'s default-deny.
+
 `capabilityScopeOf` decides which of the two enforcement paths a capability takes: declaration-scoped
 capabilities are additionally checked against the declaration's own grant, instance-scoped ones are
 not, because no declaration grants them. `hostSupportedCapabilities` carries **A5** — every `host.*`
@@ -154,6 +184,47 @@ than through a resource indicator. The four instance-level capabilities (`declar
 `auth.manage`, `audit.read`, `attention.resolve`) stay reachable only from the console, per their
 existing "console-only" language above — no `OperatorScope` value names them, and no operator-api
 token can exercise them. See `design/90-decisions.md`, 2026-08-09.
+
+**A scope expands to capabilities by a total rule, not by a lookup table.** `expandScopes`
+(`src/authorization/authorization.ts`) is the single place a granted scope becomes a capability set,
+and it is the only scope enforcement that exists in the tree: `ToolDeclaration.scopes` is
+canonicalised into the fingerprint and published in `SanitisedManifest`, and `dispatch-pipeline.ts`
+reads it nowhere. Its shape is deliberately the same two-branch shape as `capabilityScopeOf`: a
+closed listed set for the nine fixed declaration-scoped literals, and a rule over the open remainder.
+
+A scope therefore exists only at the boundary. `Session` carries a `grant` and no scopes at all, so
+the conversion `expandScopes` performs at establishment is one-way and total: everything a scope is
+going to mean has already been decided by the time any handler runs. Two consequences a reader may
+rely on. A capability-less entry is gated by nothing at dispatch, whatever its `scopes` field says —
+the file-watcher plan entry under `### Contract types (L0)` is the only such entry today, and that is
+its intended reading. And `operator`, `scheduler` and `watcher` sessions are issued no scopes
+whatsoever; they build a grant from the contract set directly, which is why a dispatch-time scope
+check has nothing to check for three of the four profiles and was rejected rather than added. See
+`design/90-decisions.md`, 2026-08-23.
+
+The two branches cannot be collapsed into one, and the reason is worth stating because it looks like
+an inconsistency. `scheduler.read` ends in `read` and belongs to the `schedule` scope, not the `read`
+one — for the fixed literals the scope follows the *operation family*, which only coincides with the
+tail seven times out of nine. Deriving all nine from their tails would silently move `scheduler.read`
+and `scheduler.manage` into `read` and `write`, widening what a `read`-scoped token reaches. So the
+nine keep the explicit mapping they already have, unchanged, and the rule applies to `content.*`
+alone: the tail fixed under `### Capabilities and the lattice` selects the scope, `read` to `read`
+and `write` to `write`. A content family has no operation family of its own for a table to key on,
+which is precisely why a rule is the right instrument there and the wrong one for the other nine.
+
+Consequences a reader may rely on. Every `content.*` capability in the contract set is reachable from
+exactly one of the four scopes, so the `mcp` and `operator-api` surfaces see a consumer's own tools
+on the same terms the console, scheduler and watcher already do. `read` and `write` stay separable
+for content, so a resource owner can grant read-only access to a consumer domain — a fifth
+content-shaped scope was rejected for collapsing exactly that distinction, and for keying a scope on
+a capability family when the design's four are keyed on the operation. No content capability is
+reachable from `raw` or `schedule`; the escape hatch and the scheduler stay gated by their own
+capabilities, and a consumer cannot reach either by naming a family after one.
+
+This resolves a gap that measurement found rather than reading did: `content.*` was admitted by the
+type, by the ceiling and by a declaration's grant, and reachable from no MCP scope, so a consumer's
+entire tool surface was invisible to the one client kind the brief's definition-of-done 13 requires
+it for. See `design/90-decisions.md`, 2026-08-23.
 
 ### Declaration
 
@@ -752,8 +823,12 @@ Both entries are `capabilityScope: 'declaration'` because a watched file always 
 declared repository. The plan entry states it explicitly rather than deriving it, since it carries
 no capabilities for `capability-scope-mismatch` to check it against. That empty capability array is
 deliberate — a pure parse of an already-claimed file reaches nothing a capability guards — and it
-means the `write` scope is the plan tool's only gate. The apply tool is where the repository bound
-sits, and it enforces its own, per D14.
+means **the plan entry is gated by nothing at dispatch**, which is the intended reading and not an
+omission. `scopes: ['write']` is a compile-time shape the compiler enforces and `SanitisedManifest`
+publishes; it is not a runtime gate, because `Session` carries no scopes for dispatch to compare it
+against (`### Scopes` above). An earlier draft of this paragraph called the `write` scope "the plan
+tool's only gate", which was never true of the tree; it is withdrawn. See `design/90-decisions.md`,
+2026-08-23. The apply tool is where the repository bound sits, and it enforces its own, per D14.
 
 `untrustedOutput` is the annotation the prior art puts on a tool returning author-controlled text.
 
@@ -1856,6 +1931,22 @@ after a container restart without re-authorising (S14.7). A grant is never re-is
 authorization code — the surface layer deletes the ephemeral code before calling this method, so a
 replay finds no code to exchange rather than reaching the store twice.
 
+`expandScopes` is exported and crosses a module boundary — `src/contract/tool-parity.ts` calls it to
+compute the widest grant an `mcp` session can hold. It must stay exported for that reason: the parity
+harness measuring what a profile can see has to use the same expansion a real session is built with,
+because a second description of the mapping is a second thing to keep correct and the first thing to
+go stale. It is synchronous, total, and adds nothing — its result is a subset of the contract set for
+every input, including an empty scope array and a scope carrying a capability this deployment never
+registered.
+
+The mapping it applies is fixed under `### Scopes` above, and **that is where a change to it belongs**;
+this signature carries no policy of its own. Two things a caller may not assume. It is not a
+membership test against `ToolDeclaration.scopes`, which nothing at dispatch reads — a tool declaring
+no capabilities is gated by no scope at all, whatever its `scopes` field says. And its totality is
+load-bearing rather than incidental: a capability the rule cannot place must fail the build (**A10**),
+never fall through to an empty grant, because an unplaceable capability that merely expands to nothing
+is indistinguishable at runtime from one the resource owner declined to grant.
+
 ### L4 — operator identity
 
 Declared in `src/operator-identity/operator-identity.ts`.
@@ -2540,6 +2631,7 @@ type CompilerError = ModuleErrorBase & (
   | { readonly code: 'annotation-contradiction'; readonly name: RegistryToolName; readonly rule: string }
   | { readonly code: 'reserved-name'; readonly name: RegistryToolName }
   | { readonly code: 'limit-exceeds-cap'; readonly name: RegistryToolName; readonly cap: number }
+  | { readonly code: 'capability-unscopable'; readonly name: RegistryToolName; readonly capability: CapabilityName }
 );
 ```
 
@@ -2568,6 +2660,16 @@ value the declaration exceeded — for `timeoutSeconds: 1.5` it is the nearest a
 consumer that renders it must read it as "what this field accepts", never as "what you passed
 exceeded this". The `summary` names the rule that was broken.
 
+`capability-unscopable` is a declared capability that `### Scopes`'s rule cannot place in any of the
+four scopes — in practice a `content.*` name whose final segment is neither `read` nor `write`, since
+the nine fixed literals are placed by a closed table that cannot miss one. It exists because the
+alternative failure is silent and was the defect that produced this variant: an unplaceable capability
+expands to nothing, so the tool compiles, boots, and is invisible to every scope-bearing surface with
+no error anywhere to read. `ContentCapability`'s type already rejects a malformed name written as a
+literal; this variant is what catches one that reached the array as a widened `string`, which is the
+only way a published consumer package can deliver one. It is **A10**'s enforcement, and the reason
+A10 may be relied on without checking.
+
 `no-executor` and `multiple-executors` are decided **within the declaration array alone**, because
 `compile` receives nothing else and invariant B1 forbids L0 from importing the layer that
 implements a target. `no-executor` is a declaration whose `ExecutionTarget` names an empty
@@ -2577,7 +2679,7 @@ well-formed but unimplemented; boot does that, and it is boot that owns `executo
 
 Every `CompilerError` carries `resultKind: 'validation'`. A rejected declaration set is caller
 input failing the contract — the envelope's own definition of `validation` — not a failure of the
-service or its environment, so `isError` is false for all eight.
+service or its environment, so `isError` is false for all nine.
 
 ### Boot
 
@@ -2629,6 +2731,7 @@ responsible for maintaining it.
 | A7 | `declaration.manage`, `auth.manage`, `audit.read` and `attention.resolve` are absent from every profile whose kind is `mcp`, `scheduler` or `watcher`. | Authorization |
 | A8 | No field of `RepositoryConfig` is a capability, scope, path prefix, credential reference, remote, host, timeout or limit. Any field a caller could set that widens what the service will do lives in `Declaration`. | Contract — re-checked at every amendment of `RepositoryConfig` |
 | A9 | `visibleTools` and `dispatch` apply the same predicate. A tool absent from `visibleTools` returns `authorization` from `dispatch` and never reaches a handler. | Dispatch pipeline |
+| A10 | Every capability in the contract set is placed in at least one scope by `### Scopes`'s rule. Equivalently: `expandScopes(['read','write','raw','schedule'], contract)` equals the declaration-scoped members of `contract`. A capability the rule cannot place fails the build as `capability-unscopable` rather than expanding to nothing. | Compiler, Authorization |
 
 ### Recovery and ordering
 
