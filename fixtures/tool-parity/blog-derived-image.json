@@ -1118,6 +1118,109 @@
     "profile": "mcp",
     "tools": [
       {
+        "name": "add_author",
+        "capabilities": [
+          "content.author.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            },
+            "name": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            },
+            "imageUrl": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "name"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "add_hub_entry",
+        "capabilities": [
+          "content.hub.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "hub": {
+              "type": "string",
+              "enum": [
+                "lucifer-chronicles",
+                "ai-assisted-engineering",
+                "state-of-dev",
+                "game-engine"
+              ]
+            },
+            "title": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "href": {
+              "type": "string",
+              "pattern": "^/[a-z0-9-]+/$"
+            },
+            "label": {
+              "type": "string"
+            },
+            "position": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "hub",
+            "title",
+            "description",
+            "href"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "add_tag",
+        "capabilities": [
+          "content.tag.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "key": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]*$"
+            },
+            "label": {
+              "type": "string"
+            },
+            "permalink": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "label",
+            "description"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
         "name": "checks_await",
         "capabilities": [
           "host.checks.read"
@@ -1160,6 +1263,161 @@
           "required": [
             "ref"
           ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "create_post",
+        "capabilities": [
+          "content.post.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            },
+            "date": {
+              "type": "string"
+            },
+            "authors": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "authorDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "imageUrl": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "tagDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "permalink": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "truncateAfter": {
+              "type": "string"
+            },
+            "overwrite": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "description",
+            "slug",
+            "body",
+            "tags"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "delete_post",
+        "capabilities": [
+          "content.post.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "slug"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "deploy_status",
+        "capabilities": [
+          "content.gitUtility.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "mergeCommitSha": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mergeCommitSha"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "get_post",
+        "capabilities": [
+          "content.post.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
           "additionalProperties": false
         }
       },
@@ -1334,6 +1592,65 @@
         }
       },
       {
+        "name": "list_authors",
+        "capabilities": [
+          "content.author.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "list_posts",
+        "capabilities": [
+          "content.post.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "tag": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "list_tags",
+        "capabilities": [
+          "content.tag.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "parse_markdown",
+        "capabilities": [
+          "content.markdown.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
         "name": "pr_comments",
         "capabilities": [
           "host.pr.read"
@@ -1448,6 +1765,17 @@
         }
       },
       {
+        "name": "preflight",
+        "capabilities": [
+          "content.gate.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
         "name": "prepare_branch",
         "capabilities": [
           "git.local.write",
@@ -1462,6 +1790,28 @@
           },
           "required": [
             "branch"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "publish_report",
+        "capabilities": [
+          "content.gitUtility.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "slug": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pr"
           ],
           "additionalProperties": false
         }
@@ -1512,6 +1862,36 @@
         "inputSchema": {
           "type": "object",
           "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "run_artifact_check",
+        "capabilities": [
+          "content.gate.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "outputPath": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "run_doc_gate",
+        "capabilities": [
+          "content.gate.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "treatWarningsAsErrors": {
+              "type": "boolean"
+            }
+          },
           "additionalProperties": false
         }
       },
@@ -1622,6 +2002,165 @@
         }
       },
       {
+        "name": "unstage_paths",
+        "capabilities": [
+          "content.gitUtility.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            }
+          },
+          "required": [
+            "paths"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "update_post",
+        "capabilities": [
+          "content.post.write"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "frontMatter": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "tags": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "authors": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "date": {
+                  "type": "string"
+                },
+                "slug": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "authorDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "imageUrl": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "tagDefinitions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "permalink": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "allowSlugChange": {
+              "type": "boolean"
+            },
+            "compatibilityRouteAdded": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "slug"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "validate_hubs",
+        "capabilities": [
+          "content.validation.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "validate_posts",
+        "capabilities": [
+          "content.validation.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowSlugChange": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
         "name": "verify_published_url",
         "capabilities": [
           "host.checks.read"
@@ -1639,6 +2178,51 @@
           "required": [
             "url",
             "expectedCommitSha"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "wait_for_deploy",
+        "capabilities": [
+          "content.gitUtility.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "mergeCommitSha": {
+              "type": "string"
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "mergeCommitSha"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "wait_for_merge",
+        "capabilities": [
+          "content.gitUtility.read"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "pr": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "pr"
           ],
           "additionalProperties": false
         }
