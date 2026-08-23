@@ -194,11 +194,12 @@ function validateOne(declaration: ToolDeclaration): CompilerError[] {
   }
 
   for (const capability of declaration.capabilities) {
-    if (capabilityScopeOf(capability) !== declaration.capabilityScope) {
+    const scope = capabilityScopeOf(capability);
+    if (scope !== declaration.capabilityScope) {
       errors.push(
         moduleError(
           { code: 'capability-scope-mismatch', name, capability },
-          `tool '${name}' declares capabilityScope '${declaration.capabilityScope}' but capability '${capability}' is '${capabilityScopeOf(capability)}'-scoped`,
+          `tool '${name}' declares capabilityScope '${declaration.capabilityScope}' but capability '${capability}' is '${scope}'-scoped`,
         ),
       );
     }
@@ -206,7 +207,7 @@ function validateOne(declaration: ToolDeclaration): CompilerError[] {
     // four McpScopes. capabilityScopeOf gates this to declaration-scoped
     // capabilities alone — the four instance-scoped ones are unscoped by
     // design (A7), not unscopable, and must not raise this error.
-    if (capabilityScopeOf(capability) === 'declaration' && scopeForCapability(capability) === null) {
+    if (scope === 'declaration' && scopeForCapability(capability) === null) {
       errors.push(
         moduleError(
           { code: 'capability-unscopable', name, capability },

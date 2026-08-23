@@ -32,6 +32,10 @@ const FULL_CEILING = new Set([
   'attention.resolve',
 ]) as unknown as ContractCapabilitySet;
 
+function declarationScopedMembersOf(contract: ContractCapabilitySet): ReadonlySet<CapabilityName> {
+  return new Set([...(contract as unknown as ReadonlySet<CapabilityName>)].filter((c) => capabilityScopeOf(c) === 'declaration'));
+}
+
 async function migratedVolume<T>(fn: (volume: string) => Promise<T>): Promise<T> {
   return withVolumeAsync(async (volume) => {
     const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
@@ -193,7 +197,7 @@ test('S39.6/A10 — expandScopes(all four scopes, contract) equals the declarati
   ]) as unknown as ContractCapabilitySet;
 
   const expanded = expandScopes(['read', 'write', 'raw', 'schedule'], contract);
-  const declarationScoped = new Set([...(contract as unknown as ReadonlySet<CapabilityName>)].filter((c) => capabilityScopeOf(c) === 'declaration'));
+  const declarationScoped = declarationScopedMembersOf(contract);
 
   assert.deepEqual([...(expanded as unknown as ReadonlySet<string>)].sort(), [...declarationScoped].sort());
 });
@@ -207,7 +211,7 @@ test('S39.6/A10, demonstrated — a capability the rule cannot place breaks the 
   const contract = new Set([...(FULL_CEILING as unknown as ReadonlySet<CapabilityName>), 'content.post.delete' as CapabilityName]) as unknown as ContractCapabilitySet;
 
   const expanded = expandScopes(['read', 'write', 'raw', 'schedule'], contract);
-  const declarationScoped = new Set([...(contract as unknown as ReadonlySet<CapabilityName>)].filter((c) => capabilityScopeOf(c) === 'declaration'));
+  const declarationScoped = declarationScopedMembersOf(contract);
 
   assert.notDeepEqual([...(expanded as unknown as ReadonlySet<string>)].sort(), [...declarationScoped].sort());
   assert.equal((expanded as unknown as ReadonlySet<string>).has('content.post.delete'), false, 'the unplaceable capability is silently absent from the expansion — the exact failure A10 exists to catch at build time instead');
