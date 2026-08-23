@@ -9,8 +9,8 @@ import { PRODUCTION_TOOL_DECLARATIONS } from '../src/composition-root/production
 // --build-context") — the same relative-import pattern extended the other
 // direction: this script reaches into the blog's own extension declarations
 // the way the blog's build reaches into this repo's src/.
-import { EXTRA_TOOL_DECLARATIONS } from '../../SubZeroDev.Blog-S20/tools/git-service-consumer/declarations.ts';
-import { EXTRA_GIT_UTILITY_DECLARATIONS } from '../../SubZeroDev.Blog-S20/tools/git-service-consumer/extra-declarations.ts';
+import { EXTRA_TOOL_DECLARATIONS } from '../../SubZeroDev.Blog/tools/git-service-consumer/declarations.ts';
+import { EXTRA_GIT_UTILITY_DECLARATIONS } from '../../SubZeroDev.Blog/tools/git-service-consumer/extra-declarations.ts';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
