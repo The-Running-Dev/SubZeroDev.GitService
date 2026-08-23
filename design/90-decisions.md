@@ -2061,6 +2061,12 @@ Chosen: A ninth `CompilerError` variant, `capability-unscopable`, carrying the t
 Rejected: **Rely on the tightened `ContentCapability` type alone** — it rejects a malformed name written as a literal, which covers how declarations are authored here, but not one that reached the declaration array as a widened `string`, which is the one way a published consumer package can deliver one. **Reuse `capability-scope-mismatch`** — that variant means a declared `capabilityScope` disagreeing with `capabilityScopeOf`, a different question; overloading it would make its own rejections unreadable. **Add a `DeclarationError` variant instead, at grant time** — `capability-outside-ceiling` already refuses a grant naming a capability the ceiling lacks, and the deployment ceiling is read unvalidated from `DEPLOYMENT_CEILING`, so a malformed name can enter the ceiling but never the contract set and is therefore inert rather than dangerous. The build is where it should be caught, because that is where a consumer can still fix it.
 Reversibility: cheap for the variant, expensive for A10 — an invariant that has been relied on is not withdrawn without re-auditing every reader.
 
+### 2026-08-23 — Scopes are enforced only at session establishment; the plan tool's "gate" is withdrawn
+Context: Found while fixing the `content.*` scope gap above. `20-contract.md` § *Contract types (L0)* said of the file-watcher plan entry — which has an empty capability array by design — that "the `write` scope is the plan tool's only gate". `dispatch-pipeline.ts` reads `ToolDeclaration.scopes` nowhere, and `Session` (`src/shared/session.ts`) has no `scopes` field at all: it carries `grant`, a capability set. Scopes are consumed once, by `expandScopes`, at establishment. So the claimed gate has never existed and there is nothing at dispatch it could be compared against. Per *Hard rules* this is an invariant not held rather than descriptive drift, so it was escalated rather than reconciled in place.
+Chosen: The tree is right and the prose was aspirational. Withdrew the sentence at its source in § *Contract types (L0)*, and stated positively there and in § *Scopes* that a capability-less entry is gated by nothing at dispatch and that this is the intended reading. `ToolDeclaration.scopes` is compile-time shape — the compiler does enforce `scopes must be exactly ['write']` for both watcher phases — plus published `SanitisedManifest` metadata, and is not a runtime gate. The contract's own adjacent reasoning already supported this: "a pure parse of an already-claimed file reaches nothing a capability guards."
+Rejected: **Add the dispatch check and make the field mean what the prose said** — requires giving `Session` a `scopes` field it does not have, and `operator`, `scheduler` and `watcher` sessions are issued no scopes whatsoever (they build a grant from the contract set), so the check would need a "no scopes means unrestricted" rule — a second hole in place of the first, for three of the four profiles. It also creates an enforcement path parallel to the capability lattice, which **A9** exists to prevent. **Leave it open for a later `/reconcile`** — the contradiction was already located, and both sides read; deferring would leave a known-false sentence in the document for a reader who reaches § *Contract types (L0)* without reaching § *Scopes*.
+Reversibility: cheap — prose only, and the rejected alternative remains available if a capability-less entry ever needs gating.
+
 ---
 
 ## Open
@@ -2070,15 +2076,3 @@ Emptied 2026-08-21 — the heading previously sat mid-log with 201 resolved deci
 beneath it (2026-08-03 through 2026-08-19), an artifact of where it was first inserted rather than a
 backlog of unactioned items. Moved here, to the true end of the append-only log, with nothing under
 it.
-
-- **`ToolDeclaration.scopes` is enforced by nothing at dispatch, and `20-contract.md` says otherwise.**
-  Found 2026-08-23 while fixing the `content.*` scope gap, and deliberately not acted on — it is a
-  distinct defect from that one. `entry.scopes` is canonicalised into the fingerprint and published in
-  `SanitisedManifest`, and `dispatch-pipeline.ts` never reads it; the only scope enforcement that
-  exists is `expandScopes` narrowing a session grant to capabilities. A tool declaring **no**
-  capabilities is therefore gated by no scope at all. `20-contract.md` § *Contract types (L0)* states
-  of the file-watcher plan entry — which has an empty capability array by design — that "the `write`
-  scope is the plan tool's only gate". That is an invariant the tree does not hold, not descriptive
-  drift, so per *Hard rules* it is escalated rather than reconciled: either the contract's claim is
-  wrong and should be withdrawn, or dispatch is missing a scope check the contract requires. Deciding
-  which is `/reconcile`'s at deep-reasoning tier.

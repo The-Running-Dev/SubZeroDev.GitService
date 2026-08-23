@@ -192,12 +192,15 @@ canonicalised into the fingerprint and published in `SanitisedManifest`, and `di
 reads it nowhere. Its shape is deliberately the same two-branch shape as `capabilityScopeOf`: a
 closed listed set for the nine fixed declaration-scoped literals, and a rule over the open remainder.
 
-**This contradicts `### Contract types (L0)` above**, which says of the file-watcher plan entry that
-"the `write` scope is the plan tool's only gate" — an entry with an empty capability array, which
-under the enforcement just described is gated by no scope at all. The contradiction is recorded and
-deliberately unresolved here: it is a distinct defect from the one this section fixes, and which side
-is wrong — the claim, or a missing dispatch check — is not this document's to decide alone. See
-`design/90-decisions.md` § *Open*.
+A scope therefore exists only at the boundary. `Session` carries a `grant` and no scopes at all, so
+the conversion `expandScopes` performs at establishment is one-way and total: everything a scope is
+going to mean has already been decided by the time any handler runs. Two consequences a reader may
+rely on. A capability-less entry is gated by nothing at dispatch, whatever its `scopes` field says —
+the file-watcher plan entry under `### Contract types (L0)` is the only such entry today, and that is
+its intended reading. And `operator`, `scheduler` and `watcher` sessions are issued no scopes
+whatsoever; they build a grant from the contract set directly, which is why a dispatch-time scope
+check has nothing to check for three of the four profiles and was rejected rather than added. See
+`design/90-decisions.md`, 2026-08-23.
 
 The two branches cannot be collapsed into one, and the reason is worth stating because it looks like
 an inconsistency. `scheduler.read` ends in `read` and belongs to the `schedule` scope, not the `read`
@@ -820,8 +823,12 @@ Both entries are `capabilityScope: 'declaration'` because a watched file always 
 declared repository. The plan entry states it explicitly rather than deriving it, since it carries
 no capabilities for `capability-scope-mismatch` to check it against. That empty capability array is
 deliberate — a pure parse of an already-claimed file reaches nothing a capability guards — and it
-means the `write` scope is the plan tool's only gate. The apply tool is where the repository bound
-sits, and it enforces its own, per D14.
+means **the plan entry is gated by nothing at dispatch**, which is the intended reading and not an
+omission. `scopes: ['write']` is a compile-time shape the compiler enforces and `SanitisedManifest`
+publishes; it is not a runtime gate, because `Session` carries no scopes for dispatch to compare it
+against (`### Scopes` above). An earlier draft of this paragraph called the `write` scope "the plan
+tool's only gate", which was never true of the tree; it is withdrawn. See `design/90-decisions.md`,
+2026-08-23. The apply tool is where the repository bound sits, and it enforces its own, per D14.
 
 `untrustedOutput` is the annotation the prior art puts on a tool returning author-controlled text.
 
