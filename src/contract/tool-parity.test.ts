@@ -80,9 +80,9 @@ test('S36.4: an addition is reported as an addition and does not fail a run; a r
   assert.ok(removalComparison.differences.some((d) => d.tool === 'git_log' && d.kind === 'removed'));
 });
 
-test('S36.5: a capture records what a caller of that profile would actually be shown, not the whole registry', () => {
+test('S36.5/S39.7: a capture records what a caller of that profile would actually be shown, not the whole registry', () => {
   const registry = registryOf(
-    { name: 'content_publish', capabilities: ['content.publish'], executionClass: 'mutating' }, // mcp's maximal grant never includes content.*
+    { name: 'content_publish', capabilities: ['content.publish.write'], executionClass: 'mutating' }, // S39: content.* is reachable from mcp via its own tail's scope
     { name: 'declaration_manage', capabilityScope: 'instance', capabilities: ['declaration.manage'], executionClass: 'mutating' }, // instance-scoped: absent from mcp/scheduler/watcher (A7)
   );
   const snapshots = captureToolParity(registry);
@@ -92,7 +92,7 @@ test('S36.5: a capture records what a caller of that profile would actually be s
   // scheduler and watcher share one declaration-scoped-only grant shape, which includes content.*.
   assert.ok(byProfile.get('watcher')!.has('content_publish'));
   assert.ok(byProfile.get('scheduler')!.has('content_publish'));
-  assert.equal(byProfile.get('mcp')!.has('content_publish'), false, 'mcp has no scope that ever grants content.*');
+  assert.ok(byProfile.get('mcp')!.has('content_publish'), "S39: mcp's maximal grant (all four scopes) reaches content.publish.write via the write scope");
 
   assert.ok(byProfile.get('operator')!.has('declaration_manage'));
   for (const profile of ['mcp', 'scheduler', 'watcher'] as const) {

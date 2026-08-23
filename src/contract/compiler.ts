@@ -1,7 +1,7 @@
 import { err, ok, type Outcome } from '../shared/outcome.ts';
 import { isoUtcTimestamp, type RegistryToolName, type Sha256Hex } from '../shared/brands.ts';
 import type { Finding } from '../shared/result-kind.ts';
-import { capabilityScopeOf, type CapabilityName, type ContractCapabilitySet } from './capabilities.ts';
+import { capabilityScopeOf, scopeForCapability, type CapabilityName, type ContractCapabilitySet } from './capabilities.ts';
 import { computeFingerprint, normaliseEntryOrder } from './fingerprint.ts';
 import { isJsonObject } from './json.ts';
 import type { SchemaObject } from './json-schema.ts';
@@ -194,11 +194,24 @@ function validateOne(declaration: ToolDeclaration): CompilerError[] {
   }
 
   for (const capability of declaration.capabilities) {
-    if (capabilityScopeOf(capability) !== declaration.capabilityScope) {
+    const scope = capabilityScopeOf(capability);
+    if (scope !== declaration.capabilityScope) {
       errors.push(
         moduleError(
           { code: 'capability-scope-mismatch', name, capability },
-          `tool '${name}' declares capabilityScope '${declaration.capabilityScope}' but capability '${capability}' is '${capabilityScopeOf(capability)}'-scoped`,
+          `tool '${name}' declares capabilityScope '${declaration.capabilityScope}' but capability '${capability}' is '${scope}'-scoped`,
+        ),
+      );
+    }
+    // A10: a declaration-scoped capability must be placeable in one of the
+    // four McpScopes. capabilityScopeOf gates this to declaration-scoped
+    // capabilities alone — the four instance-scoped ones are unscoped by
+    // design (A7), not unscopable, and must not raise this error.
+    if (scope === 'declaration' && scopeForCapability(capability) === null) {
+      errors.push(
+        moduleError(
+          { code: 'capability-unscopable', name, capability },
+          `tool '${name}' declares capability '${capability}', which ### Scopes's rule cannot place in any of the four scopes (a content.* capability's final segment must be 'read' or 'write')`,
         ),
       );
     }

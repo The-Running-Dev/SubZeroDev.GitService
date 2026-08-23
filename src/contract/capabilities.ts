@@ -1,6 +1,13 @@
 import type { Brand } from '../shared/brands.ts';
 
-export type ContentCapability = `content.${string}`;
+/**
+ * Open at the family, fixed at the tail — `20-contract.md` § *Capabilities
+ * and the lattice*: "Openness is bounded at the tail, not at the head." A
+ * consumer names the family (`content.post`, `content.gitUtility`); the
+ * final segment must be `read` or `write`, which is what lets `### Scopes`'s
+ * rule place a name this document has never seen.
+ */
+export type ContentCapability = `content.${string}.read` | `content.${string}.write`;
 
 export type DeclarationScopedCapability =
   | 'repo.read'
@@ -53,6 +60,53 @@ export type McpScope = 'read' | 'write' | 'raw' | 'schedule';
 /** `20-contract.md` § U2, resolved 2026-08-09 by S13: the same four values as `McpScope`. */
 export type OperatorScope = McpScope;
 export type Scope = McpScope | OperatorScope;
+
+export function isContentCapability(capability: CapabilityName): capability is ContentCapability {
+  return capability.startsWith('content.');
+}
+
+/**
+ * The nine fixed declaration-scoped literals' scope follows their operation
+ * family, which coincides with their own tail only seven times out of nine
+ * (`scheduler.read`/`scheduler.manage` end in `read`/nothing-read but belong
+ * to `schedule`) — `20-contract.md` § *Scopes*. This is the one place that
+ * table is written; `expandScopes` and the compiler's `capability-unscopable`
+ * check both read it rather than keeping their own copy.
+ */
+const FIXED_CAPABILITY_SCOPE: ReadonlyMap<CapabilityName, McpScope> = new Map([
+  ['repo.read', 'read'],
+  ['host.pr.read', 'read'],
+  ['host.checks.read', 'read'],
+  ['git.local.write', 'write'],
+  ['git.remote.write', 'write'],
+  ['host.pr.write', 'write'],
+  ['git.raw', 'raw'],
+  ['scheduler.manage', 'schedule'],
+  ['scheduler.read', 'schedule'],
+]);
+
+/**
+ * The scope `### Scopes`'s rule places `capability` in, or `null` when no
+ * scope can reach it. The nine fixed literals are placed by the closed table
+ * above, which cannot miss one. A `content.*` capability is placed by its own
+ * tail — `read` to `read`, `write` to `write` — the rule `ContentCapability`'s
+ * type already enforces for a literal; `null` is reachable only for a
+ * malformed name that arrived as a widened `string`, which is exactly what
+ * the compiler's `capability-unscopable` error exists to catch (**A10**).
+ * Every other `CapabilityName` — the four instance-scoped ones — is also
+ * `null` here, deliberately: they are unscoped by design (**A7**), not
+ * unscopable, and the compiler check below is gated on `capabilityScopeOf`
+ * to keep that distinction.
+ */
+export function scopeForCapability(capability: CapabilityName): McpScope | null {
+  const fixed = FIXED_CAPABILITY_SCOPE.get(capability);
+  if (fixed) return fixed;
+  if (isContentCapability(capability)) {
+    if (capability.endsWith('.read')) return 'read';
+    if (capability.endsWith('.write')) return 'write';
+  }
+  return null;
+}
 
 /**
  * `Declaration.host` (`20-contract.md` § Declaration). Declared here, not in

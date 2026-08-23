@@ -12,7 +12,7 @@ import { appendIdentityEvent, type Audit } from '../audit/audit.ts';
 import type { IdentityEvent } from '../audit/types.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import { MCP_PROFILE, type Declaration } from '../declarations/types.ts';
-import type { ContractCapabilitySet, DeploymentCeiling, CapabilityName, McpScope, Scope, OperatorScope } from '../contract/capabilities.ts';
+import { scopeForCapability, type ContractCapabilitySet, type DeploymentCeiling, type CapabilityName, type McpScope, type Scope, type OperatorScope } from '../contract/capabilities.ts';
 import type { StoreTransaction } from '../store/structured-store.ts';
 import { storeError } from '../store/errors.ts';
 import { retentionCutoff, toRetentionReport, type RetentionReport } from '../shared/retention.ts';
@@ -217,40 +217,21 @@ function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): Outcome<T, 
 }
 
 /**
- * Every `McpScope` value expands to a fixed, hand-picked capability subset,
- * intersected against `contractCapabilitySet` so a token can never carry a
- * capability this deployment did not register (invariant A1). Provisional:
- * the real per-scope mapping belongs wherever S14 builds MCP session
- * establishment's own scope expansion, and this local copy exists only
- * because `verifyOperatorApiToken` needs *some* honest, non-decorative
- * answer now — a token issued with only `read` must not carry `git.raw`.
- * `design/90-decisions.md`, 2026-08-09.
- *
- * Declaration-scoped capabilities only. The four instance-level ones —
- * `declaration.manage`, `auth.manage`, `audit.read`, `attention.resolve` —
- * appear in no scope, because `20-contract.md` § Scopes says of them "no
- * `OperatorScope` value names them, and no operator-api token can exercise
- * them", and the 2026-08-09 decision rejected the superset reading by name.
- * Adding one here is how that decision gets reversed by accident.
- */
-const SCOPE_CAPABILITIES: Readonly<Record<OperatorScope, readonly CapabilityName[]>> = {
-  read: ['repo.read', 'host.pr.read', 'host.checks.read'],
-  write: ['git.local.write', 'git.remote.write', 'host.pr.write'],
-  raw: ['git.raw'],
-  schedule: ['scheduler.manage', 'scheduler.read'],
-};
-
-/**
- * Exported so `src/contract/tool-parity.ts` (S36) can compute the widest grant
- * an `mcp` session can actually hold — the same scope-to-capability mapping
- * `establishMcpSession` uses, not a second copy of it that could drift.
+ * A scope expands to capabilities by a total rule, not a lookup table —
+ * `20-contract.md` § *Scopes*: `capabilities.ts`'s `scopeForCapability` is
+ * the single place that rule is written (the closed nine-literal table plus
+ * the `content.*` tail rule), so this only ever grants a capability this
+ * deployment's contract set actually holds (invariant A1) and is, by
+ * construction, total over it (**A10**) — a capability the rule cannot place
+ * is caught at compile time by `capability-unscopable` instead of silently
+ * expanding to nothing here.
  */
 export function expandScopes(scopes: readonly OperatorScope[], contractCapabilitySet: ContractCapabilitySet): Session['grant'] {
   const granted = new Set<CapabilityName>();
-  for (const scope of scopes) {
-    for (const capability of SCOPE_CAPABILITIES[scope] ?? []) {
-      if ((contractCapabilitySet as unknown as ReadonlySet<CapabilityName>).has(capability)) granted.add(capability);
-    }
+  const requested = new Set<OperatorScope>(scopes);
+  for (const capability of contractCapabilitySet as unknown as ReadonlySet<CapabilityName>) {
+    const scope = scopeForCapability(capability);
+    if (scope !== null && requested.has(scope)) granted.add(capability);
   }
   return granted as unknown as Session['grant'];
 }

@@ -78,4 +78,13 @@ export const SELF_TEST_FIXTURES: readonly SelfTestFixture[] = [
     ],
     expected: 'limit-exceeds-cap',
   },
+  {
+    // S39.2: ContentCapability's own type refuses this tail as a literal
+    // (S39.1); 'as CapabilityName' is the widened-string arrival this
+    // variant exists to catch, the only way a published consumer package
+    // can deliver one.
+    description: "capability-unscopable: a content.* capability whose final segment is neither 'read' nor 'write', arriving as a widened string",
+    declarations: [fixtureTool({ name: 'content_publish', capabilities: ['content.post.delete' as never], executionClass: 'mutating' })],
+    expected: 'capability-unscopable',
+  },
 ];
