@@ -1,6 +1,6 @@
 # Slices — SubZeroDev.Git
 
-Derived from `10-design.md` and `20-contract.md`. Thirty-eight vertical slices. Each one ends
+Derived from `10-design.md` and `20-contract.md`. Thirty-nine vertical slices. Each one ends
 runnable: it goes from an entry point to persistence and leaves nothing half-wired.
 
 ## How this document is kept
@@ -89,17 +89,18 @@ demonstrated *failure to refuse* while the same box carries both meanings. Their
 without changing their ids**, on the same rule that reworded `S18.1` and `S18.2` — `S30.2` had been
 written as a control for `S30.1`, and `S30.4`'s outcome set had no category for two live instances.
 
-S30 is **renamed** for the same reason: "The lease guard refuses a filesystem that does not lock"
-states as fact the thing the slice now exists to disprove. Issue
-[#118](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/118) still carries the old
-title and the old criteria. It is open, so that is drift for `/track` to report and sync, not
-something this command reconciles.
+S30 was **renamed** for the same reason: "The lease guard refuses a filesystem that does not lock"
+states as fact the thing the slice existed to disprove. Issue
+[#118](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/118) carried the old title and
+the old criteria at the time; `/track` reported that drift and synced it, and the issue has since
+closed. S30 is a landed row.
 
-**The blindness itself is not resolved here, and must not be read as accepted.** `/slices` can decide
-what S30 checks; it cannot decide whether boot should be able to see a cross-session lock failure at
-all, because that means telling boot what kind of mount it is on — new surface in `lease.ts` and a
-claim in `10-design.md` that would have to change. That is `/design`'s, and it is staged in
-`90-decisions.md` § Open so `/track` raises it.
+**The blindness itself was not resolved there, and must not be read as accepted.** `/slices` could
+decide what S30 checks; it could not decide whether boot should be able to see a cross-session lock
+failure at all, because that means telling boot what kind of mount it is on — new surface in
+`lease.ts` and a claim in `10-design.md` that would have to change. That is `/design`'s, and it is
+now issue [#135](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/135) rather than a
+staged item in `90-decisions.md` § Open, which is empty.
 
 **S18 is split the same way S17 was, and six of its criteria are retired rather than moved.** S18
 asked one session to stand up a user interface from nothing, ship five views on top of it, federate
@@ -155,6 +156,15 @@ S35 to S38 are appended on the same rule as S23–S27 and S31–S34, and placed 
 dependencies run rather than after S22 — S35 and S36 ahead of S20 because S20 cannot start without
 them, S37 and S38 after it because both need the blog's tools already migrated.
 
+**S39 is appended on the same rule, and no criterion of S20's is retired to make room for it.** S20
+did not mis-size this one; it could not have seen it. `S20.8` measured what each profile can reach
+and found the `mcp` profile reaching none of the blog's own tools, and the cause was neither in the
+blog's declarations nor in the parity harness but in the base's scope expansion, which is not S20's
+to touch — `Touches` names the blog's tools, its derived image, and its fixtures. So the work is a
+slice of its own rather than a criterion added to a slice whose scope excludes it, and `S20.8` stays
+exactly as written: it is the measurement, and S39 is what makes the measurement pass. S39 is placed
+ahead of S20 for that reason, the same way S35 and S36 were.
+
 **S32 has no retired predecessor, because nothing named it.** `10-design.md` § Console session
 requires a grants view — "revoke everything and re-authenticate is one screen during an incident" —
 and S18's own `Delivers` line said "the three remaining operator views", counting grants as already
@@ -201,9 +211,9 @@ one real filesystem that does produce split-brain sails straight past it. S30 is
 measurement rather than a proof: it pins where single-instance ownership actually stops, and leaves a
 committed fixture that any future repair has to satisfy. It was placed ahead of S18 because it needs
 the image S28 built and nothing else, and because a boundary the system leans on is worth knowing
-before five more slices are written on top of it. **It is now the only console-era slice still
-outstanding**, and those five landed around it — so the ordering argument stands as the record of why
-it sits here, not as a claim about what runs next.
+before five more slices are written on top of it. It has since landed, along with the five console
+slices around it — so the ordering argument stands as the record of why it ran there, not as a claim
+about what runs next.
 
 **Among the console slices, the bet that had never been taken ran first and the external dependency
 ran second.** S18 was where a browser talked to this service for the first time: an ambient-authority
@@ -215,24 +225,35 @@ were views over backends that already shipped, so the risk in them was presentat
 architecture; they were ordered smallest-first, and only S34's last criterion depended on the other
 three, because it is the one that counts every view.
 
-**S35 runs before the migration, because the migration was written against a seam that does not
-exist.** `10-design.md` § Where consumer extension attaches names two seams, and only one of them
-was ever built: S19 shipped the console half as a published package a consumer's build consumes,
-and nothing shipped the tool half at all. Everything the handover needs — sixteen tools compiling
-into one registry, one fingerprint over the extension, a consumer's handlers reachable from a
-pipeline that may not import them — rests on that unbuilt half, exactly the way every console slice
-rested on a bundle S18 had not yet served. It is proven against a small example consumer committed
-here rather than against the blog, so a defect in the seam surfaces on one declaration and one view
-rather than a third of the way through a two-repository migration. S36 follows it because a
+**S35 ran before the migration, because the migration had been written against a seam that did not
+exist.** `10-design.md` § Where consumer extension attaches names two seams, and at that point only
+one of them had been built: S19 shipped the console half as a published package a consumer's build
+consumes, and nothing shipped the tool half at all. Everything the handover needs — the consumer's
+tools compiling into one registry, one fingerprint over the extension, a consumer's handlers
+reachable from a pipeline that may not import them — rested on that unbuilt half, exactly the way
+every console slice rested on a bundle S18 had not yet served. It was proven against a small example
+consumer committed here rather than against the blog, so a defect in the seam surfaced on one
+declaration and one view rather than a third of the way through a two-repository migration. S36
+followed it because a
 comparison that has never reported a difference cannot be the evidence definition-of-done item 17
 asks for, and building it after the migration would mean measuring parity with a tool the migration
 itself was the first to exercise.
 
-**What remains is S30, then S35, S36, S20, S37, S38, S21 and S22 in that order** — a measurement,
-then the extension seam, then the way to measure parity, then the blog's tools, its screens and its
-watched files, then the second repository, then the deployment gates. Everything from S35 onward is
-dependency order rather than a risk argument, with one exception already stated: S35 and S36 are
-placed ahead of S20 on risk as well, because both were assumptions inside it.
+**S36 is why S39 exists, and that is the strongest argument this ordering has produced.** S35 and S36
+were placed ahead of S20 on the reasoning above, and the measurement S36 built then failed in a way
+no amount of reading the types would have found: `content.*` is admitted by the type, by the ceiling
+and by a declaration's grant, and was reachable from no MCP scope, so a consumer's entire tool
+surface was invisible to the one client kind definition-of-done 13 requires it for. Three of the four
+profiles build their grant from the contract set directly and were unaffected, which is why every
+prior review passed over it. Had the parity harness been built after the migration, as the retired
+`S20.2` assumed, the migration itself would have been the first thing to exercise it and this would
+have surfaced as a defect in the blog rather than a gap in the base.
+
+**What remains is S39, then S20, S37, S38, S21 and S22 in that order** — the scope rule that makes a
+consumer's operations reachable, then the blog's tools, its screens and its watched files, then the
+second repository, then the deployment gates. Everything from S20 onward is dependency order rather
+than a risk argument. S39 is placed ahead of S20 because `S20.8` cannot pass without it, and because
+it is base-runtime work sitting under a slice that touches no base source.
 
 ## Contract gates
 
@@ -241,27 +262,32 @@ committed separately and before the handler work depending on it. **No slice may
 signature absent from the contract** — where a slice needs tools, amending the contract is its
 first acceptance criterion, not an implementation detail.
 
-**One gate is live, and it is new.** `20-contract.md` § Unresolved records every U-item from U1 to
-U10 resolved, the last two on 2026-08-19 by S18 and S19; that section is the authority for which
-slice closed which gate and on what date, and it is not restated here. What it does not yet carry is
-the **consumer-extension seam for tools**. The contract fixes the console half — § Console view
-registration names the published build entry a consumer's own shell calls with its additional views
-— and fixes nothing for the other half: what the base publishes for a consumer's build to compile
-against, how a consumer supplies its own declarations, handlers and recovery descriptors, and how
-its build emits one registry over both sets. That is a new public interface, so it is a contract
-amendment rather than an implementation detail, and **`S35.1` is that amendment**. It is committed
-separately and before the rest of S35, exactly as every earlier gate was.
+**No gate is live.** `20-contract.md` § Unresolved records every U-item from U1 to U10 resolved, the
+last two on 2026-08-19 by S18 and S19; that section is the authority for which slice closed which
+gate and on what date, and it is not restated here. The one gate this document raised itself — the
+**consumer-extension seam for tools**, which the contract fixed for the console half and not the
+other — was `S35.1`, committed separately and before the rest of S35, exactly as every earlier gate
+was. S35 has landed and that gate is closed.
 
-Naming the gate here is not the same as recording it in § Unresolved, which is `/contract`'s to
-write. This document names what blocks a slice and the criterion that closes it; the amendment
-itself decides the shape.
+Naming a gate here is not the same as recording it in § Unresolved, which is `/contract`'s to write.
+This document names what blocks a slice and the criterion that closes it; the amendment itself
+decides the shape.
 
-Nothing S30, S36, S20, S37, S38, S21 or S22 needs is unfixed in the contract, checked against it
-rather than remembered: S36's harness is a build-time script with no public interface, of the same
-kind as the migration and layering checks that already ship; S37 uses the console registration and
-filtering the contract already fixes; S38 uses the file-watcher plan/apply protocol U10 resolved;
-and S20's content capabilities are already admitted by the open `content.*` template type. None of
-them opens with an amendment criterion.
+**One claim this section used to make was wrong, and a measurement is what found it.** It read
+"S20's content capabilities are already admitted by the open `content.*` template type. None of them
+opens with an amendment criterion." Admitted by the type and reachable through the expansion are
+different things, and `S20.8` measured the difference: every `content.*` capability was unreachable
+from every MCP scope. The correction is already committed — `20-contract.md` § *Capabilities and the
+lattice*, § *Scopes*, § *Compiler* and **A10** carry it, with the alternatives rejected in
+`90-decisions.md`, 2026-08-23 — so the amendment is not a gate S39 opens with but a settled contract
+S39 implements against. That is the ordinary case, not an exception: a slice's first criterion is an
+amendment only when the amendment has not already been made.
+
+Nothing S39, S20, S37, S38, S21 or S22 needs is now unfixed in the contract, checked against it
+rather than remembered: S37 uses the console registration and filtering the contract already fixes;
+S38 uses the file-watcher plan/apply protocol U10 resolved, whose plan entry the same 2026-08-23 pass
+confirmed is gated by nothing at dispatch and intended to be; and S39's four surfaces are each fixed
+by name. None of them opens with an amendment criterion.
 
 **U7 was answered in two parts, and the first part moved earlier than this section used to say.**
 Invariant B3 has boot verify the console asset manifest and refuse to start on a mismatch, and the
@@ -317,10 +343,13 @@ Bodies retired; the closed issue is the record. Criteria are not re-derived from
 | **S27** | Disk pressure releases only disposable clones, or refuses clearly | [#96](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/96) |
 | **S28** | The service ships as a container, and a second one refuses the volume | [#114](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/114) |
 | **S29** | The layering is enforced by a check, and every gate runs unattended | [#115](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/115) |
+| **S30** | Where single-instance ownership actually stops, demonstrated | [#118](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/118) |
 | **S31** | Federated login, and a way back after a recovery code | [#126](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/126) |
 | **S32** | Revoking everything is one screen | [#127](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/127) |
 | **S33** | The trail is readable, and its integrity is visible in it | [#128](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/128) |
 | **S34** | The two states with no other exit become visible, and clearable | [#129](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/129) |
+| **S35** | A consumer can add its own tools | [#155](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/155) |
+| **S36** | Parity is measured, and the measurement has failed | [#156](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/156) |
 
 Two rows carry a name this document changed after the issue was opened: #31 is titled "A dropped
 file becomes a pull request…" and #92 "A consumer can declare a safe content-drop protocol", both
@@ -331,137 +360,56 @@ edited — reported here rather than reconciled.
 
 ## Outstanding
 
-## S30 — Where single-instance ownership actually stops, demonstrated
+## S39 — A consumer's own operations are reachable from an agent
 
-Delivers: anyone deciding where to put this service's storage can see, from a test they can run
-themselves, exactly which storage arrangements keep two copies of the service apart and which do
-not — including one that does not, and where the startup check waves it through. Nobody has to take
-that boundary on trust, or rediscover it by losing a repository to two instances writing at once.
+Delivers: an agent working through this service can reach a consumer's own operations — writing a
+post, running its publishing gates — and not only the repository-generic ones. Until now a consumer
+could add operations, be granted them, and have them build cleanly, while every agent that connected
+saw none of them; the console saw them, which is why nobody noticed until the operations were
+counted. And anyone adding an operation the service cannot decide how to reach is told so when they
+build it, instead of shipping something invisible to the callers it was written for.
 
-Touches: a committed container harness beside `lease-self-test-container.ts` and the deployment run
-configuration it needs (a mount overlay and a file-server sidecar). **No production source change is
-expected**; if one turns out to be needed, that is a defect and this slice stops on it.
+Touches: the capability type, the scope-to-capability expansion in authorization, the compiler's
+error set, and the invariant assertion in the parity harness.
 
-Depends on: S28 — it needs the real image, and nothing else.
-
-Acceptance:
-- S30.2 A container on a container-managed named volume — the supported configuration, same image
-  and same command as every other run in this slice — boots and serves. This is the control: without
-  it, every outcome below is attributable to the harness rather than to the mount under it.
-- S30.4 The mount configurations exercised are counted and each one's outcome stated, from a set of
-  four: served, `lease-held`, `lease-not-exclusive`, or **served twice** — two instances live against
-  one volume at once. The set includes a bind-mounted Windows host path, recorded as `lease-held` on
-  the second container — the 2026-08-14 negative result, carried into the acceptance record rather
-  than living only in the decision log, and the answer to issue #55.
-- S30.5 Two containers of the real image, each holding an independent client session against one
-  CIFS/SMB share mounted `nobrl` and served by a sidecar, both boot and both answer `/healthz` with
-  `ready: true` at the same time. Session independence is forced rather than hoped for, and the
-  harness states how. No injected `LockAcquirer`. This is the split-brain invariant C7 exists to
-  prevent, reached against a real filesystem.
-- S30.6 In that same run, boot's own self-test **passes on both sides** — neither container exits
-  `lease-not-exclusive`. S30.5 and S30.6 together are the finding: the guard does not fire on the
-  condition it was written for.
-- S30.7 `lease-self-test-child.ts` is run directly inside a container whose data mount is S30.5's
-  `nobrl` share, as its own step rather than through boot, and exits `3` — `CHILD_REFUSED_EXIT_CODE`.
-  Stated as a number. This is the mechanism behind S30.6 rather than a restatement of it: the child
-  is a subprocess of the container that already holds the lock, so it shares that CIFS client
-  session, and `nobrl` disables only server-mediated cross-session locking. The check measures the
-  session it already holds, which is why it cannot see S30.5.
-- S30.8 The harness is committed, is runnable on demand rather than swept into `npm test` — the
-  same treatment `lease-self-test-container.ts` already has, for the same reason — and its own header
-  states in full that it asserts a vulnerability rather than a guarantee, so that **a later change
-  making S30.5 or S30.6 fail is a fix and not a regression**. This is the fixture any repair to the
-  self-test would have to satisfy.
-- S30.9 The harness output names every mount configuration it did **not** exercise, and why. NFS is
-  one of them: Docker Desktop's Linux VM kernel carries no NFSv3 client, so `nolock` is unreachable,
-  and NFSv4's locking is protocol-integrated with no equivalent switch. A coverage claim nobody can
-  check is a description, not a gate.
-
-Out of scope: changing `lease.ts`, `lease-self-test-child.ts` or the self-test protocol. **The
-blindness S30.6 and S30.7 measure is a defect in the self-test, and this slice records it rather than
-repairing it** — a repair means boot learning what kind of mount it is on, which it is not told
-today, and that is a `design/10-design.md` and `design/20-contract.md` change belonging to `/design`.
-Making a non-locking mount a supported deployment configuration; it is exercised here only to measure
-where the guarantee stops. Whether the design's named-volume requirement should harden, soften, or
-stay as it is given these results — also `/design`'s.
-
-**`S30.1` and `S30.3` are retired, and the gaps they leave are deliberate.** Both asked boot to
-refuse a filesystem whose locking is absent, and boot demonstrably does not refuse it; the criteria
-that replace them measure what the check actually does instead. See *Criterion ids* above.
-
----
-
-## S35 — A consumer can add its own tools
-
-Delivers: anyone building their own image on top of this service can add operations of their own and
-get one service offering both theirs and the base's, reached through one login and one console.
-Until now the only way to add an operation was to change the base itself, which is the thing the
-whole handover exists to stop needing.
-
-Touches: the contract's consumer-extension seam for tools, the composition root, the registry build,
-the container build, and a small example consumer committed here with its own image.
-
-Depends on: S19 and S28, both landed — the console half of the same seam, and the image a consumer
-builds from.
+Depends on: S35 and S36, both landed — the consumer whose operation this makes reachable, and the
+harness A10's equality is asserted in.
 
 Acceptance:
-- S35.1 The contract is amended to fix the tool half of the consumer-extension seam: what the base
-  publishes for a consumer's build to compile against, how a consumer supplies its own declarations,
-  handlers and recovery descriptors, and how its build emits one registry over both sets. Committed
-  as its own change, before any criterion below.
-- S35.2 An example consumer committed in this repository builds an image from the base and boots it.
-  A session against that image lists every base tool plus the example's own, and both counts are
-  stated.
-- S35.3 That image reports one registry fingerprint covering both sets, and it differs from the base
-  image's. Replacing the built registry artifact inside the derived image makes boot refuse with the
-  same fingerprint-mismatch reason the base gives, stated by name.
-- S35.4 The compiler is absent from the derived image's runtime stage, proven by the same check the
-  base runs. **B8** holds across the extension, not only in the base.
-- S35.5 The example consumer's tool declares a capability the base does not. A declaration whose
-  grant omits that capability does not see the tool in a listing at all, rather than being refused
-  when it calls it.
-- S35.6 The example consumer registers one console screen through the published console package, and
-  it renders in the derived image's console for a declaration holding its capability. That image's
-  console fingerprint covers the screen: a bundle swapped after the build refuses to boot.
-- S35.7 Building and booting the derived image runs unattended alongside the base's own container
-  gate, and fails that gate when the seam is broken.
+- S39.1 A `content.*` capability whose final segment is neither `read` nor `write`, written as a
+  literal in a tool declaration, fails the repository's own typecheck gate. Both directions are
+  shown: a conforming name of each tail compiles.
+- S39.2 The same malformed name reaching the declaration array as a widened `string`, where the type
+  cannot catch it, fails `compile` with `capability-unscopable` naming the tool and the offending
+  capability. Its `resultKind` is `validation` and `isError` is false, as for the other eight.
+- S39.3 An MCP session holding only the `read` scope sees a tool declaring a `content.*` read
+  capability in a listing and can call it, and does not see a tool declaring the write one at all. A
+  session holding only `write` sees the second and not the first. Read and write stay separable for
+  content, which is the property the rejected fifth scope would have collapsed.
+- S39.4 A session holding only `raw` and `schedule` sees no content tool whatsoever. The escape hatch
+  and the scheduler are not reachable by naming a capability family after them.
+- S39.5 The nine fixed declaration-scoped literals expand exactly as they did before, pinned
+  name-by-name against the existing table — `scheduler.read` reaches `schedule` and never `read`. A
+  later attempt to derive all nine from their tails fails this criterion rather than silently
+  widening what a `read`-scoped token reaches.
+- S39.6 **A10** is asserted rather than described: `expandScopes(['read','write','raw','schedule'],
+  contract)` equals the declaration-scoped members of the contract set, run against a registry
+  carrying a `content.*` capability of each tail. Adding a capability the rule cannot place makes the
+  assertion fail, demonstrated.
+- S39.7 A session of the `mcp` profile against the example consumer's derived image sees that
+  consumer's own tool. The `mcp` profile's tool count for that image is stated before and after this
+  slice, and the difference is exactly the consumer's content-capability tools — which numbered zero
+  visible before.
+- S39.8 Comparing the base image against its committed parity fixtures still reports zero differences
+  for every profile. The base declares no `content.*` capability, so any change to its own visible
+  surface would mean one of the nine fixed literals moved.
 
-Out of scope: the blog — no blog tool, screen, rename or declaration appears here. Parity fixtures,
-which are S36's. Changing which tools the base itself ships. Publishing the base to a package
-registry: the example consumer builds from the image and the workspace it sits in, and whether the
-base is ever published outward is a deployment question this slice does not answer.
-
----
-
-## S36 — Parity is measured, and the measurement has failed
-
-Delivers: anyone claiming a migration lost nothing can point at a comparison that ran and said what
-changed, instead of at an assertion. The operations an image offers are recorded for each kind of
-caller and checked against that record, so an operation that quietly disappeared, narrowed, or
-changed what it accepts is named — rather than discovered later by whoever needed it.
-
-Touches: a capture-and-compare harness, committed fixtures for the base image, and the gates.
-
-Depends on: S35 — the comparison has to read a derived image as well as a base one.
-
-Acceptance:
-- S36.1 Tool metadata is captured from a built image once per actor profile the service defines, and
-  committed as a fixture. The number of profiles captured is stated and equals the number defined.
-- S36.2 Comparing an unchanged image against its own fixtures reports zero differences, for every
-  profile.
-- S36.3 The comparison has **failed**, deliberately, in three distinct ways: a tool removed, a
-  tool's required capabilities narrowed, and a tool's accepted input changed. Each produces a
-  reported difference naming the tool and what changed, with the counts stated. A comparison that
-  has only ever reported zero differences is not known to compare anything.
-- S36.4 An addition is reported as an addition and does not fail a run, because a derived image
-  legitimately offers a superset of the base's tools. A removal fails.
-- S36.5 A capture records what a caller of that profile would actually be shown rather than the
-  whole registry: a tool that profile cannot see is absent from its fixture, and a capability change
-  hiding a tool from one profile alone shows up as a removal in that profile's comparison only.
-- S36.6 The harness runs unattended against the base image's own fixtures alongside the other gates.
-
-Out of scope: the blog's fixtures and the cutover comparison, both S20's. Comparing anything other
-than tool metadata — behaviour parity is not measured here and is not claimed.
+Out of scope: re-measuring the blog's parity, which is `S20.8` and is the criterion this slice
+exists to unblock. Adding a fifth content-shaped scope, or changing which scope reaches any of the
+nine fixed literals — both rejected on 2026-08-23, and reopening either is a contract change rather
+than an implementation choice. Adding a dispatch-time check against `ToolDeclaration.scopes`:
+withdrawn on the same date, and scopes stay enforced only at session establishment. Validating the
+deployment ceiling, where a malformed name is inert because it can never reach the contract set.
 
 ---
 
