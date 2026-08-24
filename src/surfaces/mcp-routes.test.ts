@@ -235,6 +235,15 @@ async function mcpCall(baseUrl: string, declarationId: string, sessionId: string
   return { status: response.status, body: (await response.json()) as Record<string, unknown> };
 }
 
+async function mcpNotify(baseUrl: string, declarationId: string, sessionId: string, method: string, params: unknown = {}): Promise<{ status: number; bodyText: string }> {
+  const response = await fetch(`${baseUrl}/mcp/${declarationId}`, {
+    method: 'POST',
+    headers: { 'Mcp-Session-Id': sessionId, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', method, params }),
+  });
+  return { status: response.status, bodyText: await response.text() };
+}
+
 async function declareRepo(declarations: Declarations, id: string, capabilityGrant: readonly string[]): Promise<void> {
   const declared = await declarations.declare(
     {
@@ -308,6 +317,26 @@ test("S14.3 — tools/list omits a tool the declaration lacks a capability for, 
       assert.equal(call.status, 403);
       const result = (call.body.result as { content: { text: string }[] }).content[0]!.text;
       assert.equal((JSON.parse(result) as { kind: string }).kind, 'authorization');
+    });
+  });
+});
+
+test('#177 — a JSON-RPC notification (no id), notably notifications/initialized, gets no response body and does not abort the session', async () => {
+  await withVolumeAsync(async (volume) => {
+    await withServer(volume, async ({ baseUrl, declarations }) => {
+      await declareRepo(declarations, 'repo-notify', ['repo.read']);
+      const { accessToken } = await fullOAuthFlow(baseUrl, 'repo-notify', ['read']);
+      const init = await mcpInitialize(baseUrl, 'repo-notify', accessToken);
+      assert.equal(init.status, 200);
+
+      const notified = await mcpNotify(baseUrl, 'repo-notify', init.sessionId!, 'notifications/initialized');
+      assert.equal(notified.status, 204, 'a notification must never be answered with a JSON-RPC error');
+      assert.equal(notified.bodyText, '', 'a notification response carries no body');
+
+      const list = await mcpCall(baseUrl, 'repo-notify', init.sessionId!, 'tools/list');
+      assert.equal(list.status, 200, 'the session must still be usable after the notification');
+      const tools = (list.body.result as { tools: { name: string }[] }).tools.map((t) => t.name);
+      assert.ok(tools.includes('repo_status'));
     });
   });
 });
