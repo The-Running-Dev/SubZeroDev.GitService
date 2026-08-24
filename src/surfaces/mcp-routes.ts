@@ -100,8 +100,8 @@ function sendJson(res: ServerResponse, status: number, body: unknown, headers: R
   res.end(payload);
 }
 
-function sendNoContent(res: ServerResponse): void {
-  res.writeHead(204, { 'Cache-Control': 'no-store' });
+function sendAccepted(res: ServerResponse): void {
+  res.writeHead(202, { 'Cache-Control': 'no-store' });
   res.end();
 }
 
@@ -560,17 +560,24 @@ async function handleMcpTransport(deps: McpRoutesDependencies, req: IncomingMess
   const method = body.method;
 
   // JSON-RPC 2.0: a message with no `id` member is a notification and must
-  // never receive a response, `notifications/initialized` being the one the
-  // MCP spec mandates every client send right after `initialize` — a client
-  // SDK that gets an error reply here (as any method here would otherwise
-  // produce) treats it as fatal and aborts the connection before ever
-  // reaching `tools/list`.
-  if (!('id' in body)) {
-    sendNoContent(res);
-    return;
-  }
+  // never receive a JSON-RPC response, `notifications/initialized` being the
+  // one the MCP spec mandates every client send right after `initialize` — a
+  // client SDK that gets an error reply here (as any method here would
+  // otherwise produce) treats it as fatal and aborts the connection before
+  // ever reaching `tools/list`. The answer is `202 Accepted` with no body,
+  // which the MCP Streamable HTTP transport requires and which clients branch
+  // on by that exact status; the accept itself is deliberately *below* the
+  // session checks, so a notification is no more of an unauthenticated
+  // entrypoint than any other method on this route.
+  const isNotification = !('id' in body);
 
   if (method === 'initialize') {
+    // `initialize` is a request, never a notification: accept and drop it
+    // rather than minting a session whose result has no `id` to answer.
+    if (isNotification) {
+      sendAccepted(res);
+      return;
+    }
     const bearer = bearerFrom(req);
     if (!bearer) {
       unauthorized(res, deps.origin, declarationIdValue, 'no bearer token presented');
@@ -612,6 +619,11 @@ async function handleMcpTransport(deps: McpRoutesDependencies, req: IncomingMess
   if (session.repositoryBinding !== declarationIdValue) {
     const result = authorizationResult(`this session is bound to '${session.repositoryBinding}', not '${declarationIdValue}'`, []);
     sendJson(res, 403, jsonRpcResult(rpcId, { content: [{ type: 'text', text: JSON.stringify(result) }], isError: true }));
+    return;
+  }
+
+  if (isNotification) {
+    sendAccepted(res);
     return;
   }
 

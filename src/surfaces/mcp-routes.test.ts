@@ -330,8 +330,16 @@ test('#177 — a JSON-RPC notification (no id), notably notifications/initialize
       assert.equal(init.status, 200);
 
       const notified = await mcpNotify(baseUrl, 'repo-notify', init.sessionId!, 'notifications/initialized');
-      assert.equal(notified.status, 204, 'a notification must never be answered with a JSON-RPC error');
+      assert.equal(notified.status, 202, 'a notification must never be answered with a JSON-RPC error');
       assert.equal(notified.bodyText, '', 'a notification response carries no body');
+
+      // The accept sits below the session checks: a notification is not a way
+      // around them, and an id-less `initialize` mints no session.
+      const unsessioned = await mcpNotify(baseUrl, 'repo-notify', 'not-a-session', 'notifications/initialized');
+      assert.equal(unsessioned.status, 401, 'a notification on no live session is refused like any other method');
+      const idlessInit = await mcpNotify(baseUrl, 'repo-notify', init.sessionId!, 'initialize');
+      assert.equal(idlessInit.status, 202, 'an id-less initialize is accepted and dropped, not answered');
+      assert.equal(idlessInit.bodyText, '');
 
       const list = await mcpCall(baseUrl, 'repo-notify', init.sessionId!, 'tools/list');
       assert.equal(list.status, 200, 'the session must still be usable after the notification');
