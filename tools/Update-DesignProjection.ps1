@@ -356,6 +356,17 @@ function Invoke-DesignProjection {
 # Guards the invocation so this script's tests can dot-source it - the same shape
 # Test-DesignState.ps1, Read-DesignState.ps1 and Test-DesignDrift.ps1 already use.
 if ($MyInvocation.InvocationName -ne '.') {
+    <#
+        A -DryRun caller (Test-DesignState.ps1's Invoke-Projector) captures this process's
+        stdout over a pipe. PowerShell still encodes pipeline output using
+        [Console]::OutputEncoding even when stdout is redirected, and that defaults to the
+        OS's OEM code page (ibm437 on this host) rather than UTF-8 - so a non-ASCII byte in a
+        rendered region (the em dashes design/20-contract.md renders throughout, a mirrored
+        issue title) got best-fit-substituted before it ever left this process, no matter how
+        correctly the caller decoded it. Setting this here, once, before the only place this
+        script writes to stdout, fixes the write side to match Invoke-GhRaw's read-side fix.
+    #>
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
     $Path = (Resolve-Path -LiteralPath $Path).Path
     $result = Invoke-DesignProjection -RepoPath $Path -DryRun:$DryRun
 

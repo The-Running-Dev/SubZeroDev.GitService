@@ -946,10 +946,30 @@ function Invoke-Projector {
     if (-not (Test-Path -LiteralPath $projectorPath)) {
         return [pscustomobject]@{ Ran = $false; Detail = 'tools/Update-DesignProjection.ps1 does not exist'; Regions = @() }
     }
+    <#
+        A nested pwsh's stdout is native-command output too, decoded via
+        [Console]::OutputEncoding the same as gh's - the OEM code page on this host, not the
+        UTF-8 the child actually writes. A projected region carrying a non-ASCII byte (the em
+        dashes throughout 20-contract.md, or a mirrored issue title) came back corrupted, so
+        every comparison against the tree's real UTF-8 copy mismatched and ProjectionStale
+        fired on content that was never actually stale. Same fix as Invoke-GhRaw: an explicit
+        UTF-8 StandardOutputEncoding via ProcessStartInfo, sidestepping the console.
+    #>
+    $raw = $null
     try {
-        $raw = & pwsh -NoProfile -File $projectorPath -Path $RepoPath -DryRun 2>$null
-        if ($LASTEXITCODE -ne 0) {
-            return [pscustomobject]@{ Ran = $false; Detail = "exited $LASTEXITCODE"; Regions = @() }
+        $psi = [System.Diagnostics.ProcessStartInfo]::new()
+        $psi.FileName = (Get-Process -Id $PID).Path
+        foreach ($a in @('-NoProfile', '-File', $projectorPath, '-Path', $RepoPath, '-DryRun')) { $psi.ArgumentList.Add($a) }
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.UseShellExecute = $false
+        $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $raw = $proc.StandardOutput.ReadToEnd()
+        $proc.StandardError.ReadToEnd() | Out-Null
+        $proc.WaitForExit()
+        if ($proc.ExitCode -ne 0) {
+            return [pscustomobject]@{ Ran = $false; Detail = "exited $($proc.ExitCode)"; Regions = @() }
         }
     } catch {
         return [pscustomobject]@{ Ran = $false; Detail = $_.Exception.Message; Regions = @() }
@@ -958,7 +978,7 @@ function Invoke-Projector {
     $regions = @()
     try {
         if ($raw) {
-            $regions = @(($raw -join "`n") | ConvertFrom-Json)
+            $regions = @($raw | ConvertFrom-Json)
         }
     } catch {
         return [pscustomobject]@{ Ran = $false; Detail = "unparseable projector output: $($_.Exception.Message)"; Regions = @() }
@@ -1050,13 +1070,39 @@ function Test-CommitIsAncestor {
     }
 }
 
+function Invoke-GhRaw {
+    <#
+        gh writes UTF-8. PowerShell's native-command capture (`& gh @args`) decodes that
+        stdout using [Console]::OutputEncoding, which on a Windows host defaults to the OEM
+        code page (ibm437) rather than UTF-8 - the same class of bug Sync-Kit.ps1's
+        Invoke-GitRaw fixed for git's output (#20), never applied to gh. A non-ASCII byte in
+        an issue title then decodes to the wrong character and WorkStateDivergence misfires
+        comparing a correctly-mirrored title against a corrupted live read. Routing through
+        ProcessStartInfo with an explicit UTF-8 StandardOutputEncoding sidesteps the console
+        entirely.
+    #>
+    param([string[]] $GhArgs)
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = 'gh'
+    foreach ($a in $GhArgs) { $psi.ArgumentList.Add($a) }
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $proc.StandardError.ReadToEnd() | Out-Null
+    $proc.WaitForExit()
+    [pscustomobject]@{ Output = $stdout; ExitCode = $proc.ExitCode }
+}
+
 function Test-TrackerAvailable {
     param([string] $Repository)
     $ghArgs = @('issue', 'list', '--state', 'all', '--limit', '1', '--json', 'number')
     if ($Repository) { $ghArgs += @('-R', $Repository) }
     try {
-        & gh @ghArgs 2>$null | Out-Null
-        return ($LASTEXITCODE -eq 0)
+        $result = Invoke-GhRaw -GhArgs $ghArgs
+        return ($result.ExitCode -eq 0)
     } catch {
         return $false
     }
@@ -1085,13 +1131,13 @@ function Test-TrackerClasses {
         foreach ($ref in $workRefs) {
             $number = $ref.Scalars['Issue']
             if ([string]::IsNullOrWhiteSpace($number)) { continue }
-            $json = & gh issue view $number --json title, state 2>$null
-            if ($LASTEXITCODE -ne 0 -or -not $json) {
+            $issueResult = Invoke-GhRaw -GhArgs @('issue', 'view', $number, '--json', 'title,state')
+            if ($issueResult.ExitCode -ne 0 -or -not $issueResult.Output) {
                 $couldNotEvaluate.Add((New-CouldNotEvaluate -Reason 'TrackerUnavailable' -Detail "could not read issue #$number for $($ref.Id)"))
                 continue
             }
             try {
-                $issue = ($json -join "`n") | ConvertFrom-Json
+                $issue = $issueResult.Output | ConvertFrom-Json
             } catch {
                 $couldNotEvaluate.Add((New-CouldNotEvaluate -Reason 'TrackerUnavailable' -Detail "unparseable gh output for issue #$number"))
                 continue

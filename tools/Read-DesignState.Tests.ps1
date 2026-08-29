@@ -12,13 +12,13 @@
   real one) read the containing checkout's own design/state/. That S4.6 block asserts on adopted
   design-state content, which only this repository has: the 2026-08-19 compatibility promise
   (design/90-decisions.md) leaves the installed targets unmigrated, and this file is copied into
-  every one of them. So it is skipped wherever design/state/ is absent - false and unevaluated
+  every one of them. So it is skipped wherever design/state/units/ is absent - false and unevaluated
   rather than a false pass or a false failure, the same way Test-DesignState.ps1 itself reports
   StateSetAbsent and exits 2 rather than a silent 0.
 #>
 
 $script:ReadDesignStateSelfTestRoot = Split-Path $PSScriptRoot -Parent
-$script:SkipReadDesignStateSelfTests = -not (Test-Path (Join-Path $script:ReadDesignStateSelfTestRoot 'design/state'))
+$script:SkipReadDesignStateSelfTests = -not (Test-Path (Join-Path $script:ReadDesignStateSelfTestRoot 'design/state/units'))
 
 BeforeAll {
     $script:ScriptPath = Join-Path $PSScriptRoot 'Read-DesignState.ps1'

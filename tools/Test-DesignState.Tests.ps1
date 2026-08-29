@@ -11,13 +11,13 @@
   self-referential blocks below assert on adopted design-state content, which only this
   repository has: the 2026-08-19 compatibility promise (design/90-decisions.md) leaves the
   installed targets unmigrated, and this file is copied into every one of them. So they are
-  skipped wherever design/state/ is absent - false and unevaluated rather than a false pass or a
+  skipped wherever design/state/units/ is absent - false and unevaluated rather than a false pass or a
   false failure, the same way Test-DesignState.ps1 itself reports StateSetAbsent and exits 2
   rather than a silent 0.
 #>
 
 $script:DesignStateSelfTestRoot = Split-Path $PSScriptRoot -Parent
-$script:SkipDesignStateSelfTests = -not (Test-Path (Join-Path $script:DesignStateSelfTestRoot 'design/state'))
+$script:SkipDesignStateSelfTests = -not (Test-Path (Join-Path $script:DesignStateSelfTestRoot 'design/state/units'))
 
 BeforeAll {
     $script:ScriptPath = Join-Path $PSScriptRoot 'Test-DesignState.ps1'
@@ -1346,8 +1346,9 @@ Describe 'S12.7: an installed target discovers these suites as skipped, not fail
         # The regression guard for the -Skip: conditions at the top of this file and of
         # Read-DesignState.Tests.ps1, Update-DesignProjection.Tests.ps1 and Test-CIWorkflow.Tests.ps1.
         # Remove any of them and this block fails. The fixture is S12.6's shape - a real copy of
-        # this repository minus design/state/ - plus the one line that makes verify.yml look like
-        # an installed target's: no "Check the design state against the tree" step.
+        # this repository minus adopted design state, with the work mirror that /track creates,
+        # plus the one line that makes verify.yml look like an installed target's: no "Check the
+        # design state against the tree" step.
         $script:S127RepoRoot = Split-Path $PSScriptRoot -Parent
         $script:S127Checkout = Join-Path $TestDrive 'checkout-target-shaped'
         New-Item -ItemType Directory -Path $script:S127Checkout -Force | Out-Null
@@ -1355,6 +1356,16 @@ Describe 'S12.7: an installed target discovers these suites as skipped, not fail
             Where-Object { $_.Name -ne '.git' } |
             Copy-Item -Destination $script:S127Checkout -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath (Join-Path $script:S127Checkout 'design/state') -Recurse -Force
+        New-Item -ItemType Directory -Path (Join-Path $script:S127Checkout 'design/state/work') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $script:S127Checkout 'design/state/work/1.md') -Encoding utf8NoBOM -Value @'
+# work/1
+Issue: 1
+Title: x
+State: OPEN
+Rank: 1
+MirroredAt: abc123
+Criteria:
+'@
 
         $script:S127Workflow = Join-Path $script:S127Checkout '.github/workflows/verify.yml'
         @(Get-Content -LiteralPath $script:S127Workflow) |
@@ -1404,7 +1415,7 @@ $r = Invoke-Pester -Configuration $c
         $script:S127Here = Get-DiscoveredSkip -Root $script:S127RepoRoot
     }
 
-    It 'S12.7: every self-referential block is skipped where design/state/ is absent' {
+    It 'S12.7: every self-referential block is skipped where only work-mirror state exists' {
         foreach ($block in $script:S127SelfReferentialBlocks) {
             $tests = @($script:S127Target | Where-Object { $_.Block -eq $block })
             $tests.Count | Should -BeGreaterThan 0 -Because "$block must still be discovered - skipped, not deleted"
