@@ -51,7 +51,7 @@ This command does not carry a second copy of `/pr`'s rules, or of the gate and t
 
 - Edit `design/`. A bug fix is not a design change; where fixing this one turns out to need a contract or schema change, that is `/contract`'s or `/design`'s, and this command stops rather than making it.
 - Open a pull request as a draft.
-- Resolve a review thread. That is `/pr`'s final phase, under the batch `AGENTS.md` defines.
+- Resolve a review thread. That is `/pr`'s final phase, under the delegation `AGENTS.md` § *Git and delivery* states.
 - Merge.
 - File an issue for a defect that did not reproduce.
 - Fix an adjacent defect noticed along the way. Note it, do not widen the change — the same discipline `resolve.md` and `AGENTS.md`'s *One slice at a time* already state.

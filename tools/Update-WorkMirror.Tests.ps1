@@ -109,7 +109,7 @@ Describe 'Update-WorkMirror' {
             $text | Should -Match 'Criteria: S14\.1, S14\.2'
         }
 
-        It 'stamps MirroredAt even when a write changes no other field' {
+        It 'does not rewrite a record, and does not restamp MirroredAt, when no mirrored field changed' {
             $repo = New-RepoRoot
             Mock Get-OpenIssueList { [pscustomobject]@{
                 Issues  = @((New-Issue -Number 57 -Title 'S14 — Work state' -Body "- [ ] **S14.1** first"))
@@ -120,10 +120,34 @@ Describe 'Update-WorkMirror' {
             Invoke-WorkMirrorUpdate -RepoPath $repo | Out-Null
 
             Mock Get-CurrentWorkMirrorSha { 'sha0002' }
+            $r = Invoke-WorkMirrorUpdate -RepoPath $repo
+
+            $text = Get-Content -LiteralPath (Join-Path $repo 'design/state/work/57.md') -Raw
+            $text | Should -Match 'MirroredAt: sha0001'
+            $r.Written.Count | Should -Be 0
+        }
+
+        It 'rewrites a record and restamps MirroredAt when a mirrored field changed' {
+            $repo = New-RepoRoot
+            Mock Get-OpenIssueList { [pscustomobject]@{
+                Issues  = @((New-Issue -Number 57 -Title 'S14 — Work state' -Body "- [ ] **S14.1** first"))
+                Failure = $null
+            } }
+            Mock Get-ProjectItemPositions { $null }
+            Mock Get-CurrentWorkMirrorSha { 'sha0001' }
             Invoke-WorkMirrorUpdate -RepoPath $repo | Out-Null
+
+            Mock Get-OpenIssueList { [pscustomobject]@{
+                Issues  = @((New-Issue -Number 57 -Title 'S14 — Work state, renamed' -Body "- [ ] **S14.1** first"))
+                Failure = $null
+            } }
+            Mock Get-CurrentWorkMirrorSha { 'sha0002' }
+            $r = Invoke-WorkMirrorUpdate -RepoPath $repo
 
             $text = Get-Content -LiteralPath (Join-Path $repo 'design/state/work/57.md') -Raw
             $text | Should -Match 'MirroredAt: sha0002'
+            $text | Should -Match 'Title: S14 — Work state, renamed'
+            $r.Written.Count | Should -Be 1
         }
 
         It 'writes never carry an Issue, Milestone or git side effect - fields are the closed WorkRef vocabulary only' {
