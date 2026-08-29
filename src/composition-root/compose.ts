@@ -558,9 +558,12 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
     },
     // Issue #47 — the declaration's own declared required checks, so
     // `awaitChecks` can tell a required failure from an informational one.
+    // A config that cannot be read answers `null`, never `[]`: "nothing is
+    // required" is a statement about the declaration, and an unparseable
+    // config is not entitled to make it.
     requiredChecksFor: async (ctx) => {
       const config = await gitOperations.loadRepositoryConfig(ctx);
-      return config.ok ? config.value.requiredChecks : [];
+      return config.ok ? config.value.requiredChecks : null;
     },
   });
   moduleAdapter.register('host.createPullRequest' as ModuleTargetName, toModuleHandler(hostOperations.createPullRequest));

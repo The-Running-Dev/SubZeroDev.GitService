@@ -87,7 +87,7 @@ function operations(
   overrides: {
     readonly journal?: ReturnType<typeof recordingJournal>['journal'];
     readonly sleep?: (ms: number) => Promise<void>;
-    readonly requiredChecksFor?: (ctx: CallContext) => Promise<readonly string[]>;
+    readonly requiredChecksFor?: (ctx: CallContext) => Promise<readonly string[] | null>;
   } = {},
 ) {
   const adapter = createGitHubAdapter({ clock: systemClock, exec: gh.exec, sleep: async () => {}, baseBranchFor: async () => 'main' as never });
@@ -404,6 +404,77 @@ test('#47: a declaration with no declared required checks never raises required-
   const result = await ops.awaitChecks(context(), { ref: null, timeoutSeconds: 1800 });
 
   assert.equal(result.ok, true);
+});
+
+test('#47: a required check that failed is terminal while other checks are still running', async () => {
+  const gh = stubGh([
+    {
+      when: (a) => a[0] === 'api',
+      reply: () =>
+        stdout(
+          JSON.stringify({
+            check_runs: [
+              { name: 'ci', status: 'completed', conclusion: 'failure', details_url: null },
+              { name: 'e2e', status: 'in_progress', conclusion: null, details_url: null },
+            ],
+          }),
+        ),
+    },
+    { when: (a) => a[0] === 'pr' && a[1] === 'list', reply: () => stdout(PR_LIST_JSON_FOR_HEAD) },
+  ]);
+  const ops = operations(gh, { requiredChecksFor: async () => ['ci'] });
+
+  const result = await ops.awaitChecks(context(), { ref: null, timeoutSeconds: 1800 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.kind, 'precondition');
+  assert.deepEqual(result.findings, [
+    { path: 'check', rule: 'required-check-failed', message: 'ci' },
+    { path: 'pullRequest', rule: 'required-check-failed', message: '7' },
+  ]);
+});
+
+test('#47: a pull-request lookup that failed does not become a clean wait', async () => {
+  const gh = stubGh([
+    { when: (a) => a[0] === 'api', reply: () => stdout(JSON.stringify({ check_runs: [{ name: 'ci', status: 'completed', conclusion: 'failure', details_url: null }] })) },
+    { when: (a) => a[0] === 'pr' && a[1] === 'list', reply: () => ghFailure('gh: HTTP 502 bad gateway') },
+  ]);
+  const ops = operations(gh, { requiredChecksFor: async () => ['ci'] });
+
+  const result = await ops.awaitChecks(context(), { ref: null, timeoutSeconds: 1800 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.kind, 'upstream');
+});
+
+test('#47: a required failure with no open pull request refuses rather than reporting a pass', async () => {
+  const gh = stubGh([
+    { when: (a) => a[0] === 'api', reply: () => stdout(JSON.stringify({ check_runs: [{ name: 'ci', status: 'completed', conclusion: 'failure', details_url: null }] })) },
+    { when: (a) => a[0] === 'pr' && a[1] === 'list', reply: () => stdout('[]') },
+  ]);
+  const ops = operations(gh, { requiredChecksFor: async () => ['ci'] });
+
+  const result = await ops.awaitChecks(context(), { ref: null, timeoutSeconds: 1800 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.kind, 'precondition');
+  assert.deepEqual(result.findings, [
+    { path: 'check', rule: 'required-check-failed', message: 'ci' },
+    { path: 'pullRequest', rule: 'not-found', message: HEAD as string },
+  ]);
+});
+
+test('#47: required checks that cannot be read fail the wait closed, not open', async () => {
+  const gh = stubGh([
+    { when: (a) => a[0] === 'api', reply: () => stdout(JSON.stringify({ check_runs: [{ name: 'ci', status: 'completed', conclusion: 'failure', details_url: null }] })) },
+  ]);
+  const ops = operations(gh, { requiredChecksFor: async () => null });
+
+  const result = await ops.awaitChecks(context(), { ref: null, timeoutSeconds: 1800 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.kind, 'precondition');
+  assert.deepEqual(result.findings, [{ path: 'requiredChecks', rule: 'unreadable', message: 'ci' }]);
 });
 
 // --- S10.8 — comment bodies are data ---
