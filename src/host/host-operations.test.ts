@@ -82,7 +82,14 @@ function recordingJournal() {
   };
 }
 
-function operations(gh: ReturnType<typeof stubGh>, overrides: { readonly journal?: ReturnType<typeof recordingJournal>['journal']; readonly sleep?: (ms: number) => Promise<void> } = {}) {
+function operations(
+  gh: ReturnType<typeof stubGh>,
+  overrides: {
+    readonly journal?: ReturnType<typeof recordingJournal>['journal'];
+    readonly sleep?: (ms: number) => Promise<void>;
+    readonly requiredChecksFor?: (ctx: CallContext) => Promise<readonly string[]>;
+  } = {},
+) {
   const adapter = createGitHubAdapter({ clock: systemClock, exec: gh.exec, sleep: async () => {}, baseBranchFor: async () => 'main' as never });
   return createHostOperations({
     clock: systemClock,
@@ -91,6 +98,7 @@ function operations(gh: ReturnType<typeof stubGh>, overrides: { readonly journal
     headShaFor: async () => HEAD,
     pollIntervalSeconds: 0,
     sleep: overrides.sleep ?? (async () => {}),
+    ...(overrides.requiredChecksFor ? { requiredChecksFor: overrides.requiredChecksFor } : {}),
   });
 }
 
@@ -339,6 +347,63 @@ test('S10.6: a check still running is pending, never failure', async () => {
 
   assert.equal(result.ok, true);
   assert.equal(result.data?.checks[0]?.conclusion, 'pending');
+});
+
+// --- Issue #47 — a declared required check that concluded failure is terminal ---
+
+const PR_LIST_JSON_FOR_HEAD = JSON.stringify([
+  {
+    number: 7,
+    url: 'https://github.com/acme/repo/pull/7',
+    headRefName: 'slice/S10',
+    headRefOid: HEAD,
+    baseRefOid: 'c'.repeat(40),
+    state: 'OPEN',
+    mergeCommit: null,
+    mergeable: 'MERGEABLE',
+    autoMergeRequest: null,
+  },
+]);
+
+test('#47: awaitChecks returns required-check-failed when a declared required check concludes failure', async () => {
+  const gh = stubGh([
+    { when: (a) => a[0] === 'api', reply: () => stdout(JSON.stringify({ check_runs: [{ name: 'ci', status: 'completed', conclusion: 'failure', details_url: null }] })) },
+    { when: (a) => a[0] === 'pr' && a[1] === 'list', reply: () => stdout(PR_LIST_JSON_FOR_HEAD) },
+  ]);
+  const ops = operations(gh, { requiredChecksFor: async () => ['ci'] });
+
+  const result = await ops.awaitChecks(context(), { ref: null, timeoutSeconds: 1800 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.kind, 'precondition');
+  assert.deepEqual(result.findings, [
+    { path: 'check', rule: 'required-check-failed', message: 'ci' },
+    { path: 'pullRequest', rule: 'required-check-failed', message: '7' },
+  ]);
+});
+
+test('#47: a check that failed but is not declared required does not make the wait terminal', async () => {
+  const gh = stubGh([
+    { when: (a) => a[0] === 'api', reply: () => stdout(JSON.stringify({ check_runs: [{ name: 'lint', status: 'completed', conclusion: 'failure', details_url: null }] })) },
+  ]);
+  const ops = operations(gh, { requiredChecksFor: async () => ['ci'] });
+
+  const result = await ops.awaitChecks(context(), { ref: null, timeoutSeconds: 1800 });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.data?.concluded, true);
+  assert.equal(result.data?.checks[0]?.conclusion, 'failure');
+});
+
+test('#47: a declaration with no declared required checks never raises required-check-failed', async () => {
+  const gh = stubGh([
+    { when: (a) => a[0] === 'api', reply: () => stdout(JSON.stringify({ check_runs: [{ name: 'ci', status: 'completed', conclusion: 'failure', details_url: null }] })) },
+  ]);
+  const ops = operations(gh);
+
+  const result = await ops.awaitChecks(context(), { ref: null, timeoutSeconds: 1800 });
+
+  assert.equal(result.ok, true);
 });
 
 // --- S10.8 — comment bodies are data ---

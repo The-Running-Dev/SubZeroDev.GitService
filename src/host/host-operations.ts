@@ -8,7 +8,7 @@ import { diagnosticsFor } from '../shared/diagnostics.ts';
 import type { Outcome } from '../shared/outcome.ts';
 import type { ModuleErrorBase } from '../shared/result-kind.ts';
 import type { HostAdapter } from './github-adapter.ts';
-import type { HostError } from './errors.ts';
+import { hostError, type HostError } from './errors.ts';
 import type {
   ChecksAwaitData,
   ChecksAwaitInput,
@@ -49,6 +49,13 @@ export interface HostOperationsDependencies {
   readonly journal?: Pick<Journal, 'appendStep'>;
   /** Reads the clone's current head, for the two check tools' null `ref`. */
   readonly headShaFor: (ctx: CallContext) => Promise<GitSha | null>;
+  /**
+   * The declaration's `RepositoryConfig.requiredChecks`, for `awaitChecks`'s
+   * `required-check-failed` terminal judgement (issue #47). Absent — the
+   * default — means no check this declaration runs is declared required, so
+   * the wait never treats a failure as terminal.
+   */
+  readonly requiredChecksFor?: (ctx: CallContext) => Promise<readonly string[]>;
   /**
    * The three-step credential preparation — declaration, the reference's own
    * allowed-host check, resolution — run **here** rather than inside the
@@ -140,6 +147,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
   const { clock, adapter } = deps;
   const sleep = deps.sleep ?? realSleep;
   const pollIntervalSeconds = deps.pollIntervalSeconds ?? POLL_INTERVAL_SECONDS_DEFAULT;
+  const requiredChecksFor = deps.requiredChecksFor ?? (async () => []);
 
   /**
    * A host mutation's effect lands on the host, where local pre-state cannot
@@ -315,6 +323,32 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
 
         const pending = lastChecks.filter((check) => check.conclusion === 'pending');
         if (pending.length === 0) {
+          // Issue #47: a check failing is not itself terminal — only a
+          // *declared required* one is. `RepositoryConfig.requiredChecks`
+          // names checks by this repository's own convention, so a failure
+          // outside that list (a merely informational check, say) leaves the
+          // wait exactly as it was before this variant existed.
+          const requiredChecks = await requiredChecksFor(ctx);
+          const failedRequired = lastChecks.find((check) => check.conclusion === 'failure' && requiredChecks.includes(check.name));
+          if (failedRequired) {
+            const openPullRequests = await adapter.listPullRequests(ctx, 'open');
+            const pullRequest = openPullRequests.ok ? (openPullRequests.value.find((pr) => pr.headSha === ref) ?? null) : null;
+            // Without a pull request to name, `required-check-failed` cannot
+            // be constructed at all — `HostError` requires one, because an
+            // operator sent a check name with nowhere to look is not sent
+            // anywhere. A required check failing on a ref with no open pull
+            // request (a push before one exists) falls through to reporting
+            // the checks as concluded, same as an undeclared failure would.
+            if (pullRequest !== null) {
+              return hostErrorToToolResult(
+                hostError(
+                  { code: 'required-check-failed', check: failedRequired.name, pullRequest: pullRequest.ref },
+                  `required check '${failedRequired.name}' concluded failure on pull request #${pullRequest.ref.number}`,
+                ),
+              );
+            }
+          }
+
           const waitedSeconds = Math.round((Date.parse(clock.now()) - startedAtMs) / 1000);
           return success(
             `every check at ${ref} concluded after ${waitedSeconds}s`,
