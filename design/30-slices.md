@@ -352,6 +352,8 @@ Bodies retired; the closed issue is the record. Criteria are not re-derived from
 | **S36** | Parity is measured, and the measurement has failed | [#156](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/156) |
 | **S20** | The blog's authoring tools run on this runtime | [#34](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/34) |
 | **S39** | A consumer's own operations are reachable from an agent | [#171](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/171) |
+| **S37** | The blog's authoring screens appear, and only for the blog | [#157](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/157) |
+| **S38** | The blog's watched files become pull requests | [#158](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/158) |
 
 Two rows carry a name this document changed after the issue was opened: #31 is titled "A dropped
 file becomes a pull request…" and #92 "A consumer can declare a safe content-drop protocol", both
@@ -361,68 +363,6 @@ edited — reported here rather than reconciled.
 ---
 
 ## Outstanding
-
-## S37 — The blog's authoring screens appear, and only for the blog
-
-Delivers: whoever wrote and published posts from the blog's own console does it from this service's
-console instead, against the repository they have selected — and those screens are simply not there
-when they have selected any other one.
-
-Touches: the blog's two authoring screens, ported onto the published console package and taking the
-selected repository as an input, and the blog's derived image bundle.
-
-Depends on: S20.
-
-Acceptance:
-- S37.1 The blog's post-list and compose screens render in the derived image's console when the blog
-  declaration is selected.
-- S37.2 Both are absent for a second declaration in the same running instance, and their absence
-  follows from that declaration's grant lacking the content capabilities each screen declares —
-  never from a check against a declaration name. Demonstrated with two declarations live at once.
-- S37.3 Neither screen assumes a single repository: each acts against the selected declaration, and
-  no request either makes omits the repository.
-- S37.4 A post is created and published through the console in a real browser, end to end against a
-  real repository, and the resulting change is visible on the remote.
-- S37.5 The derived image's console fingerprint covers both screens: a bundle swapped after the
-  build refuses to boot, the same way the base's does.
-
-Out of scope: restyling the base console — a derived image is not forbidden from doing so, and this
-slice does not. Adding a file view or content editor to the base console; the brief left that open
-and it stays open.
-
----
-
-## S38 — The blog's watched files become pull requests
-
-Delivers: someone can drop a finished post file into a folder for the blog and get a pull request
-from it, with no git client, no console and no agent involved — the headless delivery the blog has
-today, running on this service instead.
-
-Touches: the blog's plan and apply authoring pair in its derived image, and the blog declaration's
-watcher configuration.
-
-Depends on: S20.
-
-Acceptance:
-- S38.1 The blog declaration names its own plan and apply tools, both compiled into its derived
-  image's registry and each annotated for its phase.
-- S38.2 The plan decides the repository path from the file's own front matter, and the watcher
-  chooses no path. Demonstrated with two files whose front matter routes them to different paths in
-  one run.
-- S38.3 The pair's plan schemas are byte-for-byte equal after canonical serialisation. A
-  deliberately mismatched pair is refused at declaration and again at boot re-validation, and each
-  refusal reason is stated by name.
-- S38.4 A complete file dropped into the blog's inbox reaches an open pull request unattended, and
-  the file ends in `processed/`.
-- S38.5 A file whose front matter does not satisfy the plan tool's schema never reaches a git
-  command, ends in `failed/` with a sibling reason file naming what was wrong, and is not retried.
-- S38.6 The apply tool refuses a path outside the declaration's effective allowlist whoever
-  dispatched it, including when a session calls it directly rather than through the watcher.
-
-Out of scope: changing the watcher mechanism, which is generic and landed in S23. A second
-consumer's plan/apply pair. Widening what the blog's plan tool may decide beyond a repository path.
-
----
 
 ## S21 — A second repository, driven end to end, unwatched
 
