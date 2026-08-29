@@ -8,7 +8,7 @@ import { diagnosticsFor } from '../shared/diagnostics.ts';
 import type { Outcome } from '../shared/outcome.ts';
 import type { ModuleErrorBase } from '../shared/result-kind.ts';
 import type { HostAdapter } from './github-adapter.ts';
-import type { HostError } from './errors.ts';
+import { hostError, type HostError } from './errors.ts';
 import type {
   ChecksAwaitData,
   ChecksAwaitInput,
@@ -49,6 +49,19 @@ export interface HostOperationsDependencies {
   readonly journal?: Pick<Journal, 'appendStep'>;
   /** Reads the clone's current head, for the two check tools' null `ref`. */
   readonly headShaFor: (ctx: CallContext) => Promise<GitSha | null>;
+  /**
+   * The declaration's `RepositoryConfig.requiredChecks`, for `awaitChecks`'s
+   * `required-check-failed` terminal judgement (issue #47). Absent — the
+   * default — means no check this declaration runs is declared required, so
+   * the wait never treats a failure as terminal.
+   *
+   * `null` is **not** the same answer as `[]`: it means the declaration's
+   * required checks could not be read at all, and the wait refuses rather
+   * than reporting a failing check as a clean pass. An empty list is a
+   * declaration that requires nothing; `null` is a declaration that has not
+   * been heard from.
+   */
+  readonly requiredChecksFor?: (ctx: CallContext) => Promise<readonly string[] | null>;
   /**
    * The three-step credential preparation — declaration, the reference's own
    * allowed-host check, resolution — run **here** rather than inside the
@@ -140,6 +153,77 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
   const { clock, adapter } = deps;
   const sleep = deps.sleep ?? realSleep;
   const pollIntervalSeconds = deps.pollIntervalSeconds ?? POLL_INTERVAL_SECONDS_DEFAULT;
+  const requiredChecksFor = deps.requiredChecksFor ?? (async () => []);
+
+  /**
+   * The `required-check-failed` judgement (issue #47), factored out because
+   * it runs on **every poll** rather than once the last check concludes. A
+   * required check that has already failed is terminal the moment it
+   * concludes: waiting for the rest would turn the terminal state the
+   * contract names into a `wait-timeout` whenever a slower informational
+   * check outlives the deadline.
+   *
+   * Returns the result the wait owes its caller, or `null` to carry on
+   * waiting. Every branch that cannot reach a verdict refuses rather than
+   * falling through to the ordinary success envelope — a wait that answers
+   * "every check concluded" while a required one is red is the one answer
+   * that is certainly wrong.
+   */
+  async function requiredCheckFailure(
+    ctx: CallContext,
+    ref: GitSha,
+    checks: readonly ChecksAwaitData['checks'][number][],
+  ): Promise<ToolResult<never> | null> {
+    const failed = checks.filter((check) => check.conclusion === 'failure');
+    if (failed.length === 0) return null;
+
+    // Fails closed. An unreadable or unparseable declaration config cannot
+    // say which checks are required, and answering "none are" would invert a
+    // safety judgement on a stray comma.
+    const requiredChecks = await requiredChecksFor(ctx);
+    if (requiredChecks === null) {
+      return precondition(
+        `a check at ${ref} concluded failure and the declaration's required checks could not be read, so the wait cannot say whether it was required`,
+        [{ path: 'requiredChecks', rule: 'unreadable', message: failed.map((check) => check.name).join(', ') }],
+      );
+    }
+
+    // `RepositoryConfig.requiredChecks` names checks by this repository's own
+    // convention, so a failure outside that list (a merely informational
+    // check, say) leaves the wait exactly as it was before this variant
+    // existed.
+    const failedRequired = failed.find((check) => requiredChecks.includes(check.name));
+    if (!failedRequired) return null;
+
+    const openPullRequests = await adapter.listPullRequests(ctx, 'open');
+    // A lookup that failed is not evidence that there is no pull request.
+    // Reporting the wait as concluded here would hide a red required check
+    // behind a rate limit.
+    if (!openPullRequests.ok) return hostErrorToToolResult(openPullRequests.error);
+
+    const pullRequest = openPullRequests.value.find((pr) => pr.headSha === ref) ?? null;
+    if (pullRequest === null) {
+      // `HostError.required-check-failed` requires a `PullRequestRef` — an
+      // operator sent a check name with nowhere to look is not sent anywhere
+      // — so a required failure on a ref with no open pull request (a push
+      // before one exists) cannot raise the terminal state. It still refuses,
+      // naming what is missing, rather than reporting a pass.
+      return precondition(
+        `required check '${failedRequired.name}' concluded failure at ${ref}, and no open pull request has that commit as its head`,
+        [
+          { path: 'check', rule: 'required-check-failed', message: failedRequired.name },
+          { path: 'pullRequest', rule: 'not-found', message: ref as string },
+        ],
+      );
+    }
+
+    return hostErrorToToolResult(
+      hostError(
+        { code: 'required-check-failed', check: failedRequired.name, pullRequest: pullRequest.ref },
+        `required check '${failedRequired.name}' concluded failure on pull request #${pullRequest.ref.number}`,
+      ),
+    );
+  }
 
   /**
    * A host mutation's effect lands on the host, where local pre-state cannot
@@ -312,6 +396,13 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
           return hostErrorToToolResult(checks.error);
         }
         lastChecks = checks.value;
+
+        // Issue #47: a check failing is not itself terminal — only a
+        // *declared required* one is. Judged on every poll, before the
+        // pending count, so a required failure does not sit behind a slower
+        // check that is still running.
+        const required = await requiredCheckFailure(ctx, ref, lastChecks);
+        if (required !== null) return required;
 
         const pending = lastChecks.filter((check) => check.conclusion === 'pending');
         if (pending.length === 0) {
