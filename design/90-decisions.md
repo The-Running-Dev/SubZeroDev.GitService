@@ -2076,3 +2076,29 @@ Emptied 2026-08-21 — the heading previously sat mid-log with 201 resolved deci
 beneath it (2026-08-03 through 2026-08-19), an artifact of where it was first inserted rather than a
 backlog of unactioned items. Moved here, to the true end of the append-only log, with nothing under
 it.
+
+**S21 (2026-08-30) — `CloneStore.ensure()`'s fresh-clone call never carries a credential.** Driving
+S21 for real against a genuinely private repository failed at the first `prepare_branch`: `git clone`
+exited 128, because `clone-store.ts`'s fresh-clone `exec.runGit` call (`argv: ['clone', '--',
+declaration.cloneUrl, clonePath]`) passes `credential: null` unconditionally — only `git-operations.ts`'s
+`prepareRemote`-backed calls (push, fetch, sync_base) resolve and attach the declaration's credential.
+A declared repository whose host requires authentication to read at all can therefore never complete
+its own first clone, contradicting S5's "clones itself on first use" for exactly the case a private
+declaration exists to cover. Routed around for the S21 proof by making the throwaway target repository
+public instead of fixing it, per S21's own "Touches: nothing new". Not filed as an issue here — that is
+`/track`'s to do from this entry.
+
+**S21 (2026-08-30) — `pr_enable_auto_merge` cannot reach the `merge-conflict` terminal state through
+GitHub's real behaviour.** `github-adapter.ts`'s `enableAutoMerge` runs `gh pr merge <n> --auto
+--squash` and classifies `merge-conflict` only from that command's own failure (a stderr match plus a
+`mergeable === false` follow-up read). Demonstrated three times against a real, genuinely conflicting
+pull request on a real repository (branch protection configured, `allow_auto_merge` enabled): the
+`--auto` form always exits 0 and leaves auto-merge queued indefinitely, never failing — GitHub's auto-merge
+API only rejects an *immediate*, non-`--auto` merge attempt with a mergeability error
+("is not mergeable: the merge commit cannot be cleanly created"), which this tool never issues. So the
+coded detection path is unreachable through the actual invocation the tool performs; S21.3 could not
+be satisfied for this one terminal state despite good-faith engineering of a real conflict. The other
+three terminal states (failed required check, wait timeout, restart mid-operation) were each reached
+for real in the same session. Not filed as an issue here — that is `/track`'s to do from this entry;
+resolving it is a contract/design question (e.g. a scheduled re-check after enabling auto-merge, or a
+direct-merge fallback path) rather than a slice-local fix.
