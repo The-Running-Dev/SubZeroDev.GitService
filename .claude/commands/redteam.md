@@ -41,7 +41,38 @@ Rules:
 - Do not propose fixes. Naming the fix invites me to accept your framing of the problem.
 - Do not soften. If something is BLOCKING, say BLOCKING.
 - If you genuinely find nothing at a severity level, say "none at this level" rather than padding.
-- Findings go to stdout, not into the design doc. I decide what gets written back.
+- Findings go to stdout **and** to a findings file (below), never into the design doc. I decide what gets written back into `design/`.
+
+## Write the findings to a file
+
+**This command runs on a different vendor from the design author, and adjudication happens back on the author's vendor.** Findings that exist only in one session's stdout have to be copy-pasted across that gap by hand, which is lossy, and is the step where a severity gets softened or a finding gets dropped without anyone deciding to drop it. Write them down instead — the repository is the handoff.
+
+One file per pass, at `design/redteam/<YYYY-MM-DD>-<target>.md`, where `<target>` is the document attacked (`10-design`, `00-brief`). A second pass on the same day against the same target appends `-2`; it never overwrites the first, because two passes are two pieces of evidence.
+
+```markdown
+# Red team — design/10-design.md
+
+Target: design/10-design.md @ <sha>
+Vendor: <vendor>
+Model: <model id, and effort if known>
+Date: <YYYY-MM-DD>
+
+## F1
+Severity: BLOCKING
+Status: unadjudicated
+Claim: <the one-line claim>
+Where: <section or component>
+Breaks when: <the specific condition, with concrete values where possible>
+Consequence: <what the user or operator experiences>
+Cost: <cheap to fix now / expensive to fix later, and why>
+```
+
+- **The finding body is verbatim what you would have printed.** This file is not a summary of the pass; it is the pass.
+- **`Status:` is `unadjudicated` and this command never changes it.** The adjudicating session writes `defect`, `accepted risk`, `brief conflict`, or `not sustained` in place, on the line, as I rule on each one. That keeps the classification next to the finding it classifies rather than in a chat log nobody can find later.
+- **Ids are stable within a file** (`F1`, `F2`) and are what a decision-log entry or an issue cites.
+- **`Target:` pins a sha.** A finding against a revision of the design that no longer exists is still evidence, but a reader has to be able to tell.
+- **Commit and push it.** `AGENTS.md` § *Git and delivery* delegates the branch, the commit, the push and the pull request; this file is ordinary work and takes the ordinary path. It is the only thing this command writes.
+- **This is not the design doc and writing it is not proposing a fix.** The rule above is unchanged: no fixes, no verdict, no summary.
 
 ## Stopping rule
 

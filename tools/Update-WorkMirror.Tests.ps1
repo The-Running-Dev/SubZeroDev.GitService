@@ -166,6 +166,54 @@ Describe 'Update-WorkMirror' {
         }
     }
 
+    Context 'closed-issue refresh' {
+        It 'rewrites a stale on-disk WorkRef to State: CLOSED when its issue drops off the open list' {
+            $repo = New-RepoRoot
+            $workDir = Join-Path $repo 'design/state/work'
+            New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $workDir '9.md') -Value "# work/9`nIssue: 9`nTitle: Closed thing`nState: OPEN`nRank: 9`nMirroredAt: sha0001`nCriteria:`n"
+            Mock Get-OpenIssueList { [pscustomobject]@{ Issues = @(); Failure = $null } }
+            Mock Get-IssuesByNumber { @((New-Issue -Number 9 -Title 'Closed thing' -State 'CLOSED')) }
+            Mock Get-CurrentWorkMirrorSha { 'sha0002' }
+
+            $r = Invoke-WorkMirrorUpdate -RepoPath $repo
+
+            $text = Get-Content -LiteralPath (Join-Path $workDir '9.md') -Raw
+            $text | Should -Match 'State: CLOSED'
+            $text | Should -Match 'MirroredAt: sha0002'
+            $r.Written.Count | Should -Be 1
+        }
+
+        It 'only re-fetches issue numbers that already have an on-disk WorkRef, not the whole tracker' {
+            $repo = New-RepoRoot
+            $workDir = Join-Path $repo 'design/state/work'
+            New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $workDir '9.md') -Value "# work/9`nIssue: 9`nTitle: Closed thing`nState: OPEN`nRank: 9`nMirroredAt: sha0001`nCriteria:`n"
+            Mock Get-OpenIssueList { [pscustomobject]@{ Issues = @(); Failure = $null } }
+            Mock Get-IssuesByNumber { @((New-Issue -Number 9 -Title 'Closed thing' -State 'CLOSED')) }
+            Mock Get-CurrentWorkMirrorSha { 'sha0002' }
+
+            Invoke-WorkMirrorUpdate -RepoPath $repo | Out-Null
+
+            Should -Invoke Get-IssuesByNumber -ParameterFilter { @($Numbers) -join ',' -eq '9' } -Times 1 -Exactly
+        }
+
+        It 'leaves an already-closed on-disk record untouched when nothing about it changed' {
+            $repo = New-RepoRoot
+            $workDir = Join-Path $repo 'design/state/work'
+            New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $workDir '9.md') -Value "# work/9`nIssue: 9`nTitle: Closed thing`nState: CLOSED`nRank: 9`nMirroredAt: sha0001`nCriteria:`n"
+            Mock Get-OpenIssueList { [pscustomobject]@{ Issues = @(); Failure = $null } }
+            Mock Get-IssuesByNumber { @((New-Issue -Number 9 -Title 'Closed thing' -State 'CLOSED')) }
+            Mock Get-CurrentWorkMirrorSha { 'sha0002' }
+
+            $r = Invoke-WorkMirrorUpdate -RepoPath $repo
+
+            (Get-Content -LiteralPath (Join-Path $workDir '9.md') -Raw) | Should -Match 'MirroredAt: sha0001'
+            $r.Written.Count | Should -Be 0
+        }
+    }
+
     Context 'Rank degradation (S14.3)' {
         It 'uses the project position when the issue is in the project' {
             $repo = New-RepoRoot

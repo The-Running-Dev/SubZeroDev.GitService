@@ -37,7 +37,10 @@
 
 .PARAMETER ForceDeleteBranches
     Branch names to delete with `git branch -D` after everything else has run. Only ever
-    honoured for a branch this same run independently confirmed in SquashMergeCandidates -
+    honoured for a branch this same run independently confirmed in SquashMergeCandidates,
+    which now requires the local tip to equal the merged PR's headRefOid - a branch carrying
+    commits the merged PR does not account for lands in TipAheadOfMergedPr instead and is
+    never force-deleted. Only ever
     i.e. `--merged` did not see it, but `gh` found a merged PR whose head was this branch.
     A name not in that list is refused, never force-deleted, even if passed here.
 
@@ -58,7 +61,9 @@
 .EXAMPLE
     ./tools/Invoke-DoneHousekeeping.ps1 -SkipPull -ForceDeleteBranches 'fix/squashed'
     Force-delete a branch this run's own gh check found squash-merged in
-    SquashMergeCandidates, once approval for exactly this list has been given.
+    SquashMergeCandidates - a list whose entries have each had their local tip confirmed
+    equal to the head the PR merged, which is the evidence that replaced the confirmation
+    prompt this list used to require.
 #>
 [CmdletBinding()]
 param(
@@ -111,6 +116,7 @@ if ($statusResult.Output.Trim()) {
             PrunedCount    = 0
             Candidates     = @()
             SquashMergeCandidates = @()
+            TipAheadOfMergedPr    = @()
             Deleted        = @()
             Refused        = @()
             Stashed        = $false
@@ -163,6 +169,7 @@ if ($currentBranch -and $currentBranch -ne $DefaultBranch) {
                 PrunedCount    = 0
                 Candidates     = @()
                 SquashMergeCandidates = @()
+                TipAheadOfMergedPr    = @()
                 Deleted        = @()
                 Refused        = @()
                 Stashed        = $stashed
@@ -213,15 +220,46 @@ $allBranches = @(($allBranchesResult.Output -split "`n") |
     ForEach-Object { $_.Trim() } |
     Where-Object { $_ -and $_ -ne $DefaultBranch -and $mergedBranches -notcontains $_ })
 
+# A merged PR alone is NOT sufficient evidence to force-delete. `gh pr list --head <branch>`
+# matches on branch NAME, so it still reports the PR after commits have been pushed on top of
+# the merged tip - and -D on that branch discards those commits with nothing said. Compare the
+# local tip against the PR's own headRefOid and only list a branch whose tip is exactly what
+# merged. A tip that does not match is reported separately as TipAheadOfMergedPr, never as a
+# force-delete candidate; that comparison is what replaced the confirmation prompt this list
+# used to require.
 $squashMergeCandidates = [System.Collections.Generic.List[object]]::new()
+$tipAheadOfMergedPr = [System.Collections.Generic.List[object]]::new()
 foreach ($branch in $allBranches) {
-    $prCheck = & gh pr list --state merged --head $branch --json number,url,mergeCommit 2>$null
+    $prCheck = & gh pr list --state merged --head $branch --json number,url,mergeCommit,headRefOid 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $prCheck) { continue }
     $parsed = @($prCheck | ConvertFrom-Json)
     if ($parsed.Count -eq 0) { continue }
+
+    $tipResult = Invoke-Git -GitArgs @('rev-parse', $branch) -WorkingDir $repoRootResolved
+    $localTip = if ($tipResult.ExitCode -eq 0) { ($tipResult.Output -split "`n")[0].Trim() } else { $null }
+    $mergedHead = $parsed[0].headRefOid
+
+    if (-not $localTip -or -not $mergedHead -or $localTip -ne $mergedHead) {
+        $tipAheadOfMergedPr.Add([pscustomobject]@{
+            Branch     = $branch
+            MergedPr   = $parsed[0].url
+            LocalTip   = $localTip
+            MergedHead = $mergedHead
+            Reason     = if (-not $mergedHead) {
+                "PR $($parsed[0].url) reported no headRefOid - cannot confirm the local tip is what merged."
+            } elseif (-not $localTip) {
+                "Could not resolve the local tip of '$branch' - cannot confirm it is what merged."
+            } else {
+                "Local tip $localTip is not the head that merged in $($parsed[0].url) ($mergedHead) - commits exist on this branch that no merged PR accounts for."
+            }
+        })
+        continue
+    }
+
     $squashMergeCandidates.Add([pscustomobject]@{
-        Branch   = $branch
-        MergedPr = $parsed[0].url
+        Branch     = $branch
+        MergedPr   = $parsed[0].url
+        MergedHead = $mergedHead
     })
 }
 
@@ -283,6 +321,7 @@ foreach ($branch in $ForceDeleteBranches) {
     PrunedCount    = $prunedLines.Count
     Candidates     = $candidates
     SquashMergeCandidates = @($squashMergeCandidates)
+    TipAheadOfMergedPr    = @($tipAheadOfMergedPr)
     Deleted        = @($deleted)
     Refused        = @($refused)
     Stashed        = $stashed

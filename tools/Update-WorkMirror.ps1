@@ -9,7 +9,10 @@
     label, never a milestone, never git (S14.1). `/track`'s alone; no other command invokes it
     and no other command writes a WorkRef.
 
-    One WorkRef per currently-open issue. `Rank` degrades rather than failing: the issue's
+    One WorkRef per issue this repository has ever mirrored: a currently-open issue is written
+    from the tracker listing, and an issue whose on-disk record predates its closing is
+    re-fetched individually, by issue number, and rewritten with its closed State - never left
+    stuck at OPEN. `Rank` degrades rather than failing: the issue's
     position in the per-repository GitHub Project when one places it, otherwise its milestone
     number, otherwise the issue number itself - falling through is not a finding, and an
     emitted WorkRef never lacks a Rank (S14.3). `Criteria` is read from `- [ ] **<id>**`
@@ -184,6 +187,32 @@ function Get-ProjectItemPositions {
     $positions
 }
 
+#
+# Re-fetches individual issues already mirrored on disk that Get-OpenIssueList no longer
+# returns - the only way a closed issue's WorkRef is ever revisited. Best-effort per issue: one
+# that cannot be read (deleted, network blip) is silently skipped and its existing record is
+# left untouched rather than treated as a could-not-evaluate for the whole run.
+function Get-IssuesByNumber {
+    param([int[]] $Numbers, [string] $Repository)
+
+    $results = [System.Collections.Generic.List[object]]::new()
+    foreach ($number in @($Numbers)) {
+        $ghArgs = @('issue', 'view', "$number", '--json', 'number,title,state,body,milestone')
+        if ($Repository) { $ghArgs += @('-R', $Repository) }
+
+        try {
+            $result = Invoke-GhRaw -GhArgs $ghArgs
+            if ($result.ExitCode -ne 0) { continue }
+        } catch { continue }
+        if ([string]::IsNullOrWhiteSpace($result.Output)) { continue }
+
+        try {
+            $results.Add(($result.Output | ConvertFrom-Json))
+        } catch { continue }
+    }
+    @($results)
+}
+
 function Get-CurrentRepoOwnerName {
     param([string] $Repository)
 
@@ -300,8 +329,22 @@ function Invoke-WorkMirrorUpdate {
 
     $workDir = Join-Path $RepoPath 'design/state/work'
 
+    $openNumbers = [System.Collections.Generic.HashSet[int]]::new()
+    foreach ($issue in $issueList.Issues) { [void]$openNumbers.Add([int]$issue.number) }
+
+    $staleNumbers = [System.Collections.Generic.List[int]]::new()
+    if (Test-Path -LiteralPath $workDir) {
+        foreach ($file in Get-ChildItem -LiteralPath $workDir -Filter '*.md' -File) {
+            $number = 0
+            if ([int]::TryParse($file.BaseName, [ref] $number) -and -not $openNumbers.Contains($number)) {
+                $staleNumbers.Add($number)
+            }
+        }
+    }
+    $closedIssues = if ($staleNumbers.Count -gt 0) { Get-IssuesByNumber -Numbers @($staleNumbers) -Repository $Repository } else { @() }
+
     $written = [System.Collections.Generic.List[object]]::new()
-    foreach ($issue in $issueList.Issues) {
+    foreach ($issue in (@($issueList.Issues) + @($closedIssues))) {
         $rank = Get-IssueRank -Issue $issue -ProjectPositions $projectPositions
         $criteria = Get-IssueCriteriaIds -Body $issue.body
         $file = Join-Path $workDir "$($issue.number).md"

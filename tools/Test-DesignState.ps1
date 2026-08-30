@@ -1216,8 +1216,11 @@ function Invoke-DesignStateCheck {
         $couldNotEvaluate.Add((New-CouldNotEvaluate -Reason 'RecordUnparseable' -Detail "$($f.Path):$($f.Line): $($f.Text)"))
     }
 
-    if ($graph.Root -eq '' -or $graph.Records.Count -eq 0) {
-        $couldNotEvaluate.Add((New-CouldNotEvaluate -Reason 'StateSetAbsent' -Detail 'design/state/ is missing or holds zero records'))
+    # WorkRef is mirrored into every target on every /track run regardless of adoption (#113),
+    # so it never counts toward "the state set is present" - only the other five kinds do.
+    $adoptedRecordCount = @($graph.Records | Where-Object { $_.Kind -ne 'WorkRef' }).Count
+    if ($graph.Root -eq '' -or $adoptedRecordCount -eq 0) {
+        $couldNotEvaluate.Add((New-CouldNotEvaluate -Reason 'StateSetAbsent' -Detail 'design/state/ is missing or holds no records other than WorkRef mirrors'))
         return New-DesignStateResult -Findings @() -Reported @() -CouldNotEvaluate @($couldNotEvaluate) -ExitCode 2 -LargestClosure $null -ReportLines @('StateSetAbsent: nothing to check.')
     }
 

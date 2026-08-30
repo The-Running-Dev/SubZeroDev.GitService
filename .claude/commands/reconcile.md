@@ -56,7 +56,7 @@ For each: which direction you recommend — the code changing to match the doc, 
 
 If a section found nothing, say "none" and move on. Do not manufacture a fork to have something to ask about.
 
-Once I have decided, apply the edits and append the decision-log entries — following the full record-writing sequence in `design/10-design.md` § *Record* where this repository's own `design/state/` exists. Nothing else beyond that sequence.
+Once I have decided, apply the edits and append the decision-log entries — following the full record-writing sequence in `AGENTS.md` § *Writing a design-state record* where this repository's own `design/state/` exists. Nothing else beyond that sequence.
 
 ## Re-run
 

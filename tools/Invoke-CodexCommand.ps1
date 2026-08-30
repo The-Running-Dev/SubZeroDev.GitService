@@ -113,6 +113,7 @@ $commandProfiles = [ordered]@{
     'install-all'      = 'builder'
     'kit-sync'         = 'builder'
     'kit-help'         = 'quick'
+    'next'             = 'builder'    # orients like /kit-help but acts, so it needs write access
     'clean'            = 'quick'
     'install-code-review-agent' = 'builder'
     'freeze'           = 'builder'
@@ -127,6 +128,16 @@ $profileConfig = [ordered]@{
     'quick'     = @{ Model = 'gpt-5.3-codex-spark'; Effort = 'low';    Approval = 'on-request'; Sandbox = 'workspace-write' }
 }
 
+# The tier each profile resolves to, spelled exactly as AGENTS.md's *Model, effort, and
+# review budget* table spells it. This is the value stamped into the child environment so
+# the gate never has to infer a tier from a self-report, and never has to read a config
+# file the sandbox puts out of reach - see $tierEnvironment below.
+$profileTiers = [ordered]@{
+    'architect' = 'Deep reasoning'
+    'builder'   = 'Implementation'
+    'quick'     = 'Implementation'
+}
+
 if ($List) {
     $commandProfiles.GetEnumerator() | ForEach-Object {
         $p = $profileConfig[$_.Value]
@@ -137,6 +148,7 @@ if ($List) {
             Effort   = $p.Effort
             Approval = $p.Approval
             Sandbox  = $p.Sandbox
+            Tier     = $profileTiers[$_.Value]
         }
     } | Format-Table -AutoSize
     return
@@ -164,9 +176,32 @@ $codexInvocationArgs = @(
 )
 $codexInvocationArgs += $CodexArgs
 
+# AGENTS.md's tier gate is told to resolve a Codex session's tier from its configuration
+# rather than its self-report. On the profile that matters most - `architect`, which is
+# `sandbox_mode = read-only` and scoped to the workspace - that configuration lives in
+# `~/.codex/`, outside the sandbox, so the session cannot read it and the gate falls to its
+# documented last resort (the self-report) and stops. That is the failure this stamping
+# removes: environment variables cross the sandbox boundary, config files do not.
+#
+# The gate reads AGENTKIT_TIER first, the configuration second, and the self-report last.
+# Only a session launched through this script carries the stamp, which is why it is a
+# hardening on top of the configuration read and not a replacement for it.
+$tierEnvironment = [ordered]@{
+    AGENTKIT_TIER    = $profileTiers[$codexProfile]
+    AGENTKIT_MODEL   = $selectedConfig.Model
+    AGENTKIT_EFFORT  = $resolvedEffort
+    AGENTKIT_COMMAND = "/$normalized"
+    AGENTKIT_PROFILE = $codexProfile
+}
+
 if ($WhatIf) {
-    Write-Output "codex $($codexInvocationArgs -join ' ')"
+    $stamp = ($tierEnvironment.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' '
+    Write-Output "$stamp codex $($codexInvocationArgs -join ' ')"
     return
+}
+
+foreach ($entry in $tierEnvironment.GetEnumerator()) {
+    Set-Item -Path "Env:$($entry.Key)" -Value $entry.Value
 }
 
 & codex @codexInvocationArgs
