@@ -979,6 +979,44 @@ Describe 'Test-DesignState: end-to-end (S5.2, S5.3, S5.4, S5.9)' {
         (@($result.CouldNotEvaluate | Where-Object { $_.Reason -eq 'StateSetAbsent' })).Count | Should -Be 1
     }
 
+    It '#113: design/state/ holding only WorkRef records still yields StateSetAbsent, not UnrecordedArtifact' {
+        New-StateFile -RelativePath 'work/1.md' -Content @'
+# work/1
+Issue: 1
+Title: x
+State: OPEN
+Rank: 1
+MirroredAt: abc123
+Criteria:
+'@
+        $result = Invoke-DesignStateCheck -RepoPath $TestDrive
+
+        (@($result.CouldNotEvaluate | Where-Object { $_.Reason -eq 'StateSetAbsent' })).Count | Should -Be 1
+        $result.ExitCode | Should -Be 2
+        $result.Findings.Count | Should -Be 0
+    }
+
+    It '#113: design/state/ holding any non-WorkRef record does not yield StateSetAbsent' {
+        New-StateFile -RelativePath 'work/1.md' -Content @'
+# work/1
+Issue: 1
+Title: x
+State: OPEN
+Rank: 1
+MirroredAt: abc123
+Criteria:
+'@
+        New-StateFile -RelativePath 'units/command/a.md' -Content @'
+# unit/command/a
+Kind: command
+Status: active
+Binds: I999
+'@
+        $result = Invoke-DesignStateCheck -RepoPath $TestDrive
+
+        (@($result.CouldNotEvaluate | Where-Object { $_.Reason -eq 'StateSetAbsent' })).Count | Should -Be 0
+    }
+
     It 'S5.2: all three lists are always present, even when empty (checked on the absent-state-set path)' {
         $result = Invoke-DesignStateCheck -RepoPath $TestDrive
         ($null -eq $result.Findings) | Should -BeFalse

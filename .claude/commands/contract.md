@@ -46,7 +46,7 @@ Rules:
 - If the design doc does not determine a signature, do not invent it. List it under `## Unresolved` and stop.
 - **Do not restate a declaration the tree already carries.** Point at it and state what it cannot say.
 - No implementation. No comments explaining intent — the design doc carries intent. File paths are permitted **only** as the pointers this section requires.
-- Anything you add here that was not implied by the design doc gets a decision-log entry. Where this repository's own `design/state/` exists, writing it also follows the record-writing sequence in `design/10-design.md` § *Record* — not restated here.
+- Anything you add here that was not implied by the design doc gets a decision-log entry. Where this repository's own `design/state/` exists, writing it also follows the record-writing sequence in `AGENTS.md` § *Writing a design-state record* — not restated here.
 
 ## Re-run
 

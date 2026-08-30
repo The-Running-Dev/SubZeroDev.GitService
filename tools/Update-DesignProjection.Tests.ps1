@@ -374,6 +374,30 @@ Describe 'Update-DesignProjection against this repository''s own tree' -Skip:$sc
 
     BeforeAll {
         $script:RepoRoot = Split-Path $PSScriptRoot -Parent
+
+        <#
+          A real, non-DryRun run against $script:RepoRoot writes real files - if the repo
+          is not already at its fixed point, the run's own idempotence assertion is exactly
+          the thing that can fail, and without this guard the mutated file would be left
+          behind (issue #161). Snapshot the affected files first and restore them in a
+          finally, the same pattern S18.6 in Test-DesignState.Tests.ps1 already uses, so a
+          failure here can never leave the real checkout dirty.
+        #>
+        function Backup-RestoreOnFailure {
+            param(
+                [Parameter(Mandatory)][string[]] $Path,
+                [Parameter(Mandatory)][scriptblock] $Body
+            )
+            $originals = @{}
+            foreach ($p in $Path) { $originals[$p] = Get-Content -LiteralPath $p -Raw }
+            try {
+                & $Body
+            } finally {
+                foreach ($p in $Path) {
+                    Set-Content -LiteralPath $p -Value $originals[$p] -Encoding utf8NoBOM -NoNewline
+                }
+            }
+        }
     }
 
     It 'S7.2: -DryRun against the real repository writes nothing' {
@@ -385,11 +409,105 @@ Describe 'Update-DesignProjection against this repository''s own tree' -Skip:$sc
     }
 
     It 'S7.3: a real, non-DryRun run against this repository is already at its fixed point (idempotent)' {
-        $before = & git -C $script:RepoRoot status --short
-        $null = Invoke-DesignProjection -RepoPath $script:RepoRoot
-        $after = & git -C $script:RepoRoot status --short
-        # The real design/20-contract.md and design/state-index.md are committed already
-        # regenerated - a real run must not find anything to change.
-        $after | Should -Be $before
+        $contractPath = Join-Path $script:RepoRoot 'design/20-contract.md'
+        $stateIndexPath = Join-Path $script:RepoRoot 'design/state-index.md'
+        Backup-RestoreOnFailure -Path @($contractPath, $stateIndexPath) -Body {
+            $before = & git -C $script:RepoRoot status --short
+            $null = Invoke-DesignProjection -RepoPath $script:RepoRoot
+            $after = & git -C $script:RepoRoot status --short
+            # The real design/20-contract.md and design/state-index.md are committed already
+            # regenerated - a real run must not find anything to change.
+            $after | Should -Be $before
+        }
+    }
+
+    It 'regression (issue #161): Backup-RestoreOnFailure restores the real files even when the wrapped run fails' {
+        # A scratch git repo standing in for "the real repository" so this test can force
+        # real drift without ever mutating this checkout's own tracked files.
+        $scratchRoot = Join-Path $TestDrive 'issue-161-scratch-repo'
+        New-Item -ItemType Directory -Path $scratchRoot -Force | Out-Null
+
+        New-Item -ItemType Directory -Path (Join-Path $scratchRoot 'design/state/units/command') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $scratchRoot 'design/state/units/command/track.md') -Encoding utf8NoBOM -Value @'
+# unit/command/track
+Kind: command
+Status: active
+Anchor: .claude/commands/track.md
+Binds: I28
+
+## Owns
+Syncs design/ into issues.
+'@
+        New-Item -ItemType Directory -Path (Join-Path $scratchRoot 'design/state/invariants') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $scratchRoot 'design/state/invariants/I28.md') -Encoding utf8NoBOM -Value @'
+# I28
+Kind: invariant
+Status: active
+Anchor: I28
+Owner: unit/command/track
+Enforcement: instruction
+
+## Statement
+GitHub is the authority.
+'@
+
+        # design/20-contract.md seeded with STALE content inside the invariants region: a
+        # real, non-DryRun run against this fixture WILL rewrite it - this is the "real
+        # drift" case the unguarded S7.3 pattern could not survive.
+        $scratchContractPath = Join-Path $scratchRoot 'design/20-contract.md'
+        Set-Content -LiteralPath $scratchContractPath -Encoding utf8NoBOM -Value @'
+# Contract
+
+## Invariants
+
+<!-- invariants:start -->
+| this is stale content that does not match any record |
+<!-- invariants:end -->
+
+Hand-authored tail, outside every region.
+'@
+        $scratchStateIndexPath = Join-Path $scratchRoot 'design/state-index.md'
+        Set-Content -LiteralPath $scratchStateIndexPath -Encoding utf8NoBOM -Value @'
+# State Index
+
+## Units
+<!-- units:start -->
+<!-- units:end -->
+
+## Bound by
+<!-- bound-by:start -->
+<!-- bound-by:end -->
+
+## Consumers
+<!-- consumers:start -->
+<!-- consumers:end -->
+
+## Decision affects
+<!-- decision-affects:start -->
+<!-- decision-affects:end -->
+
+## Question affects
+<!-- question-affects:start -->
+<!-- question-affects:end -->
+
+## Outstanding
+<!-- outstanding:start -->
+<!-- outstanding:end -->
+'@
+
+        $contractBefore = Get-Content -LiteralPath $scratchContractPath -Raw
+        $stateIndexBefore = Get-Content -LiteralPath $scratchStateIndexPath -Raw
+
+        {
+            Backup-RestoreOnFailure -Path @($scratchContractPath, $scratchStateIndexPath) -Body {
+                $null = Invoke-DesignProjection -RepoPath $scratchRoot
+                # Confirm the wrapped run actually mutated the file - the drift is real.
+                (Get-Content -LiteralPath $scratchContractPath -Raw) | Should -Not -Be $contractBefore
+                throw 'forced failure standing in for a failing S7.3 idempotence assertion'
+            }
+        } | Should -Throw -ExpectedMessage 'forced failure standing in for a failing S7.3 idempotence assertion'
+
+        (Get-Content -LiteralPath $scratchContractPath -Raw) | Should -Be $contractBefore
+        (Get-Content -LiteralPath $scratchStateIndexPath -Raw) | Should -Be $stateIndexBefore
     }
 }
