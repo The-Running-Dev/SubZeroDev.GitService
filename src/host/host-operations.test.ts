@@ -281,6 +281,69 @@ test('S10.4: a merge conflict returns precondition naming the branch and both he
   );
 });
 
+test('S10.4 (issue #198): a real merge conflict is still detected even though GitHub\'s --auto call exits 0', async () => {
+  // GitHub's real behaviour: `gh pr merge --auto --squash` reports success and
+  // leaves auto-merge queued even when the pull request can never merge. Only
+  // a direct read of `mergeable` (forced here by the preflight poll) reveals
+  // the conflict; the merge command's own exit code never will.
+  const conflicted = JSON.stringify({
+    number: 7,
+    url: 'https://github.com/acme/repo/pull/7',
+    headRefName: 'slice/S10',
+    headRefOid: 'b'.repeat(40),
+    baseRefOid: 'c'.repeat(40),
+    state: 'OPEN',
+    mergeCommit: null,
+    mergeable: 'CONFLICTING',
+    autoMergeRequest: null,
+  });
+  const gh = stubGh([
+    { when: (a) => a[1] === 'view', reply: () => stdout(conflicted) },
+    { when: (a) => a[1] === 'merge', reply: () => stdout('') },
+  ]);
+  const ops = operations(gh);
+
+  const result = await ops.enableAutoMerge(context(), { number: 7 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.kind, 'precondition');
+  const findings = result.findings ?? [];
+  assert.deepEqual(
+    findings.map((f) => `${f.path}=${f.message}`),
+    ['branch=slice/S10', `headSha=${'b'.repeat(40)}`, `baseSha=${'c'.repeat(40)}`],
+  );
+  assert.equal(gh.calls.some((a) => a[1] === 'merge'), false, 'a conflict caught by the preflight read must never attempt the merge at all');
+});
+
+test('S10.4: an unresolved mergeability at call time still enables auto-merge, retried bounded times first', async () => {
+  // GitHub can still report `UNKNOWN` a moment after a push while it computes
+  // mergeability in the background. The preflight must not treat that as a
+  // conflict, and must not poll forever — it gives up and proceeds.
+  const unknown = JSON.stringify({
+    number: 7,
+    url: 'https://github.com/acme/repo/pull/7',
+    headRefName: 'slice/S10',
+    headRefOid: 'b'.repeat(40),
+    baseRefOid: 'c'.repeat(40),
+    state: 'OPEN',
+    mergeCommit: null,
+    mergeable: 'UNKNOWN',
+    autoMergeRequest: null,
+  });
+  const gh = stubGh([
+    { when: (a) => a[1] === 'view', reply: () => stdout(unknown) },
+    { when: (a) => a[1] === 'merge', reply: () => stdout('') },
+  ]);
+  const ops = operations(gh);
+
+  const result = await ops.enableAutoMerge(context(), { number: 7 });
+
+  assert.equal(result.ok, true);
+  const viewCalls = gh.calls.filter((a) => a[1] === 'view').length;
+  assert.ok(viewCalls >= 1 && viewCalls <= 4, `expected a bounded number of preflight reads, got ${viewCalls}`);
+  assert.equal(gh.calls.some((a) => a[1] === 'merge'), true);
+});
+
 test('S10.4: the host adapter exposes no merge and no rebase method', () => {
   const adapter = createGitHubAdapter({ clock: systemClock, exec: stubGh([]).exec });
   const surface = Object.keys(adapter);

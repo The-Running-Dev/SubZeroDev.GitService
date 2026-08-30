@@ -55,6 +55,15 @@ const BUDGET_WINDOW_SECONDS = 3600;
 const RETRY_BASE_MS = 500;
 
 /**
+ * `enableAutoMerge`'s preflight: how many times to re-read a pull request
+ * whose `mergeable` field is still `UNKNOWN`, and how long to wait between
+ * reads. GitHub usually resolves it within one or two reads; this is a
+ * bounded wait, not a promise it always resolves in time.
+ */
+const MERGEABILITY_POLL_ATTEMPTS = 4;
+const MERGEABILITY_POLL_INTERVAL_MS = 1000;
+
+/**
  * Well above what `pr_list`'s 65536-byte result limit admits (~200 entries at
  * the fields requested). Overshooting produces a loud `infrastructure`
  * refusal; gh's own default of 30 would truncate silently.
@@ -473,6 +482,29 @@ export function createGitHubAdapter(deps: GitHubAdapterDependencies): HostAdapte
     },
 
     async enableAutoMerge(ctx, number): Promise<Outcome<void, HostError>> {
+      // GitHub's `--auto` merge API always exits 0, even against a pull
+      // request that can never merge — it leaves auto-merge queued forever
+      // instead of reporting the conflict, so the command's own failure below
+      // can never see one. A direct read forces the host to compute
+      // mergeability, but that can still read `UNKNOWN` for a few seconds
+      // right after a push, so this polls a bounded number of times rather
+      // than trusting one read that may still be in flight. Decision:
+      // design/90-decisions.md, 2026-08-30.
+      for (let attempt = 1; attempt <= MERGEABILITY_POLL_ATTEMPTS; attempt++) {
+        const preflight = await readPullRequest(ctx, number);
+        if (!preflight.ok) break;
+        if (preflight.value.mergeable === false) {
+          return err(
+            hostError(
+              { code: 'merge-conflict', pullRequest: preflight.value.ref, headSha: preflight.value.headSha, baseSha: preflight.value.baseSha },
+              `pull request #${number} on branch '${preflight.value.ref.branch}' cannot merge: head ${preflight.value.headSha} conflicts with base ${preflight.value.baseSha}`,
+            ),
+          );
+        }
+        if (preflight.value.mergeable === true) break;
+        if (attempt < MERGEABILITY_POLL_ATTEMPTS) await sleep(MERGEABILITY_POLL_INTERVAL_MS);
+      }
+
       const result = await gh(ctx, 'mutation', ['pr', 'merge', String(number), '--auto', '--squash']);
       if (result.ok) return ok(undefined);
 
