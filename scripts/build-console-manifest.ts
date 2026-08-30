@@ -20,7 +20,12 @@ function fail(message: string): never {
   process.exit(1);
 }
 
-execFileSync('npm', ['run', 'build'], { cwd: consoleWorkspace, stdio: 'inherit' });
+// On Windows, `npm` resolves to `npm.cmd`, a batch-file shim. Naming the shim
+// explicitly still fails (Node refuses to `CreateProcess` a `.cmd` directly,
+// even by its real name, since the CVE-2024-27980 hardening) — `shell: true`
+// is required. Safe here: every argument is a fixed literal, none of it
+// caller-controlled. POSIX `npm` is a real executable and unaffected either way.
+execFileSync('npm', ['run', 'build'], { cwd: consoleWorkspace, stdio: 'inherit', shell: process.platform === 'win32' });
 
 const hash = await computeConsoleDigest(consoleDir).catch((cause) => {
   fail(`could not read the built console directory: ${cause instanceof Error ? cause.message : String(cause)}`);
