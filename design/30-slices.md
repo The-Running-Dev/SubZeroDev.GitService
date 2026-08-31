@@ -249,11 +249,13 @@ prior review passed over it. Had the parity harness been built after the migrati
 `S20.2` assumed, the migration itself would have been the first thing to exercise it and this would
 have surfaced as a defect in the blog rather than a gap in the base.
 
-**What remains is S39, then S20, S37, S38, S21 and S22 in that order** — the scope rule that makes a
-consumer's operations reachable, then the blog's tools, its screens and its watched files, then the
-second repository, then the deployment gates. Everything from S20 onward is dependency order rather
-than a risk argument. S39 is placed ahead of S20 because `S20.8` cannot pass without it, and because
-it is base-runtime work sitting under a slice that touches no base source.
+**The last six ran as S39, then S20, S37, S38, S21 and S22 in that order** — the scope rule that
+makes a consumer's operations reachable, then the blog's tools, its screens and its watched files,
+then the second repository, then the deployment gates. Everything from S20 onward was dependency
+order rather than a risk argument. S39 was placed ahead of S20 because `S20.8` could not pass
+without it, and because it is base-runtime work sitting under a slice that touches no base source.
+All six have since landed, so this stands as the record of why they ran in that order, not as a
+claim about what runs next.
 
 ## Contract gates
 
@@ -283,11 +285,11 @@ lattice*, § *Scopes*, § *Compiler* and **A10** carry it, with the alternatives
 S39 implements against. That is the ordinary case, not an exception: a slice's first criterion is an
 amendment only when the amendment has not already been made.
 
-Nothing S39, S20, S37, S38, S21 or S22 needs is now unfixed in the contract, checked against it
-rather than remembered: S37 uses the console registration and filtering the contract already fixes;
-S38 uses the file-watcher plan/apply protocol U10 resolved, whose plan entry the same 2026-08-23 pass
+Nothing S39, S20, S37, S38, S21 or S22 needed was unfixed in the contract, checked against it
+rather than remembered: S37 used the console registration and filtering the contract already fixes;
+S38 used the file-watcher plan/apply protocol U10 resolved, whose plan entry the same 2026-08-23 pass
 confirmed is gated by nothing at dispatch and intended to be; and S39's four surfaces are each fixed
-by name. None of them opens with an amendment criterion.
+by name. None of them opened with an amendment criterion.
 
 **U7 was answered in two parts, and the first part moved earlier than this section used to say.**
 Invariant B3 has boot verify the console asset manifest and refuse to start on a mismatch, and the
@@ -354,6 +356,8 @@ Bodies retired; the closed issue is the record. Criteria are not re-derived from
 | **S39** | A consumer's own operations are reachable from an agent | [#171](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/171) |
 | **S37** | The blog's authoring screens appear, and only for the blog | [#157](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/157) |
 | **S38** | The blog's watched files become pull requests | [#158](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/158) |
+| **S21** | A second repository, driven end to end, unwatched | [#35](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/35) |
+| **S22** | The deployment is verifiable, reversible and documented | [#36](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/36) |
 
 Two rows carry a name this document changed after the issue was opened: #31 is titled "A dropped
 file becomes a pull request…" and #92 "A consumer can declare a safe content-drop protocol", both
@@ -364,54 +368,5 @@ edited — reported here rather than reconciled.
 
 ## Outstanding
 
-## S21 — A second repository, driven end to end, unwatched
-
-Delivers: definition-of-done items 4 and 13. Generalisation is the justification for the whole
-project, and one consumer is not evidence of it.
-
-Touches: nothing new — this is a proof, not a build.
-
-Depends on: S20.
-
-Acceptance:
-- S21.1 A repository outside the `SubZeroDev.*` estate is declared and driven through a full change:
-  branch, edit, commit, push, pull request, merged.
-- S21.2 An agent completes that change **without a human touching git and without supervision**.
-- S21.3 Every terminal state is reached at least once without intervention, and each stops safely
-  and says so: merge conflict, failed required check, wait timeout, and a restart mid-operation.
-- S21.4 A `generic`-host declaration performs local git and push, and its `host.*` tools are
-  **absent from the listing** rather than failing at call time.
-- S21.5 A new repository is onboarded by declaration alone — no code change, no rebuild, no restart
-  — while the instance continues serving every other repository. Other repositories' operations are
-  timed across the onboarding to prove they were not blocked.
-
-Out of scope: adding a tool to make the second repository easier. If it needs one, that is a contract
-amendment and evidence of a gap in the generalisation.
-
----
-
-## S22 — The deployment is verifiable, reversible and documented
-
-Delivers: definition-of-done items 15, 18 and 20.
-
-Touches: the companion check script, operator documentation.
-
-Depends on: S21.
-
-Acceptance:
-- S22.1 The companion check polls `/healthz` until the commit SHA is stable, then runs a real
-  `initialize → tools/list → repo_status` session, classifying its outcome as `stale-runtime`,
-  `mixed-runtime`, `verification-credential`, `unexpected-profile-or-catalog` or `verified`. It is
-  **an executable check shipped alongside the service, not a registry tool** — asserted by its
-  absence from the registry.
-- S22.2 Each of the five classifications is produced at least once against a deliberately broken
-  deployment. A check that has only ever returned `verified` is not known to classify anything.
-- S22.3 Returning `SubZeroDev.Blog` to its current server is documented **and has been done once**,
-  with the pre-migration store copy as the rollback target.
-- S22.4 Operator documentation covers configuration, onboarding a repository, backup and recovery,
-  revocation and rollback.
-- S22.5 The volume-loss table is restated in the operator documentation as an accepted risk with its
-  costs, because no off-volume backup ships.
-
-Out of scope: an off-volume audit sink. Deferred by decision; reopening it is a brief change, not a
-slice.
+None. Every one of the thirty-nine slices is landed, and each body was retired to the index
+above as its issue closed.
