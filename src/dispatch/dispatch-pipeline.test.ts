@@ -141,11 +141,12 @@ function mutatingRegistryOf(entries: readonly ToolDeclaration[]): CompiledRegist
 }
 
 test('visibleTools returns the tool for a declaration granting repo.read, and nothing once the grant is removed', async () => {
-  await withDeclaredRepo(async ({ declarations, cloneStore, fixture }) => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, fixture, exec }) => {
     const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
     const moduleAdapter = createModuleAdapter();
     const entry = fixtureTool({ name: 'repo_status', capabilities: ['repo.read'] });
     const pipeline = createDispatchPipeline({
+      exec,
       registry: registryOf([entry]),
       ceiling: CAPABILITY_SET,
       moduleAdapter,
@@ -169,7 +170,7 @@ test('visibleTools returns the tool for a declaration granting repo.read, and no
 });
 
 test('S15.1 — git_raw is absent until the declaration explicitly grants git.raw', async () => {
-  await withDeclaredRepo(async ({ declarations, cloneStore, fixture }) => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, fixture, exec }) => {
     const entry = fixtureTool({
       name: 'git_raw', capabilities: ['git.raw'], scopes: ['raw'], executionClass: 'mutating',
       target: { kind: 'module', target: 'git.raw' as never }, limits: { timeoutSeconds: 60, maxResultBytes: 4_194_304 },
@@ -179,6 +180,7 @@ test('S15.1 — git_raw is absent until the declaration explicitly grants git.ra
       contractCapabilitySet: RAW_CAPABILITY_SET as unknown as CompiledRegistry['contractCapabilitySet'],
     };
     const pipeline = createDispatchPipeline({
+      exec,
       registry, ceiling: RAW_CAPABILITY_SET, moduleAdapter: createModuleAdapter(), declarations, cloneStore, locks: createLocks(),
       audit: createAudit({ volumeRoot: '/dev/null-unused-raw', clock: systemClock }), clock: systemClock,
     });
@@ -213,6 +215,7 @@ test('a by-name call for a tool absent from visibleTools returns authorization, 
     const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations });
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: registryOf([entry]),
       ceiling: CAPABILITY_SET,
       moduleAdapter,
@@ -252,6 +255,7 @@ test('a tool absent from the registry entirely returns authorization and audits 
     const locks = createLocks();
     const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations });
     const pipeline = createDispatchPipeline({
+      exec,
       registry: registryOf([]),
       ceiling: CAPABILITY_SET,
       moduleAdapter: createModuleAdapter(),
@@ -281,7 +285,7 @@ test('a tool absent from the registry entirely returns authorization and audits 
 });
 
 test('input failing the declared schema returns validation with findings, and the handler never runs', async () => {
-  await withDeclaredRepo(async ({ declarations, cloneStore }) => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec }) => {
     const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
     const moduleAdapter = createModuleAdapter();
     let entered = false;
@@ -297,6 +301,7 @@ test('input failing the declared schema returns validation with findings, and th
     });
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: registryOf([entry]),
       ceiling: CAPABILITY_SET,
       moduleAdapter,
@@ -324,7 +329,7 @@ test('input failing the declared schema returns validation with findings, and th
 });
 
 test('a handler returning a value the output schema rejects returns infrastructure', async () => {
-  await withDeclaredRepo(async ({ declarations, cloneStore }) => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec }) => {
     const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
     const moduleAdapter = createModuleAdapter();
     moduleAdapter.register('fixture.target' as never, async () =>
@@ -338,6 +343,7 @@ test('a handler returning a value the output schema rejects returns infrastructu
     });
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: registryOf([entry]),
       ceiling: CAPABILITY_SET,
       moduleAdapter,
@@ -363,7 +369,7 @@ test('a handler returning a value the output schema rejects returns infrastructu
 });
 
 test('a result exceeding maxResultBytes returns infrastructure rather than a truncated payload', async () => {
-  await withDeclaredRepo(async ({ declarations, cloneStore }) => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec }) => {
     const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
     const moduleAdapter = createModuleAdapter();
     moduleAdapter.register('fixture.target' as never, async () =>
@@ -377,6 +383,7 @@ test('a result exceeding maxResultBytes returns infrastructure rather than a tru
     });
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: registryOf([entry]),
       ceiling: CAPABILITY_SET,
       moduleAdapter,
@@ -411,6 +418,7 @@ test('a real repo_status call succeeds end to end and carries a ReadStamp', asyn
 
     const entry = fixtureTool({ name: 'repo_status', capabilities: ['repo.read'], target: { kind: 'module', target: 'git.status' as never } });
     const pipeline = createDispatchPipeline({
+      exec,
       registry: registryOf([entry]),
       ceiling: CAPABILITY_SET,
       moduleAdapter,
@@ -447,6 +455,7 @@ test('two dispatched reads of the same repository run concurrently — the mater
     moduleAdapter.register('git.status' as never, toModuleHandler(gitOperations.status));
     const entry = fixtureTool({ name: 'repo_status', capabilities: ['repo.read'], target: { kind: 'module', target: 'git.status' as never } });
     const pipeline = createDispatchPipeline({
+      exec,
       registry: registryOf([entry]),
       ceiling: CAPABILITY_SET,
       moduleAdapter,
@@ -513,6 +522,7 @@ test('a real git_stage + git_commit mutation runs end to end: journal settles, a
     moduleAdapter.register('git.commit' as never, toModuleHandler(gitOperations.commit));
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: mutatingRegistryOf([STAGE_ENTRY, COMMIT_ENTRY]),
       ceiling: MUTATION_CAPABILITY_SET,
       moduleAdapter,
@@ -607,6 +617,7 @@ test('mutation with the journal forced to fail returns infrastructure, and the w
     };
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: mutatingRegistryOf([STAGE_ENTRY]),
       ceiling: MUTATION_CAPABILITY_SET,
       moduleAdapter,
@@ -666,6 +677,7 @@ test('two concurrent mutations against the same repository never overlap — ins
     });
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: mutatingRegistryOf([STAGE_ENTRY]),
       ceiling: MUTATION_CAPABILITY_SET,
       moduleAdapter,
@@ -745,6 +757,7 @@ test('two concurrent mutations against *different* repositories never overlap ei
     });
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: mutatingRegistryOf([STAGE_ENTRY]),
       ceiling: MUTATION_CAPABILITY_SET,
       moduleAdapter,
@@ -836,6 +849,7 @@ test('a mutation that times out waiting for the mutation lock returns conflict n
     });
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: mutatingRegistryOf([STAGE_ENTRY]),
       ceiling: MUTATION_CAPABILITY_SET,
       moduleAdapter,
@@ -941,6 +955,7 @@ test('the materialisation lock is released after the mutation lock, not before �
     };
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: mutatingRegistryOf([STAGE_ENTRY]),
       ceiling: MUTATION_CAPABILITY_SET,
       moduleAdapter,
@@ -1028,6 +1043,7 @@ test('S8.6 — a parked declaration still serves reads and refuses ordinary muta
     await cloneStore.markAttention('repo-a' as never, 'an earlier operation was parked');
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: mutatingRegistryOf([STAGE_ENTRY, fixtureTool({ name: 'repo_status', capabilities: ['repo.read'] })]),
       ceiling: MUTATION_CAPABILITY_SET,
       moduleAdapter,
@@ -1084,6 +1100,7 @@ test('S8.8 — a session holding attention.resolve reaches the same mutating too
     await cloneStore.markAttention('repo-a' as never, 'parked for repair');
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: repairRegistryOf([STAGE_ENTRY]),
       ceiling: REPAIR_CAPABILITY_SET,
       moduleAdapter,
@@ -1141,6 +1158,7 @@ test('S8.8 — the repair gate is a predicate on executionClass, not a list of t
     await cloneStore.markAttention('repo-a' as never, 'parked');
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: repairRegistryOf([futureTool]),
       ceiling: REPAIR_CAPABILITY_SET,
       moduleAdapter,
@@ -1195,6 +1213,7 @@ test('S8.7 — the lazy recovery pass finishes before the triggering mutation ac
     };
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: mutatingRegistryOf([STAGE_ENTRY]),
       ceiling: MUTATION_CAPABILITY_SET,
       moduleAdapter,
@@ -1248,6 +1267,7 @@ test('S8.6 — a mutation arriving while the lazy pass is still running is refus
     let passes = 0;
     let releasePass: (() => void) | null = null;
     const pipeline = createDispatchPipeline({
+      exec,
       registry: mutatingRegistryOf([STAGE_ENTRY, fixtureTool({ name: 'repo_status', capabilities: ['repo.read'] })]),
       ceiling: MUTATION_CAPABILITY_SET,
       moduleAdapter,
@@ -1318,6 +1338,7 @@ test('S8.9 — resolving a parked entry returns the clone to ready and the decla
     writeFileSync(path.join(clonePath, 'README.md'), 'fixture\nchanged\n', 'utf8');
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: mutatingRegistryOf([STAGE_ENTRY]),
       ceiling: MUTATION_CAPABILITY_SET,
       moduleAdapter,
@@ -1417,6 +1438,7 @@ test('S8.10 — recovery discards nothing: a real clone keeps every commit, stas
     assert.match(before, /true$/, 'the fixture must actually hold an untracked file');
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: mutatingRegistryOf([STAGE_ENTRY]),
       ceiling: MUTATION_CAPABILITY_SET,
       moduleAdapter,
@@ -1517,6 +1539,7 @@ test('a resume dispatched from inside the lazy pass is not refused by the pass i
     // stubbed dispatch cannot show this — the resume has to actually re-enter.
     let pipeline!: ReturnType<typeof createDispatchPipeline>;
     pipeline = createDispatchPipeline({
+      exec,
       registry: mutatingRegistryOf([STAGE_ENTRY]),
       ceiling: MUTATION_CAPABILITY_SET,
       moduleAdapter,
@@ -1607,6 +1630,7 @@ test('S8.8 — the repair gate is scoped to local writes: a mutating remote tool
     fixture.current = { ...fixture.current!, capabilityGrant: new Set(['repo.read', 'git.local.write', 'git.remote.write']) as never };
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: {
         fingerprint: 'a'.repeat(64) as never,
         compiledAt: systemClock.now(),
@@ -1638,7 +1662,7 @@ test('S8.8 — the repair gate is scoped to local writes: a mutating remote tool
 });
 
 test('a pass that finds an entry already parked re-marks the clone, closing the crash window between the two writes', async () => {
-  await withDeclaredRepo(async ({ declarations, cloneStore, volume }) => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, volume, exec }) => {
     const journal = createJournal({ volumeRoot: volume, clock: systemClock });
     await materialise(cloneStore, declarations);
 
@@ -1839,7 +1863,7 @@ function waitingTool(name: string, timeoutSeconds = 1800): ToolDeclaration {
 }
 
 test('S10.5: a monitoring wait holds neither lock while it runs', async () => {
-  await withDeclaredRepo(async ({ declarations, cloneStore, locks }) => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, locks, exec }) => {
     const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
     const moduleAdapter = createModuleAdapter();
 
@@ -1859,6 +1883,7 @@ test('S10.5: a monitoring wait holds neither lock while it runs', async () => {
     });
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: registryOf([waitingTool('checks_await')]),
       ceiling: CAPABILITY_SET,
       moduleAdapter,
@@ -1905,7 +1930,7 @@ test('S10.5: a monitoring wait holds neither lock while it runs', async () => {
 });
 
 test('S10.6: a wait requesting 3600s is clamped to 1800s rather than refused', async () => {
-  await withDeclaredRepo(async ({ declarations, cloneStore, locks }) => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, locks, exec }) => {
     const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
     const moduleAdapter = createModuleAdapter();
     let seen: unknown = null;
@@ -1915,6 +1940,7 @@ test('S10.6: a wait requesting 3600s is clamped to 1800s rather than refused', a
     });
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: registryOf([waitingTool('checks_await')]),
       ceiling: CAPABILITY_SET,
       moduleAdapter,
@@ -1942,7 +1968,7 @@ test('S10.6: a wait requesting 3600s is clamped to 1800s rather than refused', a
 });
 
 test('S10.6: a wait requesting less than the cap is left exactly as asked', async () => {
-  await withDeclaredRepo(async ({ declarations, cloneStore, locks }) => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, locks, exec }) => {
     const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
     const moduleAdapter = createModuleAdapter();
     let seen: unknown = null;
@@ -1952,6 +1978,7 @@ test('S10.6: a wait requesting less than the cap is left exactly as asked', asyn
     });
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: registryOf([waitingTool('checks_await')]),
       ceiling: CAPABILITY_SET,
       moduleAdapter,
@@ -1977,7 +2004,7 @@ test('S10.6: a wait requesting less than the cap is left exactly as asked', asyn
 });
 
 test('S10.7: exceeding concurrentWaitsPerSession returns conflict', async () => {
-  await withDeclaredRepo(async ({ declarations, cloneStore }) => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec }) => {
     const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
     const locks = createLocks({ mutationQueueDepth: 32, concurrentWaitsPerSession: 1, concurrentLockFreeOperations: 16 });
     const moduleAdapter = createModuleAdapter();
@@ -1996,6 +2023,7 @@ test('S10.7: exceeding concurrentWaitsPerSession returns conflict', async () => 
     });
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: registryOf([waitingTool('checks_await')]),
       ceiling: CAPABILITY_SET,
       moduleAdapter,
@@ -2040,7 +2068,7 @@ test('S10.7: exceeding concurrentWaitsPerSession returns conflict', async () => 
 });
 
 test('S10.7: exceeding concurrentLockFreeOperations returns conflict, naming the process limit', async () => {
-  await withDeclaredRepo(async ({ declarations, cloneStore }) => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec }) => {
     const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
     const locks = createLocks({ mutationQueueDepth: 32, concurrentWaitsPerSession: 8, concurrentLockFreeOperations: 1 });
     const moduleAdapter = createModuleAdapter();
@@ -2059,6 +2087,7 @@ test('S10.7: exceeding concurrentLockFreeOperations returns conflict, naming the
     });
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: registryOf([waitingTool('checks_await')]),
       ceiling: CAPABILITY_SET,
       moduleAdapter,
@@ -2095,7 +2124,7 @@ test('S10.7: exceeding concurrentLockFreeOperations returns conflict, naming the
 });
 
 test('an http-targeted monitoring-wait tool never materialises a clone either — the guard is shared, not read-path-only', async () => {
-  await withDeclaredRepo(async ({ declarations, cloneStore }) => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec }) => {
     const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
     const moduleAdapter = createModuleAdapter();
 
@@ -2114,6 +2143,7 @@ test('an http-targeted monitoring-wait tool never materialises a clone either �
     };
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: registryOf([entry]),
       ceiling: CAPABILITY_SET,
       moduleAdapter,
@@ -2141,7 +2171,7 @@ test('an http-targeted monitoring-wait tool never materialises a clone either �
 });
 
 test('an http-targeted read tool never materialises a clone — no credential dependency, ever (S12.7)', async () => {
-  await withDeclaredRepo(async ({ declarations, cloneStore }) => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec }) => {
     const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
     const moduleAdapter = createModuleAdapter();
 
@@ -2160,6 +2190,7 @@ test('an http-targeted read tool never materialises a clone — no credential de
     };
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: registryOf([entry]),
       ceiling: CAPABILITY_SET,
       moduleAdapter,
@@ -2223,7 +2254,7 @@ test('S15.7 (generalized) — any mutating tool that times out parks its journal
 });
 
 test('S23.3 — a file-watcher plan receives cloneRoot null and takes no clone, lock, or journal path', async () => {
-  await withDeclaredRepo(async ({ declarations, cloneStore }) => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec }) => {
     let ensureCalls = 0;
     let mutationCalls = 0;
     let journalCalls = 0;
@@ -2235,6 +2266,7 @@ test('S23.3 — a file-watcher plan receives cloneRoot null and takes no clone, 
     });
     const entry = fixtureTool({ name: 'watch_plan', target: moduleTarget('watch.plan'), scopes: ['write'], capabilities: [], executionClass: 'read', annotations: { schedulable: false, fileWatcher: 'plan', untrustedOutput: true }, outputSchema: { type: 'object', properties: { branch: { type: 'string' }, commitMessage: { type: 'string' }, pullRequest: { type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' } }, required: ['title', 'body'] }, permittedPaths: { type: 'array', items: { type: 'string' } }, plan: { type: 'object', properties: { target: { type: 'string' } }, required: ['target'] } }, required: ['branch', 'commitMessage', 'pullRequest', 'permittedPaths', 'plan'] } as never });
     const pipeline = createDispatchPipeline({
+      exec,
       registry: registryOf([entry]), ceiling: CAPABILITY_SET, moduleAdapter, declarations,
       cloneStore: { ...cloneStore, ensure: (...args) => { ensureCalls += 1; return cloneStore.ensure(...args); } },
       locks: { pinActiveOperation: () => ({ release() {} }), acquireMutation: async () => { mutationCalls += 1; return { ok: false, error: { resultKind: 'conflict', retryable: false, summary: 'unexpected', code: 'acquire-timeout', holder: null } } as never; } },
@@ -2249,11 +2281,11 @@ test('S23.3 — a file-watcher plan receives cloneRoot null and takes no clone, 
 });
 
 test('S23.3 — invalid file-watcher plan output returns infrastructure', async () => {
-  await withDeclaredRepo(async ({ declarations, cloneStore }) => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec }) => {
     const moduleAdapter = createModuleAdapter();
     moduleAdapter.register('watch.bad-plan' as never, async (ctx) => success('bad', { permittedPaths: ['z.md', 'a.md'], plan: {} }, { operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation, durationMs: 0 }));
     const entry = fixtureTool({ name: 'watch_bad_plan', target: moduleTarget('watch.bad-plan'), scopes: ['write'], capabilities: [], executionClass: 'read', annotations: { schedulable: false, fileWatcher: 'plan', untrustedOutput: true }, outputSchema: { type: 'object', properties: { permittedPaths: { type: 'array', items: { type: 'string' } }, plan: { type: 'object' } }, required: ['permittedPaths', 'plan'] } as never });
-    const pipeline = createDispatchPipeline({ registry: registryOf([entry]), ceiling: CAPABILITY_SET, moduleAdapter, declarations, cloneStore, locks: createLocks(), audit: createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock }), clock: systemClock });
+    const pipeline = createDispatchPipeline({ exec, registry: registryOf([entry]), ceiling: CAPABILITY_SET, moduleAdapter, declarations, cloneStore, locks: createLocks(), audit: createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock }), clock: systemClock });
     const result = await pipeline.dispatch({ toolName: entry.name, input: {}, session: sessionWith([]), declarationId: 'repo-a' as never, scheduledJobId: null, context: 'normal', signal: new AbortController().signal });
     assert.equal(result.kind, 'infrastructure');
     assert.match(result.summary, /sorted and duplicate-free/);
@@ -2314,7 +2346,7 @@ test('S23.4 — file-watcher apply checks malformed, declaration, and plan path 
 });
 
 test('S16.6 — a mutating call carrying a scheduledJobId has it stamped onto its journal entry, never on the job itself', async () => {
-  await withDeclaredRepo(async ({ declarations, cloneStore, locks, fixture, volume }) => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, locks, fixture, volume, exec }) => {
     grantWrite(fixture, []);
     const audit = createAudit({ volumeRoot: volume, clock: systemClock });
     const journal = createJournal({ volumeRoot: volume, clock: systemClock });
@@ -2330,6 +2362,7 @@ test('S16.6 — a mutating call carrying a scheduledJobId has it stamped onto it
     });
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: mutatingRegistryOf([NOOP_ENTRY]),
       ceiling: MUTATION_CAPABILITY_SET,
       moduleAdapter,
@@ -2362,7 +2395,7 @@ test('S16.6 — a mutating call carrying a scheduledJobId has it stamped onto it
 });
 
 test('S27.1 — crossing the maintenance watermark after a mutation requests a pass, once both locks have released, and never blocks the response', async () => {
-  await withDeclaredRepo(async ({ declarations, cloneStore, locks, fixture, volume }) => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, locks, fixture, volume, exec }) => {
     grantWrite(fixture, []);
     const audit = createAudit({ volumeRoot: volume, clock: systemClock });
     const journal = createJournal({ volumeRoot: volume, clock: systemClock });
@@ -2391,6 +2424,7 @@ test('S27.1 — crossing the maintenance watermark after a mutation requests a p
     };
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: mutatingRegistryOf([NOOP_ENTRY]),
       ceiling: MUTATION_CAPABILITY_SET,
       moduleAdapter,
@@ -2425,7 +2459,7 @@ test('S27.1 — crossing the maintenance watermark after a mutation requests a p
 });
 
 test('2026-08-13 post-S27 reconciliation — the refuse watermark gates a mutation against an already-ready clone, not only materialisation', async () => {
-  await withDeclaredRepo(async ({ declarations, cloneStore, locks, fixture, volume }) => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, locks, fixture, volume, exec }) => {
     grantWrite(fixture, []);
     const audit = createAudit({ volumeRoot: volume, clock: systemClock });
     const journal = createJournal({ volumeRoot: volume, clock: systemClock });
@@ -2469,6 +2503,7 @@ test('2026-08-13 post-S27 reconciliation — the refuse watermark gates a mutati
     };
 
     const pipeline = createDispatchPipeline({
+      exec,
       registry: mutatingRegistryOf([NOOP_ENTRY]),
       ceiling: MUTATION_CAPABILITY_SET,
       moduleAdapter,

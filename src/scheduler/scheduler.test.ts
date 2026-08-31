@@ -109,6 +109,17 @@ function refusingDispatch(): Dispatch {
   };
 }
 
+/**
+ * Every grant live. `SchedulerDependencies.authorization` is required (post-S36
+ * reconciliation), so a test that is not about revocation says so explicitly
+ * rather than omitting the dependency and silently getting the same behaviour.
+ */
+const ALL_GRANTS_LIVE: Pick<Authorization, 'grantIsLive'> = {
+  async grantIsLive() {
+    return true;
+  },
+};
+
 function fakeAuthorization(liveGrants: Set<string>): Pick<Authorization, 'grantIsLive'> {
   return {
     async grantIsLive(grantId) {
@@ -170,6 +181,7 @@ test('S16.1 — creating a job naming a tool without the schedulable annotation 
     const declarations = await createDeclaredRepo(volume, ceiling, ['host.pr.write']);
     const journal = createJournal({ volumeRoot: volume, clock: systemClock });
     const scheduler = createScheduler({
+      authorization: ALL_GRANTS_LIVE,
       volumeRoot: volume,
       clock: systemClock,
       dispatch: refusingDispatch(),
@@ -195,6 +207,7 @@ test('S16.1 — creating a job naming a tool absent from the registry returns to
     const declarations = await createDeclaredRepo(volume, ceiling, ['host.pr.write']);
     const journal = createJournal({ volumeRoot: volume, clock: systemClock });
     const scheduler = createScheduler({
+      authorization: ALL_GRANTS_LIVE,
       volumeRoot: volume,
       clock: systemClock,
       dispatch: refusingDispatch(),
@@ -233,6 +246,7 @@ test('S16.3 — at fire time the grant is re-intersected with the declaration gr
     const journal = createJournal({ volumeRoot: volume, clock: systemClock });
     const { dispatch, calls } = recordingDispatch();
     const scheduler = createScheduler({
+      authorization: ALL_GRANTS_LIVE,
       volumeRoot: volume,
       clock: systemClock,
       dispatch,
@@ -343,6 +357,7 @@ test('S16.5 — cancelForDeclaration moves pending jobs to cancelled naming the 
     const declarations = await createDeclaredRepo(volume, ceiling, ['host.pr.write']);
     const journal = createJournal({ volumeRoot: volume, clock: systemClock });
     const scheduler = createScheduler({
+      authorization: ALL_GRANTS_LIVE,
       volumeRoot: volume,
       clock: systemClock,
       dispatch: refusingDispatch(),
@@ -383,6 +398,7 @@ test('S16.7 — resolveRunningAtBoot classifies a running job from the journal a
     const declarations = await createDeclaredRepo(volume, ceiling, ['host.pr.write']);
     const journal = createJournal({ volumeRoot: volume, clock: systemClock });
     const scheduler = createScheduler({
+      authorization: ALL_GRANTS_LIVE,
       volumeRoot: volume,
       clock: systemClock,
       dispatch: refusingDispatch(),
@@ -451,6 +467,7 @@ test('S16.8 — resolveRunningAtBoot performs no git or host I/O: it reaches the
       },
     };
     const scheduler = createScheduler({
+      authorization: ALL_GRANTS_LIVE,
       volumeRoot: volume,
       clock: systemClock,
       dispatch: refusingDispatch(),
@@ -482,6 +499,7 @@ test('S16.9 — an image upgrade removing a tool makes a pending job needs-atten
     const declarations = await createDeclaredRepo(volume, ceiling, ['host.pr.write']);
     const journal = createJournal({ volumeRoot: volume, clock: systemClock });
     const scheduler = createScheduler({
+      authorization: ALL_GRANTS_LIVE,
       volumeRoot: volume,
       clock: systemClock,
       dispatch: refusingDispatch(),
@@ -525,6 +543,7 @@ test('cancel reports job-not-found for another declaration\'s job, and job-not-p
     assert.equal((await declarations.declare(declareInputFor('repo-b', ['host.pr.write']), OPERATOR)).ok, true);
     const journal = createJournal({ volumeRoot: volume, clock: systemClock });
     const scheduler = createScheduler({
+      authorization: ALL_GRANTS_LIVE,
       volumeRoot: volume,
       clock: systemClock,
       dispatch: refusingDispatch(),
@@ -621,6 +640,7 @@ test('S25.5 — runRetention deletes an old terminal job (done/skipped/cancelled
     const declarations = await createDeclaredRepo(volume, ceiling, ['host.pr.write']);
     const journal = createJournal({ volumeRoot: volume, clock: systemClock });
     const scheduler = createScheduler({
+      authorization: ALL_GRANTS_LIVE,
       volumeRoot: volume,
       clock: systemClock,
       dispatch: refusingDispatch(),

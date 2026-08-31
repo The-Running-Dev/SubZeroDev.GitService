@@ -825,7 +825,11 @@ never shown, and both are worth auditing rather than dropping at the transport.
 
 ## Module boundaries
 
-Six layers. **Dependencies point downward only.**
+Six layers. **Dependencies point downward only** — no module value-imports a module in a higher
+layer. A *type-only* upward import is the one exception, because a module that receives a
+collaborator by injection cannot type the injection point without it; the import erases, so no
+runtime edge exists. Those are enumerated in the dependency-direction check rather than here, so a
+new one fails rather than accrues.
 
 ```text
 L5  Surfaces        MCP transport  |  HTTP API  |  console host
@@ -844,19 +848,19 @@ L0  Contract        contract types  |  compiler  |  generated registry
 | **Result / errors / clock** (L1) | The envelope, the eight kinds, the error classes, injectable time. | Nothing. | Constructors and predicates. |
 | **Exec** (L1) | Every subprocess. Fixed executables, argument vectors never strings, no shell, pinned working directory, secret scrubbing of captured output, credentials passed by environment name so they never appear in a process listing. | Result, errors. | Guarded `git` and `gh` runners. |
 | **Locks** (L1) | The global mutation mutex, the per-declaration materialisation mutex, and the per-declaration active-operation count. | Nothing. | Two acquire functions with bounded waits, and a non-blocking pin. |
-| **Declarations** (L1) | The declaration table, the lattice intersection, the remote-host allowlist. | Structured store, result. | Read, write, and the effective-grant computation. |
-| **Credentials** (L1) | Reference-to-secret resolution and the allowed-host constraint on each reference. Ships one resolver — the mounted secrets directory — behind an interface a second could satisfy. | The configured resolver. | Resolution that returns a value only into an exec environment, never to a handler. |
+| **Declarations** (L1) | The declaration table, the lattice intersection, the remote-host allowlist. | Structured store, contract types, and the clone store's eviction-verdict types. | Read, write, and the effective-grant computation. |
+| **Credentials** (L1) | Reference-to-secret resolution and the allowed-host constraint on each reference. Ships one resolver — the mounted secrets directory — behind an interface a second could satisfy. | The configured resolver, the structured store (the failure marks), exec, declarations, audit and the clock. | Resolution that returns a value only into an exec environment, never to a handler. |
 | **Clone store** (L1) | Materialisation, the safe-to-evict predicate, eviction, disk-pressure watermarks, remote cross-check, and the git-state *observation* recovery compares against. **Not retention beyond its own clones.** | Exec, declarations, locks, journal, recovery catalogue, audit. | Ensure, evict-if-safe, describe, request-maintenance, `runRetention`. |
-| **Journal** (L1) | Intent records, and the *classification rule* applied to a state observation it is handed. **It does not read git.** | Structured store, clock. | Begin, step, settle, a pure `classify(entry, observedState, descriptor)`, and `runRetention`. |
-| **Recovery catalogue** (L1) | A registry of per-tool recovery descriptors — expected post-state predicate and optional resume step — keyed by registry tool name. **Populated by registration at composition time, never by importing a domain module.** | Nothing. | Register, look up. |
-| **Audit** (L1) | The append-only scrubbed log, its hash chain, its single-writer append queue, and the read query the console view uses. | Exec's scrubber, clock, and the structured store — for the advisory `audit_chain_head` mirror and the retained anchors only. The segment files are the trail, and every read of the store here is best-effort, so the log survives that store's corruption. | Append (never throws), query, verify, `runRetention`. |
-| **Notifier** (L1) | Terminal-state notification, bounded retry, the outbox, and the `attention` / `info` severity split. **One transport: an HTTP webhook**, which is what Slack, Discord, Teams and most else accept; no second transport ships. **At L1, not L2** — see the notifier's placement below. | Structured store, clock. | Notify. Never blocks a caller. `runRetention`. |
+| **Journal** (L1) | Intent records, and the *classification rule* applied to a state observation it is handed. **It does not read git.** | Structured store, clock, and — for types only — the clone store's observation record and the recovery catalogue's verdict. Neither is a value edge; see the acyclicity argument. | Begin, step, settle, a pure `classify(entry, observedState, descriptor)`, and `runRetention`. |
+| **Recovery catalogue** (L1) | A registry of per-tool recovery descriptors — expected post-state predicate and optional resume step — keyed by registry tool name. **Populated by registration at composition time, never by importing a domain module.** | Nothing at runtime; the descriptor types it stores name the clone store's observation and the journal's entry. | Register, look up. |
+| **Audit** (L1) | The append-only scrubbed log, its hash chain, its single-writer append queue, and the read query the console view uses. | Clock, and the structured store — for the advisory `audit_chain_head` mirror and the retained anchors only. The segment files are the trail, and every read of the store here is best-effort, so the log survives that store's corruption. | Append (never throws), query, verify, `runRetention`. **It does not scrub.** **S5** is held on the write path rather than in this module: `exec` scrubs captured output at the point of capture, and the dispatch pipeline scrubs a journal entry's input before it is persisted. An earlier draft listed exec's scrubber as a dependency here; no such edge exists, and asserting one hid the fact that the property is every caller's to hold. |
+| **Notifier** (L1) | Terminal-state notification, bounded retry, the outbox, and the `attention` / `info` severity split. **One transport: an HTTP webhook**, which is what Slack, Discord, Teams and most else accept; no second transport ships. **At L1, not L2** — see the notifier's placement below. | Structured store, clock, audit — `clearFailed` records an operator clearing a row. | Notify. Never blocks a caller. `runRetention`. |
 | **Lifecycle** (L1) | The boot sequence, and the order the maintenance pass drives each module's `runRetention` in. Receives every collaborator by injection. **A checked module, not part of the composition root** — these are ordering decisions with failure modes, not wiring. **Not the cadences**: it exposes a `runMaintenance` the composition root's timer calls, and the snapshot interval belongs to the structured store, which owns the copies — see the retention-owners table above and the composition root below. | Whatever it is handed. | Boot, run-maintenance, shutdown. |
 | **Git operations** (L2) | Every repository-generic git behaviour: status, log, branches, health, diff, stage, commit, restore-paths, push, and the seven protected-base invariants. | L1. | Domain functions returning `ToolResult`. |
 | **Composites** (L2) | Handwritten, fixed-sequence transactional operations — branch preparation, reconcile-after-merge. Each declares its journal steps and its recovery descriptor. | Git operations, host adapter, journal. | Domain functions, and a recovery descriptor per operation. |
 | **Host adapter** (L2) | Pull requests, checks, merges, deploy monitoring; the per-credential request budget and backoff. One implementation, GitHub via `gh`. | Exec, credentials. | A host-shaped interface a second implementation could satisfy. |
-| **Scheduler** (L2) | Due-job selection, missed-tick policy, grant re-intersection. | Declarations, journal — and the dispatch pipeline **by injection**, never by import. It takes no notifier edge today; it acquires one only if #49 wires terminal-state notification here rather than into dispatch, which is the open question that issue holds. | A tick engine. |
-| **Watcher** (L2) | Per-declaration file watcher directories: the poll loop, the claim-and-move directory state machine, interrupted-claim recovery, and the pending-pull-request follow-up list. | Declarations, clone store — and the dispatch pipeline **by injection**, never by import, exactly as the scheduler takes it. Every git and host step goes through that injected pipeline, so it depends on neither git operations nor the host adapter directly. | A watch engine. `runRetention` for `processed/`. |
+| **Scheduler** (L2) | Due-job selection, missed-tick policy, grant re-intersection. | Declarations, journal — and the dispatch pipeline and authorization's `grantIsLive` **by injection**, never as a value import. It takes no notifier edge today; it acquires one only if #49 wires terminal-state notification here rather than into dispatch, which is the open question that issue holds. | A tick engine. |
+| **Watcher** (L2) | Per-declaration file watcher directories: the poll loop, the claim-and-move directory state machine, interrupted-claim recovery, and the pending-pull-request follow-up list. | Declarations, clone store, audit, the notifier, the structured store — and the dispatch pipeline **by injection**, never as a value import, exactly as the scheduler takes it. Every git and host step goes through that injected pipeline, and the watcher reads each result as opaque JSON it narrows and checks itself, so it depends on neither git operations nor the host adapter directly. It asserted that dependence away with a cast until S36's reconciliation; a claim held by a cast is not held. | A watch engine. `runRetention` for `processed/`. |
 | **Module adapter** (L3) | Invoking a registry entry whose execution target is in-process. Holds a handler catalogue keyed by target name, **populated by registration at composition time, never by importing a handler.** | L1, contract types. | Register, and an invoke the pipeline calls. |
 | **Http adapter** (L3) | Invoking a registry entry whose execution target is a declared HTTP endpoint: request shaping, the declared timeout, response mapping into the envelope. Its consumer is published-URL verification — see below. | L1, contract types. | Invoke. |
 | **Dispatch pipeline** (L4) | The one canonical call path: identify, authenticate, enforce scopes, enforce capabilities, validate input, apply limits and cancellation, invoke adapter, validate output, scrub, audit, envelope. | L3, L1, the registry artifact. **Not L2** — see the acyclicity argument. | Dispatch. |
@@ -885,8 +889,8 @@ Two edges would obviously become cycles, and are cut deliberately:
   from neither. Terminal-state notification fires from the dispatch pipeline at L4, which may not
   import L2 at all, and from boot recovery at L1, which sits below it — and neither declared it as
   a dependency. It belongs at **L1**: it holds no git or host knowledge, takes a terminal state
-  and a reason as plain values, and depends only on the structured store and the clock, which is
-  the same test that places audit and journal there. Both callers then point downward with no
+  and a reason as plain values, and depends only on the structured store, the clock and audit,
+  which is the same test that places audit and journal there. Both callers then point downward with no
   injection, and the rule that the outbox row is written in the same store transaction as the
   journal settle becomes an intra-L1 write rather than a cross-layer one.
 - **Recovery also needs to know what each operation was supposed to achieve**, and that is L2
@@ -900,7 +904,7 @@ Two edges would obviously become cycles, and are cut deliberately:
   mechanism — which is the point: a name resolved at startup is how everything above and below
   L2 reaches it.
 
-One further boundary is a product decision rather than hygiene: **nothing in L0, L3 or L4 may
+One further boundary is a product decision rather than hygiene: **nothing in L0, L3, L4 or L5 may
 import anything from L2.** The runtime is generic; the git domain is a consumer of it. That is
 the seam `MCP-NEXT.md` Phase 8 exists to eventually cut, and it stops being cuttable the first
 time the dispatch pipeline knows what a branch is. It is enforced by a dependency-direction
@@ -912,8 +916,10 @@ dispatch pipeline has to end up calling a git operation without importing one, s
 L2 handler into the module adapter's catalogue by target name, registers every recovery descriptor
 into the recovery catalogue by the same key, injects the pipeline into the scheduler and the
 watcher, constructs the lifecycle module and hands it its collaborators, and starts the surfaces.
-It is the only file exempt from the dependency-direction check, and the exemption is by path, so
-widening it is a visible diff rather than a habit.
+The files it consists of are the only ones exempt from the dependency-direction check, and the
+exemption is **by file path, never by directory**, so widening it is a visible diff rather than a
+habit. Exempting the directory instead is how that stopped being true once the root became more
+than one file, and is why the granularity is stated here rather than left to the check.
 
 **What it does not own is ordering.** The boot sequence and the order the maintenance pass drives
 each module's retention in are decisions with failure modes rather than wiring, and they live in
@@ -933,7 +939,10 @@ once called, which is why `runMaintenance`'s retention order stays in the lifecy
 The watcher is the one exception and states its own reason: its poll loop is the delivery state
 machine rather than a schedule over it, so `start`/`stop` are on its interface.
 
-With those cuts every edge points strictly downward, so the graph is acyclic by construction.
+With those cuts every runtime edge points strictly downward, so the graph is acyclic by
+construction. That is a property of the *value* graph: the type graph still carries the injection
+edges above, which is why the check distinguishes the two rather than reading an `import type` as
+a violation.
 
 ### The http adapter's consumer
 

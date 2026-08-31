@@ -11,7 +11,7 @@ import type { Declarations } from '../declarations/declarations.ts';
 import type { Declaration } from '../declarations/types.ts';
 import type { CloneStore } from '../clone/clone-store.ts';
 import type { Audit } from '../audit/audit.ts';
-import type { WatchedFileOutcome } from '../audit/types.ts';
+import type { PullRequestRef, WatchedFileOutcome } from '../audit/types.ts';
 import type { Notifier } from '../notifier/notifier.ts';
 import type { StructuredStore, StoreTransaction } from '../store/structured-store.ts';
 import { capabilityScopeOf, type CapabilityName, type ContractCapabilitySet } from '../contract/capabilities.ts';
@@ -20,10 +20,8 @@ import type { ToolResult } from '../result/envelope.ts';
 import { isError, type ResultKind } from '../shared/result-kind.ts';
 import type { OperationContextKind } from '../shared/actor.ts';
 import { directoryBytes, unlinkAndCountBytes, type RetentionReport } from '../shared/retention.ts';
-import type { RepoStatusData } from '../git/types.ts';
-import type { PrOpenData, PrStatusData } from '../host/types.ts';
 import { watcherError, type WatcherError } from './errors.ts';
-import type { FileWatcherApplyData, FileWatcherPlanData, PendingPullRequest, WatchTickReport } from './types.ts';
+import type { FileWatcherPlanData, PendingPullRequest, WatchTickReport } from './types.ts';
 import { readPendingPullRequests, writePendingPullRequests } from './pending-pull-requests.ts';
 
 /** `20-contract.md` § L2 — watcher. */
@@ -111,6 +109,72 @@ function readStrictUtf8(fullPath: string): { readonly ok: true; readonly value: 
  * § Error semantics › Clone store: "Reads ... still work"), so `dirty` alone
  * cannot tell the two apart.
  */
+/**
+ * A dispatch result is opaque JSON. The watcher narrows only the fields it
+ * uses, and checks them — it does not import the producing module's output
+ * type and assert the shape.
+ *
+ * These were `as unknown as` casts. On the production path they were backed by
+ * something real — the dispatch pipeline validates every result against the
+ * tool's own `outputSchema` before returning it, and `repo_status`'s schema
+ * requires `changedPaths` with both members — so this is not a bug being
+ * fixed. It is where **D12** and **D13** stop depending on a guarantee made
+ * two modules away: the watcher asserts what it reads, so its own comparison
+ * holds against any injected `Dispatch`, validating or not, rather than only
+ * against the one the composition root happens to wire (post-S36
+ * reconciliation). Removing the casts also removed the watcher's direct edges
+ * onto `git/types.ts` and `host/types.ts`, which `10-design.md`'s module table
+ * had claimed it did not have.
+ *
+ * Every reader below returns `null` on anything it cannot verify, and every
+ * caller treats `null` as a refusal.
+ *
+ * `pending-pull-requests.ts`'s `isWellFormedEntry` is the same idiom, applied
+ * to the same problem one file over.
+ */
+
+function asRecord(value: JsonValue | undefined): Record<string, JsonValue> | null {
+  if (value === null || value === undefined || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, JsonValue>;
+}
+
+/** `repo_status`'s `dirty` and `changedPaths`, the only two the watcher reads. */
+function readRepoStatus(value: JsonValue | undefined): { readonly dirty: boolean; readonly changedPaths: readonly { readonly path: string; readonly staged: boolean }[] } | null {
+  const record = asRecord(value);
+  if (record === null || typeof record.dirty !== 'boolean' || !Array.isArray(record.changedPaths)) return null;
+  const changedPaths: { readonly path: string; readonly staged: boolean }[] = [];
+  for (const entry of record.changedPaths) {
+    const item = asRecord(entry);
+    if (item === null || typeof item.path !== 'string' || typeof item.staged !== 'boolean') return null;
+    changedPaths.push({ path: item.path, staged: item.staged });
+  }
+  return { dirty: record.dirty, changedPaths };
+}
+
+/** The apply handler's declared changed paths. Already schema-validated by dispatch (**D11**); read here because the comparison below must not trust a cast. */
+function readAppliedChangedPaths(value: JsonValue | undefined): readonly string[] | null {
+  const record = asRecord(value);
+  if (record === null || !Array.isArray(record.changedPaths)) return null;
+  if (!record.changedPaths.every((entry): entry is string => typeof entry === 'string')) return null;
+  return record.changedPaths;
+}
+
+/** `pr_open`'s `ref`. The two branded members are checked as strings and branded here, where the check is. */
+function readPullRequestRef(value: JsonValue | undefined): PullRequestRef | null {
+  const ref = asRecord(asRecord(value)?.ref);
+  if (ref === null) return null;
+  if (typeof ref.number !== 'number' || !Number.isFinite(ref.number)) return null;
+  if (typeof ref.url !== 'string' || typeof ref.branch !== 'string') return null;
+  return { number: ref.number, url: ref.url as PullRequestRef['url'], branch: ref.branch as PullRequestRef['branch'] };
+}
+
+/** `pr_status`'s `state` and `headSha` — the only two the reconciliation reads. */
+function readPullRequestState(value: JsonValue | undefined): { readonly state: string; readonly headSha: string } | null {
+  const status = asRecord(asRecord(value)?.status);
+  if (status === null || typeof status.state !== 'string' || typeof status.headSha !== 'string') return null;
+  return { state: status.state, headSha: status.headSha };
+}
+
 export function createWatcher(deps: WatcherDependencies): Watcher {
   const { volumeRoot, clock, dispatch, declarations, cloneStore, audit, notifier, store, contractCapabilitySet, remoteOperationsPermitted, watcherEnabled } = deps;
   const pollIntervalSeconds = deps.pollIntervalSeconds ?? POLL_INTERVAL_SECONDS_DEFAULT;
@@ -201,13 +265,15 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
 
     const applied = await callTool(fw.applyTool, { permittedPaths: plan.permittedPaths, plan: plan.plan }, declaration, session);
     if (!applied.ok || applied.data === undefined) return rejectedOutcome('apply', applied.kind, applied.summary);
-    const appliedData = applied.data as unknown as FileWatcherApplyData;
+    const declaredChangedPaths = readAppliedChangedPaths(applied.data);
+    if (declaredChangedPaths === null) return rejectedOutcome('apply', 'infrastructure', 'the apply result did not carry a readable changedPaths array');
 
     const statusAfterApply = await callTool('repo_status', {}, declaration, session);
     if (!statusAfterApply.ok || statusAfterApply.data === undefined) return rejectedOutcome('repo_status_after_apply', statusAfterApply.kind, statusAfterApply.summary);
-    const afterApplyData = statusAfterApply.data as unknown as RepoStatusData;
-    const observedAfterApply = afterApplyData.changedPaths.map((entry) => entry.path as string);
-    if (!sameSet(observedAfterApply, appliedData.changedPaths as readonly string[]) || !isSubset(observedAfterApply, plan.permittedPaths as readonly string[])) {
+    const afterApplyData = readRepoStatus(statusAfterApply.data);
+    if (afterApplyData === null) return rejectedOutcome('repo_status_after_apply', 'infrastructure', 'the status observation was unreadable, so the apply result could not be independently confirmed');
+    const observedAfterApply = afterApplyData.changedPaths.map((entry) => entry.path);
+    if (!sameSet(observedAfterApply, declaredChangedPaths) || !isSubset(observedAfterApply, plan.permittedPaths as readonly string[])) {
       return rejectedOutcome(
         'repo_status_after_apply',
         'infrastructure',
@@ -215,15 +281,16 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
       );
     }
 
-    const staged = await callTool('git_stage', { paths: appliedData.changedPaths }, declaration, session);
+    const staged = await callTool('git_stage', { paths: declaredChangedPaths }, declaration, session);
     if (!staged.ok) return rejectedOutcome('git_stage', staged.kind, staged.summary);
 
     const statusAfterStage = await callTool('repo_status', {}, declaration, session);
     if (!statusAfterStage.ok || statusAfterStage.data === undefined) return rejectedOutcome('repo_status_after_stage', statusAfterStage.kind, statusAfterStage.summary);
-    const afterStageData = statusAfterStage.data as unknown as RepoStatusData;
-    const stagedPaths = afterStageData.changedPaths.map((entry) => entry.path as string);
+    const afterStageData = readRepoStatus(statusAfterStage.data);
+    if (afterStageData === null) return rejectedOutcome('repo_status_after_stage', 'infrastructure', 'the status observation was unreadable, so the staged set could not be independently confirmed');
+    const stagedPaths = afterStageData.changedPaths.map((entry) => entry.path);
     const allStaged = afterStageData.changedPaths.every((entry) => entry.staged);
-    if (!sameSet(stagedPaths, appliedData.changedPaths as readonly string[]) || !allStaged) {
+    if (!sameSet(stagedPaths, declaredChangedPaths) || !allStaged) {
       return rejectedOutcome('repo_status_after_stage', 'infrastructure', 'the independently observed staged paths do not equal the apply result, fully staged');
     }
 
@@ -240,7 +307,8 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
       session,
     );
     if (!prOpened.ok || prOpened.data === undefined) return rejectedOutcome('pr_open', prOpened.kind, prOpened.summary);
-    const prRef = (prOpened.data as unknown as PrOpenData).ref;
+    const prRef = readPullRequestRef(prOpened.data);
+    if (prRef === null) return rejectedOutcome('pr_open', 'infrastructure', 'the pull request was opened but its ref was unreadable, so the file cannot be recorded as delivered');
 
     if (fw.autoMerge) {
       // Best-effort: the pull request is already open, which is the point at
@@ -389,9 +457,9 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     for (let index = 0; index < list.entries.length; index += 1) {
       const entry = list.entries[index]!;
       const statusResult = await callTool('pr_status', { number: entry.number }, declaration, session);
-      const statusData = statusResult.ok ? (statusResult.data as unknown as PrStatusData | undefined) : undefined;
+      const statusData = statusResult.ok ? readPullRequestState(statusResult.data) : null;
 
-      if (!statusResult.ok || statusData === undefined) {
+      if (!statusResult.ok || statusData === null) {
         // `isError` (`upstream`/`timeout`/`infrastructure`) is a transient
         // read failure and stays pending for the next tick. A non-transient
         // one — `validation`/`authorization`/`precondition`/`conflict`, e.g.
@@ -404,13 +472,12 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
         // only trail until that contract amendment exists.
         if (statusResult.ok || isError(statusResult.kind)) stillPending.push(entry);
       } else {
-        const status = statusData.status;
-        if (status.state === 'open') {
+        if (statusData.state === 'open') {
           stillPending.push(entry);
-        } else if (status.state === 'closed') {
+        } else if (statusData.state === 'closed') {
           // Removed without reconciliation (S24.2) — neither list.
         } else {
-          await callTool('reconcile_after_merge', { pullRequestNumber: entry.number, expectedHeadSha: status.headSha }, declaration, session);
+          await callTool('reconcile_after_merge', { pullRequestNumber: entry.number, expectedHeadSha: statusData.headSha }, declaration, session);
           reconciled.push(entry);
         }
       }
@@ -436,8 +503,8 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     }
 
     const status = await callTool('repo_status', {}, declaration, session);
-    const statusData = status.ok ? (status.data as unknown as RepoStatusData | undefined) : undefined;
-    if (!status.ok || statusData === undefined || statusData.dirty !== false) {
+    const statusData = status.ok ? readRepoStatus(status.data) : null;
+    if (!status.ok || statusData === null || statusData.dirty !== false) {
       return emptyReport(declaration.id, 'clone-not-clean', reconciled, stillPending);
     }
 

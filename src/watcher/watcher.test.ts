@@ -455,6 +455,59 @@ test('S17.6 — a terminal failure moves the file to failed/ with a sibling erro
   });
 });
 
+/**
+ * The sibling of S17.7 below, for an observation that is *unreadable* rather
+ * than merely mismatched. The dispatch pipeline validates every result against
+ * the tool's own output schema, so this shape cannot arrive through the wired
+ * pipeline — which is the point: **D12** is the watcher's own comparison, and
+ * it must hold against any injected `Dispatch`, not only a validating one.
+ * Before the readers, this reached `.changedPaths.map(...)` on `undefined` and
+ * threw out of `tick()` mid-apply, with a commit possibly already made and no
+ * `failed/` entry saying so (post-S36 reconciliation).
+ */
+test('S17.7/D12 — an unreadable post-apply observation is refused as a terminal failure, not thrown, and git_stage is never dispatched', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+
+    const dispatchLog: DispatchRequest[] = [];
+    const handlers = successfulHandlers();
+    let call = 0;
+    handlers.repo_status = () => {
+      call += 1;
+      if (call === 1) return repoStatus(false);
+      // Call 2 is the post-apply observation. A body with no `changedPaths`
+      // at all — the shape the cast used to assert rather than check.
+      return success(
+        'status',
+        { branch: 'main', baseBranch: 'main', dirty: true, parkedOffBase: false, ahead: 0, behind: 0, observedRemote: null, readStamp: { lastSettledOperationId: null, mutationInFlight: false } },
+        { operationId: null, declarationId: null, generation: null, durationMs: 0 },
+      ) as unknown as ToolResult<never>;
+    };
+
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch(dispatchLog, handlers),
+    });
+
+    const reports = await createWatcher(deps).tick();
+
+    assert.equal(reports[0]!.outcome?.kind, 'rejected');
+    if (reports[0]!.outcome?.kind === 'rejected') {
+      assert.equal(reports[0]!.outcome.step, 'repo_status_after_apply');
+      assert.equal(reports[0]!.outcome.result, 'infrastructure');
+    }
+    assert.equal(dispatchLog.some((r) => r.toolName === 'git_stage'), false, 'no staging may start from an observation nobody could read');
+
+    const failedFiles = readdirSync(path.join(root, 'failed'));
+    assert.ok(failedFiles.find((f) => f.endsWith('-post.md')), 'the file is preserved in failed/');
+    const errorFile = failedFiles.find((f) => f.endsWith('-post.md.error.txt'));
+    assert.ok(errorFile);
+    assert.match(readFileSync(path.join(root, 'failed', errorFile!), 'utf8'), /repo_status_after_apply/);
+  });
+});
+
 test('S17.7/D12 — a mismatched post-apply observation fails before git_stage is ever dispatched', async () => {
   await withVolumeAsync(async (volume) => {
     const root = inboxRoot(volume, 'repo-a');

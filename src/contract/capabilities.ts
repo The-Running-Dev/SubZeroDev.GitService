@@ -109,6 +109,34 @@ export function scopeForCapability(capability: CapabilityName): McpScope | null 
 }
 
 /**
+ * A scope expands to capabilities by a total rule, not a lookup table —
+ * `20-contract.md` § *Scopes*: `scopeForCapability` above is the single place
+ * that rule is written (the closed nine-literal table plus the `content.*`
+ * tail rule), so this only ever grants a capability this deployment's
+ * contract set actually holds (invariant A1) and is, by construction, total
+ * over it (**A10**) — a capability the rule cannot place is caught at compile
+ * time by `capability-unscopable` instead of silently expanding to nothing
+ * here.
+ *
+ * **Declared here rather than in the authorization module**, for the same
+ * reason `HostKind` below is: it is pure over `scopeForCapability` and holds
+ * no authorization state, and `src/contract/tool-parity.ts` needs it. Keeping
+ * it at L4 made L0 import L4 at runtime — the one edge that made the module
+ * graph cyclic and "dependencies point downward only" (`10-design.md`
+ * § *Module boundaries*) false. `authorization.ts` re-exports it, so **A10**'s
+ * "Compiler, Authorization" responsibility is unchanged.
+ */
+export function expandScopes(scopes: readonly OperatorScope[], contractCapabilitySet: ContractCapabilitySet): SessionGrant {
+  const granted = new Set<CapabilityName>();
+  const requested = new Set<OperatorScope>(scopes);
+  for (const capability of contractCapabilitySet as unknown as ReadonlySet<CapabilityName>) {
+    const scope = scopeForCapability(capability);
+    if (scope !== null && requested.has(scope)) granted.add(capability);
+  }
+  return granted as unknown as SessionGrant;
+}
+
+/**
  * `Declaration.host` (`20-contract.md` § Declaration). Declared here, not in
  * the declarations module, so `hostSupportedCapabilities` below has no
  * import back onto a module that itself depends on this file.

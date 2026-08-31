@@ -9,7 +9,7 @@ import { createDispatchPipeline } from '../src/dispatch/dispatch-pipeline.ts';
 import { createDeclarations, type Declarations } from '../src/declarations/declarations.ts';
 import { createCloneStore, type CloneStore } from '../src/clone/clone-store.ts';
 import { createBareGitRemote } from '../src/clone/testing/git-fixture.ts';
-import { createExec } from '../src/exec/exec.ts';
+import { createExec, type Exec } from '../src/exec/exec.ts';
 import { createLocks } from '../src/locks/locks.ts';
 import { createAudit } from '../src/audit/audit.ts';
 import { createStructuredStore } from '../src/store/structured-store.ts';
@@ -83,7 +83,7 @@ function declarationsWithFixture(volume: string, fixture: { current: Declaration
 }
 
 async function withDeclaredRepo<T>(
-  fn: (ctx: { readonly declarations: Declarations; readonly cloneStore: CloneStore; readonly fixture: { current: Declaration | null } }) => Promise<T>,
+  fn: (ctx: { readonly declarations: Declarations; readonly cloneStore: CloneStore; readonly exec: Exec; readonly fixture: { current: Declaration | null } }) => Promise<T>,
 ): Promise<T> {
   return withVolumeAsync(async (volume) => {
     const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
@@ -97,7 +97,7 @@ async function withDeclaredRepo<T>(
     const declarations = declarationsWithFixture(volume, fixture);
     const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations });
 
-    return fn({ declarations, cloneStore, fixture });
+    return fn({ declarations, cloneStore, exec, fixture });
   });
 }
 
@@ -132,7 +132,7 @@ test("S39.7 — a session of the 'mcp' profile against the example consumer's de
 });
 
 test('S35.5 — example_note_echo is visible only once the declaration grants content.exampleNote.read, alongside the base tools its own grant already covers', async () => {
-  await withDeclaredRepo(async ({ declarations, cloneStore, fixture }) => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec, fixture }) => {
     const compiled = compiler.compile([...PRODUCTION_TOOL_DECLARATIONS, ...EXTRA_TOOL_DECLARATIONS]);
     assert.equal(compiled.ok, true);
     if (!compiled.ok) return;
@@ -155,6 +155,7 @@ test('S35.5 — example_note_echo is visible only once the declaration grants co
       cloneStore,
       locks: createLocks(),
       audit: createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock }),
+      exec,
       clock: systemClock,
     });
 

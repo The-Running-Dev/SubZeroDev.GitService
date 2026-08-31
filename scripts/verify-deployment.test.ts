@@ -23,6 +23,15 @@ import type { ContractCapabilitySet, DeploymentCeiling } from '../src/contract/c
 import type { HttpAdapter } from '../src/http/http-adapter.ts';
 import { verifyDeployment } from './verify-deployment.ts';
 import { PRODUCTION_TOOL_DECLARATIONS } from '../src/composition-root/production-declarations.ts';
+import type { JsonValue } from '../src/contract/json.ts';
+
+/**
+ * `scrubJson` is a required `DispatchPipelineDependencies` member (post-S36
+ * reconciliation). These routes never carry a resolved secret, so an identity
+ * scrub is correct here — stated, rather than inherited from an optional
+ * dependency's silent fallback.
+ */
+const NO_SECRETS_TO_SCRUB = { scrubJson: (value: JsonValue): JsonValue => value };
 
 /**
  * S22.2: each of the five classifications `verifyDeployment` can return is
@@ -88,6 +97,7 @@ async function withServer<T>(volume: string, commitSha: GitSha, fn: (handle: Ser
     audit: createAudit({ volumeRoot: volume, clock: systemClock }),
   });
   const dispatchPipeline = createDispatchPipeline({
+    exec: NO_SECRETS_TO_SCRUB,
     registry: { fingerprint: 'a'.repeat(64) as never, compiledAt: systemClock.now(), entries: [READ_TOOL], contractCapabilitySet: CEILING as unknown as never },
     ceiling: CEILING as unknown as DeploymentCeiling,
     moduleAdapter: createModuleAdapter(),

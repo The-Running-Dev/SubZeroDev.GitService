@@ -16,6 +16,14 @@ import type { InstanceLease } from '../lifecycle/lease.ts';
 import type { PullRequestRef } from '../host/types.ts';
 
 /**
+ * Re-exported for consumers of `WatchedFileOutcome`'s `succeeded` variant,
+ * which carries one. A consumer reading the outcome would otherwise need its
+ * own edge onto `host/types.ts`; this module already has that edge, listed as
+ * a shared shape in `scripts/check-layer-direction.ts`, so one is enough.
+ */
+export type { PullRequestRef } from '../host/types.ts';
+
+/**
  * Type only. The audit module (L1) that maintains the chain is S3, which is
  * also where U9 — the record's canonical serialisation — must be answered
  * before the first line is appended. Boot reports the chain state, so the

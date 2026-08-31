@@ -2846,7 +2846,7 @@ responsible for maintaining it.
 
 | # | Invariant | Responsible |
 |---|---|---|
-| B1 | Nothing in L0, L3, L4 or L5 imports anything from L2, and the exemption is exactly one path — the composition root. | CI dependency-direction check |
+| B1 | Nothing in L0, L3, L4 or L5 imports anything from L2, and the exemption names the composition root's files **by path, never by directory**, so widening it is a visible diff. Separately, no module value-imports a module in a higher layer; a type-only upward import holds only where the check itself lists it with its reason. | CI dependency-direction check |
 | B2 | The module dependency graph is acyclic. The scheduler, the watcher and the lifecycle module receive `Dispatch` by injection; the module adapter and the recovery catalogue are populated by registration. | Composition root |
 | B3 | Boot verifies the registry fingerprint and the console asset manifest, and refuses to start on a mismatch. | Lifecycle |
 | B4 | The deployment ceiling is a subset of the contract capability set. Startup is fatal otherwise. | Lifecycle |
