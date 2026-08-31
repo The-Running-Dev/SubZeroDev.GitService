@@ -2162,17 +2162,9 @@ Emptied again 2026-08-30 by `/track` — both S21 entries added 2026-08-30 (the 
 fresh-clone credential gap; the `pr_enable_auto_merge` merge-conflict detection gap) are now tracked as
 issues #178 and #198 respectively.
 
-Added 2026-08-31 by `/reconcile`, both noticed while adjudicating the drift above and deliberately
-not acted on in that pass:
+Added 2026-08-31 by `/reconcile`, one noticed while adjudicating the drift above and deliberately
+not acted on in that pass; the other tracked as an issue by `/track` the same day:
 
-- **`src/credentials/credentials.test.ts:224` is environment-sensitive.** "S9.5: a rotation inside
-  the mark's own millisecond keeps the mark, and one millisecond later clears it" failed on roughly
-  one run in three *in the container this pass ran in*, identically on the unmodified tree — so it
-  is not a regression from this pass. It has **not** been seen in CI: the last eight runs on `main`
-  are green, so this is a millisecond-boundary race that only loses on a host whose timing differs
-  from the runner's, not a flaky gate. Worth making robust rather than leaving to the clock — a test
-  that depends on two operations landing in the same millisecond is asserting something about the
-  machine, not about `credentials.ts` — but it is not currently costing anyone a re-run.
 - **`DispatchPipelineDependencies.journal` is still optional**, with the same expired justification
   the `exec` and `authorization` members carried before the 2026-08-31 entry above removed theirs
   ("Required only once a `mutating` registry entry exists (S7)" — S7 has shipped). Left alone
