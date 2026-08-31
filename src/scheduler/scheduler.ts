@@ -59,8 +59,17 @@ export interface SchedulerDependencies {
   readonly declarations: Pick<Declarations, 'get' | 'effectiveGrant' | 'effectiveWritablePrefixes'>;
   /** `findByScheduledJob` alone — boot resolution reads the journal, it never writes it. */
   readonly journal: Pick<Journal, 'findByScheduledJob'>;
-  /** Optional so a `Scheduler` built before `Authorization` existed still compiles. Without it, `tick` cannot tell a revoked creating grant from a live one and treats every grant as live — the safe direction only once no grant-issuing module exists to revoke one in the first place. */
-  readonly authorization?: Pick<Authorization, 'grantIsLive'>;
+  /**
+   * Required, not optional. `20-contract.md` § Error semantics › Scheduler
+   * says `grant-revoked` is "checked at fire time" and the caller must "never
+   * fire it, never silently drop it" — an optional dependency made that a
+   * fact about the composition root rather than about this module, and its
+   * stated justification ("the safe direction only once no grant-issuing
+   * module exists to revoke one in the first place") expired when
+   * `Authorization` shipped. A caller with nothing to check against passes a
+   * stub that says so, which is a visible decision (post-S36 reconciliation).
+   */
+  readonly authorization: Pick<Authorization, 'grantIsLive'>;
   /** Plain runtime-registry lookup; the compiler remains absent from the runtime image — the same seam `Declarations.registryEntry` already uses. */
   readonly registryEntry: (tool: RegistryToolName) => ToolDeclaration | null;
   readonly contractCapabilitySet: ContractCapabilitySet;
@@ -350,7 +359,7 @@ export function createScheduler(deps: SchedulerDependencies): Scheduler {
             }
           }
 
-          if (job.createdBy.grantId !== null && deps.authorization) {
+          if (job.createdBy.grantId !== null) {
             const live = await deps.authorization.grantIsLive(job.createdBy.grantId);
             if (!live) {
               const reason = `the creating grant '${job.createdBy.grantId}' was revoked before this job's due time`;

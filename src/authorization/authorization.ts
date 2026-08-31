@@ -12,7 +12,7 @@ import { appendIdentityEvent, type Audit } from '../audit/audit.ts';
 import type { IdentityEvent } from '../audit/types.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import { MCP_PROFILE, type Declaration } from '../declarations/types.ts';
-import { scopeForCapability, type ContractCapabilitySet, type DeploymentCeiling, type CapabilityName, type McpScope, type Scope, type OperatorScope } from '../contract/capabilities.ts';
+import { expandScopes, type ContractCapabilitySet, type DeploymentCeiling, type CapabilityName, type McpScope, type Scope, type OperatorScope } from '../contract/capabilities.ts';
 import type { StoreTransaction } from '../store/structured-store.ts';
 import { storeError } from '../store/errors.ts';
 import { retentionCutoff, toRetentionReport, type RetentionReport } from '../shared/retention.ts';
@@ -217,24 +217,14 @@ function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): Outcome<T, 
 }
 
 /**
- * A scope expands to capabilities by a total rule, not a lookup table —
- * `20-contract.md` § *Scopes*: `capabilities.ts`'s `scopeForCapability` is
- * the single place that rule is written (the closed nine-literal table plus
- * the `content.*` tail rule), so this only ever grants a capability this
- * deployment's contract set actually holds (invariant A1) and is, by
- * construction, total over it (**A10**) — a capability the rule cannot place
- * is caught at compile time by `capability-unscopable` instead of silently
- * expanding to nothing here.
+ * Re-exported, not declared here. The rule is pure over `scopeForCapability`
+ * and holds no authorization state, so it lives beside that rule in
+ * `contract/capabilities.ts`; declaring it here made L0's
+ * `contract/tool-parity.ts` import L4 at runtime. **A10**'s "Compiler,
+ * Authorization" responsibility is unchanged — this module is still where a
+ * scope becomes a session grant.
  */
-export function expandScopes(scopes: readonly OperatorScope[], contractCapabilitySet: ContractCapabilitySet): Session['grant'] {
-  const granted = new Set<CapabilityName>();
-  const requested = new Set<OperatorScope>(scopes);
-  for (const capability of contractCapabilitySet as unknown as ReadonlySet<CapabilityName>) {
-    const scope = scopeForCapability(capability);
-    if (scope !== null && requested.has(scope)) granted.add(capability);
-  }
-  return granted as unknown as Session['grant'];
-}
+export { expandScopes } from '../contract/capabilities.ts';
 
 export function createAuthorization(deps: AuthorizationDependencies): Authorization {
   const tokenDays = deps.tokenDays ?? TOKEN_RETENTION_DAYS_DEFAULT;

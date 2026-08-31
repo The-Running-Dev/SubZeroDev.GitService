@@ -64,8 +64,17 @@ export interface DispatchPipelineDependencies {
   readonly audit: Pick<Audit, 'append'>;
   /** Required only once a `mutating` registry entry exists (S7); every S6-only registry never reaches the branch that calls it. */
   readonly journal?: Pick<Journal, 'begin' | 'markApplied' | 'settle'> & Partial<Pick<Journal, 'park'>>;
-  /** `scrubJson` only — `JournalBeginInput.input` must be scrubbed before it is persisted (`20-contract.md` § Operation journal). Optional so every pre-S7 read-only call site keeps compiling; the mutating path is the only one that ever reaches it. */
-  readonly exec?: Pick<Exec, 'scrubJson'>;
+  /**
+   * `scrubJson` only — `JournalBeginInput.input` must be scrubbed before it is
+   * persisted (`20-contract.md` § Operation journal). **Required**, not
+   * optional: the fallback when it was absent was an identity scrubber, so a
+   * call site that forgot to wire it persisted the input unscrubbed, against
+   * **S5** ("no secret value appears in ... a persisted row"). The stated
+   * reason for the optionality — keeping pre-S7 read-only call sites
+   * compiling — expired when S7 shipped a mutating registry entry (post-S36
+   * reconciliation, the same shape as `SchedulerDependencies.authorization`).
+   */
+  readonly exec: Pick<Exec, 'scrubJson'>;
   readonly clock: Clock;
   readonly mutationLockAcquireMs?: number;
   /**
@@ -165,7 +174,7 @@ function extractChangedPathsFromResultData(data: unknown): readonly RepoRelative
  */
 export function createDispatchPipeline(deps: DispatchPipelineDependencies): DispatchPipeline {
   const { registry, ceiling, moduleAdapter, httpAdapter, declarations, cloneStore, locks, audit, journal, clock } = deps;
-  const exec: Pick<Exec, 'scrubJson'> = deps.exec ?? { scrubJson: (value) => value };
+  const exec: Pick<Exec, 'scrubJson'> = deps.exec;
   const mutationLockAcquireMs = deps.mutationLockAcquireMs ?? MUTATION_LOCK_ACQUIRE_MS_DEFAULT;
   const monitoringWaitCapSeconds = deps.monitoringWaitCapSeconds ?? MONITORING_WAIT_CAP_SECONDS_DEFAULT;
   const watermarks = deps.watermarks ?? DISK_WATERMARKS_DEFAULT;

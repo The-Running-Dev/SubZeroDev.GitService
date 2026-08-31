@@ -1,6 +1,5 @@
-import { expandScopes } from '../authorization/authorization.ts';
 import type { SessionKind } from '../declarations/types.ts';
-import { capabilityScopeOf, type CapabilityName, type ContractCapabilitySet, type OperatorScope } from './capabilities.ts';
+import { capabilityScopeOf, expandScopes, type CapabilityName, type ContractCapabilitySet, type OperatorScope } from './capabilities.ts';
 import type { JsonSchema } from './json.ts';
 import type { CompiledRegistry } from './tool-declaration.ts';
 

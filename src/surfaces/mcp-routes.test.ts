@@ -23,6 +23,15 @@ import { pkce, registerClient, exchangeCodeForTokens } from './testing/oauth-tes
 import type { GitSha, RemoteHost, Sha256Hex } from '../shared/brands.ts';
 import type { ContractCapabilitySet, DeploymentCeiling } from '../contract/capabilities.ts';
 import type { HttpAdapter } from '../http/http-adapter.ts';
+import type { JsonValue } from '../contract/json.ts';
+
+/**
+ * `scrubJson` is a required `DispatchPipelineDependencies` member (post-S36
+ * reconciliation). These routes never carry a resolved secret, so an identity
+ * scrub is correct here — stated, rather than inherited from an optional
+ * dependency's silent fallback.
+ */
+const NO_SECRETS_TO_SCRUB = { scrubJson: (value: JsonValue): JsonValue => value };
 
 const COMMIT_SHA = '0'.repeat(40) as GitSha;
 const CONTRACT_FINGERPRINT = '1'.repeat(64) as Sha256Hex;
@@ -80,6 +89,7 @@ async function withServer<T>(volume: string, fn: (handle: ServerHandle) => Promi
     audit: createAudit({ volumeRoot: volume, clock: systemClock }),
   });
   const dispatchPipeline = createDispatchPipeline({
+    exec: NO_SECRETS_TO_SCRUB,
     registry: { fingerprint: 'a'.repeat(64) as never, compiledAt: systemClock.now(), entries: [READ_TOOL, RAW_TOOL], contractCapabilitySet: CEILING as unknown as never },
     ceiling: CEILING as unknown as DeploymentCeiling,
     moduleAdapter: createModuleAdapter(),
