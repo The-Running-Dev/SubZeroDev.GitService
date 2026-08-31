@@ -1531,12 +1531,24 @@ Declared in `src/git/types.ts`.
 `GitLogInput.ref` defaults to `origin/<baseBranch>` when null, never to `HEAD`. `GitRawInput.argv`
 is rejected before the process starts when it selects an executable, injects configuration, writes
 configuration, carries a password-bearing remote URL, carries a remote operand that does not
-normalise to this declaration's own `cloneUrl`, or invokes a subcommand that persists a remote —
-`remote add`, `remote set-url`, or `submodule add`. Remote-valued options such as `--remote` are
-remote operands too; an opaque remote name is accepted only when it is `origin`. Configuration
-reads remain reachable except for the file, blob, global, system and editor forms that escape the
-declaration's repository-local configuration. There is no force flag anywhere in `GitPushInput`,
-and there is no reset, clean, rebase or branch-delete operation on this interface.
+normalise to this declaration's own `cloneUrl`, names a **remote-helper transport** — git's
+`<transport>::<address>` form, which never parses as a URL and so is invisible to the remote-operand
+rule, and whose `ext::` case runs the address as a command outright — or invokes a subcommand that
+persists a remote: `remote add`, `remote set-url`, or `submodule add`. Remote-valued options such as
+`--remote` are remote operands too; an opaque remote name is accepted only when it is `origin`.
+`--template` is refused in every position, because a template directory can carry hooks and a hook is
+an executable the vector never has to name. Configuration reads remain reachable except for the file,
+blob, global, system and editor forms that escape the declaration's repository-local configuration.
+There is no force flag anywhere in `GitPushInput`, and there is no reset, clean, rebase or
+branch-delete operation on this interface.
+
+**A refused vector is audited exactly as an executed one is.** The `hatch-intent` line is written
+before the argv is judged, not after, and a refusal writes the matching `hatch-outcome`; both carry
+the scrubbed vector and the actor. An attempt at one of the six operations the default path exists to
+withhold is the most attributable thing the hatch ever sees, and auditing only vectors that pass left
+exactly that attempt invisible while the registry entry promised every use is separately audited.
+**S9** carries the rule; a failed intent append is the one thing that stops the pair being written,
+and it refuses the call rather than executing unlogged. See `design/90-decisions.md`, 2026-08-31.
 
 **S6 resolves U1 for the five read operations.** Their input and output types are declared in
 `src/git/types.ts`.
@@ -1770,6 +1782,25 @@ leaving bare git mutations and scheduler-management operations unavailable to re
 a coincidence; `ChecksAwaitInput.timeoutSeconds` is clamped to it at dispatch, so a request for
 3600 s waits 1800 s rather than being refused. It declares `host.checks.read` and no mutating
 capability — invariant C7's requirement — and takes neither lock.
+
+**The `required-check-failed` judgement fails closed, and runs on every poll.** Three consequences a
+caller may rely on, none of them derivable from the variant's own row in § *Error semantics*:
+
+- **It is judged before the pending count, not after the last check concludes.** A required check
+  that has already failed is terminal the moment it concludes; waiting for the rest would turn the
+  terminal state into a `timed-out` whenever a slower informational check outlives the deadline.
+- **A declaration whose `requiredChecks` cannot be read is refused, not passed.** "Nothing is
+  required" is a statement about the declaration, and an unreadable or unparseable repository config
+  is not entitled to make it — the wait answers `precondition` naming the failed checks rather than
+  inverting a safety judgement on a stray comma. This is why the reader the wait consults answers a
+  third value for "could not be read" distinct from an empty list.
+- **A required failure the wait cannot attribute to an open pull request is refused too**, naming the
+  check and the ref, and a failed pull-request lookup propagates as the host error it was rather than
+  being read as "no pull request". The one answer that is certainly wrong is a clean wait over a red
+  required check, so every branch that cannot reach a verdict refuses.
+
+A check that concluded failure and is **not** named in `requiredChecks` leaves the wait's outcome
+exactly as it was before this judgement existed. See `design/90-decisions.md`, 2026-08-31.
 
 `readDeployStatus` has **no registry entry**. Deploy monitoring and published-URL verification are
 S12's, and S10's `Out of scope` line says so; the adapter method exists because the interface fixes
@@ -2149,7 +2180,24 @@ interface AuthorizationServerMetadata {
 | `/oauth/authorize` | `GET`, `POST` | operator console cookie | The approval step; issues a short-lived, process-local authorization code bound to a PKCE `code_challenge` (S256) and the `resource` being granted. Ephemeral — a restart mid-flow means starting over, not a re-authorization of an already-connected client |
 | `/oauth/token` | `POST` | none (PKCE substitutes for a client secret) | `authorization_code` grant (with `code_verifier`) calls `issueMcpGrant`; `refresh_token` grant calls `refresh` |
 | `/oauth/revoke` | `POST` | bearer | Revokes the presented token via `revokeBearerToken` (RFC 7009) |
-| `/mcp/{declarationId}` | `POST` | bearer, audience-checked against the path | The MCP JSON-RPC transport: `initialize`, `tools/list`, `tools/call` |
+| `/mcp/{declarationId}` | `POST` | bearer, audience-checked against the path | The MCP JSON-RPC transport: `initialize`, `tools/list`, `tools/call`, and JSON-RPC notifications |
+
+**A body carrying no `id` member is a JSON-RPC notification, and is answered `202 Accepted` with no
+body.** Two things about that are load-bearing and neither is recoverable from the tree.
+
+The status is `202`, not `204`. MCP's Streamable HTTP transport fixes it, and clients branch on that
+exact number rather than on the 2xx class — the official SDK client starts its server-initiated
+stream for `notifications/initialized` only inside its `202` arm, so a `204` is a silent protocol
+downgrade rather than an equivalent answer. A notification is the one message a JSON-RPC peer must
+never receive a response to, and `notifications/initialized` is the one the MCP spec has every client
+send immediately after `initialize`, so answering it as an unknown method aborts the connection
+before `tools/list` is ever reached.
+
+The accept sits **below** live-session resolution and the repository-binding check, never above them.
+A notification is not an exemption from either, and accepting one before them would make an omitted
+`id` an unauthenticated 2xx entrypoint on a route that exposes repository state — **E8**. `initialize`
+is a request and never a notification: one arriving without an `id` is accepted and dropped rather
+than minting a session whose result has no `id` to answer. See `design/90-decisions.md`, 2026-08-31.
 
 A `401` from `/mcp/{declarationId}` — audience mismatch, unknown/expired/revoked token or grant —
 answers `WWW-Authenticate: Bearer realm="subzerodev-git", resource_metadata="<origin>/.well-known/oauth-protected-resource/mcp/{declarationId}"`
@@ -2208,7 +2256,7 @@ type ExecError = ModuleErrorBase & (
 | `spawn-failed` | The fixed executable could not be started | no | `infrastructure` — the environment is wrong, not the request |
 | `nonzero-exit` | The child exited non-zero; `stdout` and `stderr` are already scrubbed | no | Classify by domain: auth rejection to `upstream`, a refused push to `precondition`; informational commands retain both streams for diagnosis |
 | `timed-out` | The declared cap elapsed and the child was killed | no | `timeout`, and park the journal entry — what the command achieved is not knowable |
-| `argv-rejected` | The vector selects an executable, injects or writes configuration, carries credentials or a foreign or opaque remote operand, or persists a remote | no | `validation`; no authority could ever permit it |
+| `argv-rejected` | The vector selects an executable, injects or writes configuration, carries credentials or a foreign or opaque remote operand, names a remote-helper transport (`<transport>::<address>`), or persists a remote | no | `validation`; no authority could ever permit it |
 | `cancelled` | The caller's signal aborted | no | `conflict`, releasing locks in reverse acquisition order |
 
 ### Locks
@@ -2460,9 +2508,15 @@ type HostError = ModuleErrorBase & (
 | `server-error` | 5xx after up to three retries, **read operations only** | already retried | `upstream` |
 | `auth-rejected` | The credential was refused | no | `upstream`, and mark the reference failing for **this declaration only** |
 | `merge-conflict` | The pull request cannot merge | no — **terminal** | `precondition` naming the branch and both heads; the notifier fires. There is no rebase tool |
-| `required-check-failed` | A declared required check concluded failure | no — terminal | `precondition` naming the check and pull request; the notifier fires |
+| `required-check-failed` | A declared required check concluded failure. `checks_await`'s judgement also refuses — without this variant — when it cannot establish whether a failure was required, or cannot attribute one to a pull request; see `### L2 — host adapter` | no — terminal | `precondition` naming the check and pull request; the notifier fires |
 | `not-found` | The pull request, check or workflow does not exist | no | `precondition` |
 | `timed-out` | A bounded wait reached its cap | no | `timeout`; the notifier fires |
+
+**The three "the notifier fires" cells above are specified and not yet held.** No host terminal
+state reaches the notifier on the ordinary dispatch path today, so on that path those three are
+requirements rather than descriptions; boot recovery and the watcher do fire it. Tracked as issue
+#49 — this paragraph goes when that closes. Recorded here because a reader cannot tell a rule the
+tree holds from one it owes by reading either the rule or the tree.
 
 ### Scheduler
 
@@ -2773,7 +2827,7 @@ responsible for maintaining it.
 | S6 | `Token` rows hold `verifierHash` and never a token value. `IssuedToken` is the only value-bearing type and is returned once. | Authorization |
 | S7 | Revocation writes a timestamp. No revocation deletes a row, and no cascade is written as a batch — `grantIsLive` walks upward at check time. | Authorization |
 | S8 | Every mutating call, every authorization rejection, every `git.raw` intent and outcome, every watched-file outcome, every identity event and every lease takeover produces an audit record. | Dispatch pipeline, Watcher, Operator identity, Lifecycle |
-| S9 | `git.raw` appends its intent line, carrying the argument vector, before the child process starts. | Git operations |
+| S9 | `git.raw` appends its intent line, carrying the argument vector, before the vector is judged — and therefore before any child process starts. Every call that gets past that append writes an intent/outcome pair, a refused vector included; a failed intent append is the one case that writes neither, because it refuses the call (**S3**). | Git operations |
 
 ### Envelope and surfaces
 
