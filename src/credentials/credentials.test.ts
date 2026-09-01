@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, statSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { systemClock } from '../clock/clock.ts';
@@ -244,15 +244,37 @@ test('S9.5: a rotation inside the mark\'s own millisecond keeps the mark, and on
       writeFileSync(secretPath, 'rotated-value', 'utf8');
       const tie = new Date(markedMs);
       utimesSync(secretPath, tie, tie);
+      // `utimesSync` asks the filesystem for a specific millisecond; it does not
+      // guarantee landing on it. Some mounts (observed via WSL's 9p bridge onto
+      // a Windows drive) round or drop sub-millisecond precision on the write,
+      // so what actually lands is read back rather than assumed (issue #213).
+      const observedTieMs = Math.floor(statSync(secretPath).mtimeMs);
+      assert.ok(
+        observedTieMs <= markedMs,
+        `the filesystem recorded the tie write as ${observedTieMs}, later than the mark itself (${markedMs}) — it cannot represent a tie, so this boundary is untestable here`,
+      );
 
       const blocked = await resolver.resolveInto(REF, REPO_A, new Map());
       assert.equal(blocked.ok, false);
       if (!blocked.ok) assert.equal(blocked.error.code, 'marked-failing');
       assert.equal((await resolver.listFailing()).length, 1);
 
-      // One millisecond is the whole difference, on identical bytes.
-      const later = new Date(markedMs + 1);
-      utimesSync(secretPath, later, later);
+      // The next instant the filesystem can actually express as later than the
+      // mark is the real boundary — not literally one millisecond, on a mount
+      // that cannot write that precisely. Widen the delta until the mtime the
+      // filesystem reports back genuinely clears the tie, rather than trusting
+      // a single +1ms write to have taken effect.
+      let laterMs = markedMs + 1;
+      let observedLaterMs = observedTieMs;
+      for (let attempt = 0; attempt < 12 && observedLaterMs <= markedMs; attempt++, laterMs = markedMs + 2 ** attempt) {
+        const later = new Date(laterMs);
+        utimesSync(secretPath, later, later);
+        observedLaterMs = Math.floor(statSync(secretPath).mtimeMs);
+      }
+      assert.ok(
+        observedLaterMs > markedMs,
+        `the filesystem never recorded an mtime later than the mark (${markedMs}) after widening up to ${laterMs}ms past it — last observed ${observedLaterMs}`,
+      );
 
       const env = new Map<EnvVarName, string>();
       assert.equal((await resolver.resolveInto(REF, REPO_A, env)).ok, true);
