@@ -22,13 +22,39 @@
 # reproduced locally. Every commit that can reach `main` is still gated
 # either way: a feature-branch commit through `pull_request`, a direct or
 # merged push to `main` through `push`.
+#
+# `paths-ignore` skips this workflow entirely when every changed file is one
+# of the design/tracking documents below — none of them is a build input, so
+# there is nothing here for `npm test`/`npm run build`/the container gates to
+# check. `design/20-contract.md` is deliberately absent from this list: it is
+# the one design document actually read by the build, at
+# `scripts/check-migration-matches-contract.ts` (`check:migration`, chained
+# into `npm run build` below) — a change there must still run every gate. If
+# a change touches any file outside this list too, the workflow still runs,
+# same as any other `paths-ignore`.
 
 name: CI
 
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'design/00-brief.md'
+      - 'design/10-design.md'
+      - 'design/30-slices.md'
+      - 'design/90-decisions.md'
+      - 'design/FROZEN.md'
+      - 'design/state/**'
+      - 'design/state-index.md'
   pull_request:
+    paths-ignore:
+      - 'design/00-brief.md'
+      - 'design/10-design.md'
+      - 'design/30-slices.md'
+      - 'design/90-decisions.md'
+      - 'design/FROZEN.md'
+      - 'design/state/**'
+      - 'design/state-index.md'
 
 jobs:
   build:
