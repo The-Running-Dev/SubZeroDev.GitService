@@ -46,7 +46,7 @@ const INSTANCE_SCOPED: ReadonlySet<InstanceScopedCapability> = new Set([
 
 /**
  * A capability's scope follows its own name: the four instance-scoped names
- * are a closed, listed set; every other `CapabilityName` — the seven fixed
+ * are a closed, listed set; every other `CapabilityName` — the nine fixed
  * declaration-scoped literals plus the open `content.*` family — is
  * declaration-scoped. `content.*` is open-ended precisely because it is
  * declaration-scoped: a per-declaration capability has nothing instance-wide

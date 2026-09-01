@@ -181,9 +181,15 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
    */
   async function attemptDelivery(body: string): Promise<{ readonly ok: boolean; readonly status: number }> {
     const controller = new AbortController();
+    // Deliberately **not** `unref`'d. The timer is cleared in the `finally`
+    // below, so it only ever lives for the duration of one in-flight
+    // delivery — which already holds the event loop open through its own
+    // socket. Unref-ing it therefore guarded against a case that cannot
+    // occur, and cost the bound this function exists to enforce: against an
+    // injected transport that holds nothing open, the loop drained before
+    // the abort could fire, so the timeout never ran (`90-decisions.md`,
+    // 2026-09-01).
     const timer = setTimeout(() => controller.abort(), deliveryTimeoutSeconds * 1000);
-    // Never let the timeout itself hold the process open.
-    timer.unref?.();
     try {
       return await Promise.race([
         deliverFn(webhookUrl as unknown as string, body, controller.signal),
