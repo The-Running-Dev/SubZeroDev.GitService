@@ -53,12 +53,13 @@ invocation — that translation is still genuine judgement, the flag only says *
 is a gate, not *how* to reproduce it outside CI. This repository's current flagged steps and
 their local equivalents:
 
-| Flagged step (`.github/workflows/verify.yml`) | Run locally |
+| Flagged step (`.github/workflows/ci.yml`) | Run locally |
 |---|---|
-| `Parse-check PowerShell scripts` | Parse every `*.ps1` with `[System.Management.Automation.Language.Parser]::ParseFile`, as the step does |
-| `Run Pester tests` | `Invoke-Pester -Path tools -Output Detailed -PassThru` |
-| `Validate the core/companion split` | `./tools/Test-Companion.ps1` |
-| `Check the design state against the tree` | `./tools/Test-DesignState.ps1` |
+| `Run the full test suite` | `npm test` |
+| `Run typecheck and every check:* gate` | `npm run build` |
+| `Run S18.13's end-to-end browser suite` | `npm run test:e2e` |
+| `Build S28's container image` | `docker build --build-arg GIT_COMMIT_SHA=<sha> -t subzerodev-git:ci .` |
+| `Build and boot S35's example-consumer image` | `docker build -f example-consumer/Dockerfile ...`, then boot and poll for `server: listening on` |
 
 A repository can gain, lose, or rename flagged steps over time — re-derive this table from
 the workflow files rather than trusting a memorized list; the four rows above describe this
