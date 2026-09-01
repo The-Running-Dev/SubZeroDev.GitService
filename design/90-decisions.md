@@ -2163,10 +2163,8 @@ fresh-clone credential gap; the `pr_enable_auto_merge` merge-conflict detection 
 issues #178 and #198 respectively.
 
 Added 2026-08-31 by `/reconcile`, one noticed while adjudicating the drift above and deliberately
-not acted on in that pass; the other tracked as an issue by `/track` the same day:
-
-- **`DispatchPipelineDependencies.journal` is still optional**, with the same expired justification
-  the `exec` and `authorization` members carried before the 2026-08-31 entry above removed theirs
-  ("Required only once a `mutating` registry entry exists (S7)" — S7 has shipped). Left alone
-  because the fallback's consequence was not established in that pass, unlike the identity scrubber's,
-  and changing it without knowing which invariant it drops would be a guess.
+not acted on in that pass; the other tracked as an issue by `/track` the same day. The remaining one
+— `DispatchPipelineDependencies.journal` still carrying the exec/authorization members' expired
+"required only once S7 ships" justification — was tracked as issue
+[#216](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/216) by `/track` on
+2026-09-01.
