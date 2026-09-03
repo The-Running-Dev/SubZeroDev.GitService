@@ -148,9 +148,10 @@ actually being run against it — are **appended as `S20.7` and `S20.8`**, on th
 
 S20 is also **renamed**. "`SubZeroDev.Blog` runs as a consumer, with parity measured" now describes
 what S35, S36, S20, S37 and S38 achieve together, not what the narrowed slice delivers. Issue
-[#34](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/34) still carries the old
-title and the old criteria. It is open, so that is drift for `/track` to report and sync, not
-something this command reconciles.
+[#34](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/34) closed on 2026-08-23 still
+carrying the old title. Its criteria were synced and are the narrowed set, so the title is the only
+half that went unreconciled, and it is now one of the superseded names the note under the landed
+index records rather than drift `/track` can still act on.
 
 S35 to S38 are appended on the same rule as S23–S27 and S31–S34, and placed where their
 dependencies run rather than after S22 — S35 and S36 ahead of S20 because S20 cannot start without
@@ -359,10 +360,11 @@ Bodies retired; the closed issue is the record. Criteria are not re-derived from
 | **S21** | A second repository, driven end to end, unwatched | [#35](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/35) |
 | **S22** | The deployment is verifiable, reversible and documented | [#36](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/36) |
 
-Two rows carry a name this document changed after the issue was opened: #31 is titled "A dropped
+Three rows carry a name this document changed after the issue was opened: #31 is titled "A dropped
 file becomes a pull request…" and #92 "A consumer can declare a safe content-drop protocol", both
-predating the 2026-08-11 rename to file-watcher terminology. Both issues are closed and neither is
-edited — reported here rather than reconciled.
+predating the 2026-08-11 rename to file-watcher terminology, and #34 "S20 — `SubZeroDev.Blog` runs
+as a consumer, with parity measured", predating the rename recorded above. All three issues are
+closed and none is edited — reported here rather than reconciled.
 
 ---
 
