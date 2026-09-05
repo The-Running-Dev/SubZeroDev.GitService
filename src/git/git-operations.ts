@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
+  branchName,
   isoUtcTimestamp,
   repoRelativePath,
   type BranchName,
@@ -31,7 +32,7 @@ import { diagnosticsFor } from '../shared/diagnostics.ts';
 import type { ModuleErrorBase } from '../shared/result-kind.ts';
 import { REPOSITORY_CONFIG_DEFAULTS, type RepositoryConfig } from '../declarations/types.ts';
 import { gitOperationsError, type GitOperationsError } from './errors.ts';
-import { currentBranch as sharedCurrentBranch } from './primitives.ts';
+import { currentBranch as sharedCurrentBranch } from '../exec/primitives.ts';
 import type {
   BranchSummary,
   BranchesData,
@@ -671,8 +672,28 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
         ),
       );
     }
+    let baseBranch = REPOSITORY_CONFIG_DEFAULTS.baseBranch;
+    if (typeof parsed.baseBranch === 'string') {
+      const validated = branchName(parsed.baseBranch);
+      // A string that is not a valid ref name is refused outright rather
+      // than falling back to the default: `baseBranch` reaches `git fetch`
+      // as a bare positional (`syncBase`), and a value beginning with `-`
+      // would be read by git as an option rather than a ref (issue #149).
+      // Silently substituting the default would hide that from whoever
+      // wrote the config, the same way `config-unparseable` already refuses
+      // rather than guessing for malformed JSON or a non-object shape.
+      if (!validated.ok) {
+        return err(
+          gitOperationsError(
+            { code: 'config-unparseable', findings: [{ path: `${CONFIG_RELATIVE_PATH}#baseBranch`, rule: validated.error.rule, message: validated.error.received }] },
+            `'${CONFIG_RELATIVE_PATH}' names a baseBranch git will not accept as a ref name`,
+          ),
+        );
+      }
+      baseBranch = validated.value;
+    }
     const config: RepositoryConfig = {
-      baseBranch: typeof parsed.baseBranch === 'string' ? (parsed.baseBranch as BranchName) : REPOSITORY_CONFIG_DEFAULTS.baseBranch,
+      baseBranch,
       requiredChecks: Array.isArray(parsed.requiredChecks) ? (parsed.requiredChecks as string[]) : REPOSITORY_CONFIG_DEFAULTS.requiredChecks,
       deployWorkflow: typeof parsed.deployWorkflow === 'string' ? parsed.deployWorkflow : REPOSITORY_CONFIG_DEFAULTS.deployWorkflow,
       branchPrefixes: Array.isArray(parsed.branchPrefixes) ? (parsed.branchPrefixes as string[]) : REPOSITORY_CONFIG_DEFAULTS.branchPrefixes,
@@ -687,7 +708,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       if (!configResult.ok) return toToolResultError(configResult.error);
       const cwd = ctx.cloneRoot as ClonePath;
       const signal = ctx.signal;
-      const baseBranch = configResult.value.baseBranch as BranchName;
+      const baseBranch = configResult.value.baseBranch;
       const baseRef = `origin/${baseBranch}`;
 
       const branch = await currentBranch(cwd, signal);
@@ -757,7 +778,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       if (!configResult.ok) return toToolResultError(configResult.error);
       const cwd = ctx.cloneRoot as ClonePath;
       const signal = ctx.signal;
-      const baseBranch = configResult.value.baseBranch as BranchName;
+      const baseBranch = configResult.value.baseBranch;
       const baseRef = `origin/${baseBranch}`;
       const current = await currentBranch(cwd, signal);
       const branches = await branchSummaries(cwd, baseRef, current, signal);
@@ -772,7 +793,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       if (!configResult.ok) return toToolResultError(configResult.error);
       const cwd = ctx.cloneRoot as ClonePath;
       const signal = ctx.signal;
-      const baseBranch = configResult.value.baseBranch as BranchName;
+      const baseBranch = configResult.value.baseBranch;
       const baseRef = `origin/${baseBranch}`;
 
       const branch = await currentBranch(cwd, signal);
@@ -981,7 +1002,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       if (!configResult.ok) return toToolResultError(configResult.error);
       const cwd = ctx.cloneRoot as ClonePath;
       const signal = ctx.signal;
-      const baseBranch = configResult.value.baseBranch as BranchName;
+      const baseBranch = configResult.value.baseBranch;
 
       const before = await remoteTrackingRefs(cwd, signal);
 
@@ -1012,7 +1033,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       if (!configResult.ok) return toToolResultError(configResult.error);
       const cwd = ctx.cloneRoot as ClonePath;
       const signal = ctx.signal;
-      const baseBranch = configResult.value.baseBranch as BranchName;
+      const baseBranch = configResult.value.baseBranch;
 
       const prepared = await prepareRemote(ctx);
       if (!prepared.ok) return prepared.error;

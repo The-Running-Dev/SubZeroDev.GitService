@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cloneUrl, credentialRef, declarationId, generation, grantEpoch, mcpResourceUri, pathPrefix, repoRelativePath } from './brands.ts';
+import { branchName, cloneUrl, credentialRef, declarationId, generation, grantEpoch, mcpResourceUri, pathPrefix, repoRelativePath } from './brands.ts';
 import type { RemoteHost } from './brands.ts';
 
 /**
@@ -119,4 +119,47 @@ test('pathPrefix() accepts a directory prefix or a single file, both as valid Re
   assert.equal(pathPrefix('src/').ok, true);
   assert.equal(pathPrefix('README.md').ok, true);
   assert.equal(pathPrefix('../escape/').ok, false);
+});
+
+/**
+ * Issue #149: `baseBranch` reaches `git fetch`'s argv as a bare positional,
+ * so a leading `-` must be rejected even though `git check-ref-format
+ * --branch` is otherwise the rule. Every "false" fixture below was checked
+ * directly against `git check-ref-format --branch` (rejected there too),
+ * except `-oops`/`-`/`@`, which `branchName()` rejects more strictly than
+ * git does — the point of the defect this validator fixes.
+ */
+test('branchName() accepts a git ref name and rejects one git will read as an option or refuse outright, counted', () => {
+  const fixtures = [
+    { input: 'main', expectOk: true },
+    { input: 'feature/x', expectOk: true },
+    { input: 'a.b', expectOk: true },
+    { input: 'UPPER', expectOk: true },
+    { input: 'release-1.2.3', expectOk: true },
+    { input: '', expectOk: false },
+    { input: '-oops', expectOk: false },
+    { input: '-', expectOk: false },
+    { input: '--upload-pack=/bin/sh', expectOk: false },
+    { input: '.hidden', expectOk: false },
+    { input: 'a..b', expectOk: false },
+    { input: 'a b', expectOk: false },
+    { input: 'a~b', expectOk: false },
+    { input: 'a^b', expectOk: false },
+    { input: 'a:b', expectOk: false },
+    { input: 'a?b', expectOk: false },
+    { input: 'a*b', expectOk: false },
+    { input: 'a[b', expectOk: false },
+    { input: 'a\\b', expectOk: false },
+    { input: '/leading', expectOk: false },
+    { input: 'trailing/', expectOk: false },
+    { input: 'a//b', expectOk: false },
+    { input: 'ending.', expectOk: false },
+    { input: 'a@{b', expectOk: false },
+    { input: '@', expectOk: false },
+    { input: 'a.lock', expectOk: false },
+    { input: 'feature/.hidden', expectOk: false },
+  ];
+  const { accepted, rejected } = runFixtures('branchName', fixtures, branchName);
+  assert.equal(accepted, 5);
+  assert.equal(rejected, 22);
 });

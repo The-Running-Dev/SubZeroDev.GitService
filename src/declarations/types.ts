@@ -1,4 +1,5 @@
 import type {
+  BranchName,
   CredentialRef,
   DeclarationId,
   GrantEpoch,
@@ -83,14 +84,17 @@ export interface DeclarationFilter {
 }
 
 export interface RepositoryConfig {
-  readonly baseBranch: string;
+  readonly baseBranch: BranchName;
   readonly requiredChecks: readonly string[];
   readonly deployWorkflow: string | null;
   readonly branchPrefixes: readonly string[];
 }
 
+// A known-valid literal, cast rather than run through `branchName()` — the
+// same convention `STRIPPED_FOR_UNATTENDED` below uses for a fixed value
+// that has nothing to be validated against at load time.
 export const REPOSITORY_CONFIG_DEFAULTS: RepositoryConfig = {
-  baseBranch: 'main',
+  baseBranch: 'main' as BranchName,
   requiredChecks: [],
   deployWorkflow: null,
   branchPrefixes: [],
