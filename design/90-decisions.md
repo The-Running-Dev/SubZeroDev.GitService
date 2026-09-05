@@ -2224,3 +2224,14 @@ not acted on in that pass; the other tracked as an issue by `/track` the same da
 "required only once S7 ships" justification — was tracked as issue
 [#216](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/216) by `/track` on
 2026-09-01.
+
+**The work-mirror direct-to-main carve-out (`AGENTS.md` § *Git and delivery*) has never once
+succeeded.** Three consecutive `/track` runs attempted it and were blocked before reaching a merge —
+`/track` on 2026-09-02 hit GitHub's own branch ruleset (GH013) and fell back to a PR (#221); `/track`
+on 2026-09-05 hit the same ruleset and fell back again (#236); this run, also 2026-09-05, was blocked
+earlier still, by the local tool-use classifier, before the push even reached GitHub, and fell back a
+third time (#238). The carve-out's stated justification — skipping a PR-per-refresh to break a
+self-triggering merge/`/clean`/`/track` loop — is not being realized; every refresh still opens a PR.
+Whether to relax `main`'s branch protection for this narrow path, change the carve-out to stop
+attempting the direct push and go straight to a PR, or leave it as a documented-but-dormant fallback
+is a policy call on `AGENTS.md` itself, not a `/track` fix.
