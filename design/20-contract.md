@@ -2838,7 +2838,7 @@ responsible for maintaining it.
 | E3 | Token, audience and issuer failures produce `401` with a resource-metadata challenge and never a `ToolResult`. | Surfaces, Authorization |
 | E4 | Every read result's data carries a `ReadStamp` whose `mutationInFlight` is scoped to the declaration read, not to the process-wide mutex. | Git operations |
 | E5 | No code path returns a published URL in a success position without a confirmed successful deploy for that exact commit. | Host adapter, Http adapter |
-| E6 | A bearer-authenticated route accepts no cookie, and a cookie-authenticated route accepts no bearer. | Surfaces |
+| E6 | A bearer-authenticated route accepts no cookie, and a cookie-authenticated route accepts no bearer, except on the routes `### L5 — surfaces` marks `bearer or cookie`. | Surfaces |
 | E7 | Every mutating cookie route requires an `Origin` check and a double-submit token. | Surfaces |
 | E8 | No route exposing repository, credential, audit, volume or operator state is unauthenticated at any point in the lifecycle, enrolment included. `LivenessReport` on `/healthz` is the sole unauthenticated payload and carries only `ready` and `commitSha`. | Surfaces, Operator identity |
 
