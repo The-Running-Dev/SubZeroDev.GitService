@@ -670,7 +670,7 @@ file into a repository: write it into the inbox, and the service carries it thro
 request.
 
 **This is a generalisation of `blog-mcp`'s directory watcher, which is proven and running**
-(`src/watcher/engine.ts`, ~450 lines, with its own test file). Every mechanism below is inherited
+(`SubZeroDev.Blog/tools/blog-mcp/src/watcher/engine.ts`, ~450 lines, with its own test file). Every mechanism below is inherited
 from it rather than invented here, and the differences are exactly two: the inbox is per
 declaration rather than per container, and the operation it dispatches is named by the
 declaration rather than hardcoded to `blog_create_post`.

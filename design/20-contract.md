@@ -680,7 +680,7 @@ tree to point at**. No composition root assembles one yet; each module instead c
 overridable default citing this section by name — `src/journal/journal.ts`'s `journalSettledDays`,
 `src/notifier/notifier.ts`'s `outboxDeliveredDays`, `src/scheduler/scheduler.ts`'s `terminalJobDays`,
 and the `remoteHostAllowlist`, `ceiling`, `admission` and `notifierWebhook` values read from the
-environment in `src/server.ts`. This is the "entity with no code representation" case, and the
+environment in `src/composition-root/compose.ts`. This is the "entity with no code representation" case, and the
 scaffold below is the only statement of the shape those defaults are converging on. When a real
 `DeploymentConfig` is wired, this block becomes a pointer and the local defaults stop being local.
 
@@ -2069,7 +2069,7 @@ call against whichever declaration a later request names, not at sign-in.
 | `/auth/session` | `GET` | cookie |
 | `/auth/logout` | `POST` | cookie |
 
-**Declarations (`declaration-routes.ts`)** — the landing view's feed and declaration management.
+**Declarations (`declaration-routes.ts`, and `tool-routes.ts` for the two `/tools` rows)** — the landing view's feed and declaration management.
 Listing and creating a declaration carry no repository dimension (there is nothing yet to bind to,
 or the call spans every declaration); every route naming an existing declaration's id does.
 
