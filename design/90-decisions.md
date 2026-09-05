@@ -2206,6 +2206,14 @@ Reversibility: cheap for the audit ordering; narrowing the argv rules later woul
 
 ---
 
+### 2026-09-05 — Retire the work-mirror direct-to-main carve-out; refresh commits go through the ordinary branch-PR delegation
+Context: Logged to `## Open` earlier the same day after three consecutive `/track` runs attempted the `AGENTS.md` § *Git and delivery* direct-push exception for the derived design-state record and were blocked before reaching a merge every time — `/track` on 2026-09-02 hit GitHub's branch ruleset (GH013) and fell back to a PR (#221); `/track` on 2026-09-05 hit the same ruleset and fell back again (#236); a third run the same day was blocked earlier still, by the session's tool-use classifier, before the push reached GitHub, and fell back a third time (#238). The exception's justification — skip a PR-per-refresh to avoid a self-triggering merge → `/clean` → `/track` loop — was never realized in practice.
+Chosen: Drop the exception. The work-mirror refresh now follows the same branch-commit-push-PR delegation as any other change (`AGENTS.md`, `.claude/commands/track.md`, `.claude/commands/kit-help.md`). The self-triggering loop the exception was meant to break is accepted rather than engineered around — `/next` (added since the exception was first written) already breaks it by checking what is owed before running anything, and `/track` is idempotent, so a run this triggers is a no-op.
+Rejected: **Relax `main`'s branch protection for this one path** — trades a repository-wide safety property for a convenience that a working alternative (`/next`'s owed-work check) already covers, and the classifier block observed on 2026-09-05 would not be lifted by a ruleset change on GitHub's side anyway. **Leave the exception in place as a documented-but-dormant fallback** — a carve-out that has never once fired is worse than no carve-out: it tells a future reader to expect a code path that doesn't survive contact with either enforcement layer that guards `main`.
+Reversibility: cheap — reinstating the exception is a doc edit, not a schema or code change, if `/next`'s loop-breaking is later found insufficient.
+
+---
+
 ## Open
 <Things noticed mid-slice that were deliberately not acted on. Move them out or delete them; do not let this section rot.>
 
@@ -2225,13 +2233,5 @@ not acted on in that pass; the other tracked as an issue by `/track` the same da
 [#216](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/216) by `/track` on
 2026-09-01.
 
-**The work-mirror direct-to-main carve-out (`AGENTS.md` § *Git and delivery*) has never once
-succeeded.** Three consecutive `/track` runs attempted it and were blocked before reaching a merge —
-`/track` on 2026-09-02 hit GitHub's own branch ruleset (GH013) and fell back to a PR (#221); `/track`
-on 2026-09-05 hit the same ruleset and fell back again (#236); this run, also 2026-09-05, was blocked
-earlier still, by the local tool-use classifier, before the push even reached GitHub, and fell back a
-third time (#238). The carve-out's stated justification — skipping a PR-per-refresh to break a
-self-triggering merge/`/clean`/`/track` loop — is not being realized; every refresh still opens a PR.
-Whether to relax `main`'s branch protection for this narrow path, change the carve-out to stop
-attempting the direct push and go straight to a PR, or leave it as a documented-but-dormant fallback
-is a policy call on `AGENTS.md` itself, not a `/track` fix.
+Emptied again 2026-09-05 — the work-mirror direct-to-main carve-out item is now decided and recorded
+above rather than left as an open question.

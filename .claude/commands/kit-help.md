@@ -66,7 +66,7 @@ One slice, one branch, one session. Do not start slice N+1 because you noticed s
 3. **Merge** — the user's, unless this repository's instruction file explicitly delegates it.
 4. **`/clean`** — right after the merge, in the same session. Switches back to the default branch, deletes the now-merged local slice branch (and any other local branch already merged), and prunes remote-tracking refs for branches gone from `origin`. It does not end the loop on its own: every run hands off to `/next`, and it never runs `/next` or `/track` itself.
 5. **`/next`** — **new session**, after `/clean`. Reads what is actually outstanding and runs it, or emits the next boundary banner and stops. Usually that is `/track`; often it is nothing, which is the answer `/clean` naming `/track` unconditionally could never give.
-6. **`/track`** — whenever `/next` routes to it. Closes the issue if every box is ticked, refreshes the work mirror, and commits that refresh **straight to the default branch** — no branch, no pull request (`AGENTS.md`, *Git and delivery*), because a pull request per refresh is what made this loop back on itself.
+6. **`/track`** — whenever `/next` routes to it. Closes the issue if every box is ticked, refreshes the work mirror, and commits that refresh on its own branch and PR like any other change — the direct-to-default-branch carve-out this used to take is retired (`AGENTS.md`, *Git and delivery*), so the loop this describes now closes through `/clean` handling that merge like any other, rather than being engineered around.
 
 `/verify` and `/resolve` are phases 2 and 3 of `/pr` and own their own procedure; both stay callable on their own when you want the gates run against a tree, or threads worked on a PR `/pr` did not open.
 
