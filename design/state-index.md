@@ -62,7 +62,6 @@
 | 230 | #230 | Eviction interlock hardcodes 'main' as the base branch, so any other base branch reports corrupt-tree forever | — | `722176f96730fd93da7dbae2e43d33c5b42817a0` |
 | 231 | #231 | 10-design.md's module table omits the credentials edge the clone store acquired in #223 | — | `722176f96730fd93da7dbae2e43d33c5b42817a0` |
 | 232 | #232 | Boot never reports which journal entries it parked — revalidation's entries half is a hardcoded empty list | — | `722176f96730fd93da7dbae2e43d33c5b42817a0` |
-| 234 | #234 | The design-state projection has never regenerated — design/state-index.md does not exist and the checker cannot see the failure | — | `f1be88b832d7bb8cd848d7e1deaebc82aba1f4f4` |
 | milestone/1 | #45 | Credential mount carries no username, so hosts that require a real one cannot authenticate | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
 | milestone/1 | #49 | Terminal-state detection never reaches the notifier on the ordinary dispatch or recovery paths | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
 | milestone/2 | #61 | syncBase inlines rev-parse/is-ancestor plumbing that composites.ts keeps as private helpers | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
