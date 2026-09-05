@@ -149,9 +149,9 @@ pwsh ./tools/Update-DesignProjection.ps1
 
 Run it — a real run, not `-DryRun` — whenever `Update-WorkMirror.ps1` wrote at least one record, so the mirror and its projection land in the same commit. `MirrorStale` staying reported (never blocking) for the commit that follows is expected and is not this step's concern (`design/20-contract.md` § *The divergence classes*) — this step exists only to keep the *projection* from going stale, not to chase `MirroredAt` into never firing at all.
 
-### Commit the refresh to the default branch — no branch, no pull request
+### Commit the refresh
 
-**This is the one place in the kit that commits straight to the default branch, and the carve-out permitting it is in `AGENTS.md`, *Git and delivery*.** Read its four conditions there; they are not restated here. Satisfy them, then:
+**There is no direct-to-default-branch path for this anymore.** A carve-out for it existed here previously; it is retired (`AGENTS.md`, *Git and delivery* — three consecutive attempts were each blocked before reaching a merge, so it never achieved what it was for). Commit the refresh the same way as any other change, per the ordinary branch-commit-push-PR delegation in `AGENTS.md`, *Git and delivery*:
 
 ```powershell
 git add design/state/work design/state-index.md
@@ -160,11 +160,13 @@ git commit -m "track: refresh work mirror and projection"
 git push
 ```
 
-**Check `git status --short` before staging and after.** The carve-out covers a diff containing *only* the paths those two scripts wrote. If anything else is modified — a document you corrected under *Descriptive drift*, a `## Open` bullet you removed after opening its issue — the exception is void for the whole commit: branch, commit everything together, push, and open the pull request as normal, per the ordinary delegation.
+on a fresh branch off the default branch, then open the pull request.
 
-**Why this is not a convenience.** A pull request over a mirror refresh is what made `/track` self-triggering: the refresh needed a merge, the merge put a merge on the table, `/clean` fires on a merge, and `/clean` used to hand back to `/track`. Three bookkeeping pull requests landed in one day under the old shape. The mirror mirrors GitHub, which keeps changing, so there is no revision at which it is finished — the fix is to stop treating its refresh as reviewable work, not to run the loop faster.
+**Check `git status --short` before staging.** If anything else is modified — a document you corrected under *Descriptive drift*, a `## Open` bullet you removed after opening its issue — carry it along in the same branch and commit rather than splitting it out.
 
-**Nothing about `I28` changes.** `/track` is still the sole writer of a `WorkRef`; only how that write reaches the default branch is different.
+**`/clean` firing on the resulting merge, and handing back to `/track`, is accepted rather than engineered around** (`AGENTS.md`, *Git and delivery*). `/track` is idempotent, so a re-run this triggers is a no-op.
+
+**Nothing about `I28` changes.** `/track` is still the sole writer of a `WorkRef`.
 
 ## Bugs and stories are not synced
 
