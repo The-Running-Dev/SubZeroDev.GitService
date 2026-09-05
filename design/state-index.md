@@ -59,7 +59,6 @@
 | 190 | #190 | check-layer-direction.test.ts and watcher.test.ts fail on Windows — path-separator regex and symlink EPERM | — | `c316c787456f6da803938f27de6341059aca1481` |
 | 208 | #208 | S27.1 dispatch-pipeline test intermittently exceeds its 1000ms wall-clock budget under load | — | `4d7d5f70bfa7ddb8bb58304736425b5389a05b46` |
 | 216 | #216 | Decide whether DispatchPipelineDependencies.journal should be required | — | `4d7d5f70bfa7ddb8bb58304736425b5389a05b46` |
-| 230 | #230 | Eviction interlock hardcodes 'main' as the base branch, so any other base branch reports corrupt-tree forever | — | `722176f96730fd93da7dbae2e43d33c5b42817a0` |
 | 231 | #231 | 10-design.md's module table omits the credentials edge the clone store acquired in #223 | — | `722176f96730fd93da7dbae2e43d33c5b42817a0` |
 | 232 | #232 | Boot never reports which journal entries it parked — revalidation's entries half is a hardcoded empty list | — | `722176f96730fd93da7dbae2e43d33c5b42817a0` |
 | milestone/1 | #45 | Credential mount carries no username, so hosts that require a real one cannot authenticate | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
