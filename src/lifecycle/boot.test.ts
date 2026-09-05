@@ -350,6 +350,73 @@ test('S12.5 — a resume touching the host runs through the pipeline under its o
   });
 });
 
+test('boot step 7 parks an unsettled entry whose tool has no descriptor in the catalogue this image loaded, and reports its id', async () => {
+  await withVolumeAsync(async (volume) => {
+    const seedStore = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    await seedStore.open();
+    await seedStore.migrate();
+    await seedStore.close();
+
+    // The upgrade case `10-design.md` § Boot and recovery step 7 names: an
+    // image renamed or removed `retired_tool`, so the catalogue this boot
+    // loads has no descriptor for the entry the previous image left behind.
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin({
+      operationId: 'op-no-descriptor' as never,
+      declarationId: 'repo-a' as never,
+      generation: 1 as never,
+      tool: 'retired_tool' as never,
+      input: {},
+      actorRef: { kind: 'mcp', subject: 'sub' as never, clientId: null, grantId: null },
+      scheduledJobId: null,
+      context: 'normal',
+      preState: { branch: 'main' as never, headSha: 'a'.repeat(40) as never, upstreamSha: 'a'.repeat(40) as never, indexDigest: 'b'.repeat(64) as never, worktreeDigest: 'c'.repeat(64) as never },
+    });
+
+    // Registered, but for a different tool — so the catalogue is genuinely
+    // populated and the park below is a real lookup miss rather than the
+    // "an empty catalogue parks everything" failure the 2026-08-13 decision
+    // caught in `revalidatePending`'s registry half.
+    const catalogue = createRecoveryCatalogue();
+    catalogue.register(RECONCILE_AFTER_MERGE_RECOVERY);
+
+    const attentionCalls: string[] = [];
+    const recovery: RecoveryDependencies = {
+      journal,
+      catalogue,
+      clock: systemClock,
+      declarations: { get: async () => ({ id: 'repo-a', generation: 1 }) as never },
+      cloneStore: {
+        observeGitState: async () => ok({ branch: 'main' as never, headSha: 'a'.repeat(40) as never, upstreamSha: 'a'.repeat(40) as never, indexDigest: 'b'.repeat(64) as never, worktreeDigest: 'c'.repeat(64) as never, observedAt: '2026-09-05T00:00:00.000Z' as never }),
+        markAttention: async (declarationId) => {
+          attentionCalls.push(declarationId);
+          return ok(undefined);
+        },
+      },
+      dispatch: async () => ({ ok: true, kind: 'success', summary: '', data: null, findings: [], diagnostics: null }) as never,
+      recoverySession: { grant: new Set() } as never,
+    };
+
+    const { lifecycle } = lifecycleFor(volume, undefined, { recovery });
+    try {
+      const booted = await lifecycle.boot();
+      assert.equal(booted.ok, true);
+      if (!booted.ok) return;
+
+      assert.deepEqual(booted.value.revalidation.entriesParked, ['op-no-descriptor'], 'the operator is told which entry the upgrade stranded, not merely that something was parked');
+      assert.deepEqual(attentionCalls, ['repo-a'], 'the clone is put in needs-attention so ordinary mutations are refused until the entry is resolved');
+
+      const parked = await journal.parked();
+      assert.equal(parked.ok, true);
+      if (!parked.ok) return;
+      assert.equal(parked.value.length, 1, 'the entry is parked in the store, not only reported');
+      assert.match(parked.value[0]?.attentionReason ?? '', /retired_tool/, 'the reason names the tool whose descriptor is gone');
+    } finally {
+      await lifecycle.shutdown('operator');
+    }
+  });
+});
+
 test('S2.7 — readiness passes only after the lease is held and migrations have applied', async () => {
   await withVolumeAsync(async (volume) => {
     const { lifecycle } = lifecycleFor(volume);

@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gitSha, type BranchName, type GitSha, type HttpsUrl, type RemoteHost } from '../shared/brands.ts';
-import type { CapabilityName, DeploymentCeiling, SessionGrant } from '../contract/capabilities.ts';
+import type { CapabilityName, DeploymentCeiling, EffectiveGrant, SessionGrant } from '../contract/capabilities.ts';
 import { systemClock } from '../clock/clock.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
 import { createAudit } from '../audit/audit.ts';
@@ -16,7 +16,7 @@ import { createDeclarations } from '../declarations/declarations.ts';
 import { createCloneStore, type CloneStore } from '../clone/clone-store.ts';
 import { createSurfacesServer } from '../surfaces/http-server.ts';
 import { createMcpRoutesState } from '../surfaces/mcp-routes.ts';
-import { createGitOperations } from '../git/git-operations.ts';
+import { createGitOperations, type GitOperations } from '../git/git-operations.ts';
 import { createJournal } from '../journal/journal.ts';
 import { createNotifier } from '../notifier/notifier.ts';
 import { createRecoveryCatalogue } from '../recovery/catalogue.ts';
@@ -471,6 +471,9 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
   // `Journal` depends on neither `Declarations` nor `CloneStore`, so no
   // forward reference is needed for this direction, unlike the two above.
   const journal = createJournal({ volumeRoot, clock: systemClock });
+  // Set immediately after `createGitOperations` below — `CloneStore` needs
+  // the declaration's base branch and `GitOperations` needs `CloneStore`.
+  let gitOperationsRef: Pick<GitOperations, 'loadRepositoryConfig'> | null = null;
   const cloneStore = createCloneStore({
     volumeRoot,
     clock: systemClock,
@@ -488,6 +491,36 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
     },
     watermarks,
     onMaintenanceRequested: (reason) => requestMaintenanceRef?.(reason),
+    // The eviction interlock's `origin/<base>`, resolved from the
+    // declaration's own `RepositoryConfig` rather than assumed to be `main`.
+    // The same mutable-forward-reference shape `cloneStoreRef`/`dispatchRef`/
+    // `schedulerRef` already use, for the same reason: `GitOperations` is
+    // constructed below because it depends on `CloneStore`.
+    //
+    // `loadRepositoryConfig` takes a `CallContext` and reads exactly one
+    // field of it, `cloneRoot`. Eviction has no caller and therefore no real
+    // context, so this synthesises the minimum the signature demands and
+    // nothing more: no capability is granted (`capabilities` is empty), no
+    // path is writable, and the read is audited by nobody because it mutates
+    // nothing. A config that will not parse answers `null`, which the clone
+    // store reads as the `main` default.
+    baseBranchFor: async (clonePath, signal) => {
+      if (!gitOperationsRef) return null;
+      const config = await gitOperationsRef.loadRepositoryConfig({
+        operationId: 'clone-store-base-branch' as OperationId,
+        declarationId: null,
+        generation: null,
+        cloneRoot: clonePath,
+        actorRef: { kind: 'operator', subject: 'system' as Subject, clientId: null, grantId: null },
+        capabilities: new Set() as unknown as EffectiveGrant,
+        writablePathPrefixes: [],
+        context: 'normal',
+        scheduledJobId: null,
+        deadline: systemClock.now(),
+        signal,
+      });
+      return config.ok ? config.value.baseBranch : null;
+    },
   });
   cloneStoreRef = cloneStore;
 
@@ -497,6 +530,7 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
   // call), which is what keeps invariant B8 (the compiler absent from the
   // runtime image) intact here.
   const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit, journal, declarations, credentials, credentialEnv, cloneStore });
+  gitOperationsRef = gitOperations;
   const notifier = createNotifier({ volumeRoot, clock: systemClock, webhookUrl: resolveNotifierWebhook(), audit });
   const moduleAdapter = createModuleAdapter();
   moduleAdapter.register('git.status' as ModuleTargetName, toModuleHandler(gitOperations.status));
