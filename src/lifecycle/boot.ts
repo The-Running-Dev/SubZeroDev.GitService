@@ -475,10 +475,6 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         );
       }
 
-      // Step 8 — re-derive clone state from disk. The stored value is a
-      // report, not a source of truth (`10-design.md` § Boot and recovery).
-      const clones = deps.deriveCloneStatesFromDisk ? await deps.deriveCloneStatesFromDisk() : [];
-
       // Recovery is *listed* here, never *run* here. Boot reports which
       // declarations hold unsettled entries so readiness and the transports
       // can come up knowing which ones are `recovery-pending`; the ladder
@@ -493,6 +489,7 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       // ready on the first while believing the second admits ordinary traffic
       // to repositories whose unfinished work was never classified.
       let recoveryPending: readonly DeclarationId[] = [];
+      let entriesParked: readonly OperationId[] = [];
       if (deps.recovery) {
         const unsettled = await deps.recovery.journal.allUnsettled();
         if (!unsettled.ok) {
@@ -504,7 +501,45 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
           );
         }
         recoveryPending = declarationsWithUnsettledEntries(unsettled.value);
+
+        // Step 7's journal half. "The same upgrade can remove the **recovery
+        // descriptor** an unsettled entry depends on... an entry whose tool
+        // has no descriptor in the new catalogue is parked as `attention`
+        // here rather than falling into a lookup the recovery ladder has no
+        // branch for" (`10-design.md` § Boot and recovery, step 7).
+        //
+        // The ladder's own no-descriptor branch still exists and is still
+        // the backstop for an entry written between this sweep and the lazy
+        // pass — the design says so. What this sweep buys is *when*: the
+        // operator sees the consequence of an image upgrade next to the
+        // fingerprint checks that caused it, rather than at 03:00 on first
+        // use. Both are store reads, so it costs nothing against lazy
+        // recovery.
+        //
+        // An entry already in `attention` is skipped: it is parked, its
+        // reason is whatever parked it, and re-parking would overwrite that
+        // with this one.
+        const parked: OperationId[] = [];
+        for (const entry of unsettled.value) {
+          if (entry.state === 'attention') continue;
+          if (deps.recovery.catalogue.lookup(entry.tool) !== null) continue;
+          const reason = `no recovery descriptor is registered for '${entry.tool}' in the catalogue this image loaded — the tool was removed or renamed by an upgrade`;
+          const parkResult = await deps.recovery.journal.park(entry.operationId, reason);
+          if (!parkResult.ok) continue;
+          await deps.recovery.cloneStore.markAttention(entry.declarationId, reason);
+          parked.push(entry.operationId);
+        }
+        entriesParked = parked;
       }
+
+      // Step 8 — re-derive clone state from disk. The stored value is a
+      // report, not a source of truth (`10-design.md` § Boot and recovery).
+      //
+      // It runs *after* the step 7 sweep above, which is the design's own
+      // numbering and, since that sweep began marking clones, now load-bearing
+      // rather than incidental: derived first, `clones` would report `ready`
+      // for a declaration the same boot had just put in `needs-attention`.
+      const clones = deps.deriveCloneStatesFromDisk ? await deps.deriveCloneStatesFromDisk() : [];
 
       // "Boot re-drives every undelivered row" (`10-design.md` § control flow
       // #1, step 11) — a row left `pending` by the previous process is
@@ -539,7 +574,7 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         provisioningPending,
         auditChain,
         jobsResolved,
-        revalidation: { jobsParked, entriesParked: [] },
+        revalidation: { jobsParked, entriesParked },
         clones,
         recoveryPending,
       });

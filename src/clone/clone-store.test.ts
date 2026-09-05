@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { systemClock } from '../clock/clock.ts';
@@ -464,6 +465,53 @@ test('clone.remove refuses a tree holding commits unreachable from origin/<base>
     if (!withOverride.ok) assert.equal(withOverride.error.code, 'not-safe-to-remove');
 
     assert.equal(existsSync(clonePath), true, 'nothing was removed on either attempt');
+  });
+});
+
+test('the eviction interlock evaluates origin/<base> from the declaration, so a repository whose base branch is not main is not reported corrupt', async () => {
+  await withMigratedVolume(async (volume) => {
+    // A remote with no `main` at all. The hardcoded `origin/main..HEAD` this
+    // replaces exited non-zero here, which `computeBlockers` reads as
+    // `'corrupt'` — so every such declaration reported `corrupt-tree` and was
+    // permanently unevictable and unremovable without the override.
+    const dir = mkdtempSync(path.join(tmpdir(), 'szg-trunk-remote-'));
+    const bareDir = path.join(dir, 'remote.git');
+    const workDir = path.join(dir, 'work');
+    gitIn(['init', '--bare', '--initial-branch=trunk', bareDir], dir);
+    gitIn(['init', '--initial-branch=trunk', workDir], dir);
+    gitIn(['remote', 'add', 'origin', bareDir], workDir);
+    writeFileSync(path.join(workDir, 'README.md'), 'fixture\n', 'utf8');
+    gitIn(['add', 'README.md'], workDir);
+    gitIn(['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com', 'commit', '-m', 'initial'], workDir);
+    gitIn(['push', 'origin', 'trunk'], workDir);
+
+    const declaration = fixtureDeclaration('repo-trunk', bareDir);
+    const exec = createExec({ volumeRoot: volume });
+    const locks = createLocks();
+    const cloneStore = createCloneStore({
+      volumeRoot: volume,
+      clock: systemClock,
+      exec,
+      locks,
+      declarations: declarationsStubFor(declaration),
+      // Stands in for the composition root's wiring to
+      // `GitOperations.loadRepositoryConfig`. What is under test here is that
+      // the clone store *uses* the declaration's base rather than assuming
+      // one; reading it out of `.config/subzerodev-git.json` is git
+      // operations' own, and tested there.
+      baseBranchFor: async () => 'trunk' as never,
+    });
+
+    const ensured = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(ensured.ok, true);
+    if (!ensured.ok) return;
+    ensured.value.materialisationLock.release();
+    ensured.value.activePin.release();
+
+    const verdict = await cloneStore.isSafeToEvict(declaration.id, false);
+    assert.equal(verdict.ok, true, 'a readable clone on a non-main base is evaluated, not refused as unreadable');
+    if (!verdict.ok) return;
+    assert.equal(verdict.value.safe, true, `a clean trunk-based clone is safe to evict, not blocked; got ${JSON.stringify(verdict.value)}`);
   });
 });
 

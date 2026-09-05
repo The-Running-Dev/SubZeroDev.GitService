@@ -68,6 +68,26 @@ export interface CloneStoreDependencies {
    */
   readonly credentials?: Pick<CredentialResolver, 'allowedHosts' | 'resolveInto'>;
   readonly credentialEnv?: MutableEnv;
+  /**
+   * The declaration's own `RepositoryConfig.baseBranch`, for the
+   * unreachable-commits half of the eviction interlock — which the contract
+   * states against `origin/<base>` (`20-contract.md` § L1 — clone store:
+   * "`remove` with `permitCorruptTree` still refuses when the tree holds
+   * commits unreachable from `origin/<base>`").
+   *
+   * Injected rather than read here, because **D3** makes `RepositoryConfig`
+   * git operations' to read and this module is not entitled to a second
+   * parser for the same file — the composition root wires it from
+   * `GitOperations.loadRepositoryConfig`, the same shape and the same reason
+   * as `HostOperationsDependencies.requiredChecksFor`.
+   *
+   * `null` — no config file, or one that will not parse — means `main`, the
+   * documented `RepositoryConfig` default. Absent as a dependency means the
+   * same: a `CloneStore` assembled without it behaves exactly as it did
+   * before this seam existed, which is correct for every repository whose
+   * base branch *is* `main`.
+   */
+  readonly baseBranchFor?: (clonePath: ClonePath, signal: AbortSignal) => Promise<BranchName | null>;
   readonly cloneSeconds?: number;
   readonly materialisationLockAcquireMs?: number;
   /** `20-contract.md` § Deployment configuration. Defaults to 85 / 95 (`DISK_WATERMARKS_DEFAULT`). */
@@ -525,7 +545,16 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
     const stashCount = stashResult.value.stdout.split('\n').filter((l) => l.trim().length > 0).length;
     if (stashCount > 0) blockers.push({ kind: 'stash-present', count: stashCount });
 
-    const baseBranch = ('main' as BranchName); // `RepositoryConfig` loading is `GitOperations`' (S6+); default until then.
+    // The declaration's configured base, not a fixed `main`. Hardcoding it
+    // made `rev-list origin/main..HEAD` exit non-zero on every repository
+    // whose base branch is something else, which `computeBlockers` reads as
+    // `'corrupt'` — so such a clone reported `corrupt-tree`, and was
+    // permanently unevictable *and* unremovable without the override, with
+    // the disk unreclaimable for the life of the instance. The interlock is
+    // stated against `origin/<base>` in both design and contract; this is
+    // that. A config that will not parse falls back to `main`, the same
+    // `RepositoryConfig` default a missing file already takes.
+    const baseBranch = (deps.baseBranchFor ? await deps.baseBranchFor(clonePath as ClonePath, signal) : null) ?? ('main' as BranchName);
     const branch = await currentBranch(exec, clonePath as ClonePath, GIT_COMMAND_TIMEOUT_SECONDS, signal);
 
     const unreachableResult = await exec.runGit({
