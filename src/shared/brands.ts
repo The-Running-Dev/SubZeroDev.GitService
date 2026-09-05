@@ -212,3 +212,34 @@ export function cloneUrl(value: string, allowed: readonly RemoteHost[]): Outcome
   }
   return { ok: true, value: value as CloneUrl };
 }
+
+/**
+ * `20-contract.md`'s `BranchName` defect note: a value read from a managed
+ * repository's own config reaches `git fetch`'s argv as a bare positional
+ * (`git-operations.ts`'s `syncBase`), so a leading `-` must be rejected even
+ * where git's own ref-name rules would allow it (issue #149). Every other
+ * rule mirrors what `git check-ref-format --branch` itself enforces: no `..`
+ * anywhere, no ASCII control character, space, `~`, `^`, `:`, `?`, `*`, `[`
+ * or `\`, no leading, trailing or doubled `/`, no trailing `.`, no `@{`, not
+ * the bare `@`, and no `/`-separated segment starting with `.` or ending in
+ * `.lock`.
+ */
+const BRANCH_NAME_FORBIDDEN_CHARS = /[\x00-\x1f\x7f ~^:?*\[\\]/;
+const BRANCH_NAME_RULE =
+  'a git ref name git will not read as an option: no leading -, no .., no control/space/~^:?*[\\, no leading, trailing or doubled /, no trailing ., no @{, not "@", no segment starting with . or ending in .lock';
+
+export function branchName(value: string): Outcome<BranchName, ValidationFailure> {
+  const reject = (): Outcome<BranchName, ValidationFailure> => ({ ok: false, error: fail('BranchName', BRANCH_NAME_RULE, value) });
+
+  if (value.length === 0) return reject();
+  if (value.startsWith('-')) return reject();
+  if (value === '@') return reject();
+  if (value.includes('..') || value.includes('@{')) return reject();
+  if (BRANCH_NAME_FORBIDDEN_CHARS.test(value)) return reject();
+  if (value.startsWith('/') || value.endsWith('/') || value.includes('//')) return reject();
+  if (value.endsWith('.')) return reject();
+  for (const segment of value.split('/')) {
+    if (segment.startsWith('.') || segment.endsWith('.lock')) return reject();
+  }
+  return { ok: true, value: value as BranchName };
+}

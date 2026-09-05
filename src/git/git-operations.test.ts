@@ -364,6 +364,54 @@ test('git_commit refuses to proceed when the repository config is unparseable, r
   });
 });
 
+test('loadRepositoryConfig refuses a baseBranch git would read as an option, rather than reaching git fetch with it (issue #149)', async () => {
+  await withVolumeAsync(async (volume) => {
+    const { clonePath, cleanup } = realClone();
+    try {
+      mkdirSync(path.join(clonePath, '.config'));
+      writeFileSync(path.join(clonePath, '.config', 'subzerodev-git.json'), JSON.stringify({ baseBranch: '--upload-pack=/bin/sh' }), 'utf8');
+      const exec = createExec({ volumeRoot: volume });
+      const locks = createLocks();
+      const gitOperations = createGitOperations({ clock: systemClock, exec, locks });
+
+      const result = await gitOperations.loadRepositoryConfig(contextFor(clonePath));
+      assert.equal(result.ok, false, 'a baseBranch beginning with - must never reach syncBase, which passes it to git fetch as a bare positional');
+      if (result.ok) return;
+      assert.equal(result.error.resultKind, 'precondition');
+      assert.equal(result.error.code, 'config-unparseable');
+
+      // The same refusal reaches every domain operation that reads the
+      // config, not just loadRepositoryConfig directly — repo_status is a
+      // representative caller.
+      const status = await gitOperations.status(contextFor(clonePath), {});
+      assert.equal(status.ok, false);
+      assert.equal(status.kind, 'precondition');
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+test('loadRepositoryConfig accepts a well-formed custom baseBranch from config', async () => {
+  await withVolumeAsync(async (volume) => {
+    const { clonePath, cleanup } = realClone();
+    try {
+      mkdirSync(path.join(clonePath, '.config'));
+      writeFileSync(path.join(clonePath, '.config', 'subzerodev-git.json'), JSON.stringify({ baseBranch: 'release/1.2' }), 'utf8');
+      const exec = createExec({ volumeRoot: volume });
+      const locks = createLocks();
+      const gitOperations = createGitOperations({ clock: systemClock, exec, locks });
+
+      const result = await gitOperations.loadRepositoryConfig(contextFor(clonePath));
+      assert.equal(result.ok, true);
+      if (!result.ok) return;
+      assert.equal(result.value.baseBranch, 'release/1.2');
+    } finally {
+      cleanup();
+    }
+  });
+});
+
 test('git_restore_paths restores a well-formed, allowlisted path to HEAD, discarding the change', async () => {
   await withVolumeAsync(async (volume) => {
     const { clonePath, cleanup } = realClone();
