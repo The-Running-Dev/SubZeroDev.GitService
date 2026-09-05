@@ -2412,10 +2412,17 @@ test('S27.1 — crossing the maintenance watermark after a mutation requests a p
 
     const requested: string[] = [];
     let readVolumeUsageCalledWhileMutationLockHeld = false;
+    let watermarkCheckSettled = false;
+    let releaseWatermarkCheck: () => void;
+    const watermarkCheckGate = new Promise<void>((resolve) => {
+      releaseWatermarkCheck = resolve;
+    });
     const instrumentedCloneStore: typeof cloneStore = {
       ...cloneStore,
       async readVolumeUsage() {
         if (locks.currentMutationHolder() !== null) readVolumeUsageCalledWhileMutationLockHeld = true;
+        await watermarkCheckGate;
+        watermarkCheckSettled = true;
         return ok({ totalBytes: 1000, usedBytes: 900, usedPercent: 90, byConsumer: { clones: 900, 'audit-log': 0, 'structured-store': 0, 'backups-and-snapshots': 0, 'watcher-files': 0 }, storeByTable: {} as never });
       },
       requestMaintenance(reason) {
@@ -2436,7 +2443,6 @@ test('S27.1 — crossing the maintenance watermark after a mutation requests a p
       clock: systemClock,
     });
 
-    const started = Date.now();
     const result = await pipeline.dispatch({
       toolName: 'noop_mutation' as never,
       input: {},
@@ -2446,10 +2452,13 @@ test('S27.1 — crossing the maintenance watermark after a mutation requests a p
       context: 'normal',
       signal: new AbortController().signal,
     });
-    const elapsedMs = Date.now() - started;
     assert.equal(result.kind, 'success');
-    assert.ok(elapsedMs < 1000, `dispatch returned in ${elapsedMs}ms — the watermark check must never be awaited by the caller`);
+    // The watermark check's own `readVolumeUsage` is held open by the gate
+    // above, so `dispatch` resolving proves the caller never awaited it —
+    // no wall-clock budget needed, only that this is still false.
+    assert.equal(watermarkCheckSettled, false, 'the watermark check must not be awaited by the caller');
 
+    releaseWatermarkCheck!();
     // The check itself is fired in a `finally`, so it may still be in flight
     // a tick after `dispatch` resolves — wait one macrotask for it.
     await new Promise((resolve) => setTimeout(resolve, 0));
