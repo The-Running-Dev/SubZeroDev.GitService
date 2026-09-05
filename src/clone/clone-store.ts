@@ -11,6 +11,7 @@ import type { Exec, MutableEnv } from '../exec/exec.ts';
 import type { Locks } from '../locks/locks.ts';
 import type { LockHolder } from '../locks/types.ts';
 import type { Finding } from '../shared/result-kind.ts';
+import { currentBranch } from '../exec/primitives.ts';
 import { directoryBytes, type MaintenanceReason, type RetentionReport } from '../shared/retention.ts';
 import { storeError, type StoreError } from '../store/errors.ts';
 import { DISK_WATERMARKS_DEFAULT, NO_VOLUME_USAGE, type DiskWatermarks, type VolumeConsumer, type VolumeUsage } from '../store/volume-usage.ts';
@@ -474,11 +475,10 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
   }
 
   async function observeInternal(declarationId: DeclarationId, clonePath: string, signal: AbortSignal): Promise<ObservedGitState | null> {
-    const branchResult = await exec.runGit({ argv: ['rev-parse', '--abbrev-ref', 'HEAD'], cwd: clonePath as ClonePath, timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS, credential: null, signal });
+    const branch = await currentBranch(exec, clonePath as ClonePath, GIT_COMMAND_TIMEOUT_SECONDS, signal);
     const headResult = await exec.runGit({ argv: ['rev-parse', 'HEAD'], cwd: clonePath as ClonePath, timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS, credential: null, signal });
     const upstreamResult = await exec.runGit({ argv: ['rev-parse', '@{u}'], cwd: clonePath as ClonePath, timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS, credential: null, signal });
 
-    const branch = branchResult.ok && branchResult.value.stdout.trim() !== 'HEAD' ? (branchResult.value.stdout.trim() as BranchName) : null;
     const headSha = headResult.ok ? (headResult.value.stdout.trim() as GitSha) : null;
     const upstreamSha = upstreamResult.ok ? (upstreamResult.value.stdout.trim() as GitSha) : null;
 
@@ -526,8 +526,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
     if (stashCount > 0) blockers.push({ kind: 'stash-present', count: stashCount });
 
     const baseBranch = ('main' as BranchName); // `RepositoryConfig` loading is `GitOperations`' (S6+); default until then.
-    const branchResult = await exec.runGit({ argv: ['rev-parse', '--abbrev-ref', 'HEAD'], cwd: clonePath as ClonePath, timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS, credential: null, signal });
-    const branch = branchResult.ok ? (branchResult.value.stdout.trim() as BranchName) : null;
+    const branch = await currentBranch(exec, clonePath as ClonePath, GIT_COMMAND_TIMEOUT_SECONDS, signal);
 
     const unreachableResult = await exec.runGit({
       argv: ['rev-list', '--count', `origin/${baseBranch}..HEAD`],

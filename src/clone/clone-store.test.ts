@@ -535,6 +535,46 @@ test('computeBlockers fails closed: a failed git status check refuses removal ra
   });
 });
 
+test('computeBlockers reads a detached HEAD as no branch, not the literal string "HEAD" (issue #60)', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declaration = fixtureDeclaration('repo-detached', createBareGitRemote());
+    const real = createExec({ volumeRoot: volume });
+    const locks = createLocks();
+
+    // Real git never lets `@{u}` succeed with no current branch to carry an
+    // upstream, which is exactly why this defect was latent (issue #60's own
+    // analysis). Forcing `@{u}` to report commits ahead here isolates the one
+    // thing under test — whether `computeBlockers` normalises a detached
+    // `--abbrev-ref HEAD` the same way `observeInternal`/`currentBranch`
+    // already do — from that real-git precondition.
+    const detachedWithForcedUpstream: Exec = {
+      ...real,
+      async runGit(request: ExecRequest): Promise<Outcome<ExecResult, ExecError>> {
+        if (request.argv[0] === 'rev-parse' && request.argv[1] === '--abbrev-ref' && request.argv[2] === 'HEAD') {
+          return ok({ exitCode: 0, stdout: 'HEAD\n', stderr: '', durationMs: 0, timedOut: false });
+        }
+        if (request.argv[0] === 'rev-list' && request.argv[1] === '--count' && request.argv[2] === '@{u}..HEAD') {
+          return ok({ exitCode: 0, stdout: '3\n', stderr: '', durationMs: 0, timedOut: false });
+        }
+        return real.runGit(request);
+      },
+    };
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec: detachedWithForcedUpstream, locks, declarations: declarationsStubFor(declaration) });
+
+    const ensured = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(ensured.ok, true);
+    if (!ensured.ok) return;
+    ensured.value.materialisationLock.release();
+
+    const verdict = await cloneStore.isSafeToEvict(declaration.id, false);
+    assert.equal(verdict.ok, true);
+    if (!verdict.ok) return;
+    if (verdict.value.safe) return; // no blockers at all also satisfies "no branch-ahead-of-upstream blocker naming 'HEAD'"
+    const branchAhead = verdict.value.blockers.find((b) => b.kind === 'branch-ahead-of-upstream');
+    assert.equal(branchAhead, undefined, `a detached HEAD must never surface as a branch name: ${JSON.stringify(branchAhead)}`);
+  });
+});
+
 function gitIn(args: readonly string[], cwd: string): { readonly status: number | null; readonly stdout: string; readonly stderr: string } {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };

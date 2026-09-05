@@ -32,7 +32,7 @@ import { diagnosticsFor } from '../shared/diagnostics.ts';
 import type { ModuleErrorBase } from '../shared/result-kind.ts';
 import { REPOSITORY_CONFIG_DEFAULTS, type RepositoryConfig } from '../declarations/types.ts';
 import { gitOperationsError, type GitOperationsError } from './errors.ts';
-import { currentBranch as sharedCurrentBranch } from './primitives.ts';
+import { currentBranch as sharedCurrentBranch } from '../exec/primitives.ts';
 import type {
   BranchSummary,
   BranchesData,

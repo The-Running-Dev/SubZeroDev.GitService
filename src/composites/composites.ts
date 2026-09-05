@@ -9,7 +9,7 @@ import type { GitOperations } from '../git/git-operations.ts';
 import type { HostOperations } from '../host/host-operations.ts';
 import { success, precondition, infrastructure, type ToolResult } from '../result/envelope.ts';
 import { diagnosticsFor } from '../shared/diagnostics.ts';
-import { currentBranch as sharedCurrentBranch } from '../git/primitives.ts';
+import { currentBranch as sharedCurrentBranch } from '../exec/primitives.ts';
 import type { PrepareBranchData, PrepareBranchInput, ReconcileAfterMergeData, ReconcileAfterMergeInput } from './types.ts';
 
 /**
