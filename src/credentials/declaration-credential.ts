@@ -3,6 +3,7 @@ import { ok, err, type Outcome } from '../shared/outcome.ts';
 import type { CallContext } from '../shared/call-context.ts';
 import type { CredentialBinding, MutableEnv } from '../exec/exec.ts';
 import type { Declarations } from '../declarations/declarations.ts';
+import type { Declaration } from '../declarations/types.ts';
 import type { ModuleErrorBase } from '../shared/result-kind.ts';
 import type { CredentialResolver } from './credentials.ts';
 
@@ -27,37 +28,24 @@ function moduleError(resultKind: ModuleErrorBase['resultKind'], summary: string)
 }
 
 /**
- * Everything an operation needs before it may touch a network, in the order
- * the design fixes:
- *
- * 1. the declaration, because the credential reference and the clone URL are
- *    its fields and not the call context's;
- * 2. the reference's **own** allowed-host constraint against that clone URL's
- *    host — the second guard, independent of the deployment's remote-host
- *    allowlist, so neither alone carries the property;
- * 3. resolution, at the moment of use, into the shared `MutableEnv`.
+ * Steps 2 and 3 of `prepareDeclarationCredential` below, taking the
+ * declaration directly rather than fetching it — for a caller (`CloneStore`'s
+ * initial-clone path) that already holds the `Declaration` it is about to
+ * touch a network for, and would otherwise re-fetch the same record for no
+ * reason. Split out rather than duplicated so the host-check-then-resolve
+ * sequence still has exactly one home; `prepareDeclarationCredential` is now
+ * this function plus the fetch.
  *
  * A declaration with no `credentialRef` reaches a public remote with no
  * credential at all, which is a legitimate configuration (a public mirror, or
  * a local path in a test) and not a refusal.
- *
- * Shared by the remote git operations (S9) and the host adapter (S10). It
- * lives here rather than in either because both need it and a rule with two
- * homes is a promise they will diverge.
  */
-export async function prepareDeclarationCredential(
-  deps: DeclarationCredentialDependencies,
-  ctx: CallContext,
+export async function resolveDeclarationCredential(
+  deps: Pick<DeclarationCredentialDependencies, 'credentials' | 'credentialEnv'>,
+  declaration: Pick<Declaration, 'id' | 'cloneUrl' | 'credentialRef'>,
 ): Promise<Outcome<PreparedCredential, ModuleErrorBase>> {
-  if (!deps.declarations || !deps.credentials || !deps.credentialEnv) {
+  if (!deps.credentials || !deps.credentialEnv) {
     return err(moduleError('infrastructure', 'this instance has no credential resolver configured, and will not reach a remote without one'));
-  }
-  if (ctx.declarationId === null) {
-    return err(moduleError('infrastructure', 'no declaration in context for a remote operation'));
-  }
-  const declaration = await deps.declarations.get(ctx.declarationId);
-  if (declaration === null) {
-    return err(moduleError('precondition', `declaration '${ctx.declarationId}' no longer exists`));
   }
   const ref = declaration.credentialRef;
   if (ref === null) return ok({ credential: null, ref: null });
@@ -71,7 +59,39 @@ export async function prepareDeclarationCredential(
     }
   }
 
-  const resolved = await deps.credentials.resolveInto(ref, ctx.declarationId, deps.credentialEnv);
+  const resolved = await deps.credentials.resolveInto(ref, declaration.id, deps.credentialEnv);
   if (!resolved.ok) return err(resolved.error);
   return ok({ credential: resolved.value, ref });
+}
+
+/**
+ * Everything an operation needs before it may touch a network, in the order
+ * the design fixes:
+ *
+ * 1. the declaration, because the credential reference and the clone URL are
+ *    its fields and not the call context's;
+ * 2. the reference's **own** allowed-host constraint against that clone URL's
+ *    host — the second guard, independent of the deployment's remote-host
+ *    allowlist, so neither alone carries the property;
+ * 3. resolution, at the moment of use, into the shared `MutableEnv`.
+ *
+ * Shared by the remote git operations (S9) and the host adapter (S10). It
+ * lives here rather than in either because both need it and a rule with two
+ * homes is a promise they will diverge.
+ */
+export async function prepareDeclarationCredential(
+  deps: DeclarationCredentialDependencies,
+  ctx: CallContext,
+): Promise<Outcome<PreparedCredential, ModuleErrorBase>> {
+  if (!deps.declarations) {
+    return err(moduleError('infrastructure', 'this instance has no credential resolver configured, and will not reach a remote without one'));
+  }
+  if (ctx.declarationId === null) {
+    return err(moduleError('infrastructure', 'no declaration in context for a remote operation'));
+  }
+  const declaration = await deps.declarations.get(ctx.declarationId);
+  if (declaration === null) {
+    return err(moduleError('precondition', `declaration '${ctx.declarationId}' no longer exists`));
+  }
+  return resolveDeclarationCredential(deps, declaration);
 }

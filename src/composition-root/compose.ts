@@ -477,6 +477,8 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
     exec,
     locks,
     declarations,
+    credentials,
+    credentialEnv,
     journal,
     store,
     audit,

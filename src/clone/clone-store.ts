@@ -7,7 +7,7 @@ import { sha256Hex, type BranchName, type ClonePath, type CloneUrl, type Declara
 import { canonicalize } from '../shared/canonical-json.ts';
 import type { ActorRef } from '../shared/actor.ts';
 import type { Clock } from '../clock/clock.ts';
-import type { Exec } from '../exec/exec.ts';
+import type { Exec, MutableEnv } from '../exec/exec.ts';
 import type { Locks } from '../locks/locks.ts';
 import type { LockHolder } from '../locks/types.ts';
 import type { Finding } from '../shared/result-kind.ts';
@@ -19,6 +19,8 @@ import type { Journal } from '../journal/journal.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import type { Declaration } from '../declarations/types.ts';
 import type { Audit } from '../audit/audit.ts';
+import { resolveDeclarationCredential } from '../credentials/declaration-credential.ts';
+import type { CredentialResolver } from '../credentials/credentials.ts';
 import { cloneStoreError, type CloneStoreError } from './errors.ts';
 import type { Clone, CloneHandle, CloneState, CorruptTreeOverride, EvictionBlocker, EvictionOutcome, ObservedGitState, SafeToEvictVerdict } from './types.ts';
 
@@ -54,6 +56,17 @@ export interface CloneStoreDependencies {
   readonly exec: Exec;
   readonly locks: Locks;
   readonly declarations: Pick<Declarations, 'get'>;
+  /**
+   * Resolves `declaration.credentialRef` for the initial materialisation
+   * clone (issue #178) — every other remote git call already goes through
+   * `prepareDeclarationCredential`, which this and `credentialEnv` also
+   * back. Optional so a caller with no remote credentials at all (a public
+   * mirror, a local-path test fixture) keeps compiling; without it, a clone
+   * that needs a credential still fails, honestly, the same way it did
+   * before this dependency existed.
+   */
+  readonly credentials?: Pick<CredentialResolver, 'allowedHosts' | 'resolveInto'>;
+  readonly credentialEnv?: MutableEnv;
   readonly cloneSeconds?: number;
   readonly materialisationLockAcquireMs?: number;
   /** `20-contract.md` § Deployment configuration. Defaults to 85 / 95 (`DISK_WATERMARKS_DEFAULT`). */
@@ -693,11 +706,35 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
         return err(cloneStoreError({ code: 'store-failed', cause: materialising.error }, materialising.error.summary));
       }
 
+      // Issue #178: this is the one clone-store call that reaches a remote
+      // for the first time, so it is the one call that needs the
+      // declaration's own credential — every later operation on this clone
+      // goes through `GitOperations`, which already resolves one. A
+      // resolution failure (no resolver wired, the reference not permitted
+      // for this host, the secret itself unavailable) falls back to `null`
+      // rather than aborting the clone outright: that reproduces exactly the
+      // pre-fix behaviour for that narrower case, and lets git's own
+      // authentication failure surface through the existing `clone-failed`
+      // path instead of this needing a new `CloneStoreError` variant.
+      // Issue #178: this is the one clone-store call that reaches a remote
+      // for the first time, so it is the one call that needs the
+      // declaration's own credential — every later operation on this clone
+      // goes through `GitOperations`, which already resolves one. A
+      // resolution failure (no resolver wired, the reference not permitted
+      // for this host, the secret itself unavailable) falls back to `null`
+      // rather than aborting the clone outright: that reproduces exactly the
+      // pre-fix behaviour for that narrower case, and lets git's own
+      // authentication failure surface through the existing `clone-failed`
+      // path instead of this needing a new `CloneStoreError` variant.
+      const preparedCredential =
+        deps.credentials && deps.credentialEnv
+          ? await resolveDeclarationCredential({ credentials: deps.credentials, credentialEnv: deps.credentialEnv }, declaration)
+          : null;
       const cloneResult = await exec.runGit({
         argv: ['clone', '--', declaration.cloneUrl, clonePath],
         cwd: clonesRoot as ClonePath,
         timeoutSeconds: cloneSeconds,
-        credential: null,
+        credential: preparedCredential && preparedCredential.ok ? preparedCredential.value.credential : null,
         signal,
       });
 

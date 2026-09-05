@@ -8,11 +8,12 @@ import { systemClock } from '../clock/clock.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
 import { createAudit } from '../audit/audit.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
-import { createExec, type Exec, type ExecRequest, type ExecResult } from '../exec/exec.ts';
+import { createExec, type CredentialBinding, type Exec, type ExecRequest, type ExecResult } from '../exec/exec.ts';
 import { execError, type ExecError } from '../exec/errors.ts';
 import { createLocks } from '../locks/locks.ts';
 import { ok, type Outcome } from '../shared/outcome.ts';
-import type { DeclarationId, OperationId } from '../shared/brands.ts';
+import type { CredentialResolver } from '../credentials/credentials.ts';
+import type { DeclarationId, EnvVarName, OperationId } from '../shared/brands.ts';
 import type { DeploymentCeiling } from '../contract/capabilities.ts';
 import { createDeclarations, type Declarations } from '../declarations/declarations.ts';
 import type { Declaration } from '../declarations/types.ts';
@@ -144,6 +145,57 @@ test('ensure() clones on first use, and describe() then reports ready', async ()
     const described = await cloneStore.describe(declaration.id);
     assert.equal(described.ok, true);
     if (described.ok) assert.equal(described.value.state, 'ready');
+  });
+});
+
+test('ensure() resolves and passes the declaration credential to the initial clone (issue #178)', async () => {
+  await withMigratedVolume(async (volume) => {
+    const remote = createBareGitRemote();
+    const declaration = fixtureDeclaration('repo-credentialed', remote);
+    const real = createExec({ volumeRoot: volume });
+    let cloneCredential: CredentialBinding | null = null;
+    const exec: Exec = {
+      ...real,
+      async runGit(request) {
+        if (request.argv[0] === 'clone') cloneCredential = request.credential;
+        return real.runGit(request);
+      },
+    };
+    const locks = createLocks();
+    const credentialEnv = new Map<EnvVarName, string>();
+    const binding: CredentialBinding = {
+      ref: declaration.credentialRef,
+      declarationId: declaration.id,
+      variableName: 'SZG_CREDENTIAL_FIXTURE_178' as EnvVarName,
+      username: null,
+    };
+    const credentials: Pick<CredentialResolver, 'allowedHosts' | 'resolveInto'> = {
+      async allowedHosts() {
+        return ok([]);
+      },
+      async resolveInto(_ref, _declarationId, env) {
+        env.set(binding.variableName, 'secret-value');
+        return ok(binding);
+      },
+    };
+
+    const cloneStore = createCloneStore({
+      volumeRoot: volume,
+      clock: systemClock,
+      exec,
+      locks,
+      declarations: declarationsStubFor(declaration),
+      credentials,
+      credentialEnv,
+    });
+
+    const result = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(result.ok, true);
+    if (result.ok) result.value.materialisationLock.release();
+
+    // Before the fix, the initial clone hardcoded `credential: null`,
+    // silently ignoring a valid, resolved credential — issue #178.
+    assert.deepEqual(cloneCredential, binding);
   });
 });
 
