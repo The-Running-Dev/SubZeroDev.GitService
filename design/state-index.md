@@ -58,6 +58,7 @@
 | 190 | #190 | check-layer-direction.test.ts and watcher.test.ts fail on Windows — path-separator regex and symlink EPERM | — | `c316c787456f6da803938f27de6341059aca1481` |
 | 216 | #216 | Decide whether DispatchPipelineDependencies.journal should be required | — | `4d7d5f70bfa7ddb8bb58304736425b5389a05b46` |
 | 246 | #246 | Design-state tooling reads this repo's contract for sections it has never had, and fails rather than standing down | — | `26f3a79b33306827ccd9fd202e63238153659f47` |
+| 248 | #248 | Orphaning reports no retained journal entries: `OrphanReport.retainedJournalEntries` is always empty | — | `0a097dc9fb41d785c2fc7378153bb94681ef9759` |
 | milestone/1 | #45 | Credential mount carries no username, so hosts that require a real one cannot authenticate | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
 | milestone/1 | #49 | Terminal-state detection never reaches the notifier on the ordinary dispatch or recovery paths | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
 | milestone/2 | #61 | syncBase inlines rev-parse/is-ancestor plumbing that composites.ts keeps as private helpers | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
