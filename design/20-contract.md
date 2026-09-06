@@ -61,7 +61,7 @@ checked, or by whom, and that is the only part worth writing down:
 | `WatchedFileName` | non-empty basename, no separator, not `.` or `..` | `watchedFileName()` |
 | `CloneUrl` | parses as an https or scp-style remote, and its host is on the deployment allowlist | `cloneUrl()` |
 | `McpResourceUri` | `/mcp/{DeclarationId}` | `mcpResourceUri()` |
-| `BranchName` | a ref name git will not read as an option — see the defect note below | **nothing — see below** |
+| `BranchName` | a ref name git will not read as an option — see the note below | `branchName()` |
 | `SaltedHash` | opaque, and never equal to the value it hashes | authorization, operator identity |
 
 `cloneUrlHost()` is exported beside `cloneUrl()` because a clone URL's host is checked twice against
@@ -85,15 +85,15 @@ never executes. A constructor there would restate a claim the upstream already m
 no safe branch to take when it failed. **E5** is unaffected: it constrains *when* a published URL may
 be returned in a success position, not whether the string parses.
 
-**`BranchName` has no constructor and should have one.** This is a defect in the tree, not in the
-contract. The gap matters because a branch name is not merely displayed — it reaches a git argument
-vector directly, and `RepositoryConfig.baseBranch` is read from the managed repository's own config
-file, which this service explicitly does not own. Argument vectors prevent shell injection but not
-git's own option parsing: a value beginning with `-` is read by git as a flag rather than a ref.
-Sites that interpolate into `refs/heads/${branch}` are incidentally safe; a bare positional is not.
-`branchName()` must therefore reject any value git would not accept as a ref name, and must reject a
-leading `-` whether or not git would. Until it exists, no caller may assume a `BranchName` has been
-checked.
+**`BranchName` is checked, and the reason it must be is the one part worth writing down.** A branch
+name is not merely displayed — it reaches a git argument vector directly, and
+`RepositoryConfig.baseBranch` is read from the managed repository's own config file, which this
+service explicitly does not own. Argument vectors prevent shell injection but not git's own option
+parsing: a value beginning with `-` is read by git as a flag rather than a ref. Sites that
+interpolate into `refs/heads/${branch}` are incidentally safe; a bare positional is not.
+`branchName()` therefore rejects any value git would not accept as a ref name, **and rejects a
+leading `-` whether or not git would** — that last rule is the contract's, not git's, and is the one
+a reimplementation would otherwise drop. The rule set itself is in the tree.
 
 ```ts
 interface ValidationFailure {
@@ -262,12 +262,10 @@ and never cached — **D3** — so a repository can change its own base branch w
 restarted or amended.
 
 Because the file is repository-controlled and this service does not own repository contents, every
-field here is untrusted input. `baseBranch` is typed `BranchName` in this contract and is the same
-defect the brand table records: the tree currently declares it `string`, which is why its consumers
-cast at each point of use, and one of those points passes it to a git argument vector as a bare
-positional. The contract's typing is the correct one; the field is untrusted precisely because of
-where it comes from, so it is exactly the field that should be constructed and checked rather than
-asserted.
+field here is untrusted input. `baseBranch` is a `BranchName` and is constructed rather than
+asserted, which is what the brand table's note is about: the value reaches a git argument vector as
+a bare positional, so it is exactly the field that has to be checked at the boundary rather than
+cast at each point of use.
 
 ### Clone
 
@@ -1311,15 +1309,6 @@ and contains nothing under the profile's stripped set — **A4**. No layer adds 
 commit with the amendment that caused it; a bump that could land separately would leave sessions
 frozen at an epoch that never corresponded to a stored grant.
 
-`revalidateFileWatchers` re-checks every active declaration's plan/apply tool pair against the current
-registry at boot. It returns the first mismatch found, not a full report, because boot fails closed on
-the first one either way.
-
-`effectiveGrant` takes all four layers and returns a set rather than a boolean, because the epoch
-check needs the recomputed set and not just a verdict. Each capability's own scope decides whether
-layer 3 participates in its intersection; an instance-scoped capability intersects layers 1, 2 and
-4 only, which is why `declaration` may be null.
-
 `revalidateFileWatchers` re-checks every active declaration's plan/apply tool pair against the
 current registry at boot, per the file-watcher boot re-validation this contract already requires
 (§ "File watcher", "Checked at creation, at fire time, and at boot re-validation"). It returns the
@@ -2128,8 +2117,8 @@ which name a `declarationId` directly in their path; `/oauth/authorize`'s `GET` 
 `resource` query parameter naming one, but the table below classifies routes by path rather than by
 query, consistent with every other row here.
 
-**The closed set, and the count S18.14 asks for.** Twenty-eight routes above carry no repository
-dimension — the three liveness/version/health routes, the six authentication routes, the two
+**The closed set, and the count S18.14 asks for.** Thirty-two routes above carry no repository
+dimension — the three liveness/version/health routes, the ten authentication routes, the two
 declaration listing/creation routes, the six grants/authorization routes, the two
 parked-operations routes, the two `/notifier/failed*` routes, `/audit`, and the six no-dimension
 OAuth/MCP routes below (`/.well-known/oauth-authorization-server`, `/oauth/register`,
@@ -2138,7 +2127,7 @@ may be added to it without a contract amendment naming why the new route has no 
 scope to. The remaining ten routes each carry a `declarationId` (or the equivalent —
 `/failing-credentials/{credentialRef}/{declarationId}/clear`'s second segment) directly in their
 path: the seven declaration-management and tool routes above, `/failing-credentials/.../clear`, the
-protected-resource metadata document, and the MCP transport itself. Thirty-eight routes in total.
+protected-resource metadata document, and the MCP transport itself. Forty-two routes in total.
 
 #### OAuth endpoints and the MCP transport (resolves U5)
 
