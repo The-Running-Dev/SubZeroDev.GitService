@@ -49,6 +49,7 @@ function declarationsFor(
     readonly adoptionCheck?: CloneAdoptionCheck;
     readonly registryEntries?: readonly ToolDeclaration[];
     readonly cancelScheduledJobsForDeclaration?: Parameters<typeof createDeclarations>[0]['cancelScheduledJobsForDeclaration'];
+    readonly revokeGrantsForDeclaration?: Parameters<typeof createDeclarations>[0]['revokeGrantsForDeclaration'];
   } = {},
 ) {
   const adoptionCheck: CloneAdoptionCheck = opts.adoptionCheck ?? {
@@ -63,6 +64,7 @@ function declarationsFor(
     registryEntry: (name) => opts.registryEntries?.find((entry) => entry.name === name) ?? null,
     cloneAdoptionCheck: () => adoptionCheck,
     ...(opts.cancelScheduledJobsForDeclaration ? { cancelScheduledJobsForDeclaration: opts.cancelScheduledJobsForDeclaration } : {}),
+    ...(opts.revokeGrantsForDeclaration ? { revokeGrantsForDeclaration: opts.revokeGrantsForDeclaration } : {}),
   });
 }
 
@@ -411,6 +413,77 @@ test('orphan() reports no cancelled jobs when no scheduler cascade is wired', as
     const orphaned = await declarations.orphan('repo-12' as DeclareInput['id'], OPERATOR);
     assert.equal(orphaned.ok, true);
     if (orphaned.ok) assert.deepEqual(orphaned.value.cancelledJobs, []);
+  });
+});
+
+test('issue #66 — orphan() revokes grants through the injected cascade, inside its own transaction, and reports what was revoked', async () => {
+  await withMigratedVolume(async (volume) => {
+    const calls: { declarationId: string; generation: number }[] = [];
+    const declarations = declarationsFor(volume, {
+      revokeGrantsForDeclaration: (declarationId, generation, tx) => {
+        calls.push({ declarationId: declarationId as unknown as string, generation: generation as unknown as number });
+        // Runs inside the caller's own transaction: a write through `tx`
+        // here must commit or roll back with `orphan`'s own state flip.
+        tx.run('UPDATE declaration SET updated_at = updated_at WHERE id = ?', declarationId as unknown as string);
+        return ['grant-1' as never, 'grant-2' as never];
+      },
+    });
+    const declared = await declarations.declare(declareInputFor('repo-13'), OPERATOR);
+    assert.equal(declared.ok, true);
+
+    const orphaned = await declarations.orphan('repo-13' as DeclareInput['id'], OPERATOR);
+    assert.equal(orphaned.ok, true);
+    if (!orphaned.ok) return;
+    assert.deepEqual(orphaned.value.revokedGrants, ['grant-1', 'grant-2']);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.declarationId, 'repo-13');
+    assert.equal(calls[0]!.generation, orphaned.value.generation);
+  });
+});
+
+test('orphan() reports no revoked grants when no authorization cascade is wired', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declarations = declarationsFor(volume);
+    const declared = await declarations.declare(declareInputFor('repo-14'), OPERATOR);
+    assert.equal(declared.ok, true);
+
+    const orphaned = await declarations.orphan('repo-14' as DeclareInput['id'], OPERATOR);
+    assert.equal(orphaned.ok, true);
+    if (orphaned.ok) assert.deepEqual(orphaned.value.revokedGrants, []);
+  });
+});
+
+test('issue #66 — orphan() advances the grant epoch in the same transaction as the state flip', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declarations = declarationsFor(volume);
+    const declared = await declarations.declare(declareInputFor('repo-15'), OPERATOR);
+    assert.equal(declared.ok, true);
+    const before = grantEpochOnDisk(volume, 'repo-15');
+
+    const orphaned = await declarations.orphan('repo-15' as DeclareInput['id'], OPERATOR);
+    assert.equal(orphaned.ok, true);
+
+    assert.equal(grantEpochOnDisk(volume, 'repo-15'), before + 1, 'orphaning is one of the three grant-epoch triggers');
+  });
+});
+
+test('issue #66 — orphan() rolls back the epoch bump, the state flip, and the cascades together when a later cascade throws', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declarations = declarationsFor(volume, {
+      cancelScheduledJobsForDeclaration: () => {
+        throw new Error('the regression this test guards: a partial orphan committing anyway');
+      },
+    });
+    const declared = await declarations.declare(declareInputFor('repo-16'), OPERATOR);
+    assert.equal(declared.ok, true);
+    const before = grantEpochOnDisk(volume, 'repo-16');
+
+    const orphaned = await declarations.orphan('repo-16' as DeclareInput['id'], OPERATOR);
+    assert.equal(orphaned.ok, false, 'the throwing cascade must fail the whole orphan, not just itself');
+
+    assert.equal(grantEpochOnDisk(volume, 'repo-16'), before, 'the epoch bump rolled back with the rest of the transaction');
+    const stillActive = await declarations.get('repo-16' as DeclareInput['id']);
+    assert.equal(stillActive?.state, 'active', 'the state flip rolled back too');
   });
 });
 

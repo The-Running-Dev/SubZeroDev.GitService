@@ -46,6 +46,7 @@ import {
   MCP_ACCESS_TOKEN_TTL_SECONDS_DEFAULT,
   MCP_REFRESH_TOKEN_TTL_SECONDS_DEFAULT,
   OPERATOR_API_TOKEN_TTL_SECONDS_DEFAULT,
+  type Authorization,
 } from '../authorization/authorization.ts';
 import { createScheduler, createSchedulerOperations, type Scheduler } from '../scheduler/scheduler.ts';
 import type { Session } from '../shared/session.ts';
@@ -428,6 +429,12 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
   // a cycle. `orphan` only ever calls this after boot, well after
   // `schedulerRef` below is set.
   let schedulerRef: Pick<Scheduler, 'cancelForDeclaration'> | null = null;
+  // Issue #66 — the same forward-reference shape, for the same reason:
+  // `Authorization` (L4) depends on `Declarations` (L1) already, so
+  // `Declarations` cannot import `Authorization`'s own type without a
+  // cycle. `orphan` only ever calls this after boot, well after
+  // `authorizationRef` below is set.
+  let authorizationRef: Pick<Authorization, 'revokeGrantsForResource'> | null = null;
   // 2026-08-13 post-S27 reconciliation — the same forward-reference shape,
   // for the same reason: `Watcher` is L2 and `CloneStore` (which needs its
   // usage figure for `byConsumer['watcher-files']`) is L1, so `CloneStore`
@@ -444,6 +451,10 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
     cancelScheduledJobsForDeclaration: (declarationId, reason, tx) => {
       if (!schedulerRef) throw new Error('server: declarations orphan cascade accessed before composition finished');
       return schedulerRef.cancelForDeclaration(declarationId, reason, tx);
+    },
+    revokeGrantsForDeclaration: (declarationId, generation, tx) => {
+      if (!authorizationRef) throw new Error('server: declarations orphan cascade accessed before composition finished');
+      return authorizationRef.revokeGrantsForResource(declarationId, generation, tx);
     },
     cloneAdoptionCheck: () => {
       const store = cloneStoreRef;
@@ -637,6 +648,10 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
     mcpRefreshTokenTtlSeconds: resolveTokenLifetimeSeconds('MCP_REFRESH_TOKEN_TTL_SECONDS', MCP_REFRESH_TOKEN_TTL_SECONDS_DEFAULT),
     operatorApiTokenTtlSeconds: resolveTokenLifetimeSeconds('OPERATOR_API_TOKEN_TTL_SECONDS', OPERATOR_API_TOKEN_TTL_SECONDS_DEFAULT),
   });
+  // Closes the forward reference `declarations`'s `revokeGrantsForDeclaration`
+  // opened above — set well before `orphan` can ever be called (boot has not
+  // even run yet at this point in composition).
+  authorizationRef = authorization;
 
   // S8 — the recovery catalogue, populated here from L2 and read by L1. A
   // duplicate registration is a wiring defect and fatal at composition time,

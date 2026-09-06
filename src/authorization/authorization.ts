@@ -619,9 +619,11 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
      * takes a `StoreTransaction` for, writing and reading back inside the
      * caller's own transaction rather than opening its own connection —
      * same shape as `Declarations.bumpGrantEpoch` (issue #50's note on the
-     * four `tx`-taking members). No caller wires this in yet; it is correct
-     * when one does, the same way `bumpGrantEpoch` was before this slice.
-     * Revocation never deletes or writes a token row directly — `grant`
+     * four `tx`-taking members). Wired into `Declarations.orphan` via the
+     * composition root's `revokeGrantsForDeclaration` forward reference
+     * (issue #66), the same shape `cancelScheduledJobsForDeclaration`
+     * already used for the scheduler cascade. Revocation never deletes or
+     * writes a token row directly — `grant`
      * revoked is enough for both `establishMcpSession` and `grantIsLive` to
      * treat every token under it as dead, the same cascade
      * `revokeGrant`/`revokeClient` already rely on.
