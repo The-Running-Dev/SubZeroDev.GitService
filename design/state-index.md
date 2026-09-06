@@ -45,7 +45,6 @@
 <!-- outstanding:start -->
 | Rank | Issue | Title | Criteria | Mirrored at |
 |---|---|---|---|---|
-| 24 | #38 | RepositoryConfig.baseBranch type drift between code and contract | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
 | 25 | #41 | The kit lives at D:\Downloads\agent-kit, which is a staging path, not a home | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
 | 26 | #42 | Journal's unsettled/allUnsettled/parked/findByScheduledJob return empty on a read failure, indistinguishable from nothing-found | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
 | 27 | #54 | Naming — repository, image, MCP server and service names are unsettled | — | `c316c787456f6da803938f27de6341059aca1481` |
@@ -58,8 +57,7 @@
 | 180 | #180 | Update-WorkMirror.ps1 mangles em dashes into mojibake when it writes WorkRef titles | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
 | 190 | #190 | check-layer-direction.test.ts and watcher.test.ts fail on Windows — path-separator regex and symlink EPERM | — | `c316c787456f6da803938f27de6341059aca1481` |
 | 216 | #216 | Decide whether DispatchPipelineDependencies.journal should be required | — | `4d7d5f70bfa7ddb8bb58304736425b5389a05b46` |
-| 231 | #231 | 10-design.md's module table omits the credentials edge the clone store acquired in #223 | — | `722176f96730fd93da7dbae2e43d33c5b42817a0` |
-| 232 | #232 | Boot never reports which journal entries it parked — revalidation's entries half is a hardcoded empty list | — | `722176f96730fd93da7dbae2e43d33c5b42817a0` |
+| 246 | #246 | Design-state tooling reads this repo's contract for sections it has never had, and fails rather than standing down | — | `26f3a79b33306827ccd9fd202e63238153659f47` |
 | milestone/1 | #45 | Credential mount carries no username, so hosts that require a real one cannot authenticate | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
 | milestone/1 | #49 | Terminal-state detection never reaches the notifier on the ordinary dispatch or recovery paths | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
 | milestone/2 | #61 | syncBase inlines rev-parse/is-ancestor plumbing that composites.ts keeps as private helpers | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
