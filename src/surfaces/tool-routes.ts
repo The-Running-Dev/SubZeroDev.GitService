@@ -58,7 +58,6 @@ function sessionFor(operatorSession: OperatorSession, contractCapabilitySet: Con
     actorRef: { kind: 'operator', subject: operatorSession.subject, clientId: null, grantId: null },
     repositoryBinding: null,
     grant: contractCapabilitySet as unknown as Session['grant'],
-    writablePathPrefixes: [],
     frozenAtEpoch: 0 as unknown as Session['frozenAtEpoch'],
   };
 }

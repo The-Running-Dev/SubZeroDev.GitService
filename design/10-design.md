@@ -232,7 +232,7 @@ on in four different ways.
 | Servability | **Reads and the typed write and push tools remain available to the operator console** under `declaration.manage`. Orphaning withdraws a repository from ordinary service; it does not strand whatever is still in its tree. Without this the clone is unreachable from every surface, and an orphan holding an unpushed branch is refused adoption *and* refused removal by the same predicate — a dead end whose only exit is host access. The exit is now: push the outstanding work, then `clone.remove`, then `declaration.remove`. |
 | Pending `ScheduledJob`s | Moved to `cancelled` with a reason naming the orphaning. Not fired, and not silently dropped. |
 | `Grant`s and `Token`s whose resource is `/mcp/{id}` | Revoked, and the declaration's `grantEpoch` bumped, so live sessions bound to it close on their next call rather than continuing against a repository the operator has retired. **Specified, not yet held** — `orphan` flips the state and cancels pending jobs, and neither revokes a grant nor bumps the epoch, so a live session bound to an orphaned declaration keeps dispatching until it ends. Tracked as issue #49's sibling, [#66](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/66); this annotation goes when that closes. |
-| Unsettled journal entries | Retained and reported. They are the record of work that may still be in the clone. |
+| Unsettled journal entries | Retained and reported. They are the record of work that may still be in the clone. **Retention holds; the reporting is specified and not yet held** — `orphan` returns an empty `retainedJournalEntries` whether or not any exist, because the declarations module reaches no journal, so an operator cannot tell "nothing outstanding" from "never looked". Tracked as [#248](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/248), the sibling of #66 in the same cascade; this annotation goes when that closes. |
 | File watcher directory | Watching stops immediately; the directory is left on disk untouched. Files still in the inbox are neither applied nor moved, because there is no longer a declaration to apply them to. `declaration.remove` refuses while the directory holds anything, on the same principle as `clone.remove` — a watched file the service accepted is a copy nobody else may hold. |
 
 **Re-declaring the same `id` does not inherit any of it, and `generation` is what makes that
@@ -411,8 +411,9 @@ capabilities are what the server side enabled; both must permit the call.
 | `actorRef` | `{ kind, subject, clientId? }` | Passed by value into every context. Audit and journal never import the authorization module — see Module boundaries. |
 | `repositoryBinding` | string? | **Set for `mcp` and `watcher`, absent for `operator`.** A `scheduler` session binds per job rather than per session. |
 | `grant` | set of capability names | Layer 4, computed at session establishment and frozen for the session's lifetime — frozen against *widening*. See the grant epoch for how a narrowing still reaches a live session. |
-| `writablePathPrefixes` | string[] | The **actor profile's** set, intersected per call with the declaration's. Unrestricted for `operator`; strips `.github/workflows/`, `.config/`, `tools/` and `build/` for `mcp`, `scheduler` and `watcher`. |
-| `frozenAtEpoch` | number | The declaration's `grantEpoch` when the grant was computed. Compared on every dispatch. |
+| `frozenAtEpoch` | number | The declaration's `grantEpoch` when the grant was computed. Compared before dispatch by the surface that holds the session — see the grant epoch below. |
+
+**The write allowlist is not a session field.** It is derived per call from the session's `kind`, which selects an actor profile, intersected with the declaration's set. Carrying it on the session was tried and removed: nothing read it, every construction site set it empty, and a surface that forgets to compute it would have narrowed itself to nothing the moment something started reading. Deriving from `kind` has no value for a surface to forget.
 
 **Operator sessions are persisted; MCP sessions are not.** An `OperatorSession` row carries id,
 subject, `createdAt`, `lastSeenAt`, an idle expiry, an absolute expiry and `revokedAt`. Two stated
@@ -839,16 +840,20 @@ L5  Surfaces        MCP transport  |  HTTP API  |  console host
 L4  Runtime         dispatch pipeline  |  authorization  |  operator identity
 L3  Adapters        module adapter  |  http adapter
 L2  Domain          git operations | composites | host adapter | scheduler | watcher
-L1  Platform        declarations | credentials | clone store | exec | locks | lifecycle
-                    journal | recovery catalogue | audit | notifier | result | errors | clock
+L1  Platform        declarations | credentials | clone store | structured store | exec
+                    locks | lifecycle | journal | recovery catalogue | audit | notifier
 L0  Contract        contract types  |  compiler  |  generated registry
+
+    Unlayered        shared | result | clock — cross-cutting primitives, below
+                     everything and classified by nothing; see below
 ```
 
 | Module | Owns | Depends on | Exposes |
 |---|---|---|---|
 | **Contract types** (L0) | The SDK-neutral shape of a tool declaration: name, schemas, scopes, capabilities, annotations, limits, execution target. | Nothing. | Types and authoring helpers. |
 | **Compiler** (L0, build-time only) | Normalisation, semantic safety validation, deterministic emission, SHA-256 fingerprint. | Contract types. | A registry artifact, a sanitised manifest, a fingerprint, generated documentation. **Not present at runtime.** |
-| **Result / errors / clock** (L1) | The envelope, the eight kinds, the error classes, injectable time. | Nothing. | Constructors and predicates. |
+| **Shared / result / clock** (unlayered) | The envelope, the eight kinds, branded types, `Outcome`, the call context, injectable time. **No layer of their own, deliberately** — depended on from everywhere, and every edge out of them into a layered module is type-only, which the dependency check verifies rather than assumes. Inventing layers for them was rejected on 2026-08-14: an invented classification inside a gate is worse than a named absence. | Type-only edges into L0 and L1. | Constructors and predicates. |
+| **Structured store** (L1) | The SQLite file on the named volume, its forward-only migrations, the pre-migration copy taken before each one, the daily snapshots, and the transaction boundary every other module's multi-row write commits inside. Named as a dependency by seven modules below and by **D4**, **D9**, **D10** and **R6**; it had no row of its own until the 2026-09-07 reconciliation, which is how a module every layer rests on stayed unplaced in this table. | Clock. | A connection, a transaction, migration, backup and snapshot, and `runRetention` over its own copies — ending in an incremental vacuum, because deleting rows does not free disk. |
 | **Exec** (L1) | Every subprocess. Fixed executables, argument vectors never strings, no shell, pinned working directory, secret scrubbing of captured output, credentials passed by environment name so they never appear in a process listing. | Result, errors. | Guarded `git` and `gh` runners. |
 | **Locks** (L1) | The global mutation mutex, the per-declaration materialisation mutex, and the per-declaration active-operation count. | Nothing. | Two acquire functions with bounded waits, and a non-blocking pin. |
 | **Declarations** (L1) | The declaration table, the lattice intersection, the remote-host allowlist. | Structured store, contract types, and the clone store's eviction-verdict types. | Read, write, and the effective-grant computation. |

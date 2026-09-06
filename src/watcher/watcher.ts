@@ -218,7 +218,6 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
       actorRef: { kind: 'watcher', subject: `watcher:${declaration.id}` as Subject, clientId: null, grantId: null },
       repositoryBinding: declaration.id,
       grant: declarationScopedCapabilities,
-      writablePathPrefixes: [],
       frozenAtEpoch: declaration.grantEpoch as unknown as Session['frozenAtEpoch'],
     };
   }

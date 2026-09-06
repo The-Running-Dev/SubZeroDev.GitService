@@ -59,7 +59,6 @@ export function createStubAuthorization(
         actorRef: { kind: 'operator', subject, clientId: null, grantId: null },
         repositoryBinding: null,
         grant: new Set(grant) as unknown as Session['grant'],
-        writablePathPrefixes: [],
         frozenAtEpoch: 0 as unknown as Session['frozenAtEpoch'],
       };
       return ok(session);

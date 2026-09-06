@@ -10,7 +10,6 @@ import type { Session } from '../shared/session.ts';
 import type { Clock } from '../clock/clock.ts';
 import type { Dispatch } from '../dispatch/dispatch-pipeline.ts';
 import type { Declarations } from '../declarations/declarations.ts';
-import { SCHEDULER_PROFILE } from '../declarations/types.ts';
 import type { Journal } from '../journal/journal.ts';
 import type { Authorization } from '../authorization/authorization.ts';
 import { validateAgainstSchema } from '../contract/json-schema.ts';
@@ -56,7 +55,7 @@ export interface SchedulerDependencies {
   readonly clock: Clock;
   /** Injected, never imported — `Scheduler` never imports the dispatch pipeline (`20-contract.md` § L2 — scheduler). */
   readonly dispatch: Dispatch;
-  readonly declarations: Pick<Declarations, 'get' | 'effectiveGrant' | 'effectiveWritablePrefixes'>;
+  readonly declarations: Pick<Declarations, 'get' | 'effectiveGrant'>;
   /** `findByScheduledJob` alone — boot resolution reads the journal, it never writes it. */
   readonly journal: Pick<Journal, 'findByScheduledJob'>;
   /**
@@ -409,7 +408,6 @@ export function createScheduler(deps: SchedulerDependencies): Scheduler {
             actorRef: { kind: 'scheduler', subject: `scheduler:${job.id}` as Subject, clientId: null, grantId: null },
             repositoryBinding: job.declarationId,
             grant: recomputedGrant as unknown as SessionGrant,
-            writablePathPrefixes: deps.declarations.effectiveWritablePrefixes(declaration, SCHEDULER_PROFILE),
             frozenAtEpoch: declaration.grantEpoch,
           };
           const result = await deps.dispatch({
