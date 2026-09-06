@@ -175,5 +175,25 @@ Describe 'Invoke-DoneHousekeeping' {
             $refusal = $result.Refused | Where-Object Branch -eq 'fix/squashed'
             $refusal | Should -Not -BeNullOrEmpty
         }
+
+        It 'is a force-delete candidate when the local branch name differs from the PR''s remote head-ref name' {
+            # Reproduces issue #243: a branch whose remote counterpart was deleted (or
+            # renamed) is still tracked via `branch.<name>.merge` in git config even after
+            # the remote-tracking ref itself is gone. `gh pr list --head` matches on the
+            # PR's remote head-ref name, not the local branch name, so a lookup keyed on
+            # the local name alone misses a genuinely squash-merged branch whenever the
+            # two names differ.
+            $repo = New-GitRepo -Path (Join-Path $TestDrive 'repo-renamed-local')
+            $remoteHeadOid = New-UnmergedBranch -RepoPath $repo -Branch 'feature/local-name'
+            & git -C $repo config 'branch.feature/local-name.remote' 'origin' | Out-Null
+            & git -C $repo config 'branch.feature/local-name.merge' 'refs/heads/track/remote-name' | Out-Null
+            $env:FAKE_GH_BRANCH = 'track/remote-name'
+            $env:FAKE_GH_HEAD_OID = $remoteHeadOid
+
+            $result = & $script:ScriptPath -RepoRoot $repo -DefaultBranch main -SkipPull
+
+            @($result.SquashMergeCandidates | ForEach-Object Branch) | Should -Contain 'feature/local-name'
+            @($result.TipAheadOfMergedPr | ForEach-Object Branch) | Should -Not -Contain 'feature/local-name'
+        }
     }
 }

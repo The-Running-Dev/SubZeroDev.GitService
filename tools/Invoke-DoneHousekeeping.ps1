@@ -89,6 +89,21 @@ function Invoke-Git {
     return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($out -join "`n") }
 }
 
+function Get-PrHeadRef {
+    # `gh pr list --head` matches on the PR's remote head-ref name, not the local branch
+    # name - they are usually identical, but a local branch whose remote counterpart was
+    # deleted or renamed keeps the original name only in `branch.<name>.merge`, which git
+    # retains even after the remote-tracking ref itself is pruned. Read that config first
+    # so callers key the gh lookup on the name the PR was actually opened from, falling
+    # back to the local name when no such tracking config exists.
+    param([string]$Branch, [string]$WorkingDir)
+    $mergeRef = Invoke-Git -GitArgs @('config', '--get', "branch.$Branch.merge") -WorkingDir $WorkingDir
+    if ($mergeRef.ExitCode -eq 0 -and $mergeRef.Output.Trim() -match '^refs/heads/(.+)$') {
+        return $Matches[1]
+    }
+    return $Branch
+}
+
 function Get-WorktreeBlockingPath {
     # `git branch -d` refuses a branch checked out in another worktree with
     # "cannot delete branch '<name>' used by worktree at '<path>'" - distinct from
@@ -153,7 +168,7 @@ if ($currentBranch -and $currentBranch -ne $DefaultBranch) {
         # Unmerged relative to a genuine three-dot merge check does not by itself mean
         # abandoned work - a squash-merged PR looks identical to git. Cross-check gh before
         # trusting this as a stop condition.
-        $prCheck = & gh pr list --state merged --head $currentBranch --json number,url 2>$null
+        $prCheck = & gh pr list --state merged --head (Get-PrHeadRef -Branch $currentBranch -WorkingDir $repoRootResolved) --json number,url 2>$null
         $mergedPr = $null
         if ($LASTEXITCODE -eq 0 -and $prCheck) {
             $parsed = $prCheck | ConvertFrom-Json
@@ -201,7 +216,7 @@ $mergedBranches = @(($mergedResult.Output -split "`n") |
 $candidates = [System.Collections.Generic.List[object]]::new()
 foreach ($branch in $mergedBranches) {
     $prInfo = $null
-    $prCheck = & gh pr list --state merged --head $branch --json number,url 2>$null
+    $prCheck = & gh pr list --state merged --head (Get-PrHeadRef -Branch $branch -WorkingDir $repoRootResolved) --json number,url 2>$null
     if ($LASTEXITCODE -eq 0 -and $prCheck) {
         $parsed = @($prCheck | ConvertFrom-Json)
         if ($parsed.Count -gt 0) { $prInfo = $parsed[0].url }
@@ -230,7 +245,7 @@ $allBranches = @(($allBranchesResult.Output -split "`n") |
 $squashMergeCandidates = [System.Collections.Generic.List[object]]::new()
 $tipAheadOfMergedPr = [System.Collections.Generic.List[object]]::new()
 foreach ($branch in $allBranches) {
-    $prCheck = & gh pr list --state merged --head $branch --json number,url,mergeCommit,headRefOid 2>$null
+    $prCheck = & gh pr list --state merged --head (Get-PrHeadRef -Branch $branch -WorkingDir $repoRootResolved) --json number,url,mergeCommit,headRefOid 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $prCheck) { continue }
     $parsed = @($prCheck | ConvertFrom-Json)
     if ($parsed.Count -eq 0) { continue }
