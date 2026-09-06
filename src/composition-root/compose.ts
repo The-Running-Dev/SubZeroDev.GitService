@@ -751,7 +751,6 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
     actorRef: { kind: 'recovery', subject: 'system' as Subject, clientId: null, grantId: null },
     repositoryBinding: null,
     grant: contractCapabilitySet as unknown as SessionGrant,
-    writablePathPrefixes: [],
     frozenAtEpoch: 0 as GrantEpoch,
   };
   const recovery = {

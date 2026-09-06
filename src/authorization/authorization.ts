@@ -11,7 +11,7 @@ import type { Clock } from '../clock/clock.ts';
 import { appendIdentityEvent, type Audit } from '../audit/audit.ts';
 import type { IdentityEvent } from '../audit/types.ts';
 import type { Declarations } from '../declarations/declarations.ts';
-import { MCP_PROFILE, type Declaration } from '../declarations/types.ts';
+import type { Declaration } from '../declarations/types.ts';
 import { expandScopes, type ContractCapabilitySet, type DeploymentCeiling, type CapabilityName, type McpScope, type Scope, type OperatorScope } from '../contract/capabilities.ts';
 import type { StoreTransaction } from '../store/structured-store.ts';
 import { storeError } from '../store/errors.ts';
@@ -50,7 +50,7 @@ export interface AuthorizationDependencies {
   /** The deployment ceiling (layer 2), needed to compute an MCP session's real effective grant the same way `Declarations.effectiveGrant` does for every other layer-4 caller. */
   readonly ceiling: DeploymentCeiling;
   /** Declaration lookups and the shared four-layer intersection — `establishMcpSession` and `recomputeSessionGrant` both need it, and duplicating `effectiveGrant`'s logic here would be the second copy `git/primitives.ts` already exists to warn against. */
-  readonly declarations: Pick<Declarations, 'get' | 'effectiveGrant' | 'effectiveWritablePrefixes'>;
+  readonly declarations: Pick<Declarations, 'get' | 'effectiveGrant'>;
   /**
    * Issuing and revoking a durable credential are audited here rather than at
    * the console route, because the store write is what actually happened —
@@ -375,7 +375,6 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
         actorRef: { kind: 'mcp', subject: grantRow.subject as Subject, clientId: grantRow.client_id as ClientId | null, grantId: grantRow.grant_id as GrantId },
         repositoryBinding: declaration.id,
         grant: effective as unknown as Session['grant'],
-        writablePathPrefixes: deps.declarations.effectiveWritablePrefixes(declaration, MCP_PROFILE),
         frozenAtEpoch: declaration.grantEpoch,
       };
       return ok(session);
@@ -467,7 +466,6 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
           actorRef: { kind: 'operator', subject: grantRow.subject as Subject, clientId: null, grantId: grantRow.grant_id as GrantId },
           repositoryBinding: null,
           grant: expandScopes(scopes, deps.contractCapabilitySet),
-          writablePathPrefixes: [],
           frozenAtEpoch: 0 as unknown as Session['frozenAtEpoch'],
         };
         return session;

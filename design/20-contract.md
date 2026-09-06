@@ -250,6 +250,14 @@ discarding work: an orphaned declaration stops being operable, but its clone, it
 its audit trail remain. A report where those fields were absent would let a caller assume a cleanup
 that never happens.
 
+**`retainedJournalEntries` is specified and not yet held**, alongside `revokedGrants` and the epoch
+bump (#66): `orphan` returns it empty unconditionally, because the declarations module takes no
+journal collaborator to populate it from. The field's whole argument is that a blank would be read
+as a cleanup, and a field that is always blank is read exactly that way — so this is the annotation
+its sibling had and it did not. Tracked as
+[#248](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/248); this paragraph goes when
+that closes.
+
 ### RepositoryConfig
 
 Declared in `src/declarations/types.ts`, with `REPOSITORY_CONFIG_DEFAULTS` beside it.
@@ -333,10 +341,20 @@ session, because a resume step runs as an ordinary dispatch under the lifecycle 
 rather than under anyone's grant — **R8**. Any code treating the two as the same enumeration is
 wrong, and the separate declarations are what prevent it.
 
-`Session.frozenAtEpoch` is what makes a grant a snapshot rather than a live query. It is compared
-against the declaration's `grantEpoch` before every handler invocation, and a moved epoch forces a
-recomputation that can only narrow — **A3** with **A2**. A session therefore cannot gain authority
-between calls, only lose it.
+`Session.frozenAtEpoch` is what makes a grant a snapshot rather than a live query, and it earns its
+place only where a session outlives the call that made it. The MCP transport compares it against the
+declaration's `grantEpoch` before dispatching, and a moved epoch forces a recomputation that can only
+narrow — **A3** with **A2**. A session therefore cannot gain authority between calls, only lose it. The
+scheduler, the watcher and the operator route construct a session per fire, per tick and per request
+respectively, so their `frozenAtEpoch` is current by construction rather than by comparison.
+
+**`Session` carries no write allowlist.** The path prefixes are derived per call by the dispatch
+pipeline, from the profile the session's `kind` selects, through
+`Declarations.effectiveWritablePrefixes` — which is what **A4** is written against. A
+`writablePathPrefixes` member was declared on `Session` until the 2026-09-07 reconciliation and was
+read by nothing; every construction site set it empty, so the first consumer would have narrowed the
+operator route to no writable paths at all. Derivation from `kind` has no value for a surface to
+forget to set.
 
 `STRIPPED_FOR_UNATTENDED` is `.github/workflows/`, `.config/`, `tools/`, `build/`. It is the
 `strippedPathPrefixes` of the `mcp`, `scheduler` and `watcher` profiles; the `operator` profile's
@@ -1905,11 +1923,22 @@ justified amending `git_commit` above.
 
 Declared in `src/dispatch/dispatch-pipeline.ts`.
 
-This is where a call acquires its authority and its locks, and three invariants name it as
-responsible. The epoch check runs before every handler invocation, and a moved epoch forces a
-recomputation that can only narrow — **A3** with **A2**. `visibleTools` and `dispatch` apply the *same*
-predicate: a tool absent from the first returns `authorization` from the second and never reaches a
-handler — **A9**. That is one predicate written once, not two that must be kept in agreement.
+This is where a call acquires its authority and its locks. `visibleTools` and `dispatch` apply the
+*same* predicate: a tool absent from the first returns `authorization` from the second and never
+reaches a handler — **A9**. That is one predicate written once, not two that must be kept in
+agreement. The pipeline computes the four-layer intersection itself, per call, against the
+declaration named in the request — which is what makes a narrowed declaration grant land on the very
+next call regardless of which surface is calling.
+
+**The epoch comparison is not here, and A3 does not put it here.** The pipeline never reads
+`frozenAtEpoch`. The comparison belongs to whoever *holds a session across calls*, and only the MCP
+transport does: `src/surfaces/mcp-routes.ts` compares before dispatching and recomputes on a move,
+closing the session outright if the grant or the declaration is gone. The scheduler builds a session
+per fire, the watcher per tick, and the operator route per request, each from the declaration as it
+stands at that instant — so on those three paths there is no frozen grant that could go stale, and a
+comparison would be a check that can never fire. Stating A3 as a pipeline step would describe one
+mechanism where there are two, and would tell a fourth surface to add a no-op instead of telling it
+the question that actually matters: does this surface reuse a grant it computed earlier?
 
 The pipeline mints the `operationId`; no caller supplies one. That is what makes **R1** enforceable —
 `Journal.begin` commits before the first side effect, against an identifier the caller could not have
@@ -2767,7 +2796,7 @@ responsible for maintaining it.
 |---|---|---|
 | A1 | For every call, the effective set is a subset of `contract ∩ ceiling ∩ session`, and additionally of the declaration grant for every capability whose `capabilityScopeOf` is `declaration`. No code path adds a member to any of the four sets at runtime. | Declarations |
 | A2 | `recomputeSessionGrant(s, d).grant` is a subset of `s.grant`, for all `s` and `d`. A recomputation can only narrow. | Authorization |
-| A3 | `session.frozenAtEpoch === declaration.grantEpoch` is checked before every handler invocation; a moved epoch forces A2 before the handler runs. | Dispatch pipeline |
+| A3 | No session dispatches under a grant its declaration has since narrowed. A session held across calls compares `session.frozenAtEpoch` against `declaration.grantEpoch` before dispatch and, on a move, forces A2 first; a session constructed per call satisfies this by construction, having no stale grant to compare. Only the MCP transport holds a session across calls. | Surfaces (MCP transport) |
 | A4 | `effectiveWritablePrefixes(d, p)` is a subset of `d.writablePathPrefixes` and contains no prefix under `p.strippedPathPrefixes`. No layer adds a prefix. | Declarations |
 | A5 | `hostSupportedCapabilities('generic')` contains no `host.*` capability, and no declaration with `host === 'generic'` holds one. | Declarations |
 | A6 | `git.raw` is in a declaration's grant only when written there explicitly. A newly declared repository does not have it. | Declarations |

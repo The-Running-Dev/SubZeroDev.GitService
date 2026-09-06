@@ -44,7 +44,6 @@ function sessionWith(grant: readonly DeclarationScopedCapability[]): Session {
     actorRef: { kind: 'mcp', subject: 'sub' as never, clientId: null, grantId: null },
     repositoryBinding: null,
     grant: new Set(grant) as unknown as Session['grant'],
-    writablePathPrefixes: [],
     frozenAtEpoch: 0 as never,
   };
 }
@@ -1007,7 +1006,6 @@ function operatorSessionWith(grant: readonly string[]): Session {
     actorRef: { kind: 'operator', subject: 'operator' as never, clientId: null, grantId: null },
     repositoryBinding: null,
     grant: new Set(grant) as unknown as Session['grant'],
-    writablePathPrefixes: [],
     frozenAtEpoch: 0 as never,
   };
 }
