@@ -46,40 +46,30 @@
 | Rank | Issue | Title | Criteria | Mirrored at |
 |---|---|---|---|---|
 | 25 | #41 | The kit lives at D:\Downloads\agent-kit, which is a staging path, not a home | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| 26 | #42 | Journal's unsettled/allUnsettled/parked/findByScheduledJob return empty on a read failure, indistinguishable from nothing-found | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
 | 27 | #54 | Naming — repository, image, MCP server and service names are unsettled | — | `c316c787456f6da803938f27de6341059aca1481` |
 | 28 | #55 | S2's dual-lock-holder refusal has never been run against a real Docker bind mount | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| 135 | #135 | Decide how the lease guard's blind spot on non-locking filesystems gets resolved | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| 136 | #136 | Decide whether a stale MCP client tool catalogue needs a refresh mechanism | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| 140 | #140 | Decide whether GrantView.liveSessions needs a real count or should be dropped | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| 144 | #144 | eligibleViews filters on raw capabilityGrant, not the operator's effective grant | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| 150 | #150 | Generate the registry entry tables in the contract instead of hand-maintaining them | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| 180 | #180 | Update-WorkMirror.ps1 mangles em dashes into mojibake when it writes WorkRef titles | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| 190 | #190 | check-layer-direction.test.ts and watcher.test.ts fail on Windows — path-separator regex and symlink EPERM | — | `c316c787456f6da803938f27de6341059aca1481` |
-| 216 | #216 | Decide whether DispatchPipelineDependencies.journal should be required | — | `4d7d5f70bfa7ddb8bb58304736425b5389a05b46` |
-| 246 | #246 | Design-state tooling reads this repo's contract for sections it has never had, and fails rather than standing down | — | `26f3a79b33306827ccd9fd202e63238153659f47` |
-| 248 | #248 | Orphaning reports no retained journal entries: `OrphanReport.retainedJournalEntries` is always empty | — | `0a097dc9fb41d785c2fc7378153bb94681ef9759` |
-| milestone/1 | #45 | Credential mount carries no username, so hosts that require a real one cannot authenticate | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/1 | #49 | Terminal-state detection never reaches the notifier on the ordinary dispatch or recovery paths | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/2 | #61 | syncBase inlines rev-parse/is-ancestor plumbing that composites.ts keeps as private helpers | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/2 | #65 | `sendJson`/`readJsonBody` are independently reimplemented in six surface files | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/1 | #66 | `Declarations.orphan` does not revoke grants, bump the epoch, or cancel held jobs | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/1 | #67 | The route-to-capability mapping for the HTTP bearer surface is half-built | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/1 | #73 | Implement the S17 generic content-drop watcher | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/1 | #74 | Implement S17 storage maintenance and safe eviction | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/1 | #76 | Content drops need a fixed two-phase target protocol | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/1 | #77 | Carry the watcher push SHA through auto-merge and reconciliation | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/1 | #78 | Require a live clean-tree check before watcher claims or reconciliation | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/1 | #79 | Drain an active watcher tick before releasing lifecycle ownership | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/1 | #80 | Retain terminal drops under unique original-name-preserving paths | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/1 | #81 | Audit and notify every content-drop watcher failure | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/1 | #82 | Finalize a merged watcher PR even when reconciliation fails | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/1 | #83 | Isolate untrusted drop files from protected watcher state | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/1 | #84 | Make declaration orphaning and removal aware of content-drop state | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/1 | #85 | Start the watcher healthy and idle when no declaration currently has content drops | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/1 | #86 | Wire and validate the configurable watcher polling interval | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/1 | #87 | Build an evidence-grade test harness for the content-drop watcher | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/1 | #88 | Enforce watcher contract types at every persistence and dispatch boundary | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/1 | #104 | A failed journal read at boot returns without closing the store or releasing the lease | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| milestone/1 | #113 | Test-DesignDrift.ps1 accepts non-slice titles that merely begin with an S-number | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
+| milestone/4 | #49 | Terminal-state detection never reaches the notifier on the ordinary dispatch or recovery paths | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/6 | #61 | syncBase inlines rev-parse/is-ancestor plumbing that composites.ts keeps as private helpers | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/6 | #65 | `sendJson`/`readJsonBody` are independently reimplemented in six surface files | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/4 | #67 | The route-to-capability mapping for the HTTP bearer surface is half-built | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/3 | #76 | Content drops need a fixed two-phase target protocol | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/3 | #77 | Carry the watcher push SHA through auto-merge and reconciliation | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/3 | #78 | Require a live clean-tree check before watcher claims or reconciliation | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/3 | #81 | Audit and notify every content-drop watcher failure | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/3 | #82 | Finalize a merged watcher PR even when reconciliation fails | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/3 | #83 | Isolate untrusted drop files from protected watcher state | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/3 | #84 | Make declaration orphaning and removal aware of content-drop state | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/3 | #85 | Start the watcher healthy and idle when no declaration currently has content drops | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/3 | #86 | Wire and validate the configurable watcher polling interval | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/3 | #87 | Build an evidence-grade test harness for the content-drop watcher | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/3 | #88 | Enforce watcher contract types at every persistence and dispatch boundary | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/6 | #113 | Test-DesignDrift.ps1 accepts non-slice titles that merely begin with an S-number | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/5 | #135 | Decide how the lease guard's blind spot on non-locking filesystems gets resolved | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/5 | #136 | Decide whether a stale MCP client tool catalogue needs a refresh mechanism | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/5 | #140 | Decide whether GrantView.liveSessions needs a real count or should be dropped | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/4 | #144 | eligibleViews filters on raw capabilityGrant, not the operator's effective grant | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/6 | #150 | Generate the registry entry tables in the contract instead of hand-maintaining them | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/6 | #180 | Update-WorkMirror.ps1 mangles em dashes into mojibake when it writes WorkRef titles | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/5 | #216 | Decide whether DispatchPipelineDependencies.journal should be required | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/6 | #246 | Design-state tooling reads this repo's contract for sections it has never had, and fails rather than standing down | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 <!-- outstanding:end -->
