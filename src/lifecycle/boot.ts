@@ -493,7 +493,7 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       if (deps.recovery) {
         const unsettled = await deps.recovery.journal.allUnsettled();
         if (!unsettled.ok) {
-          return err(
+          return failAfterOpen(
             bootError(
               { code: 'store-failed', cause: storeError({ code: 'io-failed' }, unsettled.error.summary) },
               `the operation journal could not be read, so no declaration's recovery state is known: ${unsettled.error.summary}`,

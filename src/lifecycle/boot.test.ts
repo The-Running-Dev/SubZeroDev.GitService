@@ -22,6 +22,7 @@ import { RECONCILE_AFTER_MERGE_RECOVERY } from '../composites/recovery-descripto
 import { err, ok } from '../shared/outcome.ts';
 import { declarationError } from '../declarations/errors.ts';
 import { storeError } from '../store/errors.ts';
+import { journalError } from '../journal/errors.ts';
 import type { RecoveryDependencies } from './recovery.ts';
 
 /** The outbox as it stands on disk, for the redrive tests below. */
@@ -171,6 +172,47 @@ test('S23 — boot refuses a stored file-watcher pair that no longer matches the
     assert.equal(booted.error.code, 'watcher-revalidation-failed');
     if (booted.error.code !== 'watcher-revalidation-failed') return;
     assert.equal(booted.error.cause, cause, 'the boot error preserves the declaration failure');
+
+    const { lifecycle: retry } = lifecycleFor(volume);
+    const retried = await retry.boot();
+    assert.equal(retried.ok, true, 'the failed boot closed the store and released the lease');
+    await retry.shutdown('operator');
+  });
+});
+
+test('#104 — a failed allUnsettled() read at boot still closes the store and releases the lease', async () => {
+  await withVolumeAsync(async (volume) => {
+    const failure = journalError({ code: 'read-failed', cause: storeError({ code: 'io-failed' }, 'disk read failed') }, 'disk read failed');
+    const recovery: RecoveryDependencies = {
+      journal: {
+        allUnsettled: async () => err(failure),
+        unsettled: async () => ok([]),
+        classify: (() => {
+          throw new Error('not exercised by this test');
+        }) as never,
+        settle: async () => ok(undefined as never),
+        park: async () => ok(undefined),
+      },
+      catalogue: createRecoveryCatalogue(),
+      clock: systemClock,
+      declarations: { get: async () => ({ id: 'repo-a', generation: 1 }) as never },
+      cloneStore: {
+        observeGitState: async () => {
+          throw new Error('not exercised by this test');
+        },
+        markAttention: async () => ok(undefined),
+      },
+      recoverySession: { grant: new Set() } as never,
+    };
+
+    const { lifecycle } = lifecycleFor(volume, undefined, { recovery });
+    const booted = await lifecycle.boot();
+
+    assert.equal(booted.ok, false, 'an unreadable journal fails boot');
+    if (booted.ok) return;
+    assert.equal(booted.error.code, 'store-failed');
+    if (booted.error.code !== 'store-failed') return;
+    assert.equal(booted.error.cause.summary, failure.summary, 'the journal read failure is preserved as the cause');
 
     const { lifecycle: retry } = lifecycleFor(volume);
     const retried = await retry.boot();
