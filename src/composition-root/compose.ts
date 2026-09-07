@@ -442,6 +442,10 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
   // Set once `watcher` exists below, well before boot succeeds and any real
   // volume-usage read can reach it.
   let watcherUsageBytesRef: (() => Promise<number>) | null = null;
+  // Created ahead of `declarations` (and `cloneStore` below it) so both can
+  // take `journal` directly — `Journal` depends on neither, so no forward
+  // reference is needed for this direction, unlike the two `Ref`s above.
+  const journal = createJournal({ volumeRoot, clock: systemClock });
   const declarations = createDeclarations({
     volumeRoot,
     clock: systemClock,
@@ -456,6 +460,7 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
       if (!authorizationRef) throw new Error('server: declarations orphan cascade accessed before composition finished');
       return authorizationRef.revokeGrantsForResource(declarationId, generation, tx);
     },
+    journal,
     cloneAdoptionCheck: () => {
       const store = cloneStoreRef;
       if (!store) throw new Error('cloneStore accessed before composition finished');
@@ -477,11 +482,6 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
       };
     },
   });
-  // Created ahead of `cloneStore` (moved up from its original position just
-  // after it) so `createCloneStore` can take `journal.unsettled` directly —
-  // `Journal` depends on neither `Declarations` nor `CloneStore`, so no
-  // forward reference is needed for this direction, unlike the two above.
-  const journal = createJournal({ volumeRoot, clock: systemClock });
   // Set immediately after `createGitOperations` below — `CloneStore` needs
   // the declaration's base branch and `GitOperations` needs `CloneStore`.
   let gitOperationsRef: Pick<GitOperations, 'loadRepositoryConfig'> | null = null;
