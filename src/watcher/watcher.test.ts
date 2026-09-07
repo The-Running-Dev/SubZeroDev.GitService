@@ -899,10 +899,19 @@ test('usageBytes never follows a symlink — not to a file outside the inbox, an
     // A file that lives outside the inboxes entirely, linked from inside one.
     const outside = path.join(volume, 'not-a-watcher-file.bin');
     writeFileSync(outside, 'x'.repeat(10_000));
-    symlinkSync(outside, path.join(rootA, 'link-to-outside.md'));
 
-    // And a directory symlink pointing back at its own parent.
-    symlinkSync(rootA, path.join(rootA, 'loop'), 'dir');
+    let symlinked = true;
+    try {
+      symlinkSync(outside, path.join(rootA, 'link-to-outside.md'));
+      // And a directory symlink pointing back at its own parent.
+      symlinkSync(rootA, path.join(rootA, 'loop'), 'dir');
+    } catch {
+      symlinked = false;
+    }
+    if (!symlinked) {
+      // No symlink privilege on this host (common on unelevated Windows) — nothing to assert.
+      return;
+    }
 
     const total = await watcher.usageBytes();
     assert.equal(
