@@ -11,6 +11,7 @@ import {
   type DeclarationId,
   type Generation,
   type GrantEpoch,
+  type GrantId,
   type IsoUtcTimestamp,
   type PathPrefix,
   type RegistryToolName,
@@ -104,10 +105,20 @@ export interface DeclarationsDependencies {
    * matching `Scheduler.cancelForDeclaration`'s shape is enough for `orphan`
    * to fold the cascade into its own transaction. Optional so a
    * `Declarations` built before the scheduler existed still compiles:
-   * without it, orphaning cancels no scheduled jobs, the same honest-empty
-   * direction `orphan`'s still-unwired grant revocation already takes.
+   * without it, orphaning cancels no scheduled jobs.
    */
   readonly cancelScheduledJobsForDeclaration?: (declarationId: DeclarationId, reason: string, tx: StoreTransaction) => readonly ScheduledJobId[];
+  /**
+   * Injected, never imported — Declarations is L1 and Authorization is L4,
+   * so this module cannot depend on `Authorization`'s own type; a plain
+   * function matching `Authorization.revokeGrantsForResource`'s shape is
+   * enough for `orphan` to fold the cascade into its own transaction, the
+   * same shape `cancelScheduledJobsForDeclaration` above already uses.
+   * Optional so a `Declarations` built before authorization existed still
+   * compiles: without it, orphaning revokes no grants — issue #66's
+   * still-unwired direction, before this dependency closed it.
+   */
+  readonly revokeGrantsForDeclaration?: (declarationId: DeclarationId, generation: Generation, tx: StoreTransaction) => readonly GrantId[];
 }
 
 interface DeclarationRow {
@@ -570,23 +581,32 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
       const now = clock.now();
       const written = withDb(volumeRoot, (db) =>
         withLocalTransaction(db, (tx) => {
+          // The epoch bump goes first, while the row is still 'active' —
+          // `bumpGrantEpochImpl`'s UPDATE is scoped to active declarations,
+          // the same guard `amend` relies on for its own bump, and orphaning
+          // is one of the three triggers the grant epoch exists for
+          // (`10-design.md` § "The grant epoch"). A failed bump throws
+          // rather than being ignored, so the whole orphan rolls back with
+          // it, the same reasoning `amend` already states.
+          const bumped = bumpGrantEpochImpl(id, now, tx);
+          if (!bumped.ok) throw new Error(bumped.error.summary);
+
           tx.run("UPDATE declaration SET state = 'orphaned', updated_at = ? WHERE id = ? AND generation = ?", now, id, existing.generation);
+          // Issue #66 — orphaning revokes every grant this declaration/generation
+          // issued, inside the same transaction as the state flip: a rolled-back
+          // orphan must not have already revoked grants out from under it.
+          const revokedGrants = deps.revokeGrantsForDeclaration ? deps.revokeGrantsForDeclaration(id, existing.generation, tx) : [];
           // S16.5 — orphaning moves this declaration's pending scheduled jobs
           // to `cancelled` naming the orphaning, inside the same transaction
           // as the state flip: a rolled-back orphan (the write above losing
           // the generation race) must not have already cancelled jobs out
           // from under it.
-          return deps.cancelScheduledJobsForDeclaration ? deps.cancelScheduledJobsForDeclaration(id, `declaration '${id}' was orphaned`, tx) : [];
+          const cancelledJobs = deps.cancelScheduledJobsForDeclaration ? deps.cancelScheduledJobsForDeclaration(id, `declaration '${id}' was orphaned`, tx) : [];
+          return { revokedGrants, cancelledJobs };
         }),
       );
       if (!written.ok) return err(declarationError({ code: 'store-failed', cause: written.error }, written.error.summary));
 
-      // Grant revocation is owned by a module this dependency group does not
-      // yet reach — `30-slices.md` § S5 "Out of scope": "the rest of the
-      // orphaning cascade... each is added by the slice that creates them."
-      // Empty here is the honest current answer, not a stub standing in for
-      // one: nothing has been revoked because nothing revoked it.
-      //
       // `fileWatcherStopped` is true whenever this declaration named a file
       // watcher, because the state flip to `orphaned` above is itself what
       // stops it: `Watcher.tick()` only lists `{ state: 'active', hasFileWatcher:
@@ -596,8 +616,8 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
       return ok({
         declarationId: id,
         generation: existing.generation,
-        cancelledJobs: written.value,
-        revokedGrants: [],
+        cancelledJobs: written.value.cancelledJobs,
+        revokedGrants: written.value.revokedGrants,
         retainedJournalEntries: [],
         cloneLeftOnDisk: true,
         fileWatcherStopped: existing.fileWatcher !== null,
