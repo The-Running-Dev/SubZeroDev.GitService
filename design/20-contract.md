@@ -1413,13 +1413,59 @@ path, where eviction must not run.
 `remove` with `permitCorruptTree` still refuses when the tree holds commits unreachable from
 `origin/<base>`. It is never a way to discard unpushed work.
 
+**`isClean` observes Git, and a lifecycle state is not a substitute for it.** `Clone.state` is a
+record of what the store last decided about a clone; `ready` says the directory is materialised and
+carries no attention mark, and says nothing whatever about the working tree. A caller that must not
+act on a tree someone else is holding work in — the watcher, before a claim or a reconciliation —
+therefore has to ask Git, at the moment it is about to act, and the answer has to be a member of its
+own rather than a state to be reinterpreted. This member is that question, and it exists because the
+watcher answered it from `describe()` instead and so could run a whole tick against a dirty tree.
+
+```ts
+type CleanlinessBlocker =
+  | { readonly kind: 'staged'; readonly count: number }
+  | { readonly kind: 'modified'; readonly count: number }
+  | { readonly kind: 'untracked'; readonly count: number }
+  | { readonly kind: 'stash-present'; readonly count: number };
+
+type CleanlinessVerdict =
+  | { readonly clean: true }
+  | { readonly clean: false; readonly blockers: readonly CleanlinessBlocker[] };
+
+isClean(declarationId: DeclarationId): Promise<Outcome<CleanlinessVerdict, CloneStoreError>>;
+```
+
+It is deliberately **not** `isSafeToEvict` with a narrower reading. Eviction blocks on pins, open
+journal entries, active operations, unreachable commits and a branch ahead of upstream, and none of
+those means the tree is dirty — a repository with an open pull request is entirely clean and entirely
+unsafe to evict. Answering cleanliness from that verdict would refuse ticks for reasons unrelated to
+the question and report them as if the tree held work. The two verdicts stay separate because they
+answer different questions, and their blocker sets overlap in exactly one member for that reason.
+
+A failure to observe is not a clean tree. Every path that cannot reach Git returns the `CloneStoreError`
+it hit rather than either verdict, and a caller that treats an error as `clean: true` has reintroduced
+the defect this member was added for — **D16**.
+
 ### L1 — journal
 
 Declared in `src/journal/journal.ts`.
 
 `classify` is pure, reads no git state and performs no I/O — the clone store owns the observation,
 the journal owns the rule. `settle` takes the notification because the outbox row and the state
-change commit in one transaction; `null` is the ordinary case. `appendStep` writes the step in the
+change commit in one transaction; `null` is the ordinary case.
+
+**`classify` is terminal-blind, and that is a boundary rather than a gap.** Its `completed` verdict
+carries no `TerminalState` and never will. A terminal state is something a domain call *observed* — a
+required check concluded red, a merge conflicted, a wait ran out — and `classify` observes nothing: it
+is given an entry, a git state and a descriptor, and it decides only whether the tree matches what the
+operation said it would do. It cannot know a check went red, because knowing that means asking the
+host, which **R3** forbids it. Terminal detection therefore lives entirely where the observation
+happens, which is the sink above; a resumed operation redispatches through the same pipeline and
+writes the same sink, so giving `RecoveryDescriptor` a second way to surface one would be a second
+producer for one consumer, able to disagree with the first about the same operation. Persisting the
+state on the entry so `classify` could read it back was rejected for the same reason it looks
+attractive: it would make `classify` no longer a function of its three arguments, and duplicate in a
+column what the settle transaction already commits to the outbox alongside it. `appendStep` writes the step in the
 `applied` state, before the call it describes.
 
 ### L1 — recovery catalogue
@@ -1862,8 +1908,17 @@ declaration that does not currently name one.
 For a claimed file, the declaration-selected protocol is `planTool`, `prepare_branch`, `applyTool`,
 the two post-apply observations and `git_stage` described under `### File watcher`, `git_commit`,
 `git_push`, `pr_open`, then `pr_enable_auto_merge` when configured. The initial clean-tree
-`repo_status` gate remains before claim, and the plan phase must succeed before the first mutating
-repository step. Each name in that sequence is dispatched independently with no outer lock. Branch,
+gate remains before claim, and the plan phase must succeed before the first mutating
+repository step.
+
+**The clean-tree gate is `CloneStore.isClean`, and it runs before the claim, not after it.** Two
+conditions gate a tick's work on a declaration and both are checked before anything is claimed: the
+clone carries no attention mark, and `isClean` returns `clean: true`. A tick that fails either leaves
+the inbox exactly as it found it and makes no dispatch, Git or host call at all — the file is not
+claimed, not moved, and not marked failed, because a dirty tree is a reason to come back later rather
+than evidence of anything wrong with the file. The two are reported distinctly in `WatchTickReport.skipped`
+(`clone-needs-attention` and `clone-not-clean`) because they need different things from an operator:
+one is a mark to clear, the other is a tree to tidy. Each name in that sequence is dispatched independently with no outer lock. Branch,
 commit and pull-request fields come only from the validated plan result; the watcher does not derive
 consumer naming conventions of its own.
 
@@ -1945,6 +2000,33 @@ call, whose target — where it has one — arrives inside `input`. `scheduledJo
 as `actorRef` does, and the pipeline stamps it onto the journal entry it creates; no caller
 supplies an `operationId`.
 
+**A `TerminalState` reaches `settle` through a per-operation sink, not through `ToolResult`.** The
+pipeline settles every operation, and until this amendment it settled every one with `null`, so the
+notifier — fully built, fully tested — had nothing in production that produced work for it. The
+sink is the channel that closes that:
+
+```ts
+type TerminalSink = Map<OperationId, TerminalState>;
+```
+
+Owned by the composition root and handed to both sides, exactly as `credentialBindings` already is
+between `HostOperations` and the adapter, and keyed on `operationId` for the same reason: concurrent
+calls must not see each other's. A domain function writes it at the point it *observes* the terminal
+condition — `HostOperations` where it already constructs the terminal-shaped `HostError` — and the
+pipeline reads and deletes it immediately before `Journal.settle`, passing what it found as `notify`
+instead of `null`. The delete is unconditional and happens on every exit, so a sink entry never
+outlives the operation that wrote it.
+
+Three alternatives were rejected and the reasons are the contract here. **A `terminal?` member on
+`ToolResult`** would be the direct expression, but the design fixes that type's shape verbatim as the
+wire form an MCP client receives; adding to it publishes an internal operator-notification concept to
+every client that will never act on it, and is `/design`'s change rather than this document's.
+**Deriving the state in the pipeline from the `Finding[]` already returned** needs no new surface at
+all — the findings carry exactly the fields each variant needs — but it means parsing display strings
+back into structured data, a pull-request number back out of `String(n)` and a branch name back out of
+free text, with no type holding producer and consumer in step. **A second producer in the recovery
+path** is rejected under **R3** below.
+
 ### L4 — authorization
 
 Declared in `src/authorization/authorization.ts`, with its records in `src/authorization/types.ts`.
@@ -2019,8 +2101,8 @@ authenticated console routes: the fingerprints, the chain state, the failing cre
 and the volume breakdown are all operator data, and item 15's companion check reaches the catalogue
 through an authenticated `tools/list` rather than through the probe.
 
-A bearer route accepts no cookie and a cookie route accepts no bearer — **E6** — except for the four
-rows S34 marks `bearer or cookie`, explained beneath the table below.
+A bearer route accepts no cookie and a cookie route accepts no bearer — **E6** — except for the two
+read rows marked `bearer or cookie`, explained beneath the table below.
 
 **Three paths were fixed ahead of the route table because they already shipped**: `LivenessReport` on
 `GET /healthz` unauthenticated, `VersionReport` on `GET /version`, and `HealthReport` on `GET /health`.
@@ -2038,20 +2120,35 @@ repository the call acts on. `console.manage`-style capability names are not rep
 are `20-contract.md` § Capabilities and the lattice's, and this table only fixes paths, methods and
 credentials, per U4's own scope.
 
-**`bearer or cookie` is a third credential value, added by S34.** Every route fixed before S34
-accepts exactly one of the two — a bearer route rejects a cookie and a cookie route rejects a
-bearer, both demonstrated end to end by S18.10 — and that split holds everywhere this value does
-not appear. The four rows it does mark (`/health`, `/parked-operations`, its `/resolve` and
-`/failing-credentials/.../clear`) predate the console's health and parked-operations views: they
-were bearer-only because nothing but a script had ever called them. S34 gives the operator console
-its own reason to call the same routes, and duplicating each as a second cookie-only path would
-mean two implementations of one read or one mutation to keep in sync, which is the drift this
-amendment avoids instead. A bearer credential on one of these four is checked exactly as before,
-capability included; a cookie is accepted as an authenticated operator session with no capability
-gate, the same as every other cookie route, and a mutating request over cookie still requires the
-double-submit CSRF token — a bearer request never does, since it carries no ambient cookie for
-CSRF to defend. Presenting neither, or a cookie failing its CSRF check, is refused exactly as a
+**`bearer or cookie` is a third credential value, added by S34 and narrowed to reads.** Every route
+fixed before S34 accepts exactly one of the two — a bearer route rejects a cookie and a cookie route
+rejects a bearer, both demonstrated end to end by S18.10 — and that split holds everywhere this value
+does not appear. The two rows it marks (`/health` and `GET /parked-operations`) predate the console's
+health and parked-operations views: they were bearer-only because nothing but a script had ever
+called them. S34 gives the operator console its own reason to call the same routes, and duplicating
+each as a second cookie-only path would mean two implementations of one read to keep in sync, which
+is the drift that amendment avoids instead. A bearer credential on either is checked exactly as
+before, capability included; a cookie is accepted as an authenticated operator session with no
+capability gate, the same as every other cookie route. Presenting neither is refused exactly as a
 plain cookie route refuses it today.
+
+**It marks no mutating route, and that is the correction this amendment makes.** S34 also marked
+`/parked-operations/{operationId}/resolve` and `/failing-credentials/.../clear`, and both are now
+`cookie`. The capabilities that gate them — `attention.resolve` and `declaration.manage` — are two of
+the four § *Scopes* fixes as reachable only from the console, so **no operator-api token can ever hold
+one**. A bearer branch on a route those capabilities gate therefore has nothing to check against, and
+the implementation duly checked nothing: any valid operator-api token, including one whose only scope
+is `read`, reached both mutations. That is not a weaker gate than the contract intended, it is the
+absence of the one the contract already stated — the same document forbade in § *Scopes* what the
+route table permitted here. Restricting both to `cookie` is what makes the two sections agree, and it
+costs nothing that was ever authorized: a script that could legitimately call either would need a
+capability no token it could be issued may carry. **Reaching an instance-scoped capability's effect
+from a credential that cannot carry that capability is the shape of this defect, and it is what a
+future `bearer or cookie` marking must be checked against** — not merely whether the route is
+convenient for the console. Should a script ever need one of these mutations, the answer is a scope
+that carries the capability, decided as an amendment to § *Scopes*, never an ungated bearer branch
+here. CSRF is unchanged and now unconditional on both: a cookie is the only credential either
+accepts, so the double-submit token always applies.
 
 **Liveness, version and health** — no repository dimension. Fixed above this table because they
 already shipped ahead of it.
@@ -2095,6 +2192,23 @@ or the call spans every declaration); every route naming an existing declaration
 | `/declarations/{declarationId}/tools` | `GET` | cookie | yes |
 | `/declarations/{declarationId}/tools/{toolName}` | `POST` | cookie | yes |
 
+**A serialised declaration carries two grants, and the console must filter on the second.** The
+listing and single-declaration reads above return the declaration's own `capabilityGrant` *and* an
+`effectiveGrant` computed server-side by `Declarations.effectiveGrant` for the operator making the
+request — the **A1** intersection, so contract and ceiling narrow it. Both are present because they
+answer different questions: the raw grant is what the manage view edits and what an operator changes,
+the effective one is what the operator can actually exercise right now. A console that filters its
+navigation on the raw grant offers views whose every action the server will refuse — a declaration may
+grant a capability the deployment ceiling excludes, and the nav entry appears anyway.
+
+The intersection is computed on the server and never in the browser. Shipping the ceiling and the
+contract set to the console so it could intersect them itself would put **A1** in two implementations,
+one of them running in a page, where a divergence is invisible until an operator is offered something
+they cannot use — which is the very defect being fixed. It is carried on the existing reads rather
+than on a route of its own because the console already fetches the row it is about to filter against,
+and a dedicated route would add a second round trip for data the first could carry, plus one more path
+to keep credential-consistent with its siblings.
+
 **Grants and authorization (`authorization-routes.ts`)** — the grants view (S32). No repository
 dimension: a client, grant, operator API token or operator session is not scoped to one
 declaration in its path, even where the underlying grant itself narrows to one.
@@ -2118,8 +2232,8 @@ out, which had a `Notifier` member (`clearFailed`) but no route before this slic
 | Path | Method | Credential | Repository dimension |
 |---|---|---|---|
 | `/parked-operations` | `GET` | bearer or cookie | no |
-| `/parked-operations/{operationId}/resolve` | `POST` | bearer or cookie | no |
-| `/failing-credentials/{credentialRef}/{declarationId}/clear` | `POST` | bearer or cookie | yes |
+| `/parked-operations/{operationId}/resolve` | `POST` | cookie | no |
+| `/failing-credentials/{credentialRef}/{declarationId}/clear` | `POST` | cookie | yes |
 | `/notifier/failed` | `GET` | cookie | no |
 | `/notifier/failed/{id}/clear` | `POST` | cookie | no |
 
@@ -2796,6 +2910,8 @@ responsible for maintaining it.
 | A8 | No field of `RepositoryConfig` is a capability, scope, path prefix, credential reference, remote, host, timeout or limit. Any field a caller could set that widens what the service will do lives in `Declaration`. | Contract — re-checked at every amendment of `RepositoryConfig` |
 | A9 | `visibleTools` and `dispatch` apply the same predicate. A tool absent from `visibleTools` returns `authorization` from `dispatch` and never reaches a handler. | Dispatch pipeline |
 | A10 | Every capability in the contract set is placed in at least one scope by `### Scopes`'s rule. Equivalently: `expandScopes(['read','write','raw','schedule'], contract)` equals the declaration-scoped members of `contract`. A capability the rule cannot place fails the build as `capability-unscopable` rather than expanding to nothing. | Compiler, Authorization |
+| A11 | No route reaches an instance-scoped capability's effect from a credential that cannot carry that capability. A route whose action is gated by `declaration.manage`, `auth.manage`, `audit.read` or `attention.resolve` accepts `cookie` only — **A7** makes those four unholdable by any token, so a bearer branch on such a route can check nothing and therefore gates nothing. | Surfaces |
+| A12 | The console filters a navigation entry on the operator's effective grant for the selected declaration, never on that declaration's raw `capabilityGrant`. The intersection is computed by `Declarations.effectiveGrant` on the server; no surface recomputes **A1** client-side. | Surfaces, Console |
 
 ### Recovery and ordering
 
@@ -2811,6 +2927,7 @@ responsible for maintaining it.
 | R8 | A resume step runs as an ordinary dispatch that takes the global mutation lock for itself, and completes before the triggering call acquires anything. It is never nested inside another operation's hold. | Lifecycle |
 | R9 | `resolveRunningAtBoot` runs no resume step and performs no git or host I/O. | Scheduler |
 | R10 | A `running` job is never simply fired again at boot. | Scheduler |
+| R11 | A `TerminalState` is written to the sink by the call that observed the terminal condition, and is read and removed by the settle for that same `operationId`. Exactly one producer exists; `Journal.classify` is not one, per **R3**. No sink entry survives the operation that wrote it. | Dispatch pipeline, Host adapter |
 
 ### Concurrency
 
@@ -2884,6 +3001,8 @@ responsible for maintaining it.
 | D13 | File-watcher staging names exactly the independently observed changed paths; commit starts only after a second observation reports that exact set fully staged. | Watcher |
 | D14 | A file-watcher apply handler validates every path it writes against the declaration's path allowlist before any side effect, whoever dispatched it. `permittedPaths` narrows that bound and never widens it. | Git operations, Watcher |
 | D15 | Every watcher tick resolves the current active declarations. Zero active file-watcher declarations is healthy and idle; adding or amending one makes it eligible on the next tick without a watcher restart. | Watcher |
+| D16 | `CloneStore.isClean` answers from an observation of Git made at the moment of the call, never from `Clone.state` or any other stored value. An observation that fails returns a `CloneStoreError`; there is no path on which a failure to look yields `clean: true`. | Clone store |
+| D17 | A watcher tick claims no file and makes no dispatch, Git or host call for a declaration unless its clone carries no attention mark **and** `isClean` returned `clean: true` on that tick. A tick refused by either leaves the inbox exactly as it found it. | Watcher |
 
 ---
 
