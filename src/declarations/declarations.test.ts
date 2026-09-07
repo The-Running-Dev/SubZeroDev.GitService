@@ -4,8 +4,10 @@ import path from 'node:path';
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { systemClock } from '../clock/clock.ts';
+import { ok } from '../shared/outcome.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
+import type { OperationJournalEntry } from '../journal/types.ts';
 import type { RemoteHost } from '../shared/brands.ts';
 import type { DeploymentCeiling } from '../contract/capabilities.ts';
 import type { SafeToEvictVerdict } from '../clone/types.ts';
@@ -50,6 +52,7 @@ function declarationsFor(
     readonly registryEntries?: readonly ToolDeclaration[];
     readonly cancelScheduledJobsForDeclaration?: Parameters<typeof createDeclarations>[0]['cancelScheduledJobsForDeclaration'];
     readonly revokeGrantsForDeclaration?: Parameters<typeof createDeclarations>[0]['revokeGrantsForDeclaration'];
+    readonly journal?: Parameters<typeof createDeclarations>[0]['journal'];
   } = {},
 ) {
   const adoptionCheck: CloneAdoptionCheck = opts.adoptionCheck ?? {
@@ -65,6 +68,7 @@ function declarationsFor(
     cloneAdoptionCheck: () => adoptionCheck,
     ...(opts.cancelScheduledJobsForDeclaration ? { cancelScheduledJobsForDeclaration: opts.cancelScheduledJobsForDeclaration } : {}),
     ...(opts.revokeGrantsForDeclaration ? { revokeGrantsForDeclaration: opts.revokeGrantsForDeclaration } : {}),
+    ...(opts.journal ? { journal: opts.journal } : {}),
   });
 }
 
@@ -450,6 +454,51 @@ test('orphan() reports no revoked grants when no authorization cascade is wired'
     const orphaned = await declarations.orphan('repo-14' as DeclareInput['id'], OPERATOR);
     assert.equal(orphaned.ok, true);
     if (orphaned.ok) assert.deepEqual(orphaned.value.revokedGrants, []);
+  });
+});
+
+test('issue #248 — orphan() reports unsettled journal entries through the injected journal collaborator', async () => {
+  await withMigratedVolume(async (volume) => {
+    const calls: { declarationId: string; generation: number }[] = [];
+    const declarations = declarationsFor(volume, {
+      journal: {
+        unsettled: async (declarationId, generation) => {
+          calls.push({ declarationId: declarationId as unknown as string, generation: generation as unknown as number });
+          return ok([
+            { operationId: 'op-1' } as unknown as OperationJournalEntry,
+            { operationId: 'op-2' } as unknown as OperationJournalEntry,
+          ]);
+        },
+      },
+    });
+    const declared = await declarations.declare(declareInputFor('repo-17'), OPERATOR);
+    assert.equal(declared.ok, true);
+
+    const orphaned = await declarations.orphan('repo-17' as DeclareInput['id'], OPERATOR);
+    assert.equal(orphaned.ok, true);
+    if (!orphaned.ok) return;
+    assert.deepEqual(orphaned.value.retainedJournalEntries, ['op-1', 'op-2']);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.declarationId, 'repo-17');
+    assert.equal(calls[0]!.generation, orphaned.value.generation);
+  });
+});
+
+test('orphan() reports no retained journal entries when the journal read finds nothing outstanding, or no journal collaborator is wired', async () => {
+  await withMigratedVolume(async (volume) => {
+    const clean = declarationsFor(volume, { journal: { unsettled: async () => ok([]) } });
+    const declaredClean = await clean.declare(declareInputFor('repo-18'), OPERATOR);
+    assert.equal(declaredClean.ok, true);
+    const orphanedClean = await clean.orphan('repo-18' as DeclareInput['id'], OPERATOR);
+    assert.equal(orphanedClean.ok, true);
+    if (orphanedClean.ok) assert.deepEqual(orphanedClean.value.retainedJournalEntries, []);
+
+    const unwired = declarationsFor(volume);
+    const declaredUnwired = await unwired.declare(declareInputFor('repo-19'), OPERATOR);
+    assert.equal(declaredUnwired.ok, true);
+    const orphanedUnwired = await unwired.orphan('repo-19' as DeclareInput['id'], OPERATOR);
+    assert.equal(orphanedUnwired.ok, true);
+    if (orphanedUnwired.ok) assert.deepEqual(orphanedUnwired.value.retainedJournalEntries, []);
   });
 });
 

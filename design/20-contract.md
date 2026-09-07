@@ -250,14 +250,6 @@ discarding work: an orphaned declaration stops being operable, but its clone, it
 its audit trail remain. A report where those fields were absent would let a caller assume a cleanup
 that never happens.
 
-**`retainedJournalEntries` is specified and not yet held**, alongside `revokedGrants` and the epoch
-bump (#66): `orphan` returns it empty unconditionally, because the declarations module takes no
-journal collaborator to populate it from. The field's whole argument is that a blank would be read
-as a cleanup, and a field that is always blank is read exactly that way — so this is the annotation
-its sibling had and it did not. Tracked as
-[#248](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/248); this paragraph goes when
-that closes.
-
 ### RepositoryConfig
 
 Declared in `src/declarations/types.ts`, with `REPOSITORY_CONFIG_DEFAULTS` beside it.

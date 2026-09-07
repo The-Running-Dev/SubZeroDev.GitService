@@ -31,6 +31,7 @@ import {
 } from '../contract/capabilities.ts';
 import { storeError, type StoreError } from '../store/errors.ts';
 import type { StoreTransaction } from '../store/structured-store.ts';
+import type { Journal } from '../journal/journal.ts';
 import type { EvictionBlocker, SafeToEvictVerdict } from '../clone/types.ts';
 import { declarationError, type DeclarationError } from './errors.ts';
 import type { ActorProfile, AmendInput, Declaration, DeclareInput, DeclarationFilter, OrphanReport } from './types.ts';
@@ -119,6 +120,15 @@ export interface DeclarationsDependencies {
    * still-unwired direction, before this dependency closed it.
    */
   readonly revokeGrantsForDeclaration?: (declarationId: DeclarationId, generation: Generation, tx: StoreTransaction) => readonly GrantId[];
+  /**
+   * Injected, never imported — `Journal` is L1, the same layer as
+   * `Declarations`, so no forward reference is needed here unlike the two
+   * cascades above; the composition root just constructs `Journal` first.
+   * Optional so a `Declarations` built before `Journal` existed still
+   * compiles: without it, `orphan` reports no retained journal entries —
+   * issue #248's still-unwired direction, before this dependency closed it.
+   */
+  readonly journal?: Pick<Journal, 'unsettled'>;
 }
 
 interface DeclarationRow {
@@ -607,6 +617,16 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
       );
       if (!written.ok) return err(declarationError({ code: 'store-failed', cause: written.error }, written.error.summary));
 
+      // Issue #248 — the journal read is not part of the transaction above:
+      // it neither writes nor needs to observe the state flip atomically,
+      // only the generation the flip already committed under. A failed read
+      // is reported the same as "nothing outstanding" rather than failing
+      // the whole (already-committed) orphan — the same inherited ambiguity
+      // `CloneStore.isSafeToEvict`'s own `deps.journal.unsettled` read
+      // accepts (issue #42), not a new one introduced here.
+      const unsettled = deps.journal ? await deps.journal.unsettled(id, existing.generation) : null;
+      const retainedJournalEntries = unsettled && unsettled.ok ? unsettled.value.map((entry) => entry.operationId) : [];
+
       // `fileWatcherStopped` is true whenever this declaration named a file
       // watcher, because the state flip to `orphaned` above is itself what
       // stops it: `Watcher.tick()` only lists `{ state: 'active', hasFileWatcher:
@@ -618,7 +638,7 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
         generation: existing.generation,
         cancelledJobs: written.value.cancelledJobs,
         revokedGrants: written.value.revokedGrants,
-        retainedJournalEntries: [],
+        retainedJournalEntries,
         cloneLeftOnDisk: true,
         fileWatcherStopped: existing.fileWatcher !== null,
       });
