@@ -361,10 +361,28 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     }
   }
 
+  /**
+   * `20-contract.md` § Watcher, W05.2: two terminal moves landing on the same
+   * timestamp-prefixed name (the same original filename delivered again
+   * within the same clock tick) must never let the later one overwrite the
+   * earlier — `renameSync` would otherwise silently clobber it. The prefix
+   * gets a deterministic `-2`, `-3`, … counter suffix ahead of the preserved
+   * original filename, so the target always still ends in `-${file}`.
+   */
+  function uniqueTerminalName(dir: string, prefix: string, file: string): string {
+    let candidatePrefix = prefix;
+    let n = 2;
+    while (existsSync(path.join(dir, `${candidatePrefix}-${file}`))) {
+      candidatePrefix = `${prefix}-${n}`;
+      n += 1;
+    }
+    return `${candidatePrefix}-${file}`;
+  }
+
   function moveToFailed(declarationId: DeclarationId, sourcePath: string, file: string, reasonText: string): void {
     const failedDir = failedDirFor(declarationId);
     mkdirSync(failedDir, { recursive: true });
-    const failedName = `${timestampPrefix(clock.now())}-${file}`;
+    const failedName = uniqueTerminalName(failedDir, timestampPrefix(clock.now()), file);
     renameSync(sourcePath, path.join(failedDir, failedName));
     writeFileSync(path.join(failedDir, `${failedName}.error.txt`), reasonText, 'utf8');
   }
@@ -372,7 +390,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
   function moveToProcessed(declarationId: DeclarationId, sourcePath: string, file: string): void {
     const processedDir = processedDirFor(declarationId);
     mkdirSync(processedDir, { recursive: true });
-    const target = path.join(processedDir, `${timestampPrefix(clock.now())}-${file}`);
+    const target = path.join(processedDir, uniqueTerminalName(processedDir, timestampPrefix(clock.now()), file));
     renameSync(sourcePath, target);
     // `renameSync` never updates mtime, and `runRetention` ages files in
     // `processed/` off their mtime — left alone, a file that sat unclaimed in
