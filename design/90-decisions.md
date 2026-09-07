@@ -2249,6 +2249,15 @@ Reversibility: cheap — reinstating the exception is a doc edit, not a schema o
 
 ---
 
+### 2026-09-07 — The tracker is reorganised around the work that remains, not the work that was planned
+
+Context: All thirty-nine slices are landed and `## Open` above is empty, so the thirty-six open issues *are* the remaining backlog — there is nothing left in prose. The tracker did not reflect that. The `MVP` milestone still held twenty-three open issues although MVP is defined as the thirty-nine slices and every one had closed; thirteen issues carried no milestone at all; and the label set was GitHub's defaults plus `slice` and `open`, neither of which routes work. Two issues also misreported the backlog by describing as unstarted work that had since shipped under other slices.
+Chosen: Four milestones named for what the work *is* — **Watcher parity** (13), **Correctness** (8), **Open decisions** (5), **Tooling & kit** (8) — with every open issue in exactly one, and `MVP` and `Post-MVP Hardening` closed as achieved. A type-plus-priority label taxonomy: `watcher`, `decision`, `tooling`, `refactor`, `platform` alongside the existing `bug`/`enhancement`, and `P1`/`P2`/`P3`; `open` is retained as provenance (tracks a `90-decisions.md` item) rather than repurposed as a type. The watcher cluster is sequenced W1–W5 in its milestone description, rooted on #76 — the two-phase drop protocol is a contract-level change that #77, #82 and #87 all depend on, so it cannot be worked in parallel with them. #73 and #74 are closed as superseded: #74's five criteria are all met in `boot.ts`'s maintenance pass, landed by S25/S26/S27 after #74 was written, and #73's content now lives entirely in #76–#88, every one of which describes a defect in a watcher that exists rather than its absence.
+Rejected: **Keep `MVP` and merely re-file the thirteen orphans** — the least churn, and it leaves a milestone whose name asserts something untrue, which is the failure mode that let twenty-three issues accumulate under it unnoticed. **One milestone for the watcher cluster and a flat labelled backlog for the rest** — lighter, and it gives the four decisions and the seven correctness defects no ordering at all, when the decisions specifically gate code that cannot start without them. **Type labels with no priority** — avoids a P-level nobody maintains, and it puts the boot-time lease leak (#104) and the agent kit's staging path (#41) at the same visual weight. **Delete #73 and #74 rather than closing them** — they carry the reasoning for why the work moved, and a closed issue with that comment is the record; deletion is also not cheaply reversible.
+Reversibility: cheap — milestones reopen, labels are removable, and both closed issues reopen with their comments intact.
+
+---
+
 ## Open
 <Things noticed mid-slice that were deliberately not acted on. Move them out or delete them; do not let this section rot.>
 
