@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync, utimesSync } from 'node:fs';
 import path from 'node:path';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
-import { systemClock } from '../clock/clock.ts';
+import { systemClock, type Clock } from '../clock/clock.ts';
+import { isoUtcTimestamp } from '../shared/brands.ts';
 import { success, validation, authorization, upstream, infrastructure, precondition } from '../result/envelope.ts';
 import type { ToolResult } from '../result/envelope.ts';
 import type { DispatchRequest, Dispatch } from '../dispatch/dispatch-pipeline.ts';
@@ -919,5 +920,56 @@ test('usageBytes never follows a symlink — not to a file outside the inbox, an
       Buffer.byteLength('hello world', 'utf8'),
       'only the one real file counts — the link target is not watcher usage, and the loop terminates',
     );
+  });
+});
+
+function fixedClock(at: string): Clock {
+  const parsed = isoUtcTimestamp(at);
+  if (!parsed.ok) throw new Error('bad fixture timestamp');
+  return { now: () => parsed.value, monotonicMs: () => 0 };
+}
+
+test('#80 — a second terminal drop sharing the first drop\'s original name is not overwritten in failed/', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'first content', 'utf8');
+
+    // A frozen clock: both terminal moves below build the identical
+    // timestamp-prefixed target name, `${timestampPrefix(clock.now())}-post.md`.
+    // `repo_status` cycles 1=pre-claim(clean), 2=post-apply, 3=post-stage on
+    // every tick — `handlersUpTo`'s own counter never resets, so it cannot be
+    // reused across two full ticks the way this reproduction needs.
+    let repoStatusCalls = 0;
+    const dispatch = scriptedDispatch([], {
+      ...successfulHandlers(),
+      repo_status: () => {
+        repoStatusCalls += 1;
+        const pos = ((repoStatusCalls - 1) % 3) + 1;
+        if (pos === 1) return repoStatus(false);
+        return pos === 2 ? repoStatus(true, [{ path: 'content/post.md', staged: false }]) : repoStatus(true, [{ path: 'content/post.md', staged: true }]);
+      },
+      git_push: () => upstream('remote rejected the push', null) as unknown as ToolResult<never>,
+    });
+    const { deps } = baseDeps(volume, {
+      clock: fixedClock('2026-01-01T00:00:00.000Z'),
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch,
+    });
+    const watcher = createWatcher(deps);
+
+    const first = await watcher.tick();
+    assert.equal(first[0]!.outcome?.kind, 'rejected');
+    const afterFirst = readdirSync(path.join(root, 'failed'));
+    assert.equal(afterFirst.filter((f) => f.endsWith('-post.md')).length, 1, 'first drop landed in failed/');
+
+    // A second drop under the same original name, same declaration, same clock tick.
+    writeFileSync(path.join(root, 'post.md'), 'second content', 'utf8');
+    const second = await watcher.tick();
+    assert.equal(second[0]!.outcome?.kind, 'rejected');
+
+    const afterSecond = readdirSync(path.join(root, 'failed'));
+    const dataFiles = afterSecond.filter((f) => f.endsWith('-post.md'));
+    assert.equal(dataFiles.length, 2, 'both drops are retained under distinct paths in failed/, not clobbering each other');
   });
 });
