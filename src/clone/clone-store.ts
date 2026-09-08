@@ -23,7 +23,7 @@ import type { Audit } from '../audit/audit.ts';
 import { resolveDeclarationCredential } from '../credentials/declaration-credential.ts';
 import type { CredentialResolver } from '../credentials/credentials.ts';
 import { cloneStoreError, type CloneStoreError } from './errors.ts';
-import type { Clone, CloneHandle, CloneState, CorruptTreeOverride, EvictionBlocker, EvictionOutcome, ObservedGitState, SafeToEvictVerdict } from './types.ts';
+import type { CleanlinessBlocker, CleanlinessVerdict, Clone, CloneHandle, CloneState, CorruptTreeOverride, EvictionBlocker, EvictionOutcome, ObservedGitState, SafeToEvictVerdict } from './types.ts';
 
 export type { MaintenanceReason };
 
@@ -32,6 +32,16 @@ export interface CloneStore {
   describe(declarationId: DeclarationId): Promise<Outcome<Clone, CloneStoreError>>;
   deriveAllStatesFromDisk(): Promise<readonly Clone[]>;
   observeGitState(declarationId: DeclarationId): Promise<Outcome<ObservedGitState, CloneStoreError>>;
+  /**
+   * `20-contract.md` § L1 — clone store: observes Git at the moment of the
+   * call, never `Clone.state` — a lifecycle state records what the store last
+   * decided and says nothing about the working tree (**D16**). Deliberately
+   * narrower than `isSafeToEvict`: eviction's blockers (pins, open journal
+   * entries, unreachable commits, a branch ahead of upstream) do not mean the
+   * tree is dirty, so this answers cleanliness alone rather than reinterpreting
+   * that verdict.
+   */
+  isClean(declarationId: DeclarationId): Promise<Outcome<CleanlinessVerdict, CloneStoreError>>;
   isSafeToEvict(declarationId: DeclarationId, acrossAllGenerations: boolean): Promise<Outcome<SafeToEvictVerdict, CloneStoreError>>;
   evictIfSafe(declarationId: DeclarationId): Promise<Outcome<EvictionOutcome, CloneStoreError>>;
   remove(declarationId: DeclarationId, override: CorruptTreeOverride, actor: ActorRef): Promise<Outcome<void, CloneStoreError>>;
@@ -599,6 +609,46 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
     return blockers;
   }
 
+  /**
+   * `isClean`'s own probe — deliberately not a narrower reading of
+   * `computeBlockers`: staged/modified/untracked counts come from `git status
+   * --porcelain=v1`'s two status columns, which `computeBlockers` never reads
+   * (it only checks whether the trimmed output is non-empty at all). Fails
+   * closed like `computeBlockers` — a command that cannot run is not evidence
+   * the tree is clean.
+   */
+  async function computeCleanliness(clonePath: string, signal: AbortSignal): Promise<CleanlinessVerdict | 'corrupt'> {
+    const statusResult = await exec.runGit({ argv: ['status', '--porcelain=v1'], cwd: clonePath as ClonePath, timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS, credential: null, signal });
+    if (!statusResult.ok) return 'corrupt';
+
+    let staged = 0;
+    let modified = 0;
+    let untracked = 0;
+    for (const line of statusResult.value.stdout.split('\n')) {
+      if (line.length === 0) continue;
+      const indexStatus = line[0] ?? ' ';
+      const worktreeStatus = line[1] ?? ' ';
+      if (indexStatus === '?' && worktreeStatus === '?') {
+        untracked += 1;
+        continue;
+      }
+      if (indexStatus !== ' ') staged += 1;
+      if (worktreeStatus !== ' ') modified += 1;
+    }
+
+    const stashResult = await exec.runGit({ argv: ['stash', 'list'], cwd: clonePath as ClonePath, timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS, credential: null, signal });
+    if (!stashResult.ok) return 'corrupt';
+    const stashCount = stashResult.value.stdout.split('\n').filter((l) => l.trim().length > 0).length;
+
+    const blockers: CleanlinessBlocker[] = [];
+    if (staged > 0) blockers.push({ kind: 'staged', count: staged });
+    if (modified > 0) blockers.push({ kind: 'modified', count: modified });
+    if (untracked > 0) blockers.push({ kind: 'untracked', count: untracked });
+    if (stashCount > 0) blockers.push({ kind: 'stash-present', count: stashCount });
+
+    return blockers.length === 0 ? { clean: true } : { clean: false, blockers };
+  }
+
   return {
     async ensure(declaration, holder, signal): Promise<Outcome<CloneHandle, CloneStoreError>> {
       const lockResult = await locks.acquireMaterialisation(declaration.id, holder, materialisationLockAcquireMs, signal);
@@ -864,6 +914,21 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
       const observed = await observeInternal(declarationId, row.value.path, new AbortController().signal);
       if (!observed) return err(cloneStoreError({ code: 'corrupt-tree' }, `could not observe git state for '${declarationId}'`));
       return ok(observed);
+    },
+
+    async isClean(declarationId): Promise<Outcome<CleanlinessVerdict, CloneStoreError>> {
+      const row = getRow(declarationId);
+      if (!row.ok) return err(cloneStoreError({ code: 'store-failed', cause: row.error }, row.error.summary));
+      if (!row.value || row.value.state === 'absent' || row.value.state === 'evicted') {
+        return err(cloneStoreError({ code: 'needs-attention', reason: 'no clone to check cleanliness' }, `'${declarationId}' has no clone to check cleanliness`));
+      }
+      const signal = new AbortController().signal;
+      if (!(await gitDirReadable(row.value.path, signal))) {
+        return err(cloneStoreError({ code: 'corrupt-tree' }, `could not check cleanliness for '${declarationId}' — git cannot read the tree`));
+      }
+      const verdict = await computeCleanliness(row.value.path, signal);
+      if (verdict === 'corrupt') return err(cloneStoreError({ code: 'corrupt-tree' }, `could not check cleanliness for '${declarationId}'`));
+      return ok(verdict);
     },
 
     async isSafeToEvict(declarationId, _acrossAllGenerations): Promise<Outcome<SafeToEvictVerdict, CloneStoreError>> {

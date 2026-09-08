@@ -31,6 +31,9 @@ export function createStubCloneStore(): CloneStore {
     async observeGitState() {
       return err(cloneStoreError({ code: 'needs-attention', reason: 'stub: observeGitState not exercised' }, 'stub'));
     },
+    async isClean() {
+      return err(cloneStoreError({ code: 'needs-attention', reason: 'stub: isClean not exercised' }, 'stub'));
+    },
     async isSafeToEvict() {
       return ok({ safe: true });
     },
