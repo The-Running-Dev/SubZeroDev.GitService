@@ -283,6 +283,44 @@ test('S17.1 — with both switches on and no active file-watcher declarations, s
   });
 });
 
+test('#86 — start() schedules the poll timer using the configured pollIntervalSeconds, not the hardcoded 15s default', async (t) => {
+  await withVolumeAsync(async (volume) => {
+    const { deps } = baseDeps(volume, { pollIntervalSeconds: 5 });
+    const scheduledDelaysMs: unknown[] = [];
+    const realSetInterval = globalThis.setInterval;
+    t.mock.method(globalThis, 'setInterval', ((_handler: () => void, delay?: number) => {
+      scheduledDelaysMs.push(delay);
+      // A real, long-delay, unref'd timer so `stop()`'s `clearInterval` has a genuine handle to clear, but the fake schedule never actually fires during the test.
+      return realSetInterval(() => undefined, 2 ** 30);
+    }) as typeof setInterval);
+
+    const watcher = createWatcher(deps);
+    const started = await watcher.start();
+    assert.equal(started.ok, true);
+    assert.deepEqual(scheduledDelaysMs, [5000], 'the configured 5s interval must reach setInterval, not the 15s contract default');
+    await watcher.stop();
+  });
+});
+
+test('#86 — start() falls back to the contract default of 15s when pollIntervalSeconds is not configured', async (t) => {
+  await withVolumeAsync(async (volume) => {
+    const { deps } = baseDeps(volume);
+    assert.equal(deps.pollIntervalSeconds, undefined);
+    const scheduledDelaysMs: unknown[] = [];
+    const realSetInterval = globalThis.setInterval;
+    t.mock.method(globalThis, 'setInterval', ((_handler: () => void, delay?: number) => {
+      scheduledDelaysMs.push(delay);
+      return realSetInterval(() => undefined, 2 ** 30);
+    }) as typeof setInterval);
+
+    const watcher = createWatcher(deps);
+    const started = await watcher.start();
+    assert.equal(started.ok, true);
+    assert.deepEqual(scheduledDelaysMs, [15000]);
+    await watcher.stop();
+  });
+});
+
 test('S17.2 — a watched file is claimed by rename into processing/ before any git or host action', async () => {
   await withVolumeAsync(async (volume) => {
     const root = inboxRoot(volume, 'repo-a');

@@ -309,7 +309,7 @@ function resolveWatcherEnabled(): boolean {
  * deployment that never opted in must not be taken down by a stray malformed
  * value it was never going to use.
  */
-function resolveWatcherPollIntervalSeconds(watcherEnabled: boolean): number {
+export function resolveWatcherPollIntervalSeconds(watcherEnabled: boolean): number {
   const raw = process.env.WATCHER_POLL_INTERVAL_SECONDS;
   if (raw === undefined || raw.trim().length === 0) return 15;
   const value = Number(raw);
