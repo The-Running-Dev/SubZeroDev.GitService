@@ -45,6 +45,14 @@ export type EvictionBlocker =
 
 export type SafeToEvictVerdict = { readonly safe: true } | { readonly safe: false; readonly blockers: readonly EvictionBlocker[] };
 
+export type CleanlinessBlocker =
+  | { readonly kind: 'staged'; readonly count: number }
+  | { readonly kind: 'modified'; readonly count: number }
+  | { readonly kind: 'untracked'; readonly count: number }
+  | { readonly kind: 'stash-present'; readonly count: number };
+
+export type CleanlinessVerdict = { readonly clean: true } | { readonly clean: false; readonly blockers: readonly CleanlinessBlocker[] };
+
 export interface CloneHandle {
   readonly clone: Clone;
   readonly materialisationLock: LockHandle;

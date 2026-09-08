@@ -13,6 +13,7 @@ import type { Declarations } from '../declarations/declarations.ts';
 import type { DeclarationFilter } from '../declarations/types.ts';
 import type { CloneStore } from '../clone/clone-store.ts';
 import type { Clone, CloneState } from '../clone/types.ts';
+import type { CloneStoreError } from '../clone/errors.ts';
 import type { Audit } from '../audit/audit.ts';
 import type { AuditAppendInput } from '../audit/types.ts';
 import type { Notifier } from '../notifier/notifier.ts';
@@ -53,11 +54,27 @@ function stubDeclarations(active: { current: readonly Declaration[] }): Pick<Dec
   };
 }
 
-function stubCloneStore(state: { current: CloneState }): Pick<CloneStore, 'describe'> {
+/**
+ * `clean` defaults to `true` (a `ready` clone is clean unless a test says
+ * otherwise) — `cleanError` forces `isClean` to fail closed instead, and
+ * `calls` (when given) counts invocations, for tests proving the
+ * needs-attention short-circuit never reaches `isClean` at all.
+ */
+function stubCloneStore(state: { current: CloneState; clean?: boolean; cleanError?: boolean }, calls?: { isClean: number }): Pick<CloneStore, 'describe' | 'isClean'> {
   return {
     async describe(declarationId) {
       const clone: Clone = { declarationId, generation: 1 as never, state: state.current, path: 'unused' as never, sizeBytes: 0, lastOperationAt: null, observedRemote: null, attentionReason: null };
       return { ok: true, value: clone };
+    },
+    async isClean(_declarationId) {
+      if (calls) calls.isClean += 1;
+      if (state.cleanError) {
+        const error: CloneStoreError = { resultKind: 'precondition', retryable: false, code: 'corrupt-tree', summary: 'stub: forced isClean failure' };
+        return { ok: false, error };
+      }
+      return state.clean === false
+        ? { ok: true, value: { clean: false, blockers: [{ kind: 'modified', count: 1 }] } }
+        : { ok: true, value: { clean: true } };
     },
   };
 }
@@ -151,9 +168,10 @@ function successfulHandlers(autoMergeCalled: { count: number } = { count: 0 }): 
       let call = 0;
       return () => {
         call += 1;
-        // Call 1 is the pre-claim clean-tree gate, call 2 the post-apply observation, call 3 the post-stage observation.
-        if (call === 1) return repoStatus(false);
-        return call === 2 ? repoStatus(true, [{ path: 'content/post.md', staged: false }]) : repoStatus(true, [{ path: 'content/post.md', staged: true }]);
+        // The pre-claim clean-tree gate is `CloneStore.isClean`, not this
+        // dispatched tool (issue #78) — call 1 is the post-apply observation,
+        // call 2 the post-stage observation.
+        return call === 1 ? repoStatus(true, [{ path: 'content/post.md', staged: false }]) : repoStatus(true, [{ path: 'content/post.md', staged: true }]);
       };
     })(),
     git_stage: () => success('staged', { staged: ['content/post.md'] }, diag()) as unknown as ToolResult<never>,
@@ -174,10 +192,11 @@ function diag() {
 /**
  * Handlers gated so anything after `failAt` throws if reached — proves the
  * sequence stops. `repo_status` is excluded from that gate and answered by
- * call count instead: it legitimately runs once before `failAt` (the
- * pre-claim clean-tree gate) regardless of where in the protocol `failAt`
- * falls, so its fixed position in `order` cannot double as "have we passed
- * the failure point" the way every other step's can.
+ * call count instead, since it legitimately runs twice within the protocol
+ * (post-apply, post-stage) regardless of where `failAt` falls, so its fixed
+ * position in `order` cannot double as "have we passed the failure point"
+ * the way every other step's can. The pre-claim clean-tree gate is
+ * `CloneStore.isClean`, not this dispatched tool (issue #78).
  */
 function handlersUpTo(failAt: string, failureResult: ToolResult<never>): Record<string, (req: DispatchRequest) => ToolResult<never>> {
   const base = successfulHandlers();
@@ -187,9 +206,7 @@ function handlersUpTo(failAt: string, failureResult: ToolResult<never>): Record<
   let repoStatusCalls = 0;
   wrapped.repo_status = () => {
     repoStatusCalls += 1;
-    // Call 1 is the pre-claim clean-tree gate, call 2 the post-apply observation, call 3 the post-stage observation.
-    if (repoStatusCalls === 1) return repoStatus(false);
-    return repoStatusCalls === 2 ? repoStatus(true, [{ path: 'content/post.md', staged: false }]) : repoStatus(true, [{ path: 'content/post.md', staged: true }]);
+    return repoStatusCalls === 1 ? repoStatus(true, [{ path: 'content/post.md', staged: false }]) : repoStatus(true, [{ path: 'content/post.md', staged: true }]);
   };
   for (const name of order) {
     wrapped[name] = (req) => {
@@ -244,9 +261,11 @@ test('S17.1 — with both switches on and no active file-watcher declarations, s
   await withVolumeAsync(async (volume) => {
     const active = { current: [] as Declaration[] };
     const dispatchLog: DispatchRequest[] = [];
+    const isCleanCalls = { isClean: 0 };
     const { deps } = baseDeps(volume, {
       declarations: stubDeclarations(active),
-      dispatch: scriptedDispatch(dispatchLog, { repo_status: () => repoStatus(false) }),
+      cloneStore: stubCloneStore({ current: 'ready' }, isCleanCalls),
+      dispatch: scriptedDispatch(dispatchLog, {}),
     });
     const watcher = createWatcher(deps);
     const started = await watcher.start();
@@ -260,7 +279,7 @@ test('S17.1 — with both switches on and no active file-watcher declarations, s
     const nextTick = await watcher.tick();
     assert.equal(nextTick.length, 1);
     assert.equal(nextTick[0]!.declarationId, 'repo-a');
-    assert.equal(dispatchLog.some((r) => r.toolName === 'repo_status'), true, 'the newly-eligible declaration was resolved without a restart');
+    assert.equal(isCleanCalls.isClean, 1, 'the newly-eligible declaration was resolved without a restart');
   });
 });
 
@@ -365,23 +384,45 @@ test('S17.5 — a tick is a no-op when the clone is not clean, and when the clon
     const dirtyLog: DispatchRequest[] = [];
     const { deps: dirtyDeps } = baseDeps(volume, {
       declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
-      cloneStore: stubCloneStore({ current: 'ready' }),
-      dispatch: scriptedDispatch(dirtyLog, { repo_status: () => repoStatus(true, [{ path: 'content/other.md', staged: false }]) }),
+      cloneStore: stubCloneStore({ current: 'ready', clean: false }),
+      dispatch: scriptedDispatch(dirtyLog, {}),
     });
     const dirtyReports = await createWatcher(dirtyDeps).tick();
     assert.equal(dirtyReports[0]!.skipped, 'clone-not-clean');
     assert.equal(existsSync(path.join(root, 'post.md')), true, 'the file stays in the inbox');
+    assert.equal(dirtyLog.length, 0, 'a dirty clone makes no dispatch, git, or host call at all (W03.3)');
 
     const attentionLog: DispatchRequest[] = [];
+    const isCleanCalls = { isClean: 0 };
     const { deps: attentionDeps } = baseDeps(volume, {
       declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
-      cloneStore: stubCloneStore({ current: 'needs-attention' }),
-      dispatch: scriptedDispatch(attentionLog, { repo_status: () => repoStatus(false) }),
+      cloneStore: stubCloneStore({ current: 'needs-attention' }, isCleanCalls),
+      dispatch: scriptedDispatch(attentionLog, {}),
     });
     const attentionReports = await createWatcher(attentionDeps).tick();
     assert.equal(attentionReports[0]!.skipped, 'clone-needs-attention');
     assert.equal(existsSync(path.join(root, 'post.md')), true, 'the file stays in the inbox');
-    assert.equal(attentionLog.length, 0, 'needs-attention is decided before repo_status is even dispatched');
+    assert.equal(attentionLog.length, 0, 'needs-attention is decided before any dispatch call');
+    assert.equal(isCleanCalls.isClean, 0, 'needs-attention is decided before isClean is even called');
+  });
+});
+
+test('#78 — a clean-tree check that fails to observe (isClean returns an error) is treated as not clean, never as clean', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+
+    const dispatchLog: DispatchRequest[] = [];
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      cloneStore: stubCloneStore({ current: 'ready', cleanError: true }),
+      dispatch: scriptedDispatch(dispatchLog, {}),
+    });
+    const reports = await createWatcher(deps).tick();
+    assert.equal(reports[0]!.skipped, 'clone-not-clean');
+    assert.equal(existsSync(path.join(root, 'post.md')), true, 'the file stays in the inbox');
+    assert.equal(dispatchLog.length, 0, 'a failure to observe cleanliness makes no dispatch, git, or host call either');
   });
 });
 
@@ -410,7 +451,7 @@ test('S17.6 and S17.7 — the full protocol delivers a claimed file to processed
 
     assert.deepEqual(
       dispatchLog.map((r) => r.toolName),
-      ['repo_status', 'plan_tool', 'prepare_branch', 'apply_tool', 'repo_status', 'git_stage', 'repo_status', 'git_commit', 'git_push', 'pr_open', 'pr_enable_auto_merge'],
+      ['plan_tool', 'prepare_branch', 'apply_tool', 'repo_status', 'git_stage', 'repo_status', 'git_commit', 'git_push', 'pr_open', 'pr_enable_auto_merge'],
     );
     assert.equal(autoMergeCalled.count, 1);
     assert.equal(auditLog.length, 1);
@@ -474,12 +515,11 @@ test('S17.7/D12 — an unreadable post-apply observation is refused as a termina
 
     const dispatchLog: DispatchRequest[] = [];
     const handlers = successfulHandlers();
-    let call = 0;
     handlers.repo_status = () => {
-      call += 1;
-      if (call === 1) return repoStatus(false);
-      // Call 2 is the post-apply observation. A body with no `changedPaths`
-      // at all — the shape the cast used to assert rather than check.
+      // The one `repo_status` call reached here is the post-apply observation
+      // — the pre-claim clean-tree gate is `CloneStore.isClean`, not this
+      // dispatched tool (issue #78). A body with no `changedPaths` at all —
+      // the shape the cast used to assert rather than check.
       return success(
         'status',
         { branch: 'main', baseBranch: 'main', dirty: true, parkedOffBase: false, ahead: 0, behind: 0, observedRemote: null, readStamp: { lastSettledOperationId: null, mutationInFlight: false } },
@@ -518,15 +558,11 @@ test('S17.7/D12 — a mismatched post-apply observation fails before git_stage i
     const { deps } = baseDeps(volume, {
       declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
       dispatch: scriptedDispatch([], {
-        repo_status: (() => {
-          let call = 0;
-          return () => {
-            call += 1;
-            if (call === 1) return repoStatus(false); // pre-claim clean check
-            // Post-apply observation reports a DIFFERENT path than the apply result claimed.
-            return repoStatus(true, [{ path: 'content/unexpected.md', staged: false }]);
-          };
-        })(),
+        // The one `repo_status` call reached here is the post-apply
+        // observation, reporting a DIFFERENT path than the apply result
+        // claimed — the pre-claim clean-tree gate is `CloneStore.isClean`,
+        // not this dispatched tool (issue #78).
+        repo_status: () => repoStatus(true, [{ path: 'content/unexpected.md', staged: false }]),
         plan_tool: () => success('planned', PLAN_DATA, diag()) as unknown as ToolResult<never>,
         prepare_branch: () => success('prepared', {}, diag()) as unknown as ToolResult<never>,
         apply_tool: () => success('applied', APPLY_DATA, diag()) as unknown as ToolResult<never>,
@@ -551,16 +587,11 @@ test('S17.7/D13 — a post-stage observation short of fully staged fails before 
     const { deps } = baseDeps(volume, {
       declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
       dispatch: scriptedDispatch([], {
-        repo_status: (() => {
-          let call = 0;
-          return () => {
-            call += 1;
-            if (call === 1) return repoStatus(false);
-            if (call === 2) return repoStatus(true, [{ path: 'content/post.md', staged: false }]);
-            // Post-stage observation says the path is still not staged.
-            return repoStatus(true, [{ path: 'content/post.md', staged: false }]);
-          };
-        })(),
+        // Call 1 is the post-apply observation (matches the apply result,
+        // unstaged); call 2 is the post-stage observation, still not staged —
+        // the pre-claim clean-tree gate is `CloneStore.isClean`, not this
+        // dispatched tool (issue #78).
+        repo_status: () => repoStatus(true, [{ path: 'content/post.md', staged: false }]),
         plan_tool: () => success('planned', PLAN_DATA, diag()) as unknown as ToolResult<never>,
         prepare_branch: () => success('prepared', {}, diag()) as unknown as ToolResult<never>,
         apply_tool: () => success('applied', APPLY_DATA, diag()) as unknown as ToolResult<never>,
@@ -937,17 +968,17 @@ test('#80 — a second terminal drop sharing the first drop\'s original name is 
 
     // A frozen clock: both terminal moves below build the identical
     // timestamp-prefixed target name, `${timestampPrefix(clock.now())}-post.md`.
-    // `repo_status` cycles 1=pre-claim(clean), 2=post-apply, 3=post-stage on
-    // every tick — `handlersUpTo`'s own counter never resets, so it cannot be
-    // reused across two full ticks the way this reproduction needs.
+    // `repo_status` cycles 1=post-apply, 2=post-stage on every tick — the
+    // pre-claim clean-tree gate is `CloneStore.isClean`, not this dispatched
+    // tool (issue #78) — `handlersUpTo`'s own counter never resets, so it
+    // cannot be reused across two full ticks the way this reproduction needs.
     let repoStatusCalls = 0;
     const dispatch = scriptedDispatch([], {
       ...successfulHandlers(),
       repo_status: () => {
         repoStatusCalls += 1;
-        const pos = ((repoStatusCalls - 1) % 3) + 1;
-        if (pos === 1) return repoStatus(false);
-        return pos === 2 ? repoStatus(true, [{ path: 'content/post.md', staged: false }]) : repoStatus(true, [{ path: 'content/post.md', staged: true }]);
+        const pos = ((repoStatusCalls - 1) % 2) + 1;
+        return pos === 1 ? repoStatus(true, [{ path: 'content/post.md', staged: false }]) : repoStatus(true, [{ path: 'content/post.md', staged: true }]);
       },
       git_push: () => upstream('remote rejected the push', null) as unknown as ToolResult<never>,
     });

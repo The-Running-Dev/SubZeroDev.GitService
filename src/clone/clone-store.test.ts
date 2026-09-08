@@ -628,6 +628,112 @@ function gitIn(args: readonly string[], cwd: string): { readonly status: number 
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 
+test('#78 — isClean reports clean:true for a freshly materialised clone with nothing changed', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declaration = fixtureDeclaration('repo-clean', createBareGitRemote());
+    const exec = createExec({ volumeRoot: volume });
+    const locks = createLocks();
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations: declarationsStubFor(declaration) });
+
+    const ensured = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(ensured.ok, true);
+    if (!ensured.ok) return;
+    ensured.value.materialisationLock.release();
+
+    const verdict = await cloneStore.isClean(declaration.id);
+    assert.equal(verdict.ok, true);
+    if (!verdict.ok) return;
+    assert.deepEqual(verdict.value, { clean: true });
+  });
+});
+
+test('#78 — isClean observes real Git state, not Clone.state — a `ready` clone with an actually dirty tree reports each kind of change it finds', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declaration = fixtureDeclaration('repo-dirty', createBareGitRemote());
+    const exec = createExec({ volumeRoot: volume });
+    const locks = createLocks();
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations: declarationsStubFor(declaration) });
+
+    const ensured = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(ensured.ok, true);
+    if (!ensured.ok) return;
+    ensured.value.materialisationLock.release();
+    const clonePath = ensured.value.clone.path as unknown as string;
+
+    // A stash entry left behind by earlier work — pushed first, and from its
+    // own change, so it neither depends on nor disturbs the dirty state built
+    // below.
+    writeFileSync(path.join(clonePath, 'stashed.md'), 'stash me\n', 'utf8');
+    gitIn(['add', 'stashed.md'], clonePath);
+    gitIn(['stash', 'push', '-m', 'fixture stash'], clonePath);
+
+    // A modified tracked file, unstaged...
+    writeFileSync(path.join(clonePath, 'README.md'), 'modified content\n', 'utf8');
+    // ...a staged new file...
+    writeFileSync(path.join(clonePath, 'staged.md'), 'new file, staged\n', 'utf8');
+    gitIn(['add', 'staged.md'], clonePath);
+    // ...and an untracked file.
+    writeFileSync(path.join(clonePath, 'untracked.md'), 'new file, untracked\n', 'utf8');
+
+    // `describe()` still reports the lifecycle state alone — `ready` — which
+    // is exactly the defect issue #78 names: a lifecycle state is not a
+    // clean-tree check.
+    const described = await cloneStore.describe(declaration.id);
+    assert.equal(described.ok, true);
+    if (described.ok) assert.equal(described.value.state, 'ready');
+
+    const verdict = await cloneStore.isClean(declaration.id);
+    assert.equal(verdict.ok, true);
+    if (!verdict.ok) return;
+    assert.equal(verdict.value.clean, false);
+    if (verdict.value.clean) return;
+    const kinds = verdict.value.blockers.map((b) => b.kind).sort();
+    assert.deepEqual(kinds, ['modified', 'stash-present', 'staged', 'untracked'].sort(), `got blockers: ${JSON.stringify(verdict.value.blockers)}`);
+  });
+});
+
+test('#78 — isClean fails closed: a failed git status check reports an error, never clean:true', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declaration = fixtureDeclaration('repo-isclean-failclosed', createBareGitRemote());
+    const real = createExec({ volumeRoot: volume });
+    const locks = createLocks();
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec: real, locks, declarations: declarationsStubFor(declaration) });
+
+    const ensured = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(ensured.ok, true);
+    if (!ensured.ok) return;
+    ensured.value.materialisationLock.release();
+
+    const flaky: Exec = {
+      ...real,
+      async runGit(request: ExecRequest): Promise<Outcome<ExecResult, ExecError>> {
+        if (request.argv[0] === 'status') {
+          return { ok: false, error: execError({ code: 'nonzero-exit', exitCode: 1, stderr: 'simulated status failure' }, 'forced failure for test') };
+        }
+        return real.runGit(request);
+      },
+    };
+    const flakyCloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec: flaky, locks, declarations: declarationsStubFor(declaration) });
+
+    const verdict = await flakyCloneStore.isClean(declaration.id);
+    assert.equal(verdict.ok, false, 'a git command that cannot be verified must refuse, never report clean:true');
+    if (!verdict.ok) assert.equal(verdict.error.code, 'corrupt-tree');
+  });
+});
+
+test('#78 — isClean on a declaration with no materialised clone reports needs-attention, not clean:true', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declaration = fixtureDeclaration('repo-isclean-absent', createBareGitRemote());
+    const exec = createExec({ volumeRoot: volume });
+    const locks = createLocks();
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations: declarationsStubFor(declaration) });
+
+    const verdict = await cloneStore.isClean(declaration.id);
+    assert.equal(verdict.ok, false);
+    if (!verdict.ok) assert.equal(verdict.error.code, 'needs-attention');
+  });
+});
+
 test('20-contract.md § Clone, U8 — observeGitState succeeds against a deliberately unmerged index, which git write-tree would refuse', async () => {
   await withMigratedVolume(async (volume) => {
     const remote = createBareGitRemote();

@@ -45,7 +45,7 @@ export interface WatcherDependencies {
   readonly clock: Clock;
   readonly dispatch: Dispatch;
   readonly declarations: Pick<Declarations, 'list'>;
-  readonly cloneStore: Pick<CloneStore, 'describe'>;
+  readonly cloneStore: Pick<CloneStore, 'describe' | 'isClean'>;
   readonly audit: Pick<Audit, 'append'>;
   readonly notifier: Pick<Notifier, 'enqueue'>;
   readonly store: Pick<StructuredStore, 'transaction'>;
@@ -102,12 +102,16 @@ function readStrictUtf8(fullPath: string): { readonly ok: true; readonly value: 
  * exactly as the scheduler is (that module does not exist yet — the watcher
  * is the first unattended actor to ship). Every git and host step goes
  * through `dispatch`, so this module imports neither `GitOperations` nor
- * `HostAdapter`. `CloneStore.describe` is the one exception: distinguishing
- * `clone-not-clean` from `clone-needs-attention` (`WatchTickReport.skipped`)
- * needs the clone's own state, which a `repo_status` read cannot report —
- * `dispatchRead` serves reads through a parked clone unchanged (`20-contract.md`
- * § Error semantics › Clone store: "Reads ... still work"), so `dirty` alone
- * cannot tell the two apart.
+ * `HostAdapter`. `CloneStore.describe` and `CloneStore.isClean` are the two
+ * exceptions, and both are read directly rather than through `dispatch`
+ * (issue #78): distinguishing `clone-not-clean` from `clone-needs-attention`
+ * (`WatchTickReport.skipped`) needs the clone's own lifecycle state, which a
+ * `repo_status` read cannot report, and the clean-tree gate itself must
+ * observe Git at the moment of the call rather than trust that lifecycle
+ * state — `Clone.state === 'ready'` says the directory is materialised and
+ * carries no attention mark, and says nothing about the working tree (**D16**).
+ * Going through `dispatch` for the gate would also audit and journal a call
+ * whose only purpose is deciding whether to act at all.
  */
 /**
  * A dispatch result is opaque JSON. The watcher narrows only the fields it
@@ -513,15 +517,18 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     if (!described.ok || described.value.state !== 'ready') {
       // Any non-`ready` clone state (`absent`, `materialising`, `dirty`,
       // `recovery-pending`, `evicted`, `needs-attention`) is reported as
-      // `clone-needs-attention` here — a `repo_status` read against a
-      // not-yet-materialised or otherwise non-ready clone would trigger
-      // clone-on-demand and, on failure, get misreported as `clone-not-clean`.
+      // `clone-needs-attention` here — a not-yet-materialised or otherwise
+      // non-ready clone has no tree for `isClean` to observe.
       return emptyReport(declaration.id, 'clone-needs-attention', reconciled, stillPending);
     }
 
-    const status = await callTool('repo_status', {}, declaration, session);
-    const statusData = status.ok ? readRepoStatus(status.data) : null;
-    if (!status.ok || statusData === null || statusData.dirty !== false) {
+    // `20-contract.md` § L2 — watcher: "the clean-tree gate is
+    // `CloneStore.isClean`, and it runs before the claim, not after it." A
+    // failure to observe is not a clean tree either (`isClean`'s own
+    // contract) — `cleanliness.ok === false` is folded into `clone-not-clean`
+    // the same as `clean: false`, both leaving the inbox untouched.
+    const cleanliness = await cloneStore.isClean(declaration.id);
+    if (!cleanliness.ok || !cleanliness.value.clean) {
       return emptyReport(declaration.id, 'clone-not-clean', reconciled, stillPending);
     }
 
