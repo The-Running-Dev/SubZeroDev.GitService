@@ -54,13 +54,11 @@
 | milestone/4 | #67 | The route-to-capability mapping for the HTTP bearer surface is half-built | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #76 | Content drops need a fixed two-phase target protocol | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #77 | Carry the watcher push SHA through auto-merge and reconciliation | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
-| milestone/3 | #78 | Require a live clean-tree check before watcher claims or reconciliation | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #81 | Audit and notify every content-drop watcher failure | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #82 | Finalize a merged watcher PR even when reconciliation fails | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #83 | Isolate untrusted drop files from protected watcher state | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #84 | Make declaration orphaning and removal aware of content-drop state | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #85 | Start the watcher healthy and idle when no declaration currently has content drops | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
-| milestone/3 | #86 | Wire and validate the configurable watcher polling interval | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #87 | Build an evidence-grade test harness for the content-drop watcher | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #88 | Enforce watcher contract types at every persistence and dispatch boundary | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/6 | #113 | Test-DesignDrift.ps1 accepts non-slice titles that merely begin with an S-number | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
