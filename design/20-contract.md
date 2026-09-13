@@ -297,7 +297,8 @@ not an implementation detail:
   write-tree`: that command can fail on a deliberately unmerged index (a real state a mutating tool
   must still be able to capture pre-state for), and it writes a tree object to the object database,
   which pre-state capture may never do.
-- `worktreeDigest` covers one entry per line of `git status --porcelain=v1`, in the order that
+- `worktreeDigest` covers one entry per line of `git status --porcelain=v1` whose working-tree
+  column is not blank (a staged-only change is `indexDigest`'s, not this one's), in the order that
   command emits them, each `{ path, workingTreeStatus }` where `workingTreeStatus` is the
   porcelain line's second column (`M`, `D`, …) for a tracked path or `?` for an untracked one — "
   tracked paths differing from the index plus the untracked set", read directly off the column the
@@ -1326,8 +1327,8 @@ first mismatch found, not a full report, because boot fails closed on the first 
 
 ### L1 — credentials
 
-Declared in `src/credentials/credentials.ts`, with `MutableEnv` and `CredentialFailureMark` in
-`src/credentials/types.ts`.
+Declared in `src/credentials/credentials.ts`, with `CredentialFailureMark` in
+`src/credentials/types.ts` and `MutableEnv` in `src/exec/exec.ts`.
 
 **`clearFailing`'s `actor` is `null` on its one internal caller (S34).** `resolveInto` clears a mark
 itself the moment it observes a secret rewritten since the mark was taken — no operator is involved,
@@ -1797,9 +1798,9 @@ one.
 
 `ChecksStatusInput.ref` and `ChecksAwaitInput.ref` default to the clone's current head when null.
 `ChecksAwaitData.concluded` is false when the wait returned because it hit its cap rather than
-because every check reached a conclusion; a wait that times out is a `timeout` envelope, so
-`concluded: false` is reachable only where the cap and the poll interval race, and callers read it
-rather than inferring conclusion from the check list.
+because every check reached a conclusion. In the tree it is never returned: a wait that reaches its
+cap — including one whose next poll would overrun it — is a `timeout` envelope. Callers still read the
+field rather than inferring conclusion from the check list.
 
 The seven registry entries S10 ships:
 
@@ -2304,9 +2305,9 @@ interface AuthorizationServerMetadata {
 | `/.well-known/oauth-protected-resource/mcp/{declarationId}` | `GET` | none | `ProtectedResourceMetadata` for that declaration's resource URI |
 | `/.well-known/oauth-authorization-server` | `GET` | none | `AuthorizationServerMetadata`, one server for the whole instance |
 | `/oauth/register` | `POST` | none | Dynamic Client Registration (RFC 7591) — wraps `registerClient` |
-| `/oauth/authorize` | `GET`, `POST` | operator console cookie | The approval step; issues a short-lived, process-local authorization code bound to a PKCE `code_challenge` (S256) and the `resource` being granted. Ephemeral — a restart mid-flow means starting over, not a re-authorization of an already-connected client |
+| `/oauth/authorize` | `GET`, `POST` | `GET` none (renders the consent form); `POST` operator console cookie and CSRF | The approval step; issues a short-lived, process-local authorization code bound to a PKCE `code_challenge` (S256) and the `resource` being granted. Ephemeral — a restart mid-flow means starting over, not a re-authorization of an already-connected client |
 | `/oauth/token` | `POST` | none (PKCE substitutes for a client secret) | `authorization_code` grant (with `code_verifier`) calls `issueMcpGrant`; `refresh_token` grant calls `refresh` |
-| `/oauth/revoke` | `POST` | bearer | Revokes the presented token via `revokeBearerToken` (RFC 7009) |
+| `/oauth/revoke` | `POST` | none — the token in the form body is its own credential | Revokes the presented token via `revokeBearerToken` (RFC 7009) |
 | `/mcp/{declarationId}` | `POST` | bearer, audience-checked against the path | The MCP JSON-RPC transport: `initialize`, `tools/list`, `tools/call`, and JSON-RPC notifications |
 
 **A body carrying no `id` member is a JSON-RPC notification, and is answered `202 Accepted` with no
@@ -2383,7 +2384,7 @@ type ExecError = ModuleErrorBase & (
 | `spawn-failed` | The fixed executable could not be started | no | `infrastructure` — the environment is wrong, not the request |
 | `nonzero-exit` | The child exited non-zero; `stdout` and `stderr` are already scrubbed | no | Classify by domain: auth rejection to `upstream`, a refused push to `precondition`; informational commands retain both streams for diagnosis |
 | `timed-out` | The declared cap elapsed and the child was killed | no | `timeout`, and park the journal entry — what the command achieved is not knowable |
-| `argv-rejected` | The vector selects an executable, injects or writes configuration, carries credentials or a foreign or opaque remote operand, names a remote-helper transport (`<transport>::<address>`), or persists a remote | no | `validation`; no authority could ever permit it |
+| `argv-rejected` | Declared, never raised by exec itself — the rule is judged in § L2 — git operations before `git_raw` reaches exec, and returned there as `validation` directly. The rule: the vector selects an executable, injects or writes configuration, carries credentials or a foreign or opaque remote operand, names a remote-helper transport (`<transport>::<address>`), or persists a remote | no | `validation`; no authority could ever permit it |
 | `cancelled` | The caller's signal aborted | no | `conflict`, releasing locks in reverse acquisition order |
 
 ### Locks
@@ -2889,7 +2890,7 @@ type BootError = ModuleErrorBase & (
 | `ceiling-outside-contract` | The deployment ceiling names a capability the contract set lacks | no | Fatal |
 | `executor-missing` | A registry entry has no registered executor | no | Fatal |
 | `watcher-revalidation-failed` | An active declaration's stored file-watcher pair is invalid against the registry loaded by this boot | no | Fatal, preserving the `DeclarationError` as `cause`; no transport starts under invalid declaration authority |
-| `store-failed` | Open, integrity check or migration failed | no | Fatal, per the store's own table |
+| `store-failed` | Open, integrity check, pre-migration backup or migration failed, or the operation journal could not be read for recovery — the store is closed and the lease released before returning | no | Fatal, per the store's own table |
 
 A broken audit chain is **not** in this list, deliberately.
 
