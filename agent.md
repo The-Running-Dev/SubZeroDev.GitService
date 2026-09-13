@@ -41,6 +41,12 @@ and preferences belong in `AGENTS.md`.
   silently when a document is restructured. Positional numbering makes this worse: inserting
   a document between existing ones means renumbering everything after it and rewriting every
   link. **Prefer appending.**
+- **An issue closing does not remove the annotation that cites it.** #66 and #248 both carried
+  "this annotation goes when that closes"; #248's fix removed its own, #66's did not, and for six
+  days `10-design.md` told every session that orphaning's grant revocation and epoch bump — a
+  security cascade — was unbuilt. Cost: a reconcile finding, and a design doc wrong about a live
+  authorization property. **A fix that closes an issue named in `design/` greps `design/` for
+  that number.**
 
 ## Verification
 
