@@ -186,7 +186,7 @@ existing "console-only" language above — no `OperatorScope` value names them, 
 token can exercise them. See `design/90-decisions.md`, 2026-08-09.
 
 **A scope expands to capabilities by a total rule, not by a lookup table.** `expandScopes`
-(`src/authorization/authorization.ts`) is the single place a granted scope becomes a capability set,
+(`src/contract/capabilities.ts`, re-exported by `src/authorization/authorization.ts`) is the single place a granted scope becomes a capability set,
 and it is the only scope enforcement that exists in the tree: `ToolDeclaration.scopes` is
 canonicalised into the fingerprint and published in `SanitisedManifest`, and `dispatch-pipeline.ts`
 reads it nowhere. Its shape is deliberately the same two-branch shape as `capabilityScopeOf`: a
@@ -2057,7 +2057,7 @@ after a container restart without re-authorising (S14.7). A grant is never re-is
 authorization code — the surface layer deletes the ephemeral code before calling this method, so a
 replay finds no code to exchange rather than reaching the store twice.
 
-`expandScopes` is exported and crosses a module boundary — `src/contract/tool-parity.ts` calls it to
+`expandScopes` is exported, and consumed beyond authorization — `src/contract/tool-parity.ts` calls it to
 compute the widest grant an `mcp` session can hold. It must stay exported for that reason: the parity
 harness measuring what a profile can see has to use the same expansion a real session is built with,
 because a second description of the mapping is a second thing to keep correct and the first thing to
@@ -2641,7 +2641,9 @@ type HostError = ModuleErrorBase & (
 
 **The three "the notifier fires" cells above are specified and not yet held.** No host terminal
 state reaches the notifier on the ordinary dispatch path today, so on that path those three are
-requirements rather than descriptions; boot recovery and the watcher do fire it. Tracked as issue
+requirements rather than descriptions. Only the watcher fires it; boot recovery does not, because
+`Journal.classify` returns `terminal: null` on every `completed` verdict (**R3**, **R11**), so the
+recovery ladder's notify branch is never taken. Tracked as issue
 #49 — this paragraph goes when that closes. Recorded here because a reader cannot tell a rule the
 tree holds from one it owes by reading either the rule or the tree.
 
@@ -2733,12 +2735,11 @@ each one's envelope is fixed here rather than left to the call site that writes 
 |---|---|---|---|
 | `tool-not-found` | A by-name call for a tool that does not exist | no | `authorization`, audited. A stale catalogue is worth seeing |
 | `capability-insufficient` | The recomputed grant no longer admits the call | no | `authorization`, audited, no handler runs |
-| `scope-insufficient` | The granted scopes do not cover the tool | no | `authorization`, audited |
 | `declaration-required` | A declaration-scoped tool was called with no declaration in context | no | `validation` |
 | `input-invalid` | The input fails the declared schema | no | `validation` with findings, before any handler runs |
 | `output-invalid` | A handler returned something the output schema rejects | no | `infrastructure`. **Side effects already happened**; the journal records them, and this is the one place a caller sees an error after they landed |
 | `result-too-large` | The result exceeds the declared limit | no | `infrastructure` |
-| `grant-revoked` | The epoch check found the grant or its client revoked | no | **Close the session.** The transport answers `401` with the resource-metadata challenge, not an envelope — the caller must re-authorise rather than retry |
+| `grant-revoked` | The grant or its client was revoked — found by the MCP transport's epoch comparison (**A3**), which is not in this pipeline | no | **Close the session.** The transport answers `401` with the resource-metadata challenge, not an envelope — the caller must re-authorise rather than retry |
 
 ### Authorization
 
@@ -2913,8 +2914,8 @@ responsible for maintaining it.
 | A8 | No field of `RepositoryConfig` is a capability, scope, path prefix, credential reference, remote, host, timeout or limit. Any field a caller could set that widens what the service will do lives in `Declaration`. | Contract — re-checked at every amendment of `RepositoryConfig` |
 | A9 | `visibleTools` and `dispatch` apply the same predicate. A tool absent from `visibleTools` returns `authorization` from `dispatch` and never reaches a handler. | Dispatch pipeline |
 | A10 | Every capability in the contract set is placed in at least one scope by `### Scopes`'s rule. Equivalently: `expandScopes(['read','write','raw','schedule'], contract)` equals the declaration-scoped members of `contract`. A capability the rule cannot place fails the build as `capability-unscopable` rather than expanding to nothing. | Compiler, Authorization |
-| A11 | No route reaches an instance-scoped capability's effect from a credential that cannot carry that capability. A route whose action is gated by `declaration.manage`, `auth.manage`, `audit.read` or `attention.resolve` accepts `cookie` only — **A7** makes those four unholdable by any token, so a bearer branch on such a route can check nothing and therefore gates nothing. | Surfaces |
-| A12 | The console filters a navigation entry on the operator's effective grant for the selected declaration, never on that declaration's raw `capabilityGrant`. The intersection is computed by `Declarations.effectiveGrant` on the server; no surface recomputes **A1** client-side. | Surfaces, Console |
+| A11 | No route reaches an instance-scoped capability's effect from a credential that cannot carry that capability. A route whose action is gated by `declaration.manage`, `auth.manage`, `audit.read` or `attention.resolve` accepts `cookie` only — **A7** makes those four unholdable by any token, so a bearer branch on such a route can check nothing and therefore gates nothing. **Specified, not yet held** — `/parked-operations/{operationId}/resolve` and `/failing-credentials/.../clear` still accept a bearer token with no capability gate; issue #67, and this note goes when it closes. | Surfaces |
+| A12 | The console filters a navigation entry on the operator's effective grant for the selected declaration, never on that declaration's raw `capabilityGrant`. The intersection is computed by `Declarations.effectiveGrant` on the server; no surface recomputes **A1** client-side. **Specified, not yet held** — the console still filters on the raw grant and the declaration reads carry no `effectiveGrant`; issue #144, and this note goes when it closes. | Surfaces, Console |
 
 ### Recovery and ordering
 
@@ -2930,7 +2931,7 @@ responsible for maintaining it.
 | R8 | A resume step runs as an ordinary dispatch that takes the global mutation lock for itself, and completes before the triggering call acquires anything. It is never nested inside another operation's hold. | Lifecycle |
 | R9 | `resolveRunningAtBoot` runs no resume step and performs no git or host I/O. | Scheduler |
 | R10 | A `running` job is never simply fired again at boot. | Scheduler |
-| R11 | A `TerminalState` is written to the sink by the call that observed the terminal condition, and is read and removed by the settle for that same `operationId`. Exactly one producer exists; `Journal.classify` is not one, per **R3**. No sink entry survives the operation that wrote it. | Dispatch pipeline, Host adapter |
+| R11 | A `TerminalState` is written to the sink by the call that observed the terminal condition, and is read and removed by the settle for that same `operationId`. Exactly one producer exists; `Journal.classify` is not one, per **R3**. No sink entry survives the operation that wrote it. **Specified, not yet held** — no sink exists and the pipeline settles every operation with `null`; issue #49, and this note goes when it closes. | Dispatch pipeline, Host adapter |
 
 ### Concurrency
 

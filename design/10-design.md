@@ -231,7 +231,7 @@ on in four different ways.
 | Clone | Left on disk, untouched, and becomes evictable under the ordinary safety interlock. |
 | Servability | **Reads and the typed write and push tools remain available to the operator console** under `declaration.manage`. Orphaning withdraws a repository from ordinary service; it does not strand whatever is still in its tree. Without this the clone is unreachable from every surface, and an orphan holding an unpushed branch is refused adoption *and* refused removal by the same predicate — a dead end whose only exit is host access. The exit is now: push the outstanding work, then `clone.remove`, then `declaration.remove`. |
 | Pending `ScheduledJob`s | Moved to `cancelled` with a reason naming the orphaning. Not fired, and not silently dropped. |
-| `Grant`s and `Token`s whose resource is `/mcp/{id}` | Revoked, and the declaration's `grantEpoch` bumped, so live sessions bound to it close on their next call rather than continuing against a repository the operator has retired. **Specified, not yet held** — `orphan` flips the state and cancels pending jobs, and neither revokes a grant nor bumps the epoch, so a live session bound to an orphaned declaration keeps dispatching until it ends. Tracked as issue #49's sibling, [#66](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/66); this annotation goes when that closes. |
+| `Grant`s and `Token`s whose resource is `/mcp/{id}` | Revoked, and the declaration's `grantEpoch` bumped, so live sessions bound to it close on their next call rather than continuing against a repository the operator has retired. |
 | Unsettled journal entries | Retained and reported. They are the record of work that may still be in the clone. |
 | File watcher directory | Watching stops immediately; the directory is left on disk untouched. Files still in the inbox are neither applied nor moved, because there is no longer a declaration to apply them to. `declaration.remove` refuses while the directory holds anything, on the same principle as `clone.remove` — a watched file the service accepted is a copy nobody else may hold. |
 
@@ -484,10 +484,8 @@ repository dimension is in the route rather than in a resource indicator.
 watching an agent misbehave could remove a capability and watch the live session keep using it.
 Both properties are wanted, so the freeze is kept and a version counter is added. Every
 declaration carries a `grantEpoch`, incremented on any change to `capabilityGrant`, on orphaning,
-and on any revocation naming that resource. **The orphaning increment is specified and not yet
-held** — see the orphaning cascade above and issue #66; the amendment and revocation increments do
-hold. A session records the epoch it froze at; dispatch
-compares before invoking a handler. If the epoch has moved the session recomputes its grant, and
+and on any revocation naming that resource. A session held across calls records the epoch it froze
+at, and the transport holding it compares before dispatching (**A3**). If the epoch has moved the session recomputes its grant, and
 because that computation is an intersection of four layers it can only ever narrow — a widened
 declaration grant does not reach a live session, while a narrowed one takes effect on the very
 next call. A call the recomputed grant no longer admits returns `authorization`. If the grant or
@@ -874,7 +872,7 @@ L0  Contract        contract types  |  compiler  |  generated registry
 | **Dispatch pipeline** (L4) | The one canonical call path: identify, authenticate, enforce scopes, enforce capabilities, validate input, apply limits and cancellation, invoke adapter, validate output, scrub, audit, envelope. | L3, L1, the registry artifact. **Not L2** — see the acyclicity argument. | Dispatch. |
 | **Authorization** (L4) | Resource-server token verification, the embedded provider, durable clients and grants, operator API tokens, revocation and the grant-epoch check. | Structured store. | MCP session establishment, API-token verification, revocation the console calls, `runRetention`. |
 | **Operator identity** (L4) | First-boot provisioning, password, enforced TOTP, recovery codes, break-glass, OIDC relying party, subject allowlist, and the persisted operator session. | Structured store. | Operator session establishment, logout, revocation. |
-| **Surfaces** (L5) | Transport framing, routing, session lifecycle, cookie attributes, CSRF defence, static console assets. | L4 for every operation, and L1 for values it only reads — the envelope constructors, the branded-string constructors, the audit record forms, the volume-usage shape and the console hash filename. Never L2 and never L3, which is what **B1** enforces; "L4 only" was a stronger claim than the invariant and than the tree. | Nothing inward. |
+| **Surfaces** (L5) | Transport framing, routing, session lifecycle, cookie attributes, CSRF defence, static console assets. | L4 for every operation, and L1 for values it only reads — the envelope constructors, the branded-string constructors, the audit record forms, the volume-usage shape and the console hash filename. Never L2 and never L3, which is what **B1** enforces; "L4 only" was a stronger claim than the invariant and than the tree. **One deliberate write exception**: declaration management — declare, amend, orphan, remove, and `clone.remove` — calls the declarations and clone store modules directly, because those are console-only instance operations rather than registry tools, so the dispatch pipeline has no entry to route them through; the route itself is their gate — the console cookie, the only credential that carries `declaration.manage` (**A7**, **A11**). | Nothing inward. |
 
 ### The acyclicity argument
 
@@ -1058,8 +1056,8 @@ assumption that some views belong to one repository.
     lock after a mutation lock.
 11. On a terminal state an unwatched caller cannot see — merge conflict, failed required check,
     wait timeout — the notifier fires. **Specified, not yet held on this path** — no host terminal
-    state reaches the notifier from dispatch today; the boot recovery pass and the watcher do fire
-    it. Tracked as issue #49. **The outbox row is written in the same store transaction
+    state reaches the notifier from dispatch or from the boot recovery pass today; only the watcher
+    fires it. Tracked as issue #49. **The outbox row is written in the same store transaction
     that marks the entry `settled`**, and delivery happens afterwards, asynchronously. Settling
     first and enqueuing second would leave a crash window in which the operation is recorded as
     complete, recovery therefore ignores it, and no outbox row exists to retry — so the one
@@ -1098,7 +1096,10 @@ operation.
    operation. Selecting one sets the repository dimension for every subsequent view.
 4. Each view calls a repository-scoped API route, which calls **the same dispatch pipeline and
    the same domain functions** as the MCP path. No surface reimplements a variant of an
-   operation. The API is an explicit route table, never a call-any-tool-by-name proxy.
+   operation. The API is an explicit route table, and no route reaches a domain function around
+   the pipeline. The console's by-name tool route is not an exception to that: it names a
+   registry tool and dispatches it through every gate the MCP path applies, so it *is* the
+   pipeline rather than a proxy beside it.
 5. Declaration management is reachable only here, and **structurally so rather than by
    configuration**: an MCP session binds to one declaration at `initialize`, so a tool that
    creates a declaration has nothing to bind to, and amending or orphaning a *different*
