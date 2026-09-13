@@ -186,7 +186,7 @@ existing "console-only" language above — no `OperatorScope` value names them, 
 token can exercise them. See `design/90-decisions.md`, 2026-08-09.
 
 **A scope expands to capabilities by a total rule, not by a lookup table.** `expandScopes`
-(`src/authorization/authorization.ts`) is the single place a granted scope becomes a capability set,
+(`src/contract/capabilities.ts`, re-exported by `src/authorization/authorization.ts`) is the single place a granted scope becomes a capability set,
 and it is the only scope enforcement that exists in the tree: `ToolDeclaration.scopes` is
 canonicalised into the fingerprint and published in `SanitisedManifest`, and `dispatch-pipeline.ts`
 reads it nowhere. Its shape is deliberately the same two-branch shape as `capabilityScopeOf`: a
@@ -297,7 +297,8 @@ not an implementation detail:
   write-tree`: that command can fail on a deliberately unmerged index (a real state a mutating tool
   must still be able to capture pre-state for), and it writes a tree object to the object database,
   which pre-state capture may never do.
-- `worktreeDigest` covers one entry per line of `git status --porcelain=v1`, in the order that
+- `worktreeDigest` covers one entry per line of `git status --porcelain=v1` whose working-tree
+  column is not blank (a staged-only change is `indexDigest`'s, not this one's), in the order that
   command emits them, each `{ path, workingTreeStatus }` where `workingTreeStatus` is the
   porcelain line's second column (`M`, `D`, …) for a tracked path or `?` for an untracked one — "
   tracked paths differing from the index plus the untracked set", read directly off the column the
@@ -1326,8 +1327,8 @@ first mismatch found, not a full report, because boot fails closed on the first 
 
 ### L1 — credentials
 
-Declared in `src/credentials/credentials.ts`, with `MutableEnv` and `CredentialFailureMark` in
-`src/credentials/types.ts`.
+Declared in `src/credentials/credentials.ts`, with `CredentialFailureMark` in
+`src/credentials/types.ts` and `MutableEnv` in `src/exec/exec.ts`.
 
 **`clearFailing`'s `actor` is `null` on its one internal caller (S34).** `resolveInto` clears a mark
 itself the moment it observes a secret rewritten since the mark was taken — no operator is involved,
@@ -1517,7 +1518,10 @@ is why they are lists rather than counts — an operator needs to know *which*.
 `leaseSelfTestPassed` is reported separately from the lease itself because holding the lease and
 having proved the volume excludes are different facts, and only the second is evidence **C7** holds.
 
-`recoverDeclaration` is the lazy pass, called on first use and by the background sweep. Any resume
+`recoverDeclaration` is the lazy pass, called on first use and by the background sweep — a single
+pass over every `recovery-pending` declaration once boot succeeds, since only boot creates that
+state. **Specified, not yet held**: no sweep is started, so an idle declaration stays
+`recovery-pending` until its first mutation; staged in `90-decisions.md` § *Open* (2026-09-13). Any resume
 step it runs goes through the injected dispatch and takes the global mutation lock for itself,
 completing before the triggering call acquires anything.
 
@@ -1794,9 +1798,9 @@ one.
 
 `ChecksStatusInput.ref` and `ChecksAwaitInput.ref` default to the clone's current head when null.
 `ChecksAwaitData.concluded` is false when the wait returned because it hit its cap rather than
-because every check reached a conclusion; a wait that times out is a `timeout` envelope, so
-`concluded: false` is reachable only where the cap and the poll interval race, and callers read it
-rather than inferring conclusion from the check list.
+because every check reached a conclusion. In the tree it is never returned: a wait that reaches its
+cap — including one whose next poll would overrun it — is a `timeout` envelope. Callers still read the
+field rather than inferring conclusion from the check list.
 
 The seven registry entries S10 ships:
 
@@ -2054,7 +2058,7 @@ after a container restart without re-authorising (S14.7). A grant is never re-is
 authorization code — the surface layer deletes the ephemeral code before calling this method, so a
 replay finds no code to exchange rather than reaching the store twice.
 
-`expandScopes` is exported and crosses a module boundary — `src/contract/tool-parity.ts` calls it to
+`expandScopes` is exported, and consumed beyond authorization — `src/contract/tool-parity.ts` calls it to
 compute the widest grant an `mcp` session can hold. It must stay exported for that reason: the parity
 harness measuring what a profile can see has to use the same expansion a real session is built with,
 because a second description of the mapping is a second thing to keep correct and the first thing to
@@ -2301,9 +2305,9 @@ interface AuthorizationServerMetadata {
 | `/.well-known/oauth-protected-resource/mcp/{declarationId}` | `GET` | none | `ProtectedResourceMetadata` for that declaration's resource URI |
 | `/.well-known/oauth-authorization-server` | `GET` | none | `AuthorizationServerMetadata`, one server for the whole instance |
 | `/oauth/register` | `POST` | none | Dynamic Client Registration (RFC 7591) — wraps `registerClient` |
-| `/oauth/authorize` | `GET`, `POST` | operator console cookie | The approval step; issues a short-lived, process-local authorization code bound to a PKCE `code_challenge` (S256) and the `resource` being granted. Ephemeral — a restart mid-flow means starting over, not a re-authorization of an already-connected client |
+| `/oauth/authorize` | `GET`, `POST` | `GET` none (renders the consent form); `POST` operator console cookie and CSRF | The approval step; issues a short-lived, process-local authorization code bound to a PKCE `code_challenge` (S256) and the `resource` being granted. Ephemeral — a restart mid-flow means starting over, not a re-authorization of an already-connected client |
 | `/oauth/token` | `POST` | none (PKCE substitutes for a client secret) | `authorization_code` grant (with `code_verifier`) calls `issueMcpGrant`; `refresh_token` grant calls `refresh` |
-| `/oauth/revoke` | `POST` | bearer | Revokes the presented token via `revokeBearerToken` (RFC 7009) |
+| `/oauth/revoke` | `POST` | none — the token in the form body is its own credential | Revokes the presented token via `revokeBearerToken` (RFC 7009) |
 | `/mcp/{declarationId}` | `POST` | bearer, audience-checked against the path | The MCP JSON-RPC transport: `initialize`, `tools/list`, `tools/call`, and JSON-RPC notifications |
 
 **A body carrying no `id` member is a JSON-RPC notification, and is answered `202 Accepted` with no
@@ -2380,7 +2384,7 @@ type ExecError = ModuleErrorBase & (
 | `spawn-failed` | The fixed executable could not be started | no | `infrastructure` — the environment is wrong, not the request |
 | `nonzero-exit` | The child exited non-zero; `stdout` and `stderr` are already scrubbed | no | Classify by domain: auth rejection to `upstream`, a refused push to `precondition`; informational commands retain both streams for diagnosis |
 | `timed-out` | The declared cap elapsed and the child was killed | no | `timeout`, and park the journal entry — what the command achieved is not knowable |
-| `argv-rejected` | The vector selects an executable, injects or writes configuration, carries credentials or a foreign or opaque remote operand, names a remote-helper transport (`<transport>::<address>`), or persists a remote | no | `validation`; no authority could ever permit it |
+| `argv-rejected` | Declared, never raised by exec itself — the rule is judged in § L2 — git operations before `git_raw` reaches exec, and returned there as `validation` directly. The rule: the vector selects an executable, injects or writes configuration, carries credentials or a foreign or opaque remote operand, names a remote-helper transport (`<transport>::<address>`), or persists a remote | no | `validation`; no authority could ever permit it |
 | `cancelled` | The caller's signal aborted | no | `conflict`, releasing locks in reverse acquisition order |
 
 ### Locks
@@ -2638,7 +2642,9 @@ type HostError = ModuleErrorBase & (
 
 **The three "the notifier fires" cells above are specified and not yet held.** No host terminal
 state reaches the notifier on the ordinary dispatch path today, so on that path those three are
-requirements rather than descriptions; boot recovery and the watcher do fire it. Tracked as issue
+requirements rather than descriptions. Only the watcher fires it; boot recovery does not, because
+`Journal.classify` returns `terminal: null` on every `completed` verdict (**R3**, **R11**), so the
+recovery ladder's notify branch is never taken. Tracked as issue
 #49 — this paragraph goes when that closes. Recorded here because a reader cannot tell a rule the
 tree holds from one it owes by reading either the rule or the tree.
 
@@ -2684,7 +2690,7 @@ type WatcherError = ModuleErrorBase & (
 | `not-permitted` | Either deployment switch is off | no | Do not start. Both default off |
 | `watched-file-unreadable` | A candidate cannot be read | no | Move it to `failed/`. A symlink is never a candidate in the first place |
 | `claim-failed` | The rename into `processing/` failed | next tick | Leave the file in the inbox |
-| `step-failed` | Any dispatched step returned a non-success envelope | no | Move to `failed/` with a sibling error file naming the step and its result. Never delete |
+| `step-failed` | Any dispatched step up to and including `pr_open` returned a non-success envelope | no | Move to `failed/` with a sibling error file naming the step and its result. Never delete. A failed `pr_enable_auto_merge` after `pr_open` succeeded is not this variant: the file is delivered and moves to `processed/`, and the failure is audited and notified |
 | `interrupted-claim` | A file sits in `processing/` at startup | **never reprocessed** | Move to `failed/` with an explanation — it may already have an open pull request |
 
 There is no caller to return an envelope to. Every outcome above is audited, and every failure
@@ -2730,12 +2736,11 @@ each one's envelope is fixed here rather than left to the call site that writes 
 |---|---|---|---|
 | `tool-not-found` | A by-name call for a tool that does not exist | no | `authorization`, audited. A stale catalogue is worth seeing |
 | `capability-insufficient` | The recomputed grant no longer admits the call | no | `authorization`, audited, no handler runs |
-| `scope-insufficient` | The granted scopes do not cover the tool | no | `authorization`, audited |
 | `declaration-required` | A declaration-scoped tool was called with no declaration in context | no | `validation` |
 | `input-invalid` | The input fails the declared schema | no | `validation` with findings, before any handler runs |
 | `output-invalid` | A handler returned something the output schema rejects | no | `infrastructure`. **Side effects already happened**; the journal records them, and this is the one place a caller sees an error after they landed |
 | `result-too-large` | The result exceeds the declared limit | no | `infrastructure` |
-| `grant-revoked` | The epoch check found the grant or its client revoked | no | **Close the session.** The transport answers `401` with the resource-metadata challenge, not an envelope — the caller must re-authorise rather than retry |
+| `grant-revoked` | The grant or its client was revoked — found by the MCP transport's epoch comparison (**A3**), which is not in this pipeline | no | **Close the session.** The transport answers `401` with the resource-metadata challenge, not an envelope — the caller must re-authorise rather than retry |
 
 ### Authorization
 
@@ -2885,7 +2890,7 @@ type BootError = ModuleErrorBase & (
 | `ceiling-outside-contract` | The deployment ceiling names a capability the contract set lacks | no | Fatal |
 | `executor-missing` | A registry entry has no registered executor | no | Fatal |
 | `watcher-revalidation-failed` | An active declaration's stored file-watcher pair is invalid against the registry loaded by this boot | no | Fatal, preserving the `DeclarationError` as `cause`; no transport starts under invalid declaration authority |
-| `store-failed` | Open, integrity check or migration failed | no | Fatal, per the store's own table |
+| `store-failed` | Open, integrity check, pre-migration backup or migration failed, or the operation journal could not be read for recovery — the store is closed and the lease released before returning | no | Fatal, per the store's own table |
 
 A broken audit chain is **not** in this list, deliberately.
 
@@ -2910,8 +2915,8 @@ responsible for maintaining it.
 | A8 | No field of `RepositoryConfig` is a capability, scope, path prefix, credential reference, remote, host, timeout or limit. Any field a caller could set that widens what the service will do lives in `Declaration`. | Contract — re-checked at every amendment of `RepositoryConfig` |
 | A9 | `visibleTools` and `dispatch` apply the same predicate. A tool absent from `visibleTools` returns `authorization` from `dispatch` and never reaches a handler. | Dispatch pipeline |
 | A10 | Every capability in the contract set is placed in at least one scope by `### Scopes`'s rule. Equivalently: `expandScopes(['read','write','raw','schedule'], contract)` equals the declaration-scoped members of `contract`. A capability the rule cannot place fails the build as `capability-unscopable` rather than expanding to nothing. | Compiler, Authorization |
-| A11 | No route reaches an instance-scoped capability's effect from a credential that cannot carry that capability. A route whose action is gated by `declaration.manage`, `auth.manage`, `audit.read` or `attention.resolve` accepts `cookie` only — **A7** makes those four unholdable by any token, so a bearer branch on such a route can check nothing and therefore gates nothing. | Surfaces |
-| A12 | The console filters a navigation entry on the operator's effective grant for the selected declaration, never on that declaration's raw `capabilityGrant`. The intersection is computed by `Declarations.effectiveGrant` on the server; no surface recomputes **A1** client-side. | Surfaces, Console |
+| A11 | No route reaches an instance-scoped capability's effect from a credential that cannot carry that capability. A route whose action is gated by `declaration.manage`, `auth.manage`, `audit.read` or `attention.resolve` accepts `cookie` only — **A7** makes those four unholdable by any token, so a bearer branch on such a route can check nothing and therefore gates nothing. **Specified, not yet held** — `/parked-operations/{operationId}/resolve` and `/failing-credentials/.../clear` still accept a bearer token with no capability gate; issue #67, and this note goes when it closes. | Surfaces |
+| A12 | The console filters a navigation entry on the operator's effective grant for the selected declaration, never on that declaration's raw `capabilityGrant`. The intersection is computed by `Declarations.effectiveGrant` on the server; no surface recomputes **A1** client-side. **Specified, not yet held** — the console still filters on the raw grant and the declaration reads carry no `effectiveGrant`; issue #144, and this note goes when it closes. | Surfaces, Console |
 
 ### Recovery and ordering
 
@@ -2927,7 +2932,7 @@ responsible for maintaining it.
 | R8 | A resume step runs as an ordinary dispatch that takes the global mutation lock for itself, and completes before the triggering call acquires anything. It is never nested inside another operation's hold. | Lifecycle |
 | R9 | `resolveRunningAtBoot` runs no resume step and performs no git or host I/O. | Scheduler |
 | R10 | A `running` job is never simply fired again at boot. | Scheduler |
-| R11 | A `TerminalState` is written to the sink by the call that observed the terminal condition, and is read and removed by the settle for that same `operationId`. Exactly one producer exists; `Journal.classify` is not one, per **R3**. No sink entry survives the operation that wrote it. | Dispatch pipeline, Host adapter |
+| R11 | A `TerminalState` is written to the sink by the call that observed the terminal condition, and is read and removed by the settle for that same `operationId`. Exactly one producer exists; `Journal.classify` is not one, per **R3**. No sink entry survives the operation that wrote it. **Specified, not yet held** — no sink exists and the pipeline settles every operation with `null`; issue #49, and this note goes when it closes. | Dispatch pipeline, Host adapter |
 
 ### Concurrency
 

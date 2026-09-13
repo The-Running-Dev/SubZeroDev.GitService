@@ -2,6 +2,78 @@
 
 Append-only. Newest at the top. The rejected alternatives are the point — without them, every future session relitigates the same choice.
 
+### 2026-09-13 — Reconciliation at bbfd3d2: `reconcile_after_merge` deletes a branch only when its tip is the merged head
+Context: `src/composites/composites.ts:374` runs `git branch -D`, which `00-brief.md` lists among the operations blocked on the default path; the code justifies it by squash merges defeating `-d`. With `expectedHeadSha` null, commits past the merged head are deleted with the branch.
+Chosen: Delete only when the local tip equals the merged pull request's head SHA; otherwise keep the branch and report `deletedBranch: null` with the reason. The brief stands. Staged in § *Open*.
+Rejected: **Keep `-D` and amend the brief** — the most expensive document to move, and it leaves unpushed-commit loss reachable. **Switch to `-d`** — squash-merged branches accumulate in every clone, harmless only because eviction eventually deletes the clone.
+Reversibility: cheap.
+
+### 2026-09-13 — Reconciliation at bbfd3d2: an open pull request is watcher delivery, even when auto-merge fails to enable
+Context: `10-design.md` § *Failure modes* and the watcher error table sent a failed `pr_enable_auto_merge` to `failed/`; `src/watcher/watcher.ts:316-326` treats the file as delivered, with no decision recording why.
+Chosen: Doc to code. A failed enable after `pr_open` moves the file to `processed/`, is audited, and notifies at `attention`; the notification owed is issue #81's W06.6.
+Rejected: **Code to doc** — a file in `failed/` whose pull request is open invites a resubmission that opens a duplicate. **Record the decision, leave the doc** — the doc keeps contradicting the code.
+Reversibility: cheap.
+
+### 2026-09-13 — Reconciliation at bbfd3d2: the watcher materialises an absent clone
+Context: `src/watcher/watcher.ts:516-523` skips every non-`ready` clone as `clone-needs-attention`, so an `absent` or `evicted` clone never processes a drop — against § *Servability of an unmaterialised declaration* and **D15** — and `dirty` is mislabelled.
+Chosen: Code changes: materialise as any first use does, gate on `isClean` the same tick, report `dirty` as `clone-not-clean`. Staged in § *Open*, after #76.
+Rejected: **Doc to code with a new `clone-absent` skip reason** — a `/contract` amendment, and an unattended declaration stays idle forever after eviction, which targets idle declarations. **Fix only the labels now** — leaves **D15** false until #76.
+Reversibility: cheap.
+
+### 2026-09-13 — Reconciliation at bbfd3d2: the corrupt-tree override quarantines instead of deleting
+Context: § L1 — clone store said `permitCorruptTree` still refuses on unreachable commits, which cannot be computed for a tree git cannot read; `clone-store.ts:1014-1032` deletes the directory, destroying what a partly corrupt `.git` still holds (R7).
+Chosen: Quarantine — move the directory aside on the volume, clear the row, count it as a volume consumer, surface it in health, and leave deletion to an operator. Routed to `/design`, then `/contract`; staged in § *Open*.
+Rejected: **Doc to code, as a stated R7 exception** — rests on "an unreadable tree's work is already unreachable", which a partly corrupt `.git` disproves. **Remove the override** — reopens the host-access dead end the orphan-servability design closed.
+Reversibility: expensive once quarantine becomes a persisted volume consumer.
+
+### 2026-09-13 — Reconciliation at bbfd3d2: generations are numbered from a high-water mark that survives remove
+Context: `declaration.remove` deletes only the newest row and `declare` numbers from the newest remaining, so a generation can be reissued and an earlier era's journal entries and audit records match the new one (R4).
+Chosen: A persisted per-id high-water mark. Routed to `/contract`, then a migration; staged in § *Open*.
+Rejected: **Number from the highest generation in declarations, journal and audit** — no schema change, couples declaring to two other stores, and lapses once audit retention anchors old records. **Accept as a known limit** — R4 would state what it does not hold, and the collision is silent.
+Reversibility: expensive — a migration either way.
+
+### 2026-09-13 — Reconciliation at bbfd3d2: one background recovery pass after boot
+Context: § L1 — lifecycle and `10-design.md` recovered "on first use or on a background sweep"; no sweep exists, so after a crash an idle declaration's interrupted work is never classified, parked or notified.
+Chosen: Code changes: one unref'd pass over `recovery-pending` declarations once boot succeeds, first use winning any race. The contract carries a "not yet held" note; staged in § *Open*.
+Rejected: **First-use only, in the docs** — parked work stays invisible for as long as a repository is idle. **A periodic sweep** — only boot creates `recovery-pending`, so repetition buys nothing.
+Reversibility: cheap.
+
+### 2026-09-13 — Reconciliation at bbfd3d2: declaration management writes through L1, and the by-name tool route is the pipeline
+Context: `10-design.md` said surfaces use "L4 for every operation"; the declaration routes call five L1 writes directly, and no L4 module owns declaration management. It also said the API is "never a call-any-tool-by-name proxy", while the contract fixes `POST /declarations/{declarationId}/tools/{toolName}`.
+Chosen: Doc to code. The declaration-management writes are named as the one deliberate L1-write exception, gated by the console cookie that alone carries `declaration.manage`; the exclusion is restated as no route reaching a domain function around the pipeline.
+Rejected: **An L4 declaration-management module** — a pass-through adding no check the route lacks, plus a `/contract` amendment. **Replace the by-name route with per-view routes** — a contract change and a regression in console reach.
+Reversibility: cheap.
+
+### 2026-09-13 — Reconciliation at bbfd3d2: modules open their own store connections
+Context: Declarations, credentials, clone store, authorization, operator identity, journal, notifier and scheduler each open `DatabaseSync` on `store.sqlite` per call rather than going through `StructuredStore.transaction`; only audit's and operator identity's were logged. No retry on busy is set on any of them (staged separately in § *Open*).
+Chosen: Record as is. Each module owns its tables' SQL and connection lifetime; the structured store owns migration, integrity, snapshots and the shared transaction a cross-module cascade needs (`StoreTransaction`).
+Rejected: **Route every read and write through `StructuredStore`** — one connection owner, and a sweeping change for no invariant currently broken; the cascades that need atomicity already pass a `StoreTransaction`.
+Reversibility: cheap to record; expensive to reverse in code.
+
+### 2026-09-13 — Reconciliation at bbfd3d2: the journal writes outbox rows itself
+Context: `Notifier.enqueue` takes a transaction so a row commits with its settle, but `src/journal/journal.ts:267-272` inserts outbox rows directly, duplicating the notifier's SQL.
+Chosen: Record as is. The row and the settle are one statement set on the journal's own connection, which is what **R6** needs, and it avoids a journal-to-notifier value edge.
+Rejected: **Call `Notifier.enqueue` from settle** — one writer for the table, at the cost of a value dependency from journal to notifier and a shared connection the journal does not otherwise take.
+Reversibility: cheap.
+
+### 2026-09-13 — Reconciliation at bbfd3d2: the first clone fails closed on a credential failure
+Context: `src/clone/clone-store.ts:807-815` clones with no credential when resolution fails, including `host-not-permitted` and `marked-failing`, so a public repository becomes `ready` behind a refused credential.
+Chosen: Code changes: abort and surface the credential error under its existing kind; only `credentialRef: null` clones anonymously. Staged in § *Open*.
+Rejected: **Record the fallback** — a guard that fails open. **Fail closed except when no resolver is wired** — composition-dependent behaviour production never exercises.
+Reversibility: cheap.
+
+### 2026-09-13 — Reconciliation at bbfd3d2: `/oauth/revoke` audits only real revocations, under the token's grant
+Context: `src/surfaces/mcp-routes.ts:523` audits every revocation as an invented operator, and `revokeBearerToken` audits even an unknown token, so an unauthenticated caller can grow the chain without bound.
+Chosen: Code changes: audit only a revocation that changed a row, as `kind: 'mcp'` with that grant's `clientId` and `grantId`; always answer 200. Staged in § *Open*.
+Rejected: **Record as is** — misattribution plus unbounded unauthenticated audit writes. **Stop auditing unknown tokens only** — keeps a false operator attribution the grant already corrects for free.
+Reversibility: cheap.
+
+### 2026-09-13 — Reconciliation at bbfd3d2: an MCP grant's subject is the operator who approved it
+Context: The consent POST requires an operator session but never carries it; the grant's `subject` and issuance actor are the client id, so no grant traces to the person who admitted an agent.
+Chosen: Carry the approver into the code record, issue with that `subject` and the client's `clientId`, audit issuance under the operator. `/contract` confirms `Grant.subject`'s meaning first; staged in § *Open*.
+Rejected: **Client as subject plus a separate `grant-approved` event** — links grant to operator only by correlating two records in time. **Accept as is** — the approver stays unrecoverable for every grant issued before a later fix.
+Reversibility: cheap for new grants; existing grants keep the client id.
+
 ### 2026-09-07 — Contract-amendment backlog: the two attention mutations become cookie-only
 Context: § *Scopes* fixes that `declaration.manage`, `auth.manage`, `audit.read` and `attention.resolve` are reachable only from the console, and **A7** puts them outside every non-console profile, so no operator-api token can hold one. S34 then marked `/parked-operations/{operationId}/resolve` and `/failing-credentials/.../clear` `bearer or cookie` so the console could call the routes a script already used. Because no token can carry the gating capability, the implementation had nothing to check on the bearer branch and passed `null` (`src/surfaces/http-server.ts:394`, `:449`), deferring to "§ U4's to settle" — which U4 had settled by then. Any valid operator-api token, including one whose only scope is `read`, therefore reached both mutations. This is issue #67, filed as a half-built mapping; it is a live authorization gap, and the two halves of this document already disagreed about it.
 Chosen: Both mutating rows become `cookie`. `/health` and `GET /parked-operations` keep `bearer or cookie` — they are reads a script legitimately polls. New invariant **A11** states the general rule the table edit is an instance of: no route reaches an instance-scoped capability's effect from a credential that cannot carry that capability, which is what a future `bearer or cookie` marking is checked against. CSRF becomes unconditional on both, cookie now being the only credential either accepts.
@@ -2303,3 +2375,39 @@ not acted on in that pass; the other tracked as an issue by `/track` the same da
 
 Emptied again 2026-09-05 — the work-mirror direct-to-main carve-out item is now decided and recorded
 above rather than left as an open question.
+
+Added 2026-09-13 by `/reconcile` at `bbfd3d2` — places where the code falls short of a contract or
+design statement that stays as written. Direction is decided (code changes to match the document);
+each was confirmed by reading the cited code. For `/track` to file, one issue per bullet.
+
+- **P1 — The tool-call cookie route has no CSRF check (E7).** `POST /declarations/{declarationId}/tools/{toolName}` dispatches straight after `requireSession`, with no `csrfOk` (`src/surfaces/tool-routes.ts:98-116`), while every sibling mutating cookie route checks it. `SameSite=Lax` blocks cross-site POSTs, not same-site ones.
+- **P1 — The eviction and removal interlock cannot see unpushed commits on branches that are not checked out (R7).** `computeBlockers` counts only `origin/<base>..HEAD` and `@{u}..HEAD` (`src/clone/clone-store.ts:570-591`), so a local branch that is not `HEAD` and carries unpushed commits is deleted with the clone.
+- **`orphan` reports a failed journal read as nothing retained.** `src/declarations/declarations.ts:378-379` folds `JournalError.read-failed` into an empty `retainedJournalEntries`, against § *Error semantics* › Journal "must not treat the result as an empty set". Its comment cites `isSafeToEvict` as precedent, but that path fails closed (`clone-store.ts:605`). No test covers the failure.
+- **Recovery can mark a clone for attention with no parked entry to clear it.** `park` ignores a failed `journal.park` and marks the clone anyway (`src/lifecycle/recovery.ts:179-193`), and a failed `unsettled()` read marks it too (`:61-64`). `clearAttention`'s only route needs a parked entry, so the declaration is stuck — the state `recovery.ts:190` itself calls unrecoverable.
+- **Parking never notifies.** `10-design.md` § boot and recovery says to park "and notify at `attention` severity"; the `operation-parked` notification kind (`src/journal/types.ts:58`) is never constructed.
+- **A resumed operation is settled without re-classifying.** `recovery.ts:153-154` settles on the resume dispatch returning ok; the design says to run the resume step, "then re-classify".
+- **`auth-rejected` on the host path never marks the credential failing.** `src/host/host-operations.ts:127-128` maps it to `upstream` only; `20-contract.md` § *Error semantics* › Host adapter requires marking the reference failing for that declaration. The only `markFailing` call is on the git path.
+- **MCP `isError` is set for every non-ok result.** `src/surfaces/mcp-routes.ts:665` sends `isError: !result.ok`; § *The result envelope* fixes it true only for `upstream`, `timeout` and `infrastructure`.
+- **`isSafeToEvict` ignores `acrossAllGenerations`.** The parameter is unused (`clone-store.ts:934`), and the journal blocker reads only the stored row's generation (`:604`), so the adoption check does not ask what the contract says it asks.
+- **The two composites return `infrastructure` for an unparseable repository config.** `src/composites/composites.ts:161` and `:305`; the contract says `precondition` with findings, as the direct git tools already do.
+- **A mutating call that times out is parked with no audit record (S8).** `src/dispatch/dispatch-pipeline.ts:660-665` returns before `audit.append`.
+- **A lease takeover goes unaudited if the first boot after it fails early (S8).** Every pre-migration failure calls `guard.release()` (`src/lifecycle/boot.ts:271-383`), which unlinks `lease.json` (`src/lifecycle/lease.ts:228-236`) — the only takeover evidence — before the takeover record is written (`boot.ts:401-415`).
+- **Boot steps 6 and 7 race.** `boot.ts:457-460` runs `resolveRunningAtBoot` and `revalidatePending` under `Promise.all`; step 6 awaits the journal per job before writing `pending` (`src/scheduler/scheduler.ts:467-478`), so a job it returns to `pending` is not revalidated this boot.
+- **Registering OAuth clients has no cap.** § L5 surfaces calls for a deployment-fixed cap on pending authorizations and registered clients; `src/surfaces/mcp-routes.ts:24-31` caps only pending authorizations and treats clients as bounded by disk, on an unauthenticated route.
+- **Recovery-code use does not force re-enrolment on the server.** `operator-identity.ts:489` sets `totp_reenrol_required`, but `requireSession` (`src/surfaces/console-auth-routes.ts:118-131`) never reads it, so every cookie route keeps serving; only the console UI enforces it. The fix should first confirm the contract's "forces" means a server-side gate.
+- **The health report's volume figure is always zero.** `src/surfaces/http-server.ts:474` hard-codes `NO_VOLUME_USAGE` although volume accounting landed (`compose.ts:812-814`); the comment at `http-server.ts:53-60` is stale.
+- **Outbox rows held back by a missing transport never reach the health view.** § *Error semantics* › Notifier says they are surfaced there; `HealthReport` (`http-server.ts:61-70`) has no field for them.
+- **A module tool's declared `timeoutSeconds` is enforced by nothing.** `buildContext` sets `deadline: clock.now()` (`dispatch-pipeline.ts:307`), and neither `invokeAndEnvelope` nor `ModuleAdapter.invoke` (`src/module-adapter/module-adapter.ts:42-51`) arms a timer.
+- **The http adapter's timeout stops before the body is read.** `src/http/http-adapter.ts:104` clears the timer, then `:113` awaits `response.json()` unbounded.
+- **No store connection has a busy timeout or bounded retry.** None of the ten `new DatabaseSync` sites outside the lease sets `busy_timeout` (the lease's own is deliberately `0`), so SQLite busy surfaces immediately as `io-failed`; `10-design.md` § *External dependencies* says bounded retry with backoff, and `StoreError.busy` is raised only by the mis-mapping below.
+- **A crash mid-clone leaves a directory that is later treated as ready.** Boot re-derivation marks any readable directory `ready` unless it was `needs-attention` (`clone-store.ts:900`), and `ensure` adopts any existing directory as `ready` after remote and readability checks only (`:713-746`). The contract's partial-directory removal covers only in-process `clone-failed` and `clone-timeout`.
+- **A lock refusal in `ensure` reports as a store fault.** `clone-store.ts:656` wraps it as `store-failed{busy}`, which reaches callers as `infrastructure`; § *Error semantics* › Locks maps lock refusals to `conflict`.
+- **Error variants raised outside their stated conditions.** Low severity, one issue: constraint violations on `declare` become `already-exists` (`declarations.ts:482-485`); `needs-attention` returned for a clone that does not exist (`clone-store.ts:922`, `:1041`, `:1050`); `spawn-failed` for a child killed by a signal (`src/exec/exec.ts:289-291`); `reference-unreadable` for an unreadable mark store or allowlist manifest (`src/credentials/credentials.ts:236-242`, `:276-278`); `host-not-permitted` never raised, replaced by an untyped `authorization` error (`src/credentials/declaration-credential.ts:57-58`); notifier `delivery-failed` for store failures (`src/notifier/notifier.ts:306`, `:325`, `:460`, `:501`); `durationMs` from subtracting wall-clock readings, against § L1 — clock (`src/shared/diagnostics.ts:18`).
+- **`reconcile_after_merge` force-deletes the local branch.** `src/composites/composites.ts:374` runs `git branch -D`, which `00-brief.md` lists as blocked on the default path; with `expectedHeadSha` null, commits past the merged head go with it. Decided 2026-09-13: delete only when the local tip equals the merged pull request's head SHA, otherwise keep the branch and report `deletedBranch: null` with the reason. The brief stands.
+- **The watcher never materialises a clone, and mislabels why it skipped.** `src/watcher/watcher.ts:516-523` reports every non-`ready` state as `clone-needs-attention`, so a file-watcher declaration whose clone is `absent` or `evicted` never processes a drop until another caller creates the clone — against `10-design.md` § *Servability of an unmaterialised declaration* and **D15**. Decided 2026-09-13: code changes. A tick materialises an `absent` or `evicted` clone as any first use does, then applies the `isClean` gate on the same tick; `dirty` reports `clone-not-clean`; only a real attention mark reports `clone-needs-attention`. No interface change. Sequence after #76, which reworks the tick protocol.
+- **`clone.remove` with `permitCorruptTree` deletes an unreadable tree outright.** `20-contract.md` § L1 — clone store says the override "still refuses when the tree holds commits unreachable from `origin/<base>`", which cannot be computed for a tree git cannot read; `src/clone/clone-store.ts:1014-1032` removes the directory wholesale, destroying whatever a partly corrupt `.git` still holds (R7). Decided 2026-09-13: quarantine rather than delete — the override moves the directory to a quarantine path on the volume, clears the clone row, counts it as a volume consumer and surfaces it in the health view, and only an operator deletes it. **A design change: `/design` (opus/high), then `/contract`**, not a `/fix`.
+- **A generation number can be issued twice (R4).** `declaration.remove` deletes only the newest row (`src/declarations/declarations.ts:685`) and `declare` numbers from the newest row remaining (`:279`, `:440`), so removing an adopted generation lets the next declare reissue it, and removing every row restarts at 1 — matching the earlier era's unsettled journal entries and audit records. Decided 2026-09-13: a per-id generation high-water mark that survives `remove`, with `declare` numbering from it. **A persisted-schema change: `/contract` (opus/high), then a migration.**
+- **No background recovery sweep is started.** `recoverDeclaration` is called only from a mutating dispatch (`src/dispatch/dispatch-pipeline.ts:502`); `compose.ts` starts no sweep, so after a crash an idle declaration's interrupted operations are never classified, parked or notified. Decided 2026-09-13: code changes — one unref'd pass after boot succeeds, recovering each `recovery-pending` declaration serially under the same lock rules as first use, with first use winning any race (test that interplay). `20-contract.md` § L1 — lifecycle carries a "not yet held" annotation to remove when this lands.
+- **The first clone falls back to no credential when resolution fails.** `src/clone/clone-store.ts:807-815` clones with `credential: null` on any resolution failure — no resolver wired, `host-not-permitted`, `marked-failing` — so a public repository materialises `ready` behind a refused or failing credential and nobody learns of it until the first push. Decided 2026-09-13: fail closed. A credential failure aborts the clone and surfaces the credential error under its existing result kind; only `credentialRef: null` clones anonymously. No new `CloneStoreError` variant.
+- **`/oauth/revoke` audits under an invented operator, and audits unknown tokens.** `src/surfaces/mcp-routes.ts:523` passes `{ kind: 'operator', subject: 'oauth-revoke' }`, and `revokeBearerToken` appends `token-revoked` whether or not a row matched (`src/authorization/authorization.ts:605-614`), so an unauthenticated caller can grow the audit chain without bound and the trail credits an operator with it. Decided 2026-09-13: audit only a revocation that changed a row, attributed to the token's own grant (`kind: 'mcp'`, its `clientId` and `grantId`); the response stays 200 either way (RFC 7009).
+- **No record of which operator approved an MCP grant.** The consent POST requires an operator session (`src/surfaces/mcp-routes.ts:395`) but never carries it forward: the authorization code record (`:416-424`) has no approver, and the grant is issued with `subject` and issuance actor both set to the client id (`:471`, `:477`). Decided 2026-09-13: carry the approving operator's subject in the code record, issue the grant with that `subject` and the client's `clientId`, and audit issuance under the operator; tokens and sessions still act as `kind: 'mcp'`. `Grant.subject` changes meaning for new grants only — **confirm the field's stated meaning with `/contract`** before the fix.

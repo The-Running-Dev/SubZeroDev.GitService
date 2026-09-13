@@ -231,7 +231,7 @@ on in four different ways.
 | Clone | Left on disk, untouched, and becomes evictable under the ordinary safety interlock. |
 | Servability | **Reads and the typed write and push tools remain available to the operator console** under `declaration.manage`. Orphaning withdraws a repository from ordinary service; it does not strand whatever is still in its tree. Without this the clone is unreachable from every surface, and an orphan holding an unpushed branch is refused adoption *and* refused removal by the same predicate — a dead end whose only exit is host access. The exit is now: push the outstanding work, then `clone.remove`, then `declaration.remove`. |
 | Pending `ScheduledJob`s | Moved to `cancelled` with a reason naming the orphaning. Not fired, and not silently dropped. |
-| `Grant`s and `Token`s whose resource is `/mcp/{id}` | Revoked, and the declaration's `grantEpoch` bumped, so live sessions bound to it close on their next call rather than continuing against a repository the operator has retired. **Specified, not yet held** — `orphan` flips the state and cancels pending jobs, and neither revokes a grant nor bumps the epoch, so a live session bound to an orphaned declaration keeps dispatching until it ends. Tracked as issue #49's sibling, [#66](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/66); this annotation goes when that closes. |
+| `Grant`s and `Token`s whose resource is `/mcp/{id}` | Revoked, and the declaration's `grantEpoch` bumped, so live sessions bound to it close on their next call rather than continuing against a repository the operator has retired. |
 | Unsettled journal entries | Retained and reported. They are the record of work that may still be in the clone. |
 | File watcher directory | Watching stops immediately; the directory is left on disk untouched. Files still in the inbox are neither applied nor moved, because there is no longer a declaration to apply them to. `declaration.remove` refuses while the directory holds anything, on the same principle as `clone.remove` — a watched file the service accepted is a copy nobody else may hold. |
 
@@ -408,7 +408,7 @@ capabilities are what the server side enabled; both must permit the call.
 |---|---|---|
 | `id` | string | |
 | `kind` | `operator` \| `mcp` \| `scheduler` \| `watcher` | |
-| `actorRef` | `{ kind, subject, clientId? }` | Passed by value into every context. Audit and journal never import the authorization module — see Module boundaries. |
+| `actorRef` | `{ kind, subject, clientId, grantId }` | Passed by value into every context. Audit and journal never import the authorization module — see Module boundaries. |
 | `repositoryBinding` | string? | **Set for `mcp` and `watcher`, absent for `operator`.** A `scheduler` session binds per job rather than per session. |
 | `grant` | set of capability names | Layer 4, computed at session establishment and frozen for the session's lifetime — frozen against *widening*. See the grant epoch for how a narrowing still reaches a live session. |
 | `frozenAtEpoch` | number | The declaration's `grantEpoch` when the grant was computed. Compared before dispatch by the surface that holds the session — see the grant epoch below. |
@@ -484,10 +484,8 @@ repository dimension is in the route rather than in a resource indicator.
 watching an agent misbehave could remove a capability and watch the live session keep using it.
 Both properties are wanted, so the freeze is kept and a version counter is added. Every
 declaration carries a `grantEpoch`, incremented on any change to `capabilityGrant`, on orphaning,
-and on any revocation naming that resource. **The orphaning increment is specified and not yet
-held** — see the orphaning cascade above and issue #66; the amendment and revocation increments do
-hold. A session records the epoch it froze at; dispatch
-compares before invoking a handler. If the epoch has moved the session recomputes its grant, and
+and on any revocation naming that resource. A session held across calls records the epoch it froze
+at, and the transport holding it compares before dispatching (**A3**). If the epoch has moved the session recomputes its grant, and
 because that computation is an intersection of four layers it can only ever narrow — a widened
 declaration grant does not reach a live session, while a narrowed one takes effect on the very
 next call. A call the recomputed grant no longer admits returns `authorization`. If the grant or
@@ -510,7 +508,7 @@ interruption whose intent was never recorded.
 | `declarationId`, `generation` | string, integer | Both. Recovery selects on the pair, so an entry from a previous era of the same id never matches. |
 | `tool` | string | registry name |
 | `input` | JSON | scrubbed |
-| `actorRef` | `{ kind, subject, clientId? }` | |
+| `actorRef` | `{ kind, subject, clientId, grantId }` | |
 | `scheduledJobId` | string? | Set by the pipeline when the call context carries one, so a scheduled job's journal entry is findable by the job that caused it. See `ScheduledJob` for why the correlation points this way and not the other. |
 | `context` | `normal` \| `repair` \| `recovery` \| `hatch` | What kind of action this was, not just which tool. Mirrors `AuditEntry.context`. |
 | `preState` | `{ branch, headSha, upstreamSha, indexDigest, worktreeDigest }` | Captured under the lock, before acting. **Digests, not booleans.** `indexDigest` hashes the index's own entries — path, mode, blob id and stage number — rather than the tree they would write; `worktreeDigest` covers tracked paths that differ from the index, plus the untracked set. |
@@ -859,7 +857,7 @@ L0  Contract        contract types  |  compiler  |  generated registry
 | **Declarations** (L1) | The declaration table, the lattice intersection, the remote-host allowlist. | Structured store, contract types, and the clone store's eviction-verdict types. | Read, write, and the effective-grant computation. |
 | **Credentials** (L1) | Reference-to-secret resolution and the allowed-host constraint on each reference. Ships one resolver — the mounted secrets directory — behind an interface a second could satisfy. | The configured resolver, the structured store (the failure marks), exec, declarations, audit and the clock. | Resolution that returns a value only into an exec environment, never to a handler. |
 | **Clone store** (L1) | Materialisation, the safe-to-evict predicate, eviction, disk-pressure watermarks, remote cross-check, and the git-state *observation* recovery compares against. **It observes; it does not classify and does not act on a verdict** — see the acyclicity argument. **Not retention beyond its own clones.** | Exec, declarations, locks, journal, audit, credentials — the initial materialisation clone resolves the declaration's own reference, every later remote call going through the same preparation — and the structured store. | Ensure, evict-if-safe, describe, request-maintenance, `runRetention`. |
-| **Journal** (L1) | Intent records, and the *classification rule* applied to a state observation it is handed. **It does not read git.** | Structured store, clock, and — for types only — the clone store's observation record and the recovery catalogue's verdict. Neither is a value edge; see the acyclicity argument. | Begin, step, settle, a pure `classify(entry, observedState, descriptor)`, and `runRetention`. |
+| **Journal** (L1) | Intent records, and the *classification rule* applied to a state observation it is handed. **It does not read git.** | The store file on its own connection, clock, and — for types only — the clone store's observation record and the recovery catalogue's verdict. Neither is a value edge; see the acyclicity argument. | Begin, step, settle, a pure `classify(entry, observedState, descriptor)`, and `runRetention`. |
 | **Recovery catalogue** (L1) | A registry of per-tool recovery descriptors — expected post-state predicate and optional resume step — keyed by registry tool name. **Populated by registration at composition time, never by importing a domain module.** | Nothing at runtime; the descriptor types it stores name the clone store's observation and the journal's entry. | Register, look up. |
 | **Audit** (L1) | The append-only scrubbed log, its hash chain, its single-writer append queue, and the read query the console view uses. | Clock, and the structured store — for the advisory `audit_chain_head` mirror and the retained anchors only, reached on its **own connection to the store file** rather than through the structured store module, so an unopenable store degrades an append instead of blocking one. The segment files are the trail, and every read of the store here is best-effort, so the log survives that store's corruption. | Append (never throws), query, verify, `runRetention`. **It does not scrub.** **S5** is held on the write path rather than in this module: `exec` scrubs captured output at the point of capture, and the dispatch pipeline scrubs a journal entry's input before it is persisted. An earlier draft listed exec's scrubber as a dependency here; no such edge exists, and asserting one hid the fact that the property is every caller's to hold. |
 | **Notifier** (L1) | Terminal-state notification, bounded retry, the outbox, and the `attention` / `info` severity split. **One transport: an HTTP webhook**, which is what Slack, Discord, Teams and most else accept; no second transport ships. **At L1, not L2** — see the notifier's placement below. | Structured store, clock, audit — `clearFailed` records an operator clearing a row. | Notify. Never blocks a caller. `runRetention`. |
@@ -871,10 +869,10 @@ L0  Contract        contract types  |  compiler  |  generated registry
 | **Watcher** (L2) | Per-declaration file watcher directories: the poll loop, the claim-and-move directory state machine, interrupted-claim recovery, and the pending-pull-request follow-up list. | Declarations, clone store, audit, the notifier, the structured store — and the dispatch pipeline **by injection**, never as a value import, exactly as the scheduler takes it. Every git and host step goes through that injected pipeline, and the watcher reads each result as opaque JSON it narrows and checks itself, so it depends on neither git operations nor the host adapter directly. It asserted that dependence away with a cast until S36's reconciliation; a claim held by a cast is not held. | A watch engine. `runRetention` for `processed/`. |
 | **Module adapter** (L3) | Invoking a registry entry whose execution target is in-process. Holds a handler catalogue keyed by target name, **populated by registration at composition time, never by importing a handler.** | L1, contract types. | Register, and an invoke the pipeline calls. |
 | **Http adapter** (L3) | Invoking a registry entry whose execution target is a declared HTTP endpoint: request shaping, the declared timeout, response mapping into the envelope. Its consumer is published-URL verification — see below. | L1, contract types. | Invoke. |
-| **Dispatch pipeline** (L4) | The one canonical call path: identify, authenticate, enforce scopes, enforce capabilities, validate input, apply limits and cancellation, invoke adapter, validate output, scrub, audit, envelope. | L3, L1, the registry artifact. **Not L2** — see the acyclicity argument. | Dispatch. |
-| **Authorization** (L4) | Resource-server token verification, the embedded provider, durable clients and grants, operator API tokens, revocation and the grant-epoch check. | Structured store. | MCP session establishment, API-token verification, revocation the console calls, `runRetention`. |
+| **Dispatch pipeline** (L4) | The one canonical call path: identify, authenticate, enforce capabilities, validate input, apply limits and cancellation, invoke adapter, validate output, scrub, audit, envelope. | L3, L1, the registry artifact. **Not L2** — see the acyclicity argument. | Dispatch. |
+| **Authorization** (L4) | Resource-server token verification, the embedded provider, durable clients and grants, operator API tokens, revocation and the grant-epoch check. | The store file on its own connection, declarations, audit, clock. | MCP session establishment, API-token verification, revocation the console calls, `runRetention`. |
 | **Operator identity** (L4) | First-boot provisioning, password, enforced TOTP, recovery codes, break-glass, OIDC relying party, subject allowlist, and the persisted operator session. | Structured store. | Operator session establishment, logout, revocation. |
-| **Surfaces** (L5) | Transport framing, routing, session lifecycle, cookie attributes, CSRF defence, static console assets. | L4 for every operation, and L1 for values it only reads — the envelope constructors, the branded-string constructors, the audit record forms, the volume-usage shape and the console hash filename. Never L2 and never L3, which is what **B1** enforces; "L4 only" was a stronger claim than the invariant and than the tree. | Nothing inward. |
+| **Surfaces** (L5) | Transport framing, routing, session lifecycle, cookie attributes, CSRF defence, static console assets. | L4 for every operation, and L1 for values it only reads — the envelope constructors, the branded-string constructors, the audit record forms, the volume-usage shape and the console hash filename. Never L2 and never L3, which is what **B1** enforces; "L4 only" was a stronger claim than the invariant and than the tree. **One deliberate write exception**: declaration management — declare, amend, orphan, remove, and `clone.remove` — calls the declarations and clone store modules directly, because those are console-only instance operations rather than registry tools, so the dispatch pipeline has no entry to route them through; the route itself is their gate — the console cookie, the only credential that carries `declaration.manage` (**A7**, **A11**). | Nothing inward. |
 
 ### The acyclicity argument
 
@@ -1058,8 +1056,8 @@ assumption that some views belong to one repository.
     lock after a mutation lock.
 11. On a terminal state an unwatched caller cannot see — merge conflict, failed required check,
     wait timeout — the notifier fires. **Specified, not yet held on this path** — no host terminal
-    state reaches the notifier from dispatch today; the boot recovery pass and the watcher do fire
-    it. Tracked as issue #49. **The outbox row is written in the same store transaction
+    state reaches the notifier from dispatch or from the boot recovery pass today; only the watcher
+    fires it. Tracked as issue #49. **The outbox row is written in the same store transaction
     that marks the entry `settled`**, and delivery happens afterwards, asynchronously. Settling
     first and enqueuing second would leave a crash window in which the operation is recorded as
     complete, recovery therefore ignores it, and no outbox row exists to retry — so the one
@@ -1069,8 +1067,8 @@ assumption that some views belong to one repository.
 **The scheduler tick and the watcher are this path with a different actor.** The scheduler selects
 due jobs, re-intersects the frozen grant with the declaration grant, the ceiling and the creating
 grant, and calls the same pipeline. The watcher claims a file from a declaration's inbox
-and calls the same pipeline once per step of its sequence — branch, write, stage, commit, push,
-pull request — each step taking the global mutation lock for itself, exactly as a console click
+and calls the same pipeline once per step of the sequence `20-contract.md` § L2 — watcher fixes,
+each step taking the global mutation lock for itself, exactly as a console click
 would. Neither has a privileged route, a credential of its own, or a second implementation of any
 operation.
 
@@ -1098,7 +1096,10 @@ operation.
    operation. Selecting one sets the repository dimension for every subsequent view.
 4. Each view calls a repository-scoped API route, which calls **the same dispatch pipeline and
    the same domain functions** as the MCP path. No surface reimplements a variant of an
-   operation. The API is an explicit route table, never a call-any-tool-by-name proxy.
+   operation. The API is an explicit route table, and no route reaches a domain function around
+   the pipeline. The console's by-name tool route is not an exception to that: it names a
+   registry tool and dispatches it through every gate the MCP path applies, so it *is* the
+   pipeline rather than a proxy beside it.
 5. Declaration management is reachable only here, and **structurally so rather than by
    configuration**: an MCP session binds to one declaration at `initialize`, so a tool that
    creates a declaration has nothing to bind to, and amending or orphaning a *different*
@@ -1181,7 +1182,7 @@ operation.
    mismatch is fatal — the service must never start with a smaller accidental tool set.
 3. Verify the deployment ceiling names only capabilities in the contract set. Verify every
    registry operation has exactly one executor.
-4. Open the structured store; take the pre-migration copy, then run forward-only migrations.
+4. Open the structured store and check its integrity; take the pre-migration copy, then run forward-only migrations.
 5. **If no operator credential exists, note that provisioning is pending.** Readiness still
    passes: it reports whether the service can serve, not whether an operator exists yet, and
    failing it would withhold traffic from the very enrolment route that resolves the condition.
@@ -1221,7 +1222,8 @@ operation.
 8. Re-derive every clone's state from disk. The stored value is a report, not a source of truth.
 9. **Readiness passes and transports start**, before any recovery work runs. Recovery is
    per-declaration and lazy: a declaration with unsettled journal entries is marked
-   `recovery-pending` and recovers on first use or on a background sweep, whichever comes first,
+   `recovery-pending` and recovers on first use or on a background sweep — one pass over the
+   `recovery-pending` declarations, started once boot succeeds — whichever comes first,
    and refuses mutations until it has. Eager recovery across every declaration would make restart
    cost scale with estate size — minutes of total unavailability at a few hundred clones, to
    recover state concerning at most one of them — which would make operators avoid the restart
@@ -1373,7 +1375,8 @@ its lifecycle is part of the security design rather than a framework default.
 | **This service's own deployment** (definition-of-done item 15) | Stale or mixed runtime, wrong catalogue, verification credential rejected | The companion check: poll `/healthz` until the commit SHA is stable, then run a real `initialize → tools/list → repo_status` session | Classifies rather than reporting a bare pass | `stale-runtime`, `mixed-runtime`, `verification-credential`, `unexpected-profile-or-catalog`, or `verified`. **Not a registry tool** — an executable check shipped alongside the service, as the brief describes | Unchanged |
 | **Notifier endpoint** | Unreachable, non-2xx | HTTP status | Outbox retries with backoff, bounded, then stops retrying and **surfaces the row in the health view and the status endpoint**. It is not dropped: an endpoint down overnight is exactly when the 03:00 merge conflict lands, and a notification that fails silently recreates the unwatched-means-unnoticed failure one level up | Nothing — it never blocks the operation it describes | Outbox row marked failed, retained until the operator clears it |
 | **File watcher** (watcher) | Incomplete input — the target tool's schema is not satisfied | Validation before any git action | Moves the file to `failed/` with a sibling `.error.txt`, audits, notifies at `attention` | Nothing — there is no caller | File preserved in `failed/` until the operator clears it. Automatic retention never deletes it |
-| | Any later step fails — branch, write, stage, commit, push, PR, auto-merge | The step's own envelope | Same: `failed/` plus the reason, naming which step and what it returned | Nothing | Whatever the completed steps did. A commit may exist and be unpushed, or a PR may be open with auto-merge not enabled — the `.error.txt` says which |
+| | Any later step up to and including opening the PR fails — branch, write, stage, commit, push, PR | The step's own envelope | Same: `failed/` plus the reason, naming which step and what it returned | Nothing | Whatever the completed steps did. A commit may exist and be unpushed — the `.error.txt` says which |
+| | Enabling auto-merge fails after the PR opened | The step's own envelope | The file is **delivered** — it moves to `processed/`, audited, and notified at `attention` naming the open PR. It is not moved to `failed/`: an open pull request is delivery, and a file in `failed/` invites a resubmission that opens a duplicate | Nothing | PR open with auto-merge not enabled; the operator enables it or merges by hand |
 | | A file is still in `processing/` at startup | Directory scan before the first tick | Moves it to `failed/` and **never reprocesses it**, because it may already have an open pull request | Nothing | Untouched; the operator is told to check the host before dropping it again |
 | | Symlink dropped into the directory | Link-preserving stat | Ignored — never treated as a candidate file | Nothing | Untouched |
 | | Clone is not clean at tick time | Clean check | Skips the whole tick. Fail-safe, not an error | Nothing | Untouched; the drop is picked up on a later tick |
