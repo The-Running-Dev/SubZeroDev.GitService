@@ -1221,7 +1221,8 @@ operation.
 8. Re-derive every clone's state from disk. The stored value is a report, not a source of truth.
 9. **Readiness passes and transports start**, before any recovery work runs. Recovery is
    per-declaration and lazy: a declaration with unsettled journal entries is marked
-   `recovery-pending` and recovers on first use or on a background sweep, whichever comes first,
+   `recovery-pending` and recovers on first use or on a background sweep — one pass over the
+   `recovery-pending` declarations, started once boot succeeds — whichever comes first,
    and refuses mutations until it has. Eager recovery across every declaration would make restart
    cost scale with estate size — minutes of total unavailability at a few hundred clones, to
    recover state concerning at most one of them — which would make operators avoid the restart

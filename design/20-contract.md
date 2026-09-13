@@ -1517,7 +1517,10 @@ is why they are lists rather than counts — an operator needs to know *which*.
 `leaseSelfTestPassed` is reported separately from the lease itself because holding the lease and
 having proved the volume excludes are different facts, and only the second is evidence **C7** holds.
 
-`recoverDeclaration` is the lazy pass, called on first use and by the background sweep. Any resume
+`recoverDeclaration` is the lazy pass, called on first use and by the background sweep — a single
+pass over every `recovery-pending` declaration once boot succeeds, since only boot creates that
+state. **Specified, not yet held**: no sweep is started, so an idle declaration stays
+`recovery-pending` until its first mutation; staged in `90-decisions.md` § *Open* (2026-09-13). Any resume
 step it runs goes through the injected dispatch and takes the global mutation lock for itself,
 completing before the triggering call acquires anything.
 
