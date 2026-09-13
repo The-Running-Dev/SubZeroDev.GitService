@@ -2684,7 +2684,7 @@ type WatcherError = ModuleErrorBase & (
 | `not-permitted` | Either deployment switch is off | no | Do not start. Both default off |
 | `watched-file-unreadable` | A candidate cannot be read | no | Move it to `failed/`. A symlink is never a candidate in the first place |
 | `claim-failed` | The rename into `processing/` failed | next tick | Leave the file in the inbox |
-| `step-failed` | Any dispatched step returned a non-success envelope | no | Move to `failed/` with a sibling error file naming the step and its result. Never delete |
+| `step-failed` | Any dispatched step up to and including `pr_open` returned a non-success envelope | no | Move to `failed/` with a sibling error file naming the step and its result. Never delete. A failed `pr_enable_auto_merge` after `pr_open` succeeded is not this variant: the file is delivered and moves to `processed/`, and the failure is audited and notified |
 | `interrupted-claim` | A file sits in `processing/` at startup | **never reprocessed** | Move to `failed/` with an explanation — it may already have an open pull request |
 
 There is no caller to return an envelope to. Every outcome above is audited, and every failure
