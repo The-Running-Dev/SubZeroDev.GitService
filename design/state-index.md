@@ -35,9 +35,9 @@
 ## Question affects
 
 <!-- question-affects:start -->
-| Question | Blocks |
-|---|---|
-| _(no question records yet)_ | |
+| Question | Blocks | Answered |
+|---|---|---|
+| _(no question records yet)_ | | |
 <!-- question-affects:end -->
 
 ## Outstanding
@@ -100,4 +100,5 @@
 | milestone/6 | #180 | Update-WorkMirror.ps1 mangles em dashes into mojibake when it writes WorkRef titles | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/5 | #216 | Decide whether DispatchPipelineDependencies.journal should be required | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/6 | #246 | Design-state tooling reads this repo's contract for sections it has never had, and fails rather than standing down | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| milestone/4 | #248 | Orphaning reports no retained journal entries: `OrphanReport.retainedJournalEntries` is always empty | — | `c2caeaf7f7a78b11d70d48f861158c422a5e94c5` |
 <!-- outstanding:end -->
