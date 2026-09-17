@@ -48,6 +48,36 @@
 | 25 | #41 | The kit lives at D:\Downloads\agent-kit, which is a staging path, not a home | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
 | 27 | #54 | Naming — repository, image, MCP server and service names are unsettled | — | `c316c787456f6da803938f27de6341059aca1481` |
 | 28 | #55 | S2's dual-lock-holder refusal has never been run against a real Docker bind mount | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
+| 263 | #263 | Tool-call cookie route accepts a request with no CSRF check | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 264 | #264 | Eviction can delete a clone holding unpushed commits on a branch that isn't checked out | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 265 | #265 | A clone can get stuck "needs attention" with nothing able to clear it | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 266 | #266 | Parking an operation never notifies anyone | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 267 | #267 | A resumed operation is marked done without re-checking its outcome | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 268 | #268 | A rejected host credential is never marked failing | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 269 | #269 | MCP tool calls report every failure as an error, even ones that shouldn't be | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 270 | #270 | The eviction safety check ignores whether other generations of a declaration still need the clone | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 271 | #271 | An unreadable repository configuration reports the wrong kind of failure | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 272 | #272 | A timed-out mutating call is parked without leaving an audit record | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 273 | #273 | A lease takeover can vanish from the record if the next boot fails early | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 274 | #274 | Two boot steps can race, leaving a job unrevalidated | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 275 | #275 | Anyone can register unlimited OAuth clients against this service | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 276 | #276 | Using a TOTP recovery code doesn't actually force re-enrolment | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 277 | #277 | The operator health view always shows zero volume usage | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 278 | #278 | Notifications stuck behind a missing delivery transport don't show up anywhere | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 279 | #279 | A module tool's declared timeout is never actually enforced | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 280 | #280 | The HTTP adapter's timeout doesn't cover reading the response body | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 281 | #281 | Database access has no retry or timeout when the database is busy | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 282 | #282 | A clone interrupted mid-copy can later be treated as complete | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 283 | #283 | A lock being busy is reported as a store failure instead of a conflict | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 284 | #284 | Several error results are labelled for conditions that don't match what actually happened | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 285 | #285 | Merging a pull request can force-delete a local branch that still holds unmerged commits | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 286 | #286 | A file-watcher declaration can sit stuck with a misleading status until something else creates its clone | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 287 | #287 | Overriding the safety check on a corrupted clone destroys it instead of setting it aside | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 288 | #288 | A declaration's generation number can be reused after the declaration is removed and redeclared | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 289 | #289 | An interrupted operation on an idle declaration can go unnoticed indefinitely | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 290 | #290 | A repository can silently clone without its credential when that credential fails to resolve | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 291 | #291 | Revoking an OAuth token can grow the audit trail without real authorization, and misattributes it | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 292 | #292 | There's no record of which operator approved a given MCP access grant | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | milestone/4 | #49 | Terminal-state detection never reaches the notifier on the ordinary dispatch or recovery paths | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/6 | #61 | syncBase inlines rev-parse/is-ancestor plumbing that composites.ts keeps as private helpers | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/6 | #65 | `sendJson`/`readJsonBody` are independently reimplemented in six surface files | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
