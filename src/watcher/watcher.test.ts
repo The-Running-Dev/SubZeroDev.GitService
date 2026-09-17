@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync, utimesSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync, utimesSync } from 'node:fs';
 import path from 'node:path';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
 import { systemClock, type Clock } from '../clock/clock.ts';
@@ -410,6 +410,247 @@ test('S17.4 — a symlink is never a candidate; a link-preserving stat refuses i
     assert.equal(reports[0]!.claimed, null, 'the symlink was never claimed');
     assert.equal(existsSync(path.join(root, 'evil-link.md')), true, 'the symlink is left untouched, still in the inbox');
     assert.equal(dispatchLog.some((r) => r.toolName === 'plan_tool'), false);
+  });
+});
+
+test('W08.3 — claim() refuses a symlinked processing/, leaving the file in the inbox and nothing written through the link', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+
+    const outsideDir = path.join(volume, 'outside-processing');
+    mkdirSync(outsideDir, { recursive: true });
+
+    let symlinked = true;
+    try {
+      symlinkSync(outsideDir, path.join(root, 'processing'), 'dir');
+    } catch {
+      symlinked = false;
+    }
+    if (!symlinked) {
+      // No symlink privilege on this host (common on unelevated Windows) — nothing to assert.
+      return;
+    }
+
+    const dispatchLog: DispatchRequest[] = [];
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch(dispatchLog, { repo_status: () => repoStatus(false) }),
+    });
+    const watcher = createWatcher(deps);
+    const reports = await watcher.tick();
+
+    assert.equal(reports[0]!.claimed, null, 'the tampered processing/ was never claimed into');
+    assert.equal(reports[0]!.outcome?.kind, 'rejected');
+    if (reports[0]!.outcome?.kind === 'rejected') assert.equal(reports[0]!.outcome.step, 'claim');
+    assert.equal(existsSync(path.join(root, 'post.md')), true, 'the file stays in the inbox');
+    assert.deepEqual(readdirSync(outsideDir), [], 'nothing is written through the symlink');
+    assert.equal(dispatchLog.some((r) => r.toolName === 'plan_tool'), false);
+  });
+});
+
+/**
+ * A reparse point needs elevated privilege to create on an unelevated Windows
+ * host (the `symlinked` guard above skips there), but `isTamperedStateDir`
+ * refuses any non-directory entry, not only a symlink — a plain file planted
+ * at the same name is refused the same way, and needs no privilege to create.
+ * This is what makes the fix checkable by reverting it on every dev host.
+ */
+test('W08.3 — claim() refuses a processing/ that is a plain file, not a directory', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+    writeFileSync(path.join(root, 'processing'), 'not a directory', 'utf8');
+
+    const dispatchLog: DispatchRequest[] = [];
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch(dispatchLog, { repo_status: () => repoStatus(false) }),
+    });
+    const watcher = createWatcher(deps);
+    const reports = await watcher.tick();
+
+    assert.equal(reports[0]!.claimed, null, 'the tampered processing/ was never claimed into');
+    assert.equal(reports[0]!.outcome?.kind, 'rejected');
+    if (reports[0]!.outcome?.kind === 'rejected') assert.equal(reports[0]!.outcome.step, 'claim');
+    assert.equal(existsSync(path.join(root, 'post.md')), true, 'the file stays in the inbox');
+    assert.equal(readFileSync(path.join(root, 'processing'), 'utf8'), 'not a directory', 'the tampering file is left untouched');
+  });
+});
+
+test('W08.3 — recoverInterruptedClaims() refuses a symlinked processing/, never reading or moving files through the link', async () => {
+  await withVolumeAsync(async (volume) => {
+    const outsideDir = path.join(volume, 'outside-processing');
+    mkdirSync(outsideDir, { recursive: true });
+    writeFileSync(path.join(outsideDir, 'secret.md'), 'not the watcher\'s to move', 'utf8');
+
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+
+    let symlinked = true;
+    try {
+      symlinkSync(outsideDir, path.join(root, 'processing'), 'dir');
+    } catch {
+      symlinked = false;
+    }
+    if (!symlinked) {
+      return;
+    }
+
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+    });
+    const watcher = createWatcher(deps);
+    const recovered = await watcher.recoverInterruptedClaims();
+
+    assert.equal(recovered.length, 0, 'the tampered processing/ is skipped, not recovered from');
+    assert.equal(existsSync(path.join(outsideDir, 'secret.md')), true, 'the file outside the inbox is never touched');
+    assert.equal(existsSync(path.join(root, 'failed')), false, 'nothing was moved to failed/ through the link');
+  });
+});
+
+test('W08.3 — recoverInterruptedClaims() refuses a processing/ that is a plain file, not a directory', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'processing'), 'not a directory', 'utf8');
+
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+    });
+    const watcher = createWatcher(deps);
+    const recovered = await watcher.recoverInterruptedClaims();
+
+    assert.equal(recovered.length, 0, 'the tampered processing/ is skipped, not recovered from');
+    assert.equal(existsSync(path.join(root, 'failed')), false, 'nothing was moved to failed/');
+  });
+});
+
+test('W08.3 — runRetention() refuses a symlinked processed/, never deleting files through the link, and reports the refusal', async () => {
+  await withVolumeAsync(async (volume) => {
+    const outsideDir = path.join(volume, 'outside-processed');
+    mkdirSync(outsideDir, { recursive: true });
+    const outsideFile = path.join(outsideDir, 'old.md');
+    writeFileSync(outsideFile, 'not the watcher\'s to delete', 'utf8');
+    const old = new Date('2026-01-01T00:00:00.000Z');
+    utimesSync(outsideFile, old, old);
+
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+
+    let symlinked = true;
+    try {
+      symlinkSync(outsideDir, path.join(root, 'processed'), 'dir');
+    } catch {
+      symlinked = false;
+    }
+    if (!symlinked) {
+      return;
+    }
+
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [] }),
+    });
+    const watcher = createWatcher(deps);
+    const report = await watcher.runRetention();
+
+    assert.equal(existsSync(outsideFile), true, 'the file outside the inbox is never deleted through the link');
+    assert.equal(report.deletedRows, 0);
+    assert.equal(report.skipped.some((s) => s.includes('processed')), true, 'the refusal is reported');
+  });
+});
+
+test('W08.3 — runRetention() refuses a processed/ that is a plain file, not a directory', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'processed'), 'not a directory', 'utf8');
+
+    const { deps } = baseDeps(volume, { declarations: stubDeclarations({ current: [] }) });
+    const watcher = createWatcher(deps);
+    const report = await watcher.runRetention();
+
+    assert.equal(report.deletedRows, 0);
+    assert.equal(report.skipped.some((s) => s.includes('processed')), true, 'the refusal is reported');
+    assert.equal(readFileSync(path.join(root, 'processed'), 'utf8'), 'not a directory', 'the tampering file is left untouched');
+  });
+});
+
+test('W08.3 — moveToProcessed refuses a symlinked processed/ by throwing, leaving the claimed file safely in processing/', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+
+    const outsideDir = path.join(volume, 'outside-processed');
+    mkdirSync(outsideDir, { recursive: true });
+
+    let symlinked = true;
+    try {
+      symlinkSync(outsideDir, path.join(root, 'processed'), 'dir');
+    } catch {
+      symlinked = false;
+    }
+    if (!symlinked) {
+      return;
+    }
+
+    const dispatchLog: DispatchRequest[] = [];
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch(dispatchLog, successfulHandlers()),
+    });
+    const watcher = createWatcher(deps);
+
+    await assert.rejects(() => watcher.tick(), /is not a real directory/);
+
+    assert.equal(existsSync(path.join(root, 'processing', 'post.md')), true, 'the already-claimed file stays safely in processing/, never lost');
+    assert.deepEqual(readdirSync(outsideDir), [], 'nothing is written through the symlink');
+  });
+});
+
+test('W08.3 — moveToProcessed refuses a processed/ that is a plain file, not a directory, by throwing', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+    writeFileSync(path.join(root, 'processed'), 'not a directory', 'utf8');
+
+    const dispatchLog: DispatchRequest[] = [];
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch(dispatchLog, successfulHandlers()),
+    });
+    const watcher = createWatcher(deps);
+
+    await assert.rejects(() => watcher.tick(), /is not a real directory/);
+
+    assert.equal(existsSync(path.join(root, 'processing', 'post.md')), true, 'the already-claimed file stays safely in processing/, never lost');
+    assert.equal(readFileSync(path.join(root, 'processed'), 'utf8'), 'not a directory', 'the tampering file is left untouched');
+  });
+});
+
+test('W08.4 — protected watcher directories are created with restrictive permissions on POSIX', async () => {
+  if (process.platform === 'win32') return; // POSIX mode bits are not enforced the same way on Windows.
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+
+    const dispatchLog: DispatchRequest[] = [];
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch(dispatchLog, successfulHandlers()),
+    });
+    await createWatcher(deps).tick();
+
+    assert.equal(statSync(path.join(root, 'processing')).mode & 0o777, 0o700);
+    assert.equal(statSync(path.join(root, 'processed')).mode & 0o777, 0o700);
+
+    const pendingDir = path.dirname(pendingPullRequestsPath(volume, 'repo-a' as never));
+    assert.equal(statSync(pendingDir).mode & 0o777, 0o700);
   });
 });
 

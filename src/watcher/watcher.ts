@@ -78,6 +78,28 @@ function isSubset(a: readonly string[], b: readonly string[]): boolean {
   return a.every((value) => setB.has(value));
 }
 
+/**
+ * `20-contract.md` § L2 — watcher, W08.3: `processing/`, `processed/`, and
+ * `failed/` are names the untrusted drop mount can also write, ahead of the
+ * watcher itself. A link-preserving `lstatSync` — never `existsSync` or
+ * `statSync`, both of which follow a symlink — is checked before any of the
+ * three is created or used, and a missing entry is not a tamper: `mkdirSync`
+ * will make it a real directory. `lstatSync` never reports a symlink as a
+ * directory, so `!isDirectory()` alone also catches it, without a second
+ * `isSymbolicLink()` check.
+ */
+function isTamperedStateDir(dir: string): boolean {
+  let stat;
+  try {
+    stat = lstatSync(dir);
+  } catch {
+    return false;
+  }
+  return !stat.isDirectory();
+}
+
+const PROTECTED_DIR_MODE = 0o700;
+
 /** Windows and Linux both refuse `:` in a filename, so the ISO timestamp prefix is sanitised for both. */
 function timestampPrefix(at: IsoUtcTimestamp): string {
   return (at as string).replace(/[:.]/g, '-');
@@ -385,7 +407,8 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
 
   function moveToFailed(declarationId: DeclarationId, sourcePath: string, file: string, reasonText: string): void {
     const failedDir = failedDirFor(declarationId);
-    mkdirSync(failedDir, { recursive: true });
+    if (isTamperedStateDir(failedDir)) throw new Error(`watcher: '${failedDir}' is not a real directory — refusing to use it as failed/ (W08.3)`);
+    mkdirSync(failedDir, { recursive: true, mode: PROTECTED_DIR_MODE });
     const failedName = uniqueTerminalName(failedDir, timestampPrefix(clock.now()), file);
     renameSync(sourcePath, path.join(failedDir, failedName));
     writeFileSync(path.join(failedDir, `${failedName}.error.txt`), reasonText, 'utf8');
@@ -393,7 +416,8 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
 
   function moveToProcessed(declarationId: DeclarationId, sourcePath: string, file: string): void {
     const processedDir = processedDirFor(declarationId);
-    mkdirSync(processedDir, { recursive: true });
+    if (isTamperedStateDir(processedDir)) throw new Error(`watcher: '${processedDir}' is not a real directory — refusing to use it as processed/ (W08.3)`);
+    mkdirSync(processedDir, { recursive: true, mode: PROTECTED_DIR_MODE });
     const target = path.join(processedDir, uniqueTerminalName(processedDir, timestampPrefix(clock.now()), file));
     renameSync(sourcePath, target);
     // `renameSync` never updates mtime, and `runRetention` ages files in
@@ -430,7 +454,8 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
 
   function claim(declarationId: DeclarationId, file: string): boolean {
     const processingDir = processingDirFor(declarationId);
-    mkdirSync(processingDir, { recursive: true });
+    if (isTamperedStateDir(processingDir)) return false;
+    mkdirSync(processingDir, { recursive: true, mode: PROTECTED_DIR_MODE });
     try {
       renameSync(path.join(inboxRootFor(declarationId), file), path.join(processingDir, file));
       return true;
@@ -639,6 +664,10 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
         const declarationId = entry as DeclarationId;
         const processingDir = processingDirFor(declarationId);
         if (!existsSync(processingDir)) continue;
+        // W08.3: a drop mount can plant `processing/` itself as a symlink or
+        // reparse point ahead of restart — refuse it exactly as `claim` does,
+        // rather than following it into `readdirSync` below.
+        if (isTamperedStateDir(processingDir)) continue;
 
         for (const fileEntry of readdirSync(processingDir)) {
           const full = path.join(processingDir, fileEntry);
@@ -690,6 +719,14 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
         for (const declarationDir of readdirSync(root)) {
           const processed = path.join(root, declarationDir, 'processed');
           if (!existsSync(processed)) continue;
+          // W08.3: `processed/` itself can be a symlink/reparse point planted by
+          // the drop mount — `unlinkAndCountBytes` below has no cross-device
+          // constraint, so following one here would let a tampered mount delete
+          // arbitrary files anywhere on the host.
+          if (isTamperedStateDir(processed)) {
+            skipped.push(`refused tampered 'processed/' for declaration '${declarationDir}'`);
+            continue;
+          }
           for (const name of readdirSync(processed)) {
             const file = path.join(processed, name);
             const stat = lstatSync(file);
