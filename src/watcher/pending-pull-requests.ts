@@ -48,7 +48,10 @@ export function readPendingPullRequests(volumeRoot: string, declarationId: Decla
 /** `20-contract.md` § Files on the volume: "written temp-then-rename". */
 export function writePendingPullRequests(volumeRoot: string, declarationId: DeclarationId, list: PendingPullRequestList): void {
   const full = pendingPullRequestsPath(volumeRoot, declarationId);
-  mkdirSync(path.dirname(full), { recursive: true });
+  // `20-contract.md` § L2 — watcher, W08.4: this directory is the genuinely
+  // separate protected runtime state root (on the named volume, never the
+  // untrusted per-declaration bind mount), so it gets restrictive permissions.
+  mkdirSync(path.dirname(full), { recursive: true, mode: 0o700 });
   const tmpPath = `${full}.${randomUUID()}.tmp`;
   writeFileSync(tmpPath, JSON.stringify(list), 'utf8');
   renameSync(tmpPath, full);
