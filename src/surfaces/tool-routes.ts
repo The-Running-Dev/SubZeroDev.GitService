@@ -6,7 +6,7 @@ import type { ContractCapabilitySet } from '../contract/capabilities.ts';
 import type { DispatchPipeline } from '../dispatch/dispatch-pipeline.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import type { OperatorSession } from '../operator-identity/operator-identity.ts';
-import { requireSession, type ConsoleAuthDependencies } from './console-auth-routes.ts';
+import { csrfOk, requireSession, type ConsoleAuthDependencies } from './console-auth-routes.ts';
 
 export interface ToolRoutesDependencies extends ConsoleAuthDependencies {
   readonly declarations: Pick<Declarations, 'get'>;
@@ -96,6 +96,10 @@ export async function handleToolRoute(deps: ToolRoutesDependencies, req: Incomin
   }
 
   if (req.method === 'POST' && segments.length === 4) {
+    if (!csrfOk(req)) {
+      sendJson(res, 403, { error: 'csrf-check-failed' });
+      return true;
+    }
     const toolName = segments[3];
     const body = await readJsonBody(req);
     if (body === null) {
