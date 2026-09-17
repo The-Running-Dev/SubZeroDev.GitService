@@ -314,6 +314,13 @@ carries the reasoning.
 
 ---
 
+## Outstanding
+
+None. Every one of the thirty-nine slices is landed, and each body was retired to the index
+below as its issue closed.
+
+---
+
 ## Landed
 
 Bodies retired; the closed issue is the record. Criteria are not re-derived from this table.
@@ -365,10 +372,3 @@ file becomes a pull request…" and #92 "A consumer can declare a safe content-d
 predating the 2026-08-11 rename to file-watcher terminology, and #34 "S20 — `SubZeroDev.Blog` runs
 as a consumer, with parity measured", predating the rename recorded above. All three issues are
 closed and none is edited — reported here rather than reconciled.
-
----
-
-## Outstanding
-
-None. Every one of the thirty-nine slices is landed, and each body was retired to the index
-above as its issue closed.
