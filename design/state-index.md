@@ -35,9 +35,9 @@
 ## Question affects
 
 <!-- question-affects:start -->
-| Question | Blocks | Answered |
-|---|---|---|
-| _(no question records yet)_ | | |
+| Question | Blocks |
+|---|---|
+| _(no question records yet)_ | |
 <!-- question-affects:end -->
 
 ## Outstanding
@@ -48,7 +48,6 @@
 | 25 | #41 | The kit lives at D:\Downloads\agent-kit, which is a staging path, not a home | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
 | 27 | #54 | Naming — repository, image, MCP server and service names are unsettled | — | `c316c787456f6da803938f27de6341059aca1481` |
 | 28 | #55 | S2's dual-lock-holder refusal has never been run against a real Docker bind mount | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| 263 | #263 | Tool-call cookie route accepts a request with no CSRF check | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 264 | #264 | Eviction can delete a clone holding unpushed commits on a branch that isn't checked out | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 265 | #265 | A clone can get stuck "needs attention" with nothing able to clear it | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 266 | #266 | Parking an operation never notifies anyone | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
