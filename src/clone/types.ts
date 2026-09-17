@@ -37,7 +37,7 @@ export type EvictionBlocker =
   | { readonly kind: 'pinned' }
   | { readonly kind: 'worktree-dirty' }
   | { readonly kind: 'branch-ahead-of-upstream'; readonly branch: BranchName; readonly ahead: number }
-  | { readonly kind: 'unreachable-commits'; readonly base: BranchName; readonly count: number }
+  | { readonly kind: 'unreachable-commits'; readonly base: BranchName; readonly count: number; readonly branch?: BranchName }
   | { readonly kind: 'stash-present'; readonly count: number }
   | { readonly kind: 'open-journal-entry'; readonly operationId: OperationId }
   | { readonly kind: 'active-operations'; readonly count: number }

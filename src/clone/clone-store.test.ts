@@ -468,6 +468,50 @@ test('clone.remove refuses a tree holding commits unreachable from origin/<base>
   });
 });
 
+test('isSafeToEvict refuses a clone holding unpushed commits on a branch that is not checked out (issue #264)', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declaration = fixtureDeclaration('repo-other-branch-unpushed', createBareGitRemote());
+    const exec = createExec({ volumeRoot: volume });
+    const locks = createLocks();
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations: declarationsStubFor(declaration) });
+
+    const ensured = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(ensured.ok, true);
+    if (!ensured.ok) return;
+    ensured.value.materialisationLock.release();
+    ensured.value.activePin.release();
+    const clonePath = ensured.value.clone.path;
+
+    // A commit sitting on a branch that is not checked out — the checked-out
+    // branch (`main`) stays clean throughout.
+    const branchResult = await exec.runGit({ argv: ['checkout', '-b', 'side-branch'], cwd: clonePath as never, timeoutSeconds: 30, credential: null, signal: noopSignal() });
+    assert.equal(branchResult.ok, true);
+    writeFileSync(path.join(clonePath, 'unpushed.txt'), 'local only, on a branch nobody checked back out of\n', 'utf8');
+    const addResult = await exec.runGit({ argv: ['add', 'unpushed.txt'], cwd: clonePath as never, timeoutSeconds: 30, credential: null, signal: noopSignal() });
+    assert.equal(addResult.ok, true);
+    const commitResult = await exec.runGit({
+      argv: ['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.com', 'commit', '-m', 'unpushed work on side-branch'],
+      cwd: clonePath as never,
+      timeoutSeconds: 30,
+      credential: null,
+      signal: noopSignal(),
+    });
+    assert.equal(commitResult.ok, true);
+    const backToMainResult = await exec.runGit({ argv: ['checkout', 'main'], cwd: clonePath as never, timeoutSeconds: 30, credential: null, signal: noopSignal() });
+    assert.equal(backToMainResult.ok, true);
+
+    const verdict = await cloneStore.isSafeToEvict(declaration.id, false);
+    assert.equal(verdict.ok, true);
+    if (!verdict.ok) return;
+    assert.equal(verdict.value.safe, false, `expected the side-branch commit to block eviction, got ${JSON.stringify(verdict.value)}`);
+    if (verdict.value.safe) return;
+    assert.ok(
+      verdict.value.blockers.some((b) => b.kind === 'unreachable-commits'),
+      `expected unreachable-commits for the non-checked-out branch, got ${JSON.stringify(verdict.value.blockers)}`,
+    );
+  });
+});
+
 test('the eviction interlock evaluates origin/<base> from the declaration, so a repository whose base branch is not main is not reported corrupt', async () => {
   await withMigratedVolume(async (volume) => {
     // A remote with no `main` at all. The hardcoded `origin/main..HEAD` this

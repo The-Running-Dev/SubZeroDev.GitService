@@ -590,6 +590,38 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
       if (Number.isFinite(ahead) && ahead > 0) blockers.push({ kind: 'branch-ahead-of-upstream', branch, ahead });
     }
 
+    // R7 covers every local branch, not only the one checked out — a branch
+    // left behind with unpushed commits is exactly as destroyable by eviction
+    // as HEAD is. The two checks above already cover the checked-out branch
+    // (including detached HEAD, which owns no ref here); this covers the rest.
+    const otherBranchesResult = await exec.runGit({
+      argv: ['for-each-ref', 'refs/heads', '--format=%(refname:short)'],
+      cwd: clonePath as ClonePath,
+      timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS,
+      credential: null,
+      signal,
+    });
+    if (!otherBranchesResult.ok) return 'corrupt';
+    const otherBranches = otherBranchesResult.value.stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && line !== branch) as BranchName[];
+
+    for (const otherBranch of otherBranches) {
+      const otherUnreachableResult = await exec.runGit({
+        argv: ['rev-list', '--count', `origin/${baseBranch}..${otherBranch}`],
+        cwd: clonePath as ClonePath,
+        timeoutSeconds: GIT_COMMAND_TIMEOUT_SECONDS,
+        credential: null,
+        signal,
+      });
+      if (!otherUnreachableResult.ok) return 'corrupt';
+      const otherUnreachableCount = Number(otherUnreachableResult.value.stdout.trim());
+      if (Number.isFinite(otherUnreachableCount) && otherUnreachableCount > 0) {
+        blockers.push({ kind: 'unreachable-commits', base: baseBranch, branch: otherBranch, count: otherUnreachableCount });
+      }
+    }
+
     if (locks.activeOperationCount(declarationId) > 0) {
       blockers.push({ kind: 'active-operations', count: locks.activeOperationCount(declarationId) });
     }
