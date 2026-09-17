@@ -2392,6 +2392,7 @@ the lock-refusal error kind, the batch of mis-mapped error variants, the force-d
 `reconcile_after_merge`, the watcher's clone-materialisation gap, the `permitCorruptTree` quarantine
 design change, the generation-number reuse, the missing background recovery sweep, the anonymous
 credential-resolution-failure fallback, the `/oauth/revoke` audit gap, and the missing MCP-grant
-approver). One bullet is held back, below.
-
-- **`orphan` reports a failed journal read as nothing retained.** `src/declarations/declarations.ts:628` folds a failed journal read into an empty `retainedJournalEntries`, against § *Error semantics* › Journal "must not treat the result as an empty set". **Held back from filing 2026-09-17**: issue [#248](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/248), closed, already covered "`OrphanReport.retainedJournalEntries` is always empty" — but the code at the cited line still does exactly this today. Needs a decision: reopen #248, or file this as a new, distinct issue (regression vs. incomplete original fix vs. a residual case #248 didn't cover) — not `/track`'s call.
+approver). The 31st bullet — "`orphan` reports a failed journal read as nothing retained"
+(`src/declarations/declarations.ts:628`) — duplicated closed issue
+[#248](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/248), which the code still
+regressed; reopened 2026-09-17 rather than filed as a new issue.
