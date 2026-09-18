@@ -1,3 +1,5 @@
+**Read [`AGENTS.shared.md`](C:\Users\Ben\.agent-kit\AGENTS.shared.md) completely before this file.** It holds the rules every repository using the kit shares.
+
 # Agent contract — SubZeroDev.Git
 
 This file is binding for every agent session in this repo, regardless of tool or model.
