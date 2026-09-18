@@ -29,7 +29,7 @@
               "${CLAUDE_PROJECT_DIR}/tools/Measure-Session.ps1",
               "-Watch"
             ],
-            "timeout": 30
+            "timeout": 10
           }
         ]
       }
