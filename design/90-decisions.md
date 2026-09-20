@@ -747,6 +747,10 @@ state a layer for them, in a row reading `**Result / errors / clock** (L1)`, whi
 read. The conclusion stands on its second clause alone — an invented classification in a gate is
 worse than a named absence — and the document has since been corrected to match, so the premise is
 now true as well. See the 2026-09-07 entry at the top.)*
+*(Amended 2026-09-20 — this entry's own `mcp-proxy` claim was also imprecise: the module table had no
+dedicated row for it, only the L5 diagram's shorthand label "MCP transport" under **Surfaces**, which
+describes the service's own inbound HTTP MCP route, not the separate `src/mcp-proxy/` stdio proxy
+process (S14.9). A dedicated **MCP proxy** (L5) row has now been added to the module table.)*
 ---
 
 ### 2026-08-13 — Post-S27 reconciliation: the refuse watermark gates every mutation, not only materialisation
@@ -2396,3 +2400,23 @@ approver). The 31st bullet — "`orphan` reports a failed journal read as nothin
 (`src/declarations/declarations.ts:628`) — duplicated closed issue
 [#248](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/248), which the code still
 regressed; reopened 2026-09-17 rather than filed as a new issue.
+
+Added 2026-09-20 by `/reconcile` at `7834349` — PR #298 (87116bb, issue #83) shipped watcher
+state-directory tamper refusal citing `20-contract.md § L2 — watcher, W08.3`/`W08.4`
+(`isTamperedStateDir()` in `src/watcher/watcher.ts`, five guard sites, `PROTECTED_DIR_MODE = 0o700`
+on every `mkdirSync`, and `src/watcher/pending-pull-requests.ts:51`). No `W08` section exists in any
+design document — the highest existing invariant is D17, and the contract's D6/D7/D8 cover the
+candidate *file*'s symlink refusal, not the state *directory*'s. The five call sites ship three
+different refusal behaviours (silent skip in `claim()` and `recoverInterruptedClaims()`; a reported
+skip pushed to `skipped[]` in `runRetention()`; a throw in `moveToFailed()`/`moveToProcessed()`),
+none stated anywhere. Confirmed as a decision, not a transcription error — a new D18 invariant plus
+a refusal-behaviour table — so left here for `/contract` (opus/high) rather than minted by this
+reconciliation. Carry forward: the symlink guard paths could not be exercised on this Windows host
+(no symlink privilege); the plain-file variants do run.
+
+The skip/throw asymmetry across those five sites — two silent skips, one reported skip, two
+throws — is itself undocumented as a choice: no `90-decisions.md` entry states why availability
+(skip and continue) was traded for loudness (throw) at different call sites. `/contract` records
+that rationale as its own decision-log entry in the same session that mints D18, rather than
+leaving the trade-off implicit in the invariant's prose — the rationale and the invariant are one
+artifact and belong together.
