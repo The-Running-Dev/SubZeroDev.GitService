@@ -47,6 +47,14 @@ and preferences belong in `AGENTS.md`.
   security cascade — was unbuilt. Cost: a reconcile finding, and a design doc wrong about a live
   authorization property. **A fix that closes an issue named in `design/` greps `design/` for
   that number.**
+- **A dangling doc-citation check belongs in a script, not in a session.** An ad-hoc sweep
+  cross-referencing every `20-contract.md §` citation in `src/` against the document's headings
+  produced ~20 "MISSING" lines that were almost entirely regex artifacts — truncated captures,
+  sub-section ids that are not headings (D5, U2), bold-paragraph anchors, `L1 exec` vs `L1 — exec`
+  dash variants. Cost: roughly a third of the pass's budget, spent generating noise then discarded
+  by hand. `W08` survived only because the string is absent from the documents entirely, not merely
+  absent as a heading. A `scripts/check-doc-citations.ts` in `npm run build` would have caught it in
+  CI the day #298 landed.
 
 ## Verification
 
