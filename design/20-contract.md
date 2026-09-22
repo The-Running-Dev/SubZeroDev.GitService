@@ -567,6 +567,17 @@ dispatches `git_stage`. After staging, a second `repo_status` must report exactl
 and every entry staged before commit may begin. A mismatch is a failed watched file, never a partial
 success; no later git or host step is dispatched.
 
+**A mismatch is the consumer breaking the protocol, and it parks the clone.** Either observation
+failing to match raises `apply-paths-mismatch`, and the watcher calls `CloneStore.markAttention` for
+the declaration before the file moves to `failed/`. The working tree is left exactly as the
+observation found it: apply's writes are the evidence, and restoring paths the observation has just
+shown cannot be trusted would destroy it. The mark, not the dirty tree, is what stops the next tick
+(**D17**, reported `clone-needs-attention`), and it blocks ordinary mutations from every actor until
+an operator clears it under `attention.resolve`. A `markAttention` that fails does not change the
+file's terminal path, and the tree it left dirty still fails `isClean`, so no tick proceeds either
+way. An observation that cannot be *read* is not a mismatch: it stays `step-failed`, because nothing
+has shown the consumer at fault.
+
 ### Instance lease
 
 Declared in `src/lifecycle/lease.ts`.
@@ -2682,16 +2693,25 @@ type WatcherError = ModuleErrorBase & (
   | { readonly code: 'claim-failed'; readonly file: WatchedFileName }
   | { readonly code: 'step-failed'; readonly step: string; readonly result: ResultKind; readonly reason: string }
   | { readonly code: 'interrupted-claim'; readonly file: WatchedFileName }
+  | {
+      readonly code: 'apply-paths-mismatch';
+      readonly observation: 'after-apply' | 'after-stage';
+      readonly declared: readonly RepoRelativePath[];
+      readonly observed: readonly RepoRelativePath[];
+      readonly unstaged: readonly RepoRelativePath[];
+      readonly permitted: readonly RepoRelativePath[];
+    }
 );
 ```
 
 | Variant | Raised when | Retryable | Caller does |
 |---|---|---|---|
 | `not-permitted` | Either deployment switch is off | no | Do not start. Both default off |
-| `watched-file-unreadable` | A candidate cannot be read | no | Move it to `failed/`. A symlink is never a candidate in the first place |
+| `watched-file-unreadable` | A candidate cannot be read, or the claimed file's bytes are not strict UTF-8 | no | Move it to `failed/`. Raised before `planTool` is dispatched, so it makes no dispatch, Git or host call. A symlink is never a candidate in the first place |
 | `claim-failed` | The rename into `processing/` failed | next tick | Leave the file in the inbox |
 | `step-failed` | Any dispatched step up to and including `pr_open` returned a non-success envelope | no | Move to `failed/` with a sibling error file naming the step and its result. Never delete. A failed `pr_enable_auto_merge` after `pr_open` succeeded is not this variant: the file is delivered and moves to `processed/`, and the failure is audited and notified |
 | `interrupted-claim` | A file sits in `processing/` at startup | **never reprocessed** | Move to `failed/` with an explanation — it may already have an open pull request |
+| `apply-paths-mismatch` | A readable post-apply observation's changed set differs from `declared` or leaves `permitted`, or a readable post-stage observation differs from `declared` or reports any entry in `unstaged` | no | `infrastructure`: the consumer's apply handler broke the protocol. Mark the clone needs-attention, move the file to `failed/` with a sibling error file carrying all four sets, and dispatch nothing further. The audit outcome is `rejected`, naming the observation as its step |
 
 There is no caller to return an envelope to. Every outcome above is audited, and every failure
 notifies at `attention`.
@@ -3002,8 +3022,8 @@ responsible for maintaining it.
 | D9 | The pre-migration copy is taken before any migration runs, and the three most recent are retained. | Structured store |
 | D10 | At most one `declaration` row per id has `state = 'active'`. | Structured store |
 | D11 | A file-watcher plan handler runs with no clone, no repository lock and no mutation journal, and no mutating repository step starts unless its output validates. | Dispatch pipeline, Watcher |
-| D12 | A file-watcher apply result advances to staging only when an independent status observation reports exactly its declared changed paths and every path is inside both its plan and the effective watcher allowlist. | Watcher |
-| D13 | File-watcher staging names exactly the independently observed changed paths; commit starts only after a second observation reports that exact set fully staged. | Watcher |
+| D12 | A file-watcher apply result advances to staging only when an independent status observation reports exactly its declared changed paths and every path is inside both its plan and the effective watcher allowlist. A readable observation that fails this marks the clone needs-attention before the file reaches `failed/`. | Watcher |
+| D13 | File-watcher staging names exactly the independently observed changed paths; commit starts only after a second observation reports that exact set fully staged. A readable second observation that does not marks the clone needs-attention. | Watcher |
 | D14 | A file-watcher apply handler validates every path it writes against the declaration's path allowlist before any side effect, whoever dispatched it. `permittedPaths` narrows that bound and never widens it. | Git operations, Watcher |
 | D15 | Every watcher tick resolves the current active declarations. Zero active file-watcher declarations is healthy and idle; adding or amending one makes it eligible on the next tick without a watcher restart. | Watcher |
 | D16 | `CloneStore.isClean` answers from an observation of Git made at the moment of the call, never from `Clone.state` or any other stored value. An observation that fails returns a `CloneStoreError`; there is no path on which a failure to look yields `clean: true`. | Clone store |
