@@ -45,7 +45,7 @@ export interface WatcherDependencies {
   readonly clock: Clock;
   readonly dispatch: Dispatch;
   readonly declarations: Pick<Declarations, 'list'>;
-  readonly cloneStore: Pick<CloneStore, 'describe' | 'isClean'>;
+  readonly cloneStore: Pick<CloneStore, 'describe' | 'isClean' | 'markAttention'>;
   readonly audit: Pick<Audit, 'append'>;
   readonly notifier: Pick<Notifier, 'enqueue'>;
   readonly store: Pick<StructuredStore, 'transaction'>;
@@ -76,6 +76,22 @@ function sameSet(a: readonly string[], b: readonly string[]): boolean {
 function isSubset(a: readonly string[], b: readonly string[]): boolean {
   const setB = new Set(b);
   return a.every((value) => setB.has(value));
+}
+
+/**
+ * `20-contract.md` § File watcher / `apply-paths-mismatch`: the sibling error
+ * file must carry all four sets so an operator can see exactly what the
+ * consumer's apply handler claimed against what the watcher independently
+ * observed.
+ */
+function mismatchReason(observation: 'after-apply' | 'after-stage', declared: readonly string[], observed: readonly string[], unstaged: readonly string[], permitted: readonly string[]): string {
+  return [
+    `apply-paths-mismatch at ${observation}: the consumer's apply handler broke the protocol`,
+    `declared: ${JSON.stringify(declared)}`,
+    `observed: ${JSON.stringify(observed)}`,
+    `unstaged: ${JSON.stringify(unstaged)}`,
+    `permitted: ${JSON.stringify(permitted)}`,
+  ].join('\n');
 }
 
 /**
@@ -299,11 +315,9 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     if (afterApplyData === null) return rejectedOutcome('repo_status_after_apply', 'infrastructure', 'the status observation was unreadable, so the apply result could not be independently confirmed');
     const observedAfterApply = afterApplyData.changedPaths.map((entry) => entry.path);
     if (!sameSet(observedAfterApply, declaredChangedPaths) || !isSubset(observedAfterApply, plan.permittedPaths as readonly string[])) {
-      return rejectedOutcome(
-        'repo_status_after_apply',
-        'infrastructure',
-        'the independently observed changed paths do not equal the apply result, or are not a subset of the plan\'s permitted paths',
-      );
+      const reason = mismatchReason('after-apply', declaredChangedPaths, observedAfterApply, [], plan.permittedPaths as readonly string[]);
+      await cloneStore.markAttention(declaration.id, reason);
+      return rejectedOutcome('repo_status_after_apply', 'infrastructure', reason);
     }
 
     const staged = await callTool('git_stage', { paths: declaredChangedPaths }, declaration, session);
@@ -314,9 +328,11 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     const afterStageData = readRepoStatus(statusAfterStage.data);
     if (afterStageData === null) return rejectedOutcome('repo_status_after_stage', 'infrastructure', 'the status observation was unreadable, so the staged set could not be independently confirmed');
     const stagedPaths = afterStageData.changedPaths.map((entry) => entry.path);
-    const allStaged = afterStageData.changedPaths.every((entry) => entry.staged);
-    if (!sameSet(stagedPaths, declaredChangedPaths) || !allStaged) {
-      return rejectedOutcome('repo_status_after_stage', 'infrastructure', 'the independently observed staged paths do not equal the apply result, fully staged');
+    const unstagedPaths = afterStageData.changedPaths.filter((entry) => !entry.staged).map((entry) => entry.path);
+    if (!sameSet(stagedPaths, declaredChangedPaths) || unstagedPaths.length > 0) {
+      const reason = mismatchReason('after-stage', declaredChangedPaths, stagedPaths, unstagedPaths, plan.permittedPaths as readonly string[]);
+      await cloneStore.markAttention(declaration.id, reason);
+      return rejectedOutcome('repo_status_after_stage', 'infrastructure', reason);
     }
 
     const committed = await callTool('git_commit', { message: plan.commitMessage }, declaration, session);
