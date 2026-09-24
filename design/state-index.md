@@ -35,9 +35,9 @@
 ## Question affects
 
 <!-- question-affects:start -->
-| Question | Blocks |
-|---|---|
-| _(no question records yet)_ | |
+| Question | Blocks | Answered |
+|---|---|---|
+| _(no question records yet)_ | | |
 <!-- question-affects:end -->
 
 ## Outstanding
@@ -48,7 +48,6 @@
 | 25 | #41 | The kit lives at D:\Downloads\agent-kit, which is a staging path, not a home | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
 | 27 | #54 | Naming — repository, image, MCP server and service names are unsettled | — | `c316c787456f6da803938f27de6341059aca1481` |
 | 28 | #55 | S2's dual-lock-holder refusal has never been run against a real Docker bind mount | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| 264 | #264 | Eviction can delete a clone holding unpushed commits on a branch that isn't checked out | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 265 | #265 | A clone can get stuck "needs attention" with nothing able to clear it | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 266 | #266 | Parking an operation never notifies anyone | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 267 | #267 | A resumed operation is marked done without re-checking its outcome | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
@@ -77,15 +76,14 @@
 | 290 | #290 | A repository can silently clone without its credential when that credential fails to resolve | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 291 | #291 | Revoking an OAuth token can grow the audit trail without real authorization, and misattributes it | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 292 | #292 | There's no record of which operator approved a given MCP access grant | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
+| 301 | #301 | Add a doc-citation checker to CI | — | `082d1df8f15bae3125e78e06155fe1c59fe3cafc` |
 | milestone/4 | #49 | Terminal-state detection never reaches the notifier on the ordinary dispatch or recovery paths | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/6 | #61 | syncBase inlines rev-parse/is-ancestor plumbing that composites.ts keeps as private helpers | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/6 | #65 | `sendJson`/`readJsonBody` are independently reimplemented in six surface files | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/4 | #67 | The route-to-capability mapping for the HTTP bearer surface is half-built | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
-| milestone/3 | #76 | Content drops need a fixed two-phase target protocol | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #77 | Carry the watcher push SHA through auto-merge and reconciliation | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #81 | Audit and notify every content-drop watcher failure | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #82 | Finalize a merged watcher PR even when reconciliation fails | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
-| milestone/3 | #83 | Isolate untrusted drop files from protected watcher state | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #84 | Make declaration orphaning and removal aware of content-drop state | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #85 | Start the watcher healthy and idle when no declaration currently has content drops | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #87 | Build an evidence-grade test harness for the content-drop watcher | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
