@@ -1,6 +1,6 @@
 import type { ModuleErrorBase } from '../shared/result-kind.ts';
 import type { ResultKind } from '../shared/result-kind.ts';
-import type { WatchedFileName } from '../shared/brands.ts';
+import type { WatchedFileName, RepoRelativePath } from '../shared/brands.ts';
 
 /** `20-contract.md` § Watcher. */
 export type WatcherError = ModuleErrorBase &
@@ -10,6 +10,14 @@ export type WatcherError = ModuleErrorBase &
     | { readonly code: 'claim-failed'; readonly file: WatchedFileName }
     | { readonly code: 'step-failed'; readonly step: string; readonly result: ResultKind; readonly reason: string }
     | { readonly code: 'interrupted-claim'; readonly file: WatchedFileName }
+    | {
+        readonly code: 'apply-paths-mismatch';
+        readonly observation: 'after-apply' | 'after-stage';
+        readonly declared: readonly RepoRelativePath[];
+        readonly observed: readonly RepoRelativePath[];
+        readonly unstaged: readonly RepoRelativePath[];
+        readonly permitted: readonly RepoRelativePath[];
+      }
   );
 
 /**
@@ -35,6 +43,7 @@ function watcherErrorResultKind(variant: WatcherErrorVariant): ResultKind {
       return variant.result;
     case 'claim-failed':
     case 'interrupted-claim':
+    case 'apply-paths-mismatch':
       return 'infrastructure';
     case 'not-permitted':
       return 'authorization';

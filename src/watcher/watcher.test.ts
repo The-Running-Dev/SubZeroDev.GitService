@@ -60,7 +60,11 @@ function stubDeclarations(active: { current: readonly Declaration[] }): Pick<Dec
  * `calls` (when given) counts invocations, for tests proving the
  * needs-attention short-circuit never reaches `isClean` at all.
  */
-function stubCloneStore(state: { current: CloneState; clean?: boolean; cleanError?: boolean }, calls?: { isClean: number }): Pick<CloneStore, 'describe' | 'isClean'> {
+function stubCloneStore(
+  state: { current: CloneState; clean?: boolean; cleanError?: boolean },
+  calls?: { isClean: number },
+  attentionLog?: { readonly declarationId: unknown; readonly reason: string }[],
+): Pick<CloneStore, 'describe' | 'isClean' | 'markAttention'> {
   return {
     async describe(declarationId) {
       const clone: Clone = { declarationId, generation: 1 as never, state: state.current, path: 'unused' as never, sizeBytes: 0, lastOperationAt: null, observedRemote: null, attentionReason: null };
@@ -75,6 +79,10 @@ function stubCloneStore(state: { current: CloneState; clean?: boolean; cleanErro
       return state.clean === false
         ? { ok: true, value: { clean: false, blockers: [{ kind: 'modified', count: 1 }] } }
         : { ok: true, value: { clean: true } };
+    },
+    async markAttention(declarationId, reason) {
+      attentionLog?.push({ declarationId, reason });
+      return { ok: true, value: undefined };
     },
   };
 }
@@ -702,6 +710,124 @@ test('#78 — a clean-tree check that fails to observe (isClean returns an error
     assert.equal(reports[0]!.skipped, 'clone-not-clean');
     assert.equal(existsSync(path.join(root, 'post.md')), true, 'the file stays in the inbox');
     assert.equal(dispatchLog.length, 0, 'a failure to observe cleanliness makes no dispatch, git, or host call either');
+  });
+});
+
+test('#76 W01.15 — a post-apply observation that leaves the declared set parks the clone and stops before git_stage', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+
+    const dispatchLog: DispatchRequest[] = [];
+    const attentionLog: { readonly declarationId: unknown; readonly reason: string }[] = [];
+    const handlers: Record<string, (req: DispatchRequest) => ToolResult<never>> = {
+      plan_tool: () => success('planned', PLAN_DATA, diag()) as unknown as ToolResult<never>,
+      prepare_branch: () => success('prepared', {}, diag()) as unknown as ToolResult<never>,
+      apply_tool: () => success('applied', APPLY_DATA, diag()) as unknown as ToolResult<never>,
+      repo_status: () => repoStatus(true, [{ path: 'content/rogue.md', staged: false }]),
+      git_stage: () => {
+        throw new Error('git_stage dispatched after a post-apply mismatch was supposed to stop the sequence');
+      },
+    };
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      cloneStore: stubCloneStore({ current: 'ready' }, undefined, attentionLog),
+      dispatch: scriptedDispatch(dispatchLog, handlers),
+    });
+    const auditLog: AuditAppendInput[] = [];
+    const reports = await createWatcher({ ...deps, audit: stubAudit(auditLog) }).tick();
+
+    assert.equal(reports[0]!.outcome!.kind, 'rejected');
+    if (reports[0]!.outcome!.kind === 'rejected') {
+      assert.equal(reports[0]!.outcome!.step, 'repo_status_after_apply');
+      assert.equal(reports[0]!.outcome!.result, 'infrastructure');
+      assert.match(reports[0]!.outcome!.reason, /after-apply/);
+      assert.match(reports[0]!.outcome!.reason, /content\/rogue\.md/);
+    }
+
+    assert.equal(attentionLog.length, 1, 'a post-apply mismatch marks the clone needs-attention');
+    assert.equal(attentionLog[0]!.declarationId, 'repo-a');
+    assert.match(attentionLog[0]!.reason, /declared/);
+    assert.match(attentionLog[0]!.reason, /observed/);
+    assert.match(attentionLog[0]!.reason, /permitted/);
+
+    const failedDir = path.join(root, 'failed');
+    const failedFiles = readdirSync(failedDir);
+    const errorFile = failedFiles.find((name) => name.endsWith('.error.txt'));
+    assert.ok(errorFile, 'a sibling error file is written to failed/');
+    const errorText = readFileSync(path.join(failedDir, errorFile!), 'utf8');
+    assert.match(errorText, /declared/);
+    assert.match(errorText, /observed/);
+    assert.match(errorText, /unstaged/);
+    assert.match(errorText, /permitted/);
+  });
+});
+
+test('#76 W01.15 — a post-stage observation reporting an unstaged path parks the clone and stops before git_commit', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+
+    const dispatchLog: DispatchRequest[] = [];
+    const attentionLog: { readonly declarationId: unknown; readonly reason: string }[] = [];
+    let repoStatusCalls = 0;
+    const handlers: Record<string, (req: DispatchRequest) => ToolResult<never>> = {
+      plan_tool: () => success('planned', PLAN_DATA, diag()) as unknown as ToolResult<never>,
+      prepare_branch: () => success('prepared', {}, diag()) as unknown as ToolResult<never>,
+      apply_tool: () => success('applied', APPLY_DATA, diag()) as unknown as ToolResult<never>,
+      repo_status: () => {
+        repoStatusCalls += 1;
+        return repoStatusCalls === 1
+          ? repoStatus(true, [{ path: 'content/post.md', staged: false }])
+          : repoStatus(true, [{ path: 'content/post.md', staged: false }]);
+      },
+      git_stage: () => success('staged', { staged: ['content/post.md'] }, diag()) as unknown as ToolResult<never>,
+      git_commit: () => {
+        throw new Error('git_commit dispatched after a post-stage mismatch was supposed to stop the sequence');
+      },
+    };
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      cloneStore: stubCloneStore({ current: 'ready' }, undefined, attentionLog),
+      dispatch: scriptedDispatch(dispatchLog, handlers),
+    });
+    const reports = await createWatcher(deps).tick();
+
+    assert.equal(reports[0]!.outcome!.kind, 'rejected');
+    if (reports[0]!.outcome!.kind === 'rejected') {
+      assert.equal(reports[0]!.outcome!.step, 'repo_status_after_stage');
+      assert.match(reports[0]!.outcome!.reason, /after-stage/);
+    }
+    assert.equal(attentionLog.length, 1, 'a post-stage mismatch marks the clone needs-attention');
+    assert.match(attentionLog[0]!.reason, /unstaged.*content\/post\.md/s);
+  });
+});
+
+test('#76 W01.16 — a candidate that is not readable as strict UTF-8 is rejected before any dispatch, Git, or host call', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    // 0xff is not a valid UTF-8 lead byte in any sequence.
+    writeFileSync(path.join(root, 'post.md'), Buffer.from([0xff, 0xfe, 0x00, 0x01]));
+
+    const dispatchLog: DispatchRequest[] = [];
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch(dispatchLog, {}),
+    });
+    const reports = await createWatcher(deps).tick();
+
+    assert.equal(dispatchLog.length, 0, 'malformed UTF-8 makes no dispatch, Git, or host call (W01.16)');
+    assert.equal(reports[0]!.outcome!.kind, 'rejected');
+    if (reports[0]!.outcome!.kind === 'rejected') {
+      assert.equal(reports[0]!.outcome!.step, 'read');
+      assert.equal(reports[0]!.outcome!.result, 'validation');
+    }
+    assert.equal(existsSync(path.join(root, 'post.md')), false, 'the unreadable candidate is moved out of the inbox');
+    const failedDir = path.join(root, 'failed');
+    assert.equal(readdirSync(failedDir).some((name) => !name.endsWith('.error.txt')), true, 'the unreadable file itself lands in failed/');
   });
 });
 
