@@ -578,6 +578,36 @@ file's terminal path, and the tree it left dirty still fails `isClean`, so no ti
 way. An observation that cannot be *read* is not a mismatch: it stays `step-failed`, because nothing
 has shown the consumer at fault.
 
+**The three state directories are the watcher's, but they sit inside the untrusted inbox — D18.**
+`processing/`, `processed/` and `failed/` are names inside the bind mount, so whatever writes the
+inbox can put an entry at any of them before the watcher does, or swap one out afterwards. A state
+directory is **tampered** when an entry exists at its name and a link-preserving stat does not report
+a directory: a symlink, a reparse point, a plain file. An absent entry is not tampered; the watcher
+creates it, owner-only on POSIX. An existing real directory is accepted as found, mode and ownership
+unchecked, because the property defended is that nothing is read, written, moved or deleted *through a
+redirection* — the inbox's writer can already write the inbox root, which is where it delivers from,
+so narrowing what it can write inside a real subdirectory buys nothing. The pending pull-request
+list's directory is created owner-only as well; it is on the named volume, not the inbox, so it has no
+untrusted writer and D18 does not reach it.
+
+A tampered state directory is **refused, never followed and never thrown**: every site that would use
+one reports the refusal as data and carries on with every other declaration. Where each site refuses
+and what it leaves behind is the table under *L2 — watcher*.
+
+A tamper halting delivery is paged through the outbox, not the audit trail. Two refusals have no
+watched file to attach an audit record to — the pre-claim gate and a tampered `processing/` at
+startup — so they enqueue the `TerminalState` variant below at `attention` and write no audit record,
+as D17's two skips write none: no action was taken to record. A refusal that does involve a file keeps
+that file's ordinary `file-watcher` audit record and `file-watcher-failed` notification. Scaffold,
+until the slice implementing D18 adds it to `TerminalState` in `src/journal/types.ts`:
+
+```ts
+  | { readonly kind: 'watcher-state-directory-tampered'; readonly directory: 'processing' | 'processed' | 'failed' }
+```
+
+The union is written out rather than derived from `WatchedFileStage` because `src/journal/` is L1 and
+may not import the watcher.
+
 ### Instance lease
 
 Declared in `src/lifecycle/lease.ts`.
@@ -1937,6 +1967,38 @@ one is a mark to clear, the other is a tree to tidy. Each name in that sequence 
 commit and pull-request fields come only from the validated plan result; the watcher does not derive
 consumer naming conventions of its own.
 
+**A third gate condition, checked first: none of the declaration's three state directories is
+tampered (D18).** It runs before D17's two, so a dirty or parked clone cannot mask a tamper for as long
+as it stays dirty or parked, and it runs whether or not the inbox holds a candidate. A tick it refuses
+is reported `state-directory-tampered` in `WatchTickReport.skipped`, which gains that value — scaffold,
+until the implementing slice adds it in `src/watcher/types.ts`:
+
+```ts
+readonly skipped: 'clone-not-clean' | 'clone-needs-attention' | 'state-directory-tampered' | null;
+```
+
+The gate is what makes the terminal-move refusal below rare rather than routine. Without it, a
+tampered `processed/` would let every tick claim a file, run the whole protocol, open a pull request,
+and only then find nowhere to put the file — one unrecorded publication per poll interval.
+
+**Refusal by site.** Each row is a refusal of a tampered state directory. None throws, none follows the
+entry, and none stops another declaration's work.
+
+| Site | Refused directory | Left behind | Reported |
+|---|---|---|---|
+| Pre-claim gate, every `tick` | any of the three | inbox untouched; no claim, dispatch, Git or host call | `skipped: 'state-directory-tampered'`; notification per *latch* below |
+| Claim, `processing/` swapped after the gate passed | `processing/` | file still in the inbox | as the gate row — it is the same condition caught late, not `claim-failed`, whose meaning is a rename that failed |
+| Terminal move after the protocol ran | `processed/` or `failed/` | file in `processing/`, for D8 on a later start; a pull request the protocol opened is already in the pending list (**D19**) | the file's `file-watcher` audit record with the protocol's own outcome, unchanged; `file-watcher-failed` at `attention` naming the refused directory; the tick returns its report normally |
+| `recoverInterruptedClaims`, `processing/` | `processing/` | nothing read through it | notification per *latch*; recovery continues with other declarations and `start` still succeeds |
+| `recoverInterruptedClaims`, `failed/` | `failed/` | file stays in `processing/`, offered again on the next start | the file's usual `interrupted-claim` audit record; `file-watcher-failed` at `attention` naming the refused directory |
+| `runRetention` | `processed/` | nothing deleted through it | a `RetentionReport.skipped` entry naming the declaration |
+
+**The latch.** `watcher-state-directory-tampered` is enqueued at most once per declaration per process:
+on the first gate or recovery refusal for that declaration, and again only after a tick has found all
+three directories sound and re-armed it. Every refusing tick still reports its skip; the latch governs
+paging only. It is in-memory by design — a restart re-pages a tamper still present, which is the
+moment an operator would want to hear about it again.
+
 ### L3 — module adapter
 
 Declared in `src/module-adapter/module-adapter.ts`.
@@ -2701,6 +2763,7 @@ type WatcherError = ModuleErrorBase & (
       readonly unstaged: readonly RepoRelativePath[];
       readonly permitted: readonly RepoRelativePath[];
     }
+  | { readonly code: 'state-directory-tampered'; readonly directory: 'processing' | 'processed' | 'failed' }
 );
 ```
 
@@ -2712,6 +2775,7 @@ type WatcherError = ModuleErrorBase & (
 | `step-failed` | Any dispatched step up to and including `pr_open` returned a non-success envelope | no | Move to `failed/` with a sibling error file naming the step and its result. Never delete. A failed `pr_enable_auto_merge` after `pr_open` succeeded is not this variant: the file is delivered and moves to `processed/`, and the failure is audited and notified |
 | `interrupted-claim` | A file sits in `processing/` at startup | **never reprocessed** | Move to `failed/` with an explanation — it may already have an open pull request |
 | `apply-paths-mismatch` | A readable post-apply observation's changed set differs from `declared` or leaves `permitted`, or a readable post-stage observation differs from `declared` or reports any entry in `unstaged` | no | `infrastructure`: the consumer's apply handler broke the protocol. Mark the clone needs-attention, move the file to `failed/` with a sibling error file carrying all four sets, and dispatch nothing further. The audit outcome is `rejected`, naming the observation as its step |
+| `state-directory-tampered` | A site in D18's refusal table finds its state directory tampered: an entry at the name that a link-preserving stat does not report as a directory | not by the watcher; the next tick re-checks, and it clears once an operator replaces the entry with a real directory or removes it | Refuse exactly as that table's row says — never follow the entry, never throw. It is never a `claim-failed` and never a `step-failed`: nothing was attempted that could fail |
 
 There is no caller to return an envelope to. Every outcome above is audited, and every failure
 notifies at `attention`.
@@ -3016,7 +3080,7 @@ responsible for maintaining it.
 | D3 | `RepositoryConfig` is read from the working tree on every operation that needs it. Nothing caches it. | Git operations |
 | D4 | Store retention ends in an incremental vacuum, and the maintenance pass reports bytes returned to the filesystem rather than rows deleted. | Structured store |
 | D5 | Every retention window that prunes automatically has exactly one owning module, and the lifecycle module calls `runRetention` on each with no mutation lock held. | Lifecycle |
-| D6 | During delivery and interrupted-claim recovery, a watched file is never deleted; every terminal path moves it to `processed/` or `failed/`. `Watcher.runRetention` may delete only files in `processed/` older than `processedFileDays`; it never deletes `failed/` files automatically. | Watcher |
+| D6 | During delivery and interrupted-claim recovery, a watched file is never deleted; every terminal path moves it to `processed/` or `failed/`, except where D18 refuses the destination, which leaves it in `processing/` for D8 on a later start. `Watcher.runRetention` may delete only files in `processed/` older than `processedFileDays`; it never deletes `failed/` files automatically. | Watcher |
 | D7 | A candidate watched file is stat-ed link-preservingly, so a symlink is never a candidate. | Watcher |
 | D8 | A file found in `processing/` at startup is moved to `failed/` and never reprocessed. | Watcher |
 | D9 | The pre-migration copy is taken before any migration runs, and the three most recent are retained. | Structured store |
@@ -3028,6 +3092,8 @@ responsible for maintaining it.
 | D15 | Every watcher tick resolves the current active declarations. Zero active file-watcher declarations is healthy and idle; adding or amending one makes it eligible on the next tick without a watcher restart. | Watcher |
 | D16 | `CloneStore.isClean` answers from an observation of Git made at the moment of the call, never from `Clone.state` or any other stored value. An observation that fails returns a `CloneStoreError`; there is no path on which a failure to look yields `clean: true`. | Clone store |
 | D17 | A watcher tick claims no file and makes no dispatch, Git or host call for a declaration unless its clone carries no attention mark **and** `isClean` returned `clean: true` on that tick. A tick refused by either leaves the inbox exactly as it found it. | Watcher |
+| D18 | No watcher code path reads, writes, renames into, lists or deletes through a state directory — `processing/`, `processed/`, `failed/` — that is tampered: present, and not reported as a directory by a link-preserving stat. A tick claims no file and makes no dispatch, Git or host call for a declaration while any of its three is tampered. A refusal is returned as data at every site and never thrown, and never stops work for another declaration or fails `start`. | Watcher |
+| D19 | A pull request the watcher opened is in its declaration's pending pull-request list before that file's terminal move is attempted. | Watcher |
 
 ---
 
