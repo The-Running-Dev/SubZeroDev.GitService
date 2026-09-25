@@ -2366,6 +2366,14 @@ Reversibility: cheap until the watcher slice implementing #76 lands; the mark's 
 
 ---
 
+### 2026-09-25 — Watcher state-directory tamper is refused uniformly, gated before claim, and paged once (D18, D19)
+Context: PR #298 (issue #83) shipped a tamper refusal for `processing/`, `processed/` and `failed/` citing `20-contract.md § L2 — watcher, W08.3`/`W08.4`, neither of which exists; `/reconcile` parked it in § *Open* on 2026-09-20 as a missing invariant plus an unexplained skip/throw asymmetry. Reading the five sites showed the asymmetry was not a trade-off anyone made but a set of accidents. `claim()`'s refusal surfaced as `claim-failed` ("the claim into processing/ failed"), which is false, and re-notified every tick. Recovery skipped silently. `moveToProcessed` and `moveToFailed` threw a bare `Error` — against the contract's "nothing throws as a control-flow mechanism" — which escaped the tick to a console line, skipped the file's audit record, and skipped writing the pending pull-request record for a pull request the protocol had already opened, so the watcher never reconciled it. A tampered `processed/` left `claim` unaffected, so every later tick would open a pull request and strand its file. A tampered `failed/` made `recoverInterruptedClaims` throw out of `start`. Accepted S50.1 already requires a tamper refusal at a terminal move to be audited and notified and never to escape the tick unrecorded; it left the behaviour itself to `/contract`.
+Chosen: One refusal applied at every site, stated as D18 with a per-site table under *L2 — watcher*: a tampered state directory is never followed and never thrown, the refusal is data, and it never stops another declaration or fails `start`. A pre-claim gate over all three directories, checked before D17's two so a dirty clone cannot mask it, reported as a new `WatchTickReport.skipped` value `state-directory-tampered`. A new `WatcherError` variant of the same name. D19: a watcher-opened pull request enters the pending list before its file's terminal move is attempted, so a refused move cannot lose it. A refused terminal move leaves the file in `processing/` for D8, amending D6's "every terminal path moves it" accordingly. The two file-less refusals (the gate, and a tampered `processing/` at startup) enqueue a new `TerminalState` variant `watcher-state-directory-tampered` at `attention` with no audit record, at most once per declaration per process through an in-memory latch re-armed when a tick finds all three sound; file-level refusals keep the file's existing `file-watcher` audit record and `file-watcher-failed` notification. The directory mode (owner-only on POSIX) is required only where the watcher creates the directory; an existing real directory is accepted as found. The `W08.3`/`W08.4` citations in `src/watcher/` are to be repointed to D18 by the implementing slice.
+Rejected: **Ratify the as-built asymmetry** with a rationale (nothing irreversible before claim, side effects after) — cheapest and no code change, but it contradicts S50.1 and the no-throw rule and keeps the lost pull request and the stranded-file loop. **Typed refusal without the pre-claim gate** — fixes the escapes with a smaller surface, and still lets a tampered `processed/` publish one pull request per poll interval until someone reads the notifications. **Report the gate skip only, like D17** — consistent, and a security-relevant tamper that halts delivery pages nobody. **Notify every tick** — an operator paged every 15 s, the routine noise that stops a signal being read. **Audit the file-less refusals under a new `AuditRecordBody` form** — puts the refusal in the hash chain, and changes the audit record format for a case the durable outbox already records, as the 2026-09-22 entry declined for a comparable case; revisit if an operator needs to query tamper refusals from the trail. **Check and correct an existing real directory's mode or ownership** — the inbox's writer already writes the inbox root, so narrowing what it can write inside a real subdirectory buys nothing, and correcting modes on a bind mount from a Windows host is unreliable.
+Reversibility: cheap until the implementing slice lands; the new `skipped` value and `TerminalState` variant are observable to operators and webhook consumers from then on.
+
+---
+
 ## Open
 <Things noticed mid-slice that were deliberately not acted on. Move them out or delete them; do not let this section rot.>
 
@@ -2409,22 +2417,5 @@ approver). The 31st bullet — "`orphan` reports a failed journal read as nothin
 [#248](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/248), which the code still
 regressed; reopened 2026-09-17 rather than filed as a new issue.
 
-Added 2026-09-20 by `/reconcile` at `7834349` — PR #298 (87116bb, issue #83) shipped watcher
-state-directory tamper refusal citing `20-contract.md § L2 — watcher, W08.3`/`W08.4`
-(`isTamperedStateDir()` in `src/watcher/watcher.ts`, five guard sites, `PROTECTED_DIR_MODE = 0o700`
-on every `mkdirSync`, and `src/watcher/pending-pull-requests.ts:51`). No `W08` section exists in any
-design document — the highest existing invariant is D17, and the contract's D6/D7/D8 cover the
-candidate *file*'s symlink refusal, not the state *directory*'s. The five call sites ship three
-different refusal behaviours (silent skip in `claim()` and `recoverInterruptedClaims()`; a reported
-skip pushed to `skipped[]` in `runRetention()`; a throw in `moveToFailed()`/`moveToProcessed()`),
-none stated anywhere. Confirmed as a decision, not a transcription error — a new D18 invariant plus
-a refusal-behaviour table — so left here for `/contract` (opus/high) rather than minted by this
-reconciliation. Carry forward: the symlink guard paths could not be exercised on this Windows host
-(no symlink privilege); the plain-file variants do run.
-
-The skip/throw asymmetry across those five sites — two silent skips, one reported skip, two
-throws — is itself undocumented as a choice: no `90-decisions.md` entry states why availability
-(skip and continue) was traded for loudness (throw) at different call sites. `/contract` records
-that rationale as its own decision-log entry in the same session that mints D18, rather than
-leaving the trade-off implicit in the invariant's prose — the rationale and the invariant are one
-artifact and belong together.
+Emptied again 2026-09-25 by `/contract` — the 2026-09-20 W08/D18 item (watcher state-directory
+tamper refusal and its skip/throw asymmetry) is now decided and recorded above as D18 and D19.
