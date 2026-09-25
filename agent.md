@@ -33,6 +33,12 @@ and preferences belong in `AGENTS.md`.
   nine-row table survived two full review passes; the same defect occurred three times in
   one project, and four documents once carried four different counts of the same thing, all
   written from memory. Re-count; never increment.
+- **Checking a table for *missing* rows has not checked the table.** A row also goes stale by
+  *narrowing*: the class it names widens, the row does not, and a pass hunting absent rows
+  sees nothing wrong. Three rows of `design/10-design.md` § *Failure modes* survived a pass
+  that added eight missing ones to that same table — one of them naming a defect shape the
+  checker had never had — and cost a whole further reconciliation, re-deriving every row
+  against the script, to find.
 - **When a type or public behaviour changes, audit everything downstream of it** — the prose
   description, every example, the projection or serialised form, the generated
   representation, command help, the test list, and the troubleshooting page. The pair of
