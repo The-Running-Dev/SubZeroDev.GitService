@@ -2374,6 +2374,14 @@ Reversibility: cheap until the implementing slice lands; the new `skipped` value
 
 ---
 
+### 2026-09-25 — `/sync` upgrade to kit v2026.09.24; one harvested lesson added to `agent.md`
+Context: Routine `/sync` run. The machine-wide kit checkout advanced v2026.09.20 → v2026.09.24 (12 commits — `Test-DesignState.ps1` module-prefixed sort fix, PR-branch checkout behaviour, new `/autoupdate`/`/autoupdate-env` skills, among others); none of those commits touch this repository's own files. Reconciliation against `INSTALL.md` found every per-repo artifact (`.git/hooks/commit-msg`, `codex/PROFILES.md`, the `AGENTS.md`/`CLAUDE.md` pointer arrangement, `.github/ISSUE_TEMPLATE/*`, `design/`) identical or already correctly diverged in the target's favour, except `agent.md`, where the kit's seed carries lessons this repo's copy does not. Per `INSTALL.md` phase 2, an already-maintained `agent.md` wins wholesale; only a lesson that is both demonstrably absent and demonstrably applicable is offered back, one at a time. One qualified: "checking a table for missing rows has not checked the table" (staleness by narrowing, not just by omission) — this repo's `design/10-design.md` § *Failure modes* is exactly that kind of table. The kit's own worked example cited a defect shape and date that do not appear anywhere in this repo's history, so that illustration was dropped rather than kept as if it happened here; the general principle was kept.
+Chosen: Add the one lesson to `agent.md` § *Drift*, generalised (no borrowed incident details). Update `.claude/kit.json` to the new kit commit/version and today's date, and drop its legacy `syncedCommit` field — not part of the current `INSTALL.md`/`sync` spec, which now write `source`, `version`, `branch`, `commit`, `installed` only.
+Rejected: **Merge the full kit/agent.md diff** — the rejected rule the reconciliation procedure exists to prevent; the target's own lessons (OS-resource-lifetime lease bug, Windows temp-cleanup `EPERM`, `void somethingAsync()`, backgrounding servers from Git Bash) are this repo's earned cost and the kit's competing lessons on the same topics are generic restatements, not improvements. **Skip the lesson entirely** — defensible, but the table-narrowing failure mode is a real, cheap-to-state risk against a table this repo actually maintains, and declining it costs nothing to reverse later if it turns out not to bite. **Keep `syncedCommit` in `kit.json`** — no current command reads or writes it; keeping a field nothing maintains is the exact two-copies-diverge risk `AGENTS.shared.md` § *Single ownership* warns about.
+Reversibility: cheap — both are single-file edits with no downstream reference.
+
+---
+
 ## Open
 <Things noticed mid-slice that were deliberately not acted on. Move them out or delete them; do not let this section rot.>
 
