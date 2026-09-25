@@ -1,6 +1,6 @@
 # Slices — SubZeroDev.Git
 
-Derived from `10-design.md` and `20-contract.md`. Thirty-nine vertical slices. Each one ends
+Derived from `10-design.md` and `20-contract.md`. Fifty-two vertical slices. Each one ends
 runnable: it goes from an entry point to persistence and leaves nothing half-wired.
 
 ## How this document is kept
@@ -258,6 +258,33 @@ without it, and because it is base-runtime work sitting under a slice that touch
 All six have since landed, so this stands as the record of why they ran in that order, not as a
 claim about what runs next.
 
+**S40 to S52 were appended on 2026-09-25 from the open-issue backlog, and they are ordered by what
+the gap costs while it stays open, not by what they build.** Every one of them closes a place where
+the tree falls short of a contract or design statement that stands as written — direction already
+decided, each confirmed against the code at `982b738` before it was sliced. Each slice names the
+issues it closes, and its criteria carry those issues' `Done when` rather than restating them loosely.
+The issues that are decisions rather than defects (#54, #135, #136, #140, #216, #276, #287, #288,
+#292, and the W08/D18 item in `90-decisions.md` § *Open*), the kit-tooling issues, and the #65
+helper refactor are deliberately not sliced: each belongs to `/design`, `/contract`, the kit, or
+`/fix`, and a slice written against an undecided contract would be deciding it.
+
+**S40 runs first because it is the one gap exploitable today.** A read-only operator token can resolve
+a parked operation and clear a failing credential, and two routes that need no authentication at all
+can grow the disk and the audit chain without bound. **S41 and S42 follow because they are what the
+operator's attention depends on**: a terminal outcome that never notifies, a park that never notifies,
+and a clone flagged `needs-attention` with no record able to clear it each mean the one person the
+system escalates to is never told, or is told and cannot act. **S43 is boot**, where a lost takeover
+record and a race between two steps each silently weaken a guarantee the brief rests on. **S44 to
+S47 are integrity and truthfulness under failure** — what a crash, a busy lock, an unresolvable
+credential or a hung module does — ordered by blast radius: a clone adopted half-written, then a
+branch force-deleted with commits nobody merged, then error kinds that name the wrong cause, then
+timeouts nothing enforces. **S48 is presentation**: every fact it shows already exists server-side.
+
+**The watcher runs last, as S49 to S52, and in dependency order.** S49 is contract-gated (§ *Contract
+gates*, below) and carries the SHA the rest of the watcher work names in its notices. S50 finishes the
+audit and notification path over it, S51 fixes a first-use gap on the same tick protocol, and S52 is
+the evidence harness that can only prove the corrected outcomes once all three have landed.
+
 ## Contract gates
 
 Items in `20-contract.md` § Unresolved block specific slices. Each is a contract amendment,
@@ -265,7 +292,15 @@ committed separately and before the handler work depending on it. **No slice may
 signature absent from the contract** — where a slice needs tools, amending the contract is its
 first acceptance criterion, not an implementation detail.
 
-**No gate is live.** `20-contract.md` § Unresolved records every U-item from U1 to U10 resolved, the
+**One gate is live: S49, raised by this document on 2026-09-25.** The watcher has to pin an auto-merge
+to the commit it pushed (#77), and `pr_enable_auto_merge`'s input carries no expected head today. Adding
+one changes a registered MCP tool's public input, so it is a contract amendment and not an
+implementation detail. `S49.1` is that amendment, committed by `/contract` (opus, high) separately
+and before the rest of S49. `/slice` refuses S49 until `S49.1` is met. The amendment decides the
+field's name, whether it is optional for callers other than the watcher, and what the persisted
+pending record carries. This section only names the gate.
+
+**No U-item is live.** `20-contract.md` § Unresolved records every U-item from U1 to U10 resolved, the
 last two on 2026-08-19 by S18 and S19; that section is the authority for which slice closed which
 gate and on what date, and it is not restated here. The one gate this document raised itself — the
 **consumer-extension seam for tools**, which the contract fixed for the console half and not the
@@ -316,8 +351,358 @@ carries the reasoning.
 
 ## Outstanding
 
-None. Every one of the thirty-nine slices is landed, and each body was retired to the index
-below as its issue closed.
+Thirteen slices, S40 to S52, appended 2026-09-25. The first thirty-nine are landed and indexed below.
+
+## S40 — Only the operator's own console can clear what needs attention
+
+Delivers: An operator can hand a script a read-only token without that script being able to resolve a
+parked operation or clear a failing credential. Someone with no credentials at all can no longer fill
+the service's disk with client registrations, or its audit trail with revocations that revoked
+nothing.
+Touches: `src/surfaces/http-server.ts` (the two mutating attention routes), `src/surfaces/mcp-routes.ts`
+(client registration, token revocation), `src/authorization/authorization.ts` (`registerClient`,
+`revokeBearerToken`), `design/20-contract.md` (**A11**'s status note).
+Depends on: none
+Closes: #67, #275, #291
+Acceptance:
+  - S40.1 `POST /parked-operations/{operationId}/resolve` and
+    `POST /failing-credentials/{credentialRef}/{declarationId}/clear` refuse a bearer credential. This
+    holds for an operator-api token with every scope and for one whose only scope is `read`. Each
+    refusal changes nothing: the parked entry stays parked and the failing mark stays set.
+  - S40.2 Both routes accept an authenticated cookie session with a valid double-submit CSRF token, and
+    refuse the same session without one. The CSRF check runs on every request to these routes, not only
+    on some credential paths.
+  - S40.3 `GET /health` and `GET /parked-operations` still accept both a bearer credential holding
+    `read` and a cookie session, exactly as before.
+  - S40.4 **A11**'s "specified, not yet held" note in `design/20-contract.md` is removed in the same
+    change, along with the code comment in `http-server.ts` that defers the question to U4.
+  - S40.5 `POST /oauth/register` refuses a registration once the stored client count reaches a
+    deployment-fixed cap. The cap is declared beside the existing pending-authorization cap, and the
+    refusal stores nothing. A test registers up to the cap and asserts the next one is refused.
+  - S40.6 `POST /oauth/revoke` answers 200 for a known token, for an already-revoked token and for a
+    token that never existed.
+  - S40.7 Only a revocation that changed a stored row appends an audit record. That record's actor is
+    `kind: 'mcp'` with the revoked token's own client id and grant id, never an operator subject. A test
+    revokes a token that does not exist and asserts the audit chain length is unchanged.
+Out of scope: TOTP re-enrolment enforcement (#276) and the approving operator on a grant (#292). Both
+are decision-gated and wait for `/contract`. So is any change to which capabilities § *Scopes* makes
+console-only.
+
+## S41 — Terminal outcomes and parked work reach the operator
+
+Delivers: An operator is told when a pull request hits a merge conflict, when a required check fails,
+when a wait times out, and when the service parks an operation for them. Today each of these happens
+silently, and the operator only finds it by going to look.
+Touches: `src/host/host-operations.ts`, `src/dispatch/dispatch-pipeline.ts`,
+`src/composition-root/compose.ts` (the terminal-state sink), `src/lifecycle/recovery.ts`,
+`src/journal/`, `design/20-contract.md` (§ *Error semantics › Host adapter*, **R11**),
+`design/10-design.md` (control-flow step 11, § *Failure modes*, § *Module boundaries*).
+Depends on: none
+Closes: #49, #266, #272
+Acceptance:
+  - S41.1 A composition-root-owned sink keyed on `operationId` carries a `TerminalState` from the host
+    call that observed it to that operation's `Journal.settle`. `host-operations.ts` writes the sink on
+    `merge-conflict`, `required-check-failed` and `wait-timeout`. The pipeline reads and deletes the
+    entry immediately before `settle` and passes it in place of `null`.
+  - S41.2 Dispatching a host call that ends in each of those three conditions leaves exactly one outbox
+    row at `attention` naming that terminal kind. It is written in the same transaction as the settle.
+  - S41.3 After every settle, whether successful, failed or terminal, the sink holds no entry for that
+    `operationId` (**R11**). A host call that fails for any other reason writes nothing to the sink and
+    enqueues no terminal notification.
+  - S41.4 Every park path — recovery's park and the pipeline's timeout park — leaves exactly one outbox
+    row of kind `operation-parked` at `attention` for the parked `operationId`. A park whose journal
+    write fails leaves none.
+  - S41.5 A mutating call that times out has its audit record appended before the journal park, as on
+    every other park path. A test asserts the audit row exists for that `operationId` and was written
+    before the park.
+  - S41.6 In the same change, remove the four `design/` sites #49 names and **R11**'s "specified, not
+    yet held" note. The § *Module boundaries* Scheduler row states the edge that actually exists
+    afterwards.
+Out of scope: making `Journal.classify` terminal-aware. It stays terminal-blind by decision (#49,
+**R3**). Adding a field to `ToolResult` is `/design`'s. Recovery's other defects are S42's.
+
+## S42 — Recovery never strands a clone, and never waits for a caller
+
+Delivers: An operator whose service crashed mid-operation gets every interrupted operation either
+finished or parked where they can resolve it. That happens without anyone having to touch the affected
+repository first, and without a clone left flagged in a state nothing can clear.
+Touches: `src/lifecycle/recovery.ts`, `src/composition-root/compose.ts` (the post-boot sweep),
+`src/journal/journal.ts`, `design/20-contract.md` (§ *L1 — lifecycle*).
+Depends on: S41 (the park notification)
+Closes: #265, #267, #289
+Acceptance:
+  - S42.1 Recovery marks a clone `needs-attention` only after `journal.park` has succeeded. When the
+    park write fails, the clone stays `recovery-pending`, no attention mark is written, and the failure
+    is returned as `infrastructure`. A test injects the park failure and asserts all three.
+  - S42.2 When recovery's `unsettled()` read fails, the clone stays `recovery-pending` and the call
+    returns `infrastructure`. It is not marked `needs-attention`. A test injects the read failure and
+    asserts both.
+  - S42.3 Every clone recovery marks `needs-attention` has a parked journal entry that
+    `resolveParkedOperation` accepts. A test resolves one and asserts the clone leaves
+    `needs-attention`.
+  - S42.4 A resume step that dispatches successfully is followed by a re-classification of the entry. The
+    entry is settled only when that verdict is `completed`; any other verdict parks it. A test whose
+    resume succeeds but leaves the operation incomplete asserts it is parked, not settled.
+  - S42.5 Once boot reports ready, one background pass recovers every declaration left
+    `recovery-pending`. It recovers them one at a time, under the same lock rules first use follows. It
+    does not hold the process open (unref'd), and it runs once per boot.
+  - S42.6 A test races the sweep against an ordinary first use of the same declaration and asserts first
+    use wins: that declaration is recovered exactly once, by first use, and the sweep skips it.
+  - S42.7 The "specified, not yet held" note on `20-contract.md` § *L1 — lifecycle* is removed in the
+    same change.
+Out of scope: making the journal a required pipeline dependency (#216, a decision). Changing what a
+resume step is, or which operations have one.
+
+## S43 — Boot keeps its evidence, and its steps in order
+
+Delivers: An operator investigating an outage can trust that a lease takeover is on record even when
+the boot that took over then failed. They can also trust that every held job is re-checked against
+current authority on every boot, rather than some slipping through a race.
+Touches: `src/lifecycle/boot.ts`, `src/lifecycle/lease.ts`, `src/scheduler/scheduler.ts`.
+Depends on: none
+Closes: #273, #274
+Acceptance:
+  - S43.1 Suppose a boot took over the lease and then failed at a step before its takeover was audited,
+    including every pre-migration failure path. The next boot then audits a takeover whose previous
+    holder is the instance the failed boot took over from. A test drives each such failure path and
+    asserts the record.
+  - S43.2 A boot that took over nothing, and fails, leaves no lease file behind. An orderly release's
+    existing behaviour is unchanged.
+  - S43.3 Boot step 7's revalidation starts only after step 6 has finished writing every job it returns
+    to `pending`. A test holds step 6's journal read open and asserts that a job step 6 then returns to
+    `pending` is revalidated in the same boot.
+  - S43.4 The code comment claiming the two steps are independent is removed.
+Out of scope: the lease self-test's blind spot on non-locking filesystems (#135, a decision). Making the
+audit chain writable before migration.
+
+## S44 — A clone on disk is exactly what it claims to be
+
+Delivers: An operator can trust that a clone the service calls ready really is complete, was fetched
+with the credential its repository declares, and is only released when no generation of that
+repository still has work in it. A busy lock tells them to retry rather than reporting that something
+is broken.
+Touches: `src/clone/clone-store.ts`.
+Depends on: none
+Closes: #270, #282, #283, #290, #284 (item 2 only)
+Acceptance:
+  - S44.1 A credential that fails to resolve aborts a first clone and surfaces the credential error under
+    its existing result kind. This covers no resolver configured, a reference that is not permitted, and
+    a secret that is unavailable. No directory is left behind. Only an explicit `credentialRef: null`
+    clones anonymously.
+  - S44.2 Boot re-derivation and `ensure` both recognise a directory left by a crash mid-clone, and
+    remove it rather than adopting it as `ready`. A test plants such a directory, restarts, and asserts
+    the next `ensure` re-clones.
+  - S44.3 A lock refusal inside `ensure` returns `conflict`, not `store-failed` or `infrastructure`.
+  - S44.4 `isSafeToEvict` with `acrossAllGenerations: true` counts unsettled journal entries from every
+    generation of the declaration. With `false`, it counts only the stored row's generation. A test
+    with an unsettled entry on an earlier generation gets opposite answers for the two values.
+  - S44.5 No path returns `needs-attention` for a clone with no row and no directory.
+Out of scope: quarantining a corrupt tree instead of deleting it (#287, gated on `/design`), and
+generation high-water marks (#288, gated on `/contract`).
+
+## S45 — Composites keep what they did not merge
+
+Delivers: An operator whose pull request just merged keeps any local commits that never made it into
+the merge. A repository with an unreadable configuration is reported as a problem with that
+repository, not with the service. A credential the git host rejects is remembered as failing on every
+path.
+Touches: `src/composites/composites.ts`, `src/git/git-operations.ts`, `src/git/primitives.ts` (new),
+`src/exec/primitives.ts`, `src/host/host-operations.ts`.
+Depends on: none
+Closes: #61, #268, #271, #285
+Acceptance:
+  - S45.1 After a merge, the local branch is deleted only when its tip equals the merged pull request's
+    head commit, and never with a force flag. Otherwise the branch is kept, and the result reports that
+    no branch was deleted and why.
+  - S45.2 A test adds a local commit past the merged head and asserts the branch and commit survive.
+  - S45.3 Both composites return `precondition` with findings for an unparseable repository
+    configuration. The findings match what the direct git tools return for the same file.
+  - S45.4 An `auth-rejected` result from the host adapter calls `markFailing` for the credential, as the
+    git path does. A test asserts the mark is set after a host rejection.
+  - S45.5 `revParse`, `isAncestor` and `currentBranch` live in `src/git/primitives.ts`.
+    `composites.ts` and `git-operations.ts` call the shared versions and hold no private copies. The
+    existing normalisation holds: `null` on failure, and a boolean from the exit status.
+Out of scope: any rebase or force-delete path, which is blocked by the brief. Changing
+`reconcile_after_merge`'s public input.
+
+## S46 — Every error names what actually happened
+
+Delivers: An operator reading a failure sees the cause that actually occurred. That rules out a
+constraint violation labelled a duplicate, a killed child process labelled a spawn failure, or a store
+fault labelled a delivery failure. An orphan report either states what is still in flight or refuses,
+and never quietly says "nothing".
+Touches: `src/declarations/declarations.ts`, `src/exec/exec.ts`, `src/credentials/credentials.ts`,
+`src/credentials/declaration-credential.ts`, `src/notifier/notifier.ts`, `src/shared/diagnostics.ts`,
+`src/surfaces/mcp-routes.ts`, `src/shared/result-kind.ts`.
+Depends on: none
+Closes: #248, #269, #284 (items 1 and 3–7)
+Acceptance:
+  - S46.1 `declare` returns `already-exists` only when the id already exists. Any other constraint
+    violation returns `store-failed`.
+  - S46.2 A child process killed by a signal is not reported as `spawn-failed`.
+  - S46.3 An unreadable mark store or allowlist manifest is not reported as `reference-unreadable`.
+  - S46.4 A declaration credential outside the permitted hosts returns `host-not-permitted`, not an
+    untyped authorization error.
+  - S46.5 A notifier store failure is not reported as `delivery-failed`.
+  - S46.6 `durationMs` is measured on a monotonic clock, never by subtracting two wall-clock readings.
+  - S46.7 An MCP tool result sets `isError` true only for `upstream`, `timeout` and `infrastructure`.
+    It uses the existing `isError(kind)` helper, and a test covers every `ResultKind`.
+  - S46.8 `orphan` reads the declaration's unsettled journal entries before the state flip. A failed
+    read fails the orphan with `store-failed` and leaves the declaration `active`. A successful read's
+    operation ids appear in `retainedJournalEntries`.
+  - S46.9 Tests cover the orphan read three ways: an unsettled entry (its id is reported), a clean
+    journal (an empty list), and a failed read (a refusal, never an empty list). The code comment
+    claiming the clone store accepts the same ambiguity is removed.
+Out of scope: the `sendJson`/`readJsonBody` consolidation (#65, `/fix`). Adding error variants the
+contract does not already declare. If an item above needs one, stop for `/contract`.
+
+## S47 — Nothing waits forever, and a busy store is retried
+
+Delivers: A slow or hung module tool, or a stalled outbound HTTP response, is cut off at the limit it
+declared rather than tying up the service indefinitely. A moment of database contention is waited out
+instead of failing the caller outright.
+Touches: `src/dispatch/dispatch-pipeline.ts` (`buildContext`), `src/module-adapter/module-adapter.ts`,
+`src/http/http-adapter.ts`, and the ten store connections outside the lease: `src/audit/audit.ts`,
+`src/declarations/declarations.ts`, `src/credentials/credentials.ts`, `src/clone/clone-store.ts`,
+`src/authorization/authorization.ts`, `src/journal/journal.ts`, `src/notifier/notifier.ts`,
+`src/scheduler/scheduler.ts`, `src/store/structured-store.ts`,
+`src/operator-identity/operator-identity.ts`.
+Depends on: none
+Closes: #279, #280, #281
+Acceptance:
+  - S47.1 A module tool call's context deadline is its start time plus its declared `timeoutSeconds`.
+    The call is aborted and returns `timeout` once that elapses. A test with a handler that never
+    settles asserts `timeout` within the declared bound.
+  - S47.2 The HTTP adapter's timeout covers reading the response body. A test whose server sends headers
+    and then stalls the body asserts `timeout`.
+  - S47.3 Each of the ten store connections sets one shared, non-zero busy timeout. The lease's
+    immediate-failure connection is unchanged.
+  - S47.4 Lock contention is retried with bounded backoff. A test holding a write lock for less than the
+    bound asserts that the second writer succeeds. Holding it past the bound returns `infrastructure`.
+Out of scope: changing any declared `timeoutSeconds` value. A retry policy on anything other than store
+contention.
+
+## S48 — The console and the health view show what is real
+
+Delivers: An operator sees only the console screens their access actually permits. The health view
+shows the real volume usage and the notifications that are stuck because no delivery channel is
+configured, instead of a zero and a silence.
+Touches: `src/surfaces/declaration-routes.ts` (`serializeDeclaration`), `src/surfaces/http-server.ts`
+(`HealthReport`), `src/composition-root/compose.ts`, `console/src/api.ts`,
+`console/src/view-registry.ts`, `console/src/Landing.tsx`, `design/20-contract.md` (**A12**'s status
+note).
+Depends on: none
+Closes: #144, #277, #278
+Acceptance:
+  - S48.1 `GET /declarations` and `GET /declarations/{declarationId}` return `effectiveGrant` beside the
+    unchanged `capabilityGrant`. It is computed server-side by `Declarations.effectiveGrant`.
+  - S48.2 `eligibleViews` and the landing screen filter on `effectiveGrant`. A test declares a grant
+    containing a capability the ceiling excludes and asserts the matching view is not offered.
+  - S48.3 **A12**'s "specified, not yet held" note is removed in the same change.
+  - S48.4 The health report carries the clone store's real volume-usage figure. The hard-coded
+    placeholder and its stale comment are gone. A test writes a known-size clone and asserts a non-zero
+    figure.
+  - S48.5 The health report carries a count of outbox rows held `pending` because no transport is
+    configured, reported separately from failed rows. A test enqueues with no transport and asserts the
+    count.
+Out of scope: `GrantView.liveSessions` (#140, a decision). Any new console view.
+
+## S49 — A watcher's auto-merge only merges the commit it pushed
+
+Delivers: An operator can trust that a pull request the file watcher opened is only ever merged at the
+exact commit the watcher pushed. If anyone moves the branch after that, the merge refuses instead of
+carrying their change in under the watcher's name.
+Touches: `design/20-contract.md` (the amendment), `src/watcher/watcher.ts`,
+`src/watcher/pending-pull-requests.ts`, `src/watcher/types.ts`, `src/host/types.ts`,
+`src/host/github-adapter.ts`.
+Depends on: none. **Contract-gated** — see § *Contract gates*.
+Closes: #77
+Acceptance:
+  - S49.1 **The contract amendment is committed first**, by `/contract`. It fixes the expected-head
+    input on `pr_enable_auto_merge` and the head SHA carried by the watcher's persisted pending record.
+    `/slice` does not start the rest of S49 until this is met.
+  - S49.2 A pending watcher PR record includes the validated head SHA that `git_push` returned. A record
+    whose SHA is missing or malformed fails closed and invokes no host operation.
+  - S49.3 `pr_enable_auto_merge` passes the expected head to the GitHub CLI as its match-head-commit
+    guard. A test asserts the flag and value on the constructed invocation.
+  - S49.4 Every reconciliation poll supplies the persisted SHA rather than the SHA from the latest
+    status read.
+  - S49.5 A test moves the PR head after the push and asserts that neither auto-merge nor reconciliation
+    treats the new head as the watcher's commit.
+  - S49.6 The watcher gains no direct-merge or rebase path. Auto-merge through the host stays its only
+    merge route.
+Out of scope: the audit and notification of a failed auto-merge (S50). Any other caller of
+`pr_enable_auto_merge`.
+
+## S50 — Every watcher outcome is audited, and every failure is told
+
+Delivers: An operator learns about every file the watcher failed to deliver and every pull request it
+could not finish reconciling, with enough detail to act. That includes the failures that today only
+reach a console log, or nothing at all. Removing a repository cannot discard a pull request the watcher
+is still following.
+Touches: `src/watcher/watcher.ts`, `src/watcher/types.ts`, `src/declarations/declarations.ts`
+(`remove`).
+Depends on: S49 (the SHA named in S50.4)
+Closes: #81, #82, #84, #88
+Acceptance:
+  - S50.1 A terminal move that fails is audited and notified at `attention`, including a refusal on a
+    tampered state directory. It never escapes the tick unrecorded.
+  - S50.2 An exception escaping a watcher tick is audited and notified at `attention`, not only written
+    to the console.
+  - S50.3 A failed `pr_enable_auto_merge` after `pr_open` succeeded leaves the file in `processed/`. It
+    is audited and notified at `attention` naming the open pull request, and never moved to `failed/`.
+  - S50.4 Once a pull request reports merged, the pending record is removed after the first
+    reconciliation attempt. A successful reconciliation audits the normal terminal outcome. A failed one
+    audits and notifies at `attention`, naming the PR, the branch, the pushed SHA and the failure
+    reason.
+  - S50.5 Tests drive both merged outcomes from a real merged-status fixture, not from a corrupted
+    pending list.
+  - S50.6 `declaration.remove` returns `watcher-directory-not-empty` while the pending list holds at
+    least one entry for the declaration, counting those entries. An absent or empty list does not
+    block, and removal deletes nothing.
+  - S50.7 Production watcher code contains no `as never` casts.
+Out of scope: deciding the state-directory tamper refusal behaviour — skip or throw, and invariant D18
+(`90-decisions.md` § *Open*, `/contract`). S50.1 audits whatever that behaviour is, without choosing it.
+
+## S51 — A watched repository clones itself on first use
+
+Delivers: An operator who sets up a file watcher on a repository that has not been cloned yet, or whose
+clone was cleaned up, sees the first dropped file processed. Today it sits until something unrelated
+creates the clone. A clone with uncommitted changes is reported as exactly that, rather than as
+needing attention.
+Touches: `src/watcher/watcher.ts`.
+Depends on: S50
+Closes: #286
+Acceptance:
+  - S51.1 A watcher tick against an `absent` or `evicted` clone materialises it the way any other first
+    use does, then applies the clean-tree gate on that same tick. A test drops a file for a
+    never-cloned declaration and asserts a pull request is opened on the first tick.
+  - S51.2 A dirty clone is reported `clone-not-clean`, and only a clone genuinely in `needs-attention`
+    is reported `clone-needs-attention`.
+  - S51.3 A clone that fails to materialise is reported with its failure, not as
+    `clone-needs-attention`, and the file stays in the inbox.
+Out of scope: changing the tick protocol or the clean-tree gate itself.
+
+## S52 — The watcher is proven against a real repository
+
+Delivers: A maintainer can see the watcher's corrected behaviour demonstrated end to end, against a
+real repository and remote. Today it is asserted against mocks that never stage, commit, lock or
+rename anything, which cannot show parity with the blog's watcher that this one replaces.
+Touches: `src/watcher/` tests and a test fixture (scratch clone, bare remote, constrained GitHub CLI
+shim).
+Depends on: S49, S50, S51
+Closes: #87
+Acceptance:
+  - S52.1 Integration tests run the watcher against a scratch clone and a bare remote, with a
+    constrained GitHub CLI shim or an equivalent host fixture.
+  - S52.2 A test proves the order prepare, apply, stage, commit, push, open PR, and proves no outer
+    mutation lock is held across it.
+  - S52.3 Tests exercise real dirty trees, duplicate terminal names, interrupted claims, malicious links,
+    and merged reconciliation success and failure.
+  - S52.4 A platform prerequisite that cannot be met is detected and skipped with a recorded reason.
+    Symlink creation on an unelevated Windows host is one such case.
+  - S52.5 Every corrected outcome from S49 to S51 is demonstrated with audit and outbox evidence.
+Out of scope: recreating the blog watcher's architecture. Adding new watcher behaviour.
 
 ---
 
