@@ -30,6 +30,13 @@ const AUTHORIZATION_CODE_TTL_MS = 5 * 60 * 1000;
  * `issueMcpGrant` write durably rather than holding an in-memory `Map`.
  */
 const MAX_PENDING_AUTHORIZATIONS = 500;
+/**
+ * `registerClient`'s durable-store counterpart to the cap above — declared
+ * and enforced in `authorization.ts` (`MAX_REGISTERED_CLIENTS_DEFAULT`),
+ * since only that module holds the `oauth_client` row count. Named here too
+ * so the two unauthenticated-registration risks in this file stay
+ * discoverable together.
+ */
 
 /**
  * Unlike `pendingAuthorizations`/`issuedCodes`, a `Session` carries no
@@ -520,6 +527,9 @@ async function handleRevoke(deps: McpRoutesDependencies, req: IncomingMessage, r
     sendJson(res, 400, { error: 'invalid_request' });
     return;
   }
+  // The actor here is never audited — `revokeBearerToken` derives the real
+  // `kind: 'mcp'` actor from the revoked row itself (S40.7), only when a row
+  // actually changes.
   await deps.authorization.revokeBearerToken(token as BearerToken, { kind: 'operator', subject: 'oauth-revoke' as Subject, clientId: null, grantId: null });
   // RFC 7009: the endpoint answers 200 whether or not the token was known,
   // so a client cannot use it to probe for valid tokens.

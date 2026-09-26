@@ -175,12 +175,6 @@ function stateComparison(preState: PreState, observed: ObservedGitState | null):
  * reach this route, `503` the store could not answer — the last is what
  * `authorization/errors.ts` fixes for `store-failed`, and reporting it as
  * `401` sends an operator hunting a revoked token instead of a sick volume.
- *
- * `required` is `null` on the two mutating routes: the capabilities that
- * would gate them (`attention.resolve`, `declaration.manage`) are
- * console-only, so no operator-api token can ever carry one and a gate here
- * would simply delete the route. The full route-to-capability mapping is
- * `20-contract.md` § U4's to settle.
  */
 async function requireBearerSession(
   deps: Pick<SurfacesDependencies, 'authorization'>,
@@ -241,19 +235,6 @@ async function requireBearerOrCookieSession(
   }
   const session = await requireSession(deps, req, res);
   return session ? operatorActorFor(session) : null;
-}
-
-/**
- * A bearer credential carries no ambient cookie for a forged cross-site
- * request to reuse, so CSRF does not apply to it — this only checks the
- * double-submit token when `requireBearerOrCookieSession` above took the
- * cookie branch, mirroring `declaration-routes.ts`'s `requireCsrf`.
- */
-function requireCsrfUnlessBearer(req: IncomingMessage, res: ServerResponse): boolean {
-  if (req.headers.authorization?.startsWith('Bearer ')) return true;
-  if (csrfOk(req)) return true;
-  sendJson(res, 403, { error: 'csrf-check-failed' });
-  return false;
 }
 
 /**
@@ -387,20 +368,24 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
   // A failing credential's second way out. The first — replacing the secret in
   // the mount — needs no route at all, which is the point of resolving at
   // point of use; this is the one for a mark left by a fault that has since
-  // been fixed somewhere other than the file. `bearer or cookie` since S34 —
-  // the health view's own clear button.
+  // been fixed somewhere other than the file. Cookie only (S40.1/S40.2) — no
+  // scope an operator-api token could carry reaches this route (A11), so a
+  // bearer credential is refused outright rather than admitted unscoped.
   const clearCredentialMatch = /^\/failing-credentials\/([^/]+)\/([^/]+)\/clear$/.exec(url.pathname);
   if (req.method === 'POST' && clearCredentialMatch) {
-    const actorRef = await requireBearerOrCookieSession(deps, req, res, null);
-    if (!actorRef) return;
-    if (!requireCsrfUnlessBearer(req, res)) return;
+    const session = await requireSession(deps, req, res);
+    if (!session) return;
+    if (!csrfOk(req)) {
+      sendJson(res, 403, { error: 'csrf-check-failed' });
+      return;
+    }
     if (!deps.clearFailingCredential) {
       sendJson(res, 503, { error: 'unavailable', summary: 'no credential resolver is wired into this server' });
       return;
     }
     const ref = decodeURIComponent(clearCredentialMatch[1]!) as CredentialRef;
     const declarationId = decodeURIComponent(clearCredentialMatch[2]!) as DeclarationId;
-    await deps.clearFailingCredential(ref, declarationId, actorRef);
+    await deps.clearFailingCredential(ref, declarationId, operatorActorFor(session));
     sendJson(res, 200, { cleared: true, ref, declarationId });
     return;
   }
@@ -442,18 +427,21 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
   }
 
   // The way out. A parked entry's other resolution — keeping it parked — is
-  // not calling this, so there is deliberately no route for it. `bearer or
-  // cookie` since S34 — the console's own resolve button.
+  // not calling this, so there is deliberately no route for it. Cookie only
+  // (S40.1/S40.2) — see the failing-credentials clear route above for why.
   const resolveMatch = /^\/parked-operations\/([^/]+)\/resolve$/.exec(url.pathname);
   if (req.method === 'POST' && resolveMatch) {
-    const actorRef = await requireBearerOrCookieSession(deps, req, res, null);
-    if (!actorRef) return;
-    if (!requireCsrfUnlessBearer(req, res)) return;
+    const session = await requireSession(deps, req, res);
+    if (!session) return;
+    if (!csrfOk(req)) {
+      sendJson(res, 403, { error: 'csrf-check-failed' });
+      return;
+    }
     if (!deps.resolveParkedOperation) {
       sendJson(res, 503, { error: 'unavailable', summary: 'no journal is wired into this server' });
       return;
     }
-    const resolved = await deps.resolveParkedOperation(resolveMatch[1] as OperationId, actorRef);
+    const resolved = await deps.resolveParkedOperation(resolveMatch[1] as OperationId, operatorActorFor(session));
     sendJson(res, resolved.ok ? 200 : 409, resolved.ok ? { resolved: true, summary: resolved.summary } : { error: 'not-resolved', summary: resolved.summary });
     return;
   }
