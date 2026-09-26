@@ -395,7 +395,7 @@ test('the parked view renders an unobservable tree rather than failing — the c
   });
 });
 
-test('S8.9 — resolving a parked operation needs a credential, and reports what it did', async () => {
+test('S40.1 — resolving a parked operation refuses a bearer credential outright, even a valid one', async () => {
   const resolved: string[] = [];
   await withServer(
     {
@@ -408,28 +408,24 @@ test('S8.9 — resolving a parked operation needs a credential, and reports what
     async (baseUrl) => {
       const unauthenticated = await fetch(`${baseUrl}/parked-operations/op-parked/resolve`, { method: 'POST' });
       assert.equal(unauthenticated.status, 401);
-      assert.deepEqual(resolved, [], 'an unauthenticated call must not reach the resolution at all');
 
-      const response = await fetch(`${baseUrl}/parked-operations/op-parked/resolve`, {
+      const bearer = await fetch(`${baseUrl}/parked-operations/op-parked/resolve`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${TOKEN}` },
       });
-      assert.equal(response.status, 200);
-      const body = (await response.json()) as { resolved: boolean; summary: string };
-      assert.equal(body.resolved, true);
-      assert.match(body.summary, /returned to ready/);
-      assert.deepEqual(resolved, ['op-parked']);
+      assert.equal(bearer.status, 401, 'no scope an operator-api token could carry reaches this route (A11) — bearer is refused outright');
+      assert.deepEqual(resolved, [], 'no bearer credential — however valid — must reach the resolution');
     },
   );
 });
 
-test('resolving an operation that is not parked answers 409 rather than reporting success', async () => {
+test('resolving an operation that is not parked answers 409 rather than reporting success, over a cookie session', async () => {
   await withServer(
-    { parked: [], resolve: async (operationId) => ({ ok: false, summary: `no parked operation '${operationId}'` }) },
+    { identity: createCookieOperatorIdentity(), parked: [], resolve: async (operationId) => ({ ok: false, summary: `no parked operation '${operationId}'` }) },
     async (baseUrl) => {
       const response = await fetch(`${baseUrl}/parked-operations/op-missing/resolve`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${TOKEN}` },
+        headers: cookieHeaders(baseUrl, true),
       });
       assert.equal(response.status, 409);
       const body = (await response.json()) as { summary: string };
@@ -494,7 +490,7 @@ test('S34 — resolving a parked operation over a cookie session, with the doubl
   );
 });
 
-test('S34 — a bearer credential on these four routes still needs no CSRF token, since it carries no ambient cookie', async () => {
+test('S40.1 — clearing a failing credential refuses a bearer credential outright, even a valid one', async () => {
   let cleared: readonly unknown[] = [];
   await withServer(
     {
@@ -507,8 +503,28 @@ test('S34 — a bearer credential on these four routes still needs no CSRF token
         method: 'POST',
         headers: { Authorization: `Bearer ${TOKEN}` },
       });
-      assert.equal(response.status, 200);
-      assert.equal(cleared.length, 3);
+      assert.equal(response.status, 401, 'no scope an operator-api token could carry reaches this route (A11) — bearer is refused outright');
+      assert.equal(cleared.length, 0);
+    },
+  );
+});
+
+test('S40.2 — clearing a failing credential over a cookie session without the double-submit token is refused', async () => {
+  let cleared: readonly unknown[] = [];
+  await withServer(
+    {
+      identity: createCookieOperatorIdentity(),
+      clearFailingCredential: async (ref, declarationId, actor) => {
+        cleared = [ref, declarationId, actor];
+      },
+    },
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/failing-credentials/some-ref/repo-a/clear`, {
+        method: 'POST',
+        headers: cookieHeaders(baseUrl, false),
+      });
+      assert.equal(response.status, 403);
+      assert.equal(cleared.length, 0, 'the CSRF check must fail before the clear is ever reached');
     },
   );
 });

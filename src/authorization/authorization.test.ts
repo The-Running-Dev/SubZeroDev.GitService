@@ -830,3 +830,76 @@ test('S25.4 — runRetention deletes an expired-or-revoked token past its window
     assert.deepEqual(tokens, ['token-live']);
   });
 });
+
+test('S40.5 — registerClient refuses once the registered-client cap is reached, and stores nothing on refusal', async () => {
+  await migratedVolume(async (volume) => {
+    const auth = createAuthorization({
+      volumeRoot: volume,
+      clock: systemClock,
+      contractCapabilitySet: FULL_CEILING,
+      ceiling: FULL_CEILING as unknown as DeploymentCeiling,
+      declarations: declarationsFor(volume),
+      audit: createAudit({ volumeRoot: volume, clock: systemClock }),
+      maxRegisteredClients: 2,
+    });
+
+    const first = await auth.registerClient({ redirectUris: ['https://a.invalid/callback' as never], clientName: 'a' });
+    assert.equal(first.ok, true);
+    const second = await auth.registerClient({ redirectUris: ['https://b.invalid/callback' as never], clientName: 'b' });
+    assert.equal(second.ok, true);
+
+    const third = await auth.registerClient({ redirectUris: ['https://c.invalid/callback' as never], clientName: 'c' });
+    assert.equal(third.ok, false);
+    if (third.ok) return;
+    assert.equal(third.error.code, 'registration-invalid');
+
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    const { count } = db.prepare('SELECT COUNT(*) as count FROM oauth_client').get() as { count: number };
+    db.close();
+    assert.equal(count, 2, 'the refused registration stored no row');
+  });
+});
+
+test('S40.6/S40.7 — revokeBearerToken audits the actual token owner on a real revocation, and grows the audit chain by nothing on an unknown value', async () => {
+  await migratedVolume(async (volume) => {
+    const declarations = declarationsFor(volume);
+    const auth = authFor(volume, FULL_CEILING, declarations);
+    const client = await registeredClient(auth);
+    const repo = await declaredRepo(declarations, 'repo-revoke', ['repo.read']);
+    const issued = await auth.issueMcpGrant(
+      { clientId: client.clientId, subject: client.subject, resource: `/mcp/${repo.id}` as never, declarationId: repo.id, generation: repo.generation, scopes: ['read'] },
+      ACTOR,
+    );
+    assert.equal(issued.ok, true);
+    if (!issued.ok) return;
+
+    const before = await auditedEvents(volume);
+
+    const unknown = await auth.revokeBearerToken('never-issued' as never, ACTOR);
+    assert.equal(unknown.ok, true);
+    const afterUnknown = await auditedEvents(volume);
+    assert.equal(afterUnknown.length, before.length, 'revoking a value that names no token must not audit');
+
+    const revoked = await auth.revokeBearerToken(issued.value.access.value, ACTOR);
+    assert.equal(revoked.ok, true);
+    const afterRevoked = await auditedEvents(volume);
+    assert.equal(afterRevoked.length, before.length + 1, 'revoking a real token audits exactly once');
+
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const page = await audit.query({ declarationId: null, tool: null, actorSubject: null, form: 'identity-event', from: null, to: null, limit: 100, cursor: null });
+    await audit.close();
+    assert.equal(page.ok, true);
+    if (!page.ok) return;
+    const last = page.value.records.at(-1) as { event?: string; actorRef?: ActorRef };
+    assert.equal(last.event, 'token-revoked');
+    assert.equal(last.actorRef?.kind, 'mcp');
+    assert.equal(last.actorRef?.clientId, client.clientId);
+    assert.equal(last.actorRef?.grantId, issued.value.grant.grantId);
+
+    // Revoking the same token again is idempotent and must not audit again.
+    const again = await auth.revokeBearerToken(issued.value.access.value, ACTOR);
+    assert.equal(again.ok, true);
+    const afterAgain = await auditedEvents(volume);
+    assert.equal(afterAgain.length, afterRevoked.length, 'revoking an already-revoked token must not audit again');
+  });
+});
