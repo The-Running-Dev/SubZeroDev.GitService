@@ -68,6 +68,8 @@ export interface AuthorizationDependencies {
   readonly mcpRefreshTokenTtlSeconds?: number;
   /** `DeploymentConfig.tokens.operatorApiSeconds` (default 31536000, 365 days). */
   readonly operatorApiTokenTtlSeconds?: number;
+  /** The registered-client cap `registerClient` enforces (default `MAX_REGISTERED_CLIENTS_DEFAULT`, 500). */
+  readonly maxRegisteredClients?: number;
 }
 
 /**
@@ -102,6 +104,16 @@ export const MCP_REFRESH_TOKEN_TTL_SECONDS_DEFAULT = 30 * 24 * 60 * 60;
 
 const TOKEN_RETENTION_DAYS_DEFAULT = 7;
 const REVOKED_GRANT_RETENTION_DAYS_DEFAULT = 180;
+
+/**
+ * `registerClient` is the durable-store half of the same unbounded-registration
+ * risk `mcp-routes.ts`'s `MAX_PENDING_AUTHORIZATIONS` bounds in memory — an
+ * unauthenticated `/oauth/register` caller could otherwise grow `oauth_client`
+ * rows without limit, since revocation only marks a row, it never deletes one.
+ * Enforced here rather than at the route because only this module holds the
+ * count.
+ */
+export const MAX_REGISTERED_CLIENTS_DEFAULT = 500;
 
 interface ClientRow {
   readonly client_id: string;
@@ -232,6 +244,7 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
   const mcpAccessTokenTtlSeconds = deps.mcpAccessTokenTtlSeconds ?? MCP_ACCESS_TOKEN_TTL_SECONDS_DEFAULT;
   const mcpRefreshTokenTtlSeconds = deps.mcpRefreshTokenTtlSeconds ?? MCP_REFRESH_TOKEN_TTL_SECONDS_DEFAULT;
   const operatorApiTokenTtlSeconds = deps.operatorApiTokenTtlSeconds ?? OPERATOR_API_TOKEN_TTL_SECONDS_DEFAULT;
+  const maxRegisteredClients = deps.maxRegisteredClients ?? MAX_REGISTERED_CLIENTS_DEFAULT;
 
   /**
    * One audit line per credential mutation that actually reached the store.
@@ -262,6 +275,13 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
       const clientId = randomUUID() as ClientId;
       const registeredAt = deps.clock.now();
       const result = withDb(deps.volumeRoot, (db) => {
+        const { count } = db.prepare('SELECT COUNT(*) as count FROM oauth_client').get() as { count: number };
+        if (count >= maxRegisteredClients) {
+          throw authorizationError(
+            { code: 'registration-invalid', findings: [{ path: 'clientId', rule: 'registration-cap', message: `registered-client cap reached (${maxRegisteredClients})` }] },
+            'client registration rejected: registered-client cap reached',
+          );
+        }
         db.prepare('INSERT INTO oauth_client (client_id, redirect_uris, registered_at, revoked_at) VALUES (?, ?, ?, NULL)').run(
           clientId,
           JSON.stringify(request.redirectUris),
@@ -601,17 +621,38 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
       return result;
     },
 
-    /** `/oauth/revoke` (RFC 7009): resolves the presented opaque value to its `jti` by the same hash lookup `establishMcpSession`/`refresh` use, then revokes it exactly as `revokeToken` would. Unknown or already-revoked is not an error — revocation is idempotent, the same as every other revoke method here. */
-    async revokeBearerToken(bearer: BearerToken, actor: ActorRef): Promise<Outcome<void, AuthorizationError>> {
+    /**
+     * `/oauth/revoke` (RFC 7009): resolves the presented opaque value to its
+     * `jti` by the same hash lookup `establishMcpSession`/`refresh` use, then
+     * revokes it exactly as `revokeToken` would. Unknown or already-revoked is
+     * not an error — revocation is idempotent, the same as every other revoke
+     * method here — but unlike those, the caller here has no `jti`/`grantId`
+     * to already know the token by, so a no-op revocation (unknown value,
+     * already-revoked value) must not audit: RFC 7009's probing resistance
+     * means this is the one call site where "found nothing to revoke" is the
+     * common case, not the exceptional one, and logging it every time would
+     * make the audit chain mostly noise. `_actor` is intentionally unused —
+     * the audited actor is `kind: 'mcp'` carrying the revoked token's own
+     * `grantId`/`clientId`, resolved from the row that actually changed,
+     * never the caller's own identity (S40.7).
+     */
+    async revokeBearerToken(bearer: BearerToken, _actor: ActorRef): Promise<Outcome<void, AuthorizationError>> {
       const candidateHash = sha256Digest(bearer);
       const now = deps.clock.now();
       const result = withDb(deps.volumeRoot, (db) => {
         const tokenRow = db.prepare('SELECT * FROM token WHERE verifier_hash = ?').get(candidateHash) as TokenRow | undefined;
-        if (!tokenRow || !timingSafeStringEqual(candidateHash, tokenRow.verifier_hash)) return;
+        if (!tokenRow || !timingSafeStringEqual(candidateHash, tokenRow.verifier_hash) || tokenRow.revoked_at !== null) return null;
         db.prepare('UPDATE token SET revoked_at = ? WHERE jti = ? AND revoked_at IS NULL').run(now, tokenRow.jti);
+        const grantRow = db.prepare('SELECT subject, client_id FROM "grant" WHERE grant_id = ?').get(tokenRow.grant_id) as { subject: string; client_id: string | null } | undefined;
+        return {
+          kind: 'mcp',
+          subject: (grantRow?.subject ?? tokenRow.jti) as Subject,
+          clientId: (grantRow?.client_id ?? null) as ClientId | null,
+          grantId: tokenRow.grant_id as GrantId,
+        } satisfies ActorRef;
       });
-      if (result.ok) await auditCredentialEvent('token-revoked', actor);
-      return result;
+      if (result.ok && result.value) await auditCredentialEvent('token-revoked', result.value);
+      return result.ok ? ok(undefined) : result;
     },
 
     /**
