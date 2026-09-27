@@ -77,7 +77,6 @@
 | 291 | #291 | Revoking an OAuth token can grow the audit trail without real authorization, and misattributes it | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 292 | #292 | There's no record of which operator approved a given MCP access grant | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 301 | #301 | Add a doc-citation checker to CI | — | `082d1df8f15bae3125e78e06155fe1c59fe3cafc` |
-| 308 | #308 | S40 — Only the operator's own console can clear what needs attention | S40.1, S40.2, S40.3, S40.4, S40.5, S40.6, S40.7 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 309 | #309 | S41 — Terminal outcomes and parked work reach the operator | S41.1, S41.2, S41.3, S41.4, S41.5, S41.6 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 310 | #310 | S42 — Recovery never strands a clone, and never waits for a caller | S42.1, S42.2, S42.3, S42.4, S42.5, S42.6, S42.7 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 311 | #311 | S43 — Boot keeps its evidence, and its steps in order | S43.1, S43.2, S43.3, S43.4 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
@@ -93,7 +92,6 @@
 | milestone/4 | #49 | Terminal-state detection never reaches the notifier on the ordinary dispatch or recovery paths | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/6 | #61 | syncBase inlines rev-parse/is-ancestor plumbing that composites.ts keeps as private helpers | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/6 | #65 | `sendJson`/`readJsonBody` are independently reimplemented in six surface files | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
-| milestone/4 | #67 | The route-to-capability mapping for the HTTP bearer surface is half-built | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #77 | Carry the watcher push SHA through auto-merge and reconciliation | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #81 | Audit and notify every content-drop watcher failure | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #82 | Finalize a merged watcher PR even when reconciliation fails | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
