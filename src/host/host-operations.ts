@@ -175,9 +175,10 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
   }
 
   /** A wait that ran out. `checks_await` is the registry's only `monitoring-wait`. */
-  function waitTimedOut(ctx: CallContext, summary: string, waitedSeconds: number): ToolResult<never> {
+  function waitTimedOut(ctx: CallContext, summary: string, limitSeconds: number, startedAtMs: number): ToolResult<never> {
+    const waitedSeconds = Math.max(0, Math.round((Date.parse(clock.now()) - startedAtMs) / 1000));
     deps.terminalSink?.set(ctx.operationId, { kind: 'wait-timeout', waitedSeconds, tool: 'checks_await' as RegistryToolName });
-    return timeoutResult(summary, waitedSeconds);
+    return timeoutResult(summary, limitSeconds);
   }
 
   /**
@@ -418,6 +419,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
               ctx,
               `checks at ${ref} were still rate-limited when the ${input.timeoutSeconds}s wait ran out`,
               input.timeoutSeconds,
+              startedAtMs,
             );
           }
           return failWith(ctx, checks.error);
@@ -442,13 +444,16 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
         }
 
         if (ctx.signal.aborted) {
-          return waitTimedOut(ctx, `the wait on ${ref} was cancelled`, input.timeoutSeconds);
+          // A cancellation is the caller's own act, not a wait running out, so it
+          // reports nothing to the operator.
+          return timeoutResult(`the wait on ${ref} was cancelled`, input.timeoutSeconds);
         }
         if (Date.parse(clock.now()) + pollIntervalSeconds * 1000 >= deadlineMs) {
           return waitTimedOut(
             ctx,
             `checks at ${ref} had not concluded within ${input.timeoutSeconds}s (${pending.length} still pending)`,
             input.timeoutSeconds,
+            startedAtMs,
           );
         }
         await sleep(pollIntervalSeconds * 1000);
