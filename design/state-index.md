@@ -77,7 +77,6 @@
 | 291 | #291 | Revoking an OAuth token can grow the audit trail without real authorization, and misattributes it | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 292 | #292 | There's no record of which operator approved a given MCP access grant | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 301 | #301 | Add a doc-citation checker to CI | — | `082d1df8f15bae3125e78e06155fe1c59fe3cafc` |
-| 309 | #309 | S41 — Terminal outcomes and parked work reach the operator | S41.1, S41.2, S41.3, S41.4, S41.5, S41.6 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 310 | #310 | S42 — Recovery never strands a clone, and never waits for a caller | S42.1, S42.2, S42.3, S42.4, S42.5, S42.6, S42.7 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 311 | #311 | S43 — Boot keeps its evidence, and its steps in order | S43.1, S43.2, S43.3, S43.4 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 312 | #312 | S44 — A clone on disk is exactly what it claims to be | S44.1, S44.2, S44.3, S44.4, S44.5 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
@@ -88,7 +87,7 @@
 | 317 | #317 | S49 — A watcher's auto-merge only merges the commit it pushed | S49.1, S49.2, S49.3, S49.4, S49.5, S49.6 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 318 | #318 | S50 — Every watcher outcome is audited, and every failure is told | S50.1, S50.2, S50.3, S50.4, S50.5, S50.6, S50.7 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 319 | #319 | S51 — A watched repository clones itself on first use | S51.1, S51.2, S51.3 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
-| 320 | #320 | S52 — The watcher is proven against a real repository | S52.1, S52.2, S52.3, S52.4, S52.5 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
+| 320 | #320 | S52 — The watcher is proven against a real repository | S52.1, S52.2, S52.3, S52.4, S52.5, S52.6 | `70413caf7ace545ab150ddd8dcfeb76c1756fd69` |
 | 330 | #330 | S53 — A tampered watcher folder stops delivery, and the operator hears once | S53.1, S53.2, S53.3, S53.4, S53.5, S53.6, S53.7, S53.8, S53.9, S53.10 | `c1fee0489483669410c59b88ba8e5d6e0740ca9c` |
 | milestone/6 | #61 | syncBase inlines rev-parse/is-ancestor plumbing that composites.ts keeps as private helpers | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/6 | #65 | `sendJson`/`readJsonBody` are independently reimplemented in six surface files | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |

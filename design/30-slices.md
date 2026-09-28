@@ -304,9 +304,8 @@ rest of the watcher work names in its notices. S50 finishes the audit and notifi
 S51 fixes a first-use gap on the same tick protocol. S52 is the evidence harness, and it can only
 prove the corrected outcomes once all four have landed.
 
-S40 has landed. S41 is partly landed and is now contract-gated as well, so until `S41.7` is met the
-next slice that is not gated is S42. S42 needs only S41's park notification, and that part is already
-on `main`.
+S40 and S41 have landed, so the next slice that is not gated is S42. S42 needs only S41's park
+notification, which is on `main`.
 
 ## Contract gates
 
@@ -315,18 +314,8 @@ committed separately and before the handler work depending on it. **No slice may
 signature absent from the contract** — where a slice needs tools, amending the contract is its
 first acceptance criterion, not an implementation detail.
 
-**Two gates are live.** The newer one is **S41, raised by this document on 2026-09-28**. `S41.2`
-assumed that every terminal state a host call observes reaches the operator through that
-operation's `settle`. `checks_await` breaks that assumption. It is the only producer of
-`required-check-failed` and `wait-timeout`, and as a `monitoring-wait` it never journals, so it never
-settles. The terminal sink PR #326 writes for those two kinds therefore has no reader. The contract
-does not say how a monitoring wait's terminal state reaches the outbox, or who clears that sink entry
-when there is no settle, so this is an amendment and not an implementation detail. `S41.7` is that
-amendment, committed by `/contract` (opus, high) separately and before the rest of S41. `/slice`
-does not resume S41 until `S41.7` is met. The amendment decides the mechanism, including whether it
-reuses the sink at all. This section only names the gate.
-
-The older gate is **S49, raised by this document on 2026-09-25.** The watcher has to pin an auto-merge
+**One gate is live, and one closed on 2026-09-28.** S41's gate, `S41.7`, was met by the amendment that
+PR #328 merged (**R12**), and S41 has landed. The live gate is **S49, raised by this document on 2026-09-25.** The watcher has to pin an auto-merge
 to the commit it pushed (#77), and `pr_enable_auto_merge`'s input carries no expected head today. Adding
 one changes a registered MCP tool's public input, so it is a contract amendment and not an
 implementation detail. `S49.1` is that amendment, committed by `/contract` (opus, high) separately
@@ -385,49 +374,8 @@ carries the reasoning.
 
 ## Outstanding
 
-Thirteen slices: S41 to S52, appended 2026-09-25, and S53, appended 2026-09-28. The first forty are
+Twelve slices: S42 to S52, appended 2026-09-25, and S53, appended 2026-09-28. The first forty-one are
 landed and indexed below.
-
-## S41 — Terminal outcomes and parked work reach the operator
-
-Delivers: An operator is told when a pull request hits a merge conflict, when a required check fails,
-when a wait times out, and when the service parks an operation for them. Today each of these happens
-silently, and the operator only finds it by going to look.
-Touches: `src/host/host-operations.ts`, `src/dispatch/dispatch-pipeline.ts`,
-`src/composition-root/compose.ts` (the terminal-state sink), `src/lifecycle/recovery.ts`,
-`src/journal/`, `design/20-contract.md` (§ *Error semantics › Host adapter*, **R11**),
-`design/10-design.md` (control-flow step 11, § *Failure modes*, § *Module boundaries*).
-Depends on: none. **Contract-gated** — see § *Contract gates*. Partly landed in PR #326: the journal
-writes the park notification, and `host-operations.ts` writes the sink.
-Closes: #49, #266, #272
-Acceptance:
-  - S41.1 A composition-root-owned sink keyed on `operationId` carries a `TerminalState` from the host
-    call that observed it to that operation's `Journal.settle`. `host-operations.ts` writes the sink on
-    `merge-conflict`, `required-check-failed` and `wait-timeout`. The pipeline reads and deletes the
-    entry immediately before `settle` and passes it in place of `null`.
-  - S41.3 After every settle, whether successful, failed or terminal, the sink holds no entry for that
-    `operationId` (**R11**). A host call that fails for any other reason writes nothing to the sink and
-    enqueues no terminal notification.
-  - S41.4 Every park path — recovery's park and the pipeline's timeout park — leaves exactly one outbox
-    row of kind `operation-parked` at `attention` for the parked `operationId`. A park whose journal
-    write fails leaves none.
-  - S41.5 A mutating call that times out has its audit record appended before the journal park, as on
-    every other park path. A test asserts the audit row exists for that `operationId` and was written
-    before the park.
-  - S41.6 In the same change, remove the four `design/` sites #49 names and **R11**'s "specified, not
-    yet held" note. The § *Module boundaries* Scheduler row states the edge that actually exists
-    afterwards.
-  - S41.7 **The contract amendment is committed first**, by `/contract`, although it is numbered last.
-    It fixes how a `monitoring-wait` that ends in `required-check-failed` or `wait-timeout` delivers
-    that terminal state to the outbox without a journal entry or a settle. It also fixes what clears
-    any sink entry that wait wrote. `/slice` does not resume S41 until this is met.
-  - S41.8 A mutating host call that ends in `merge-conflict` leaves exactly one outbox row at
-    `attention` naming `merge-conflict`, written in the same transaction as its settle.
-  - S41.9 A `checks_await` call that ends in `required-check-failed`, and one that ends in
-    `wait-timeout`, each leave exactly one outbox row at `attention` naming that kind, delivered as
-    `S41.7` fixes. Afterwards the sink holds no entry for either call's `operationId`.
-Out of scope: making `Journal.classify` terminal-aware. It stays terminal-blind by decision (#49,
-**R3**). Adding a field to `ToolResult` is `/design`'s. Recovery's other defects are S42's.
 
 ## S42 — Recovery never strands a clone, and never waits for a caller
 
@@ -813,6 +761,7 @@ Bodies retired; the closed issue is the record. Criteria are not re-derived from
 | **S21** | A second repository, driven end to end, unwatched | [#35](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/35) |
 | **S22** | The deployment is verifiable, reversible and documented | [#36](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/36) |
 | **S40** | Only the operator's own console can clear what needs attention | [#308](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/308) |
+| **S41** | Terminal outcomes and parked work reach the operator | [#309](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/309) |
 
 Three rows carry a name this document changed after the issue was opened: #31 is titled "A dropped
 file becomes a pull request…" and #92 "A consumer can declare a safe content-drop protocol", both
