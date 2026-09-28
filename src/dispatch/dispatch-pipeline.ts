@@ -14,6 +14,9 @@ import type { Locks } from '../locks/locks.ts';
 import type { Audit } from '../audit/audit.ts';
 import type { Exec } from '../exec/exec.ts';
 import type { Journal } from '../journal/journal.ts';
+import type { NotificationRequest, TerminalState } from '../journal/types.ts';
+import type { Notifier } from '../notifier/notifier.ts';
+import type { StoreTransaction, StructuredStore } from '../store/structured-store.ts';
 import type { CapabilityName, ContractCapabilitySet, DeploymentCeiling } from '../contract/capabilities.ts';
 import type { CompiledRegistry, ToolDeclaration } from '../contract/tool-declaration.ts';
 import type { JsonValue } from '../contract/json.ts';
@@ -37,6 +40,14 @@ export interface DispatchRequest {
   readonly context: OperationContextKind;
   readonly signal: AbortSignal;
 }
+
+/**
+ * `20-contract.md` § L4 — a `TerminalState` a domain function observed, left
+ * for the pipeline to read and delete (**R11**, **R12**). Owned by the
+ * composition root and keyed on `operationId`, so concurrent calls never see
+ * each other's.
+ */
+export type TerminalSink = Map<OperationId, TerminalState>;
 
 export type Dispatch = (request: DispatchRequest) => Promise<ToolResult<JsonValue>>;
 
@@ -91,6 +102,15 @@ export interface DispatchPipelineDependencies {
    * acquire both locks in its own right.
    */
   readonly recoverDeclaration?: (declarationId: DeclarationId) => Promise<unknown>;
+  /**
+   * S41. **The composition root wires all three or none** — they are optional
+   * only so a test that never reaches a terminal state need not build a store.
+   * A take with no `notifier` or `store` to deliver it is logged as a
+   * composition defect and never dropped silently.
+   */
+  readonly terminalSink?: TerminalSink;
+  readonly notifier?: Pick<Notifier, 'enqueue'>;
+  readonly store?: Pick<StructuredStore, 'transaction'>;
 }
 
 const PROFILE_BY_KIND: Readonly<Record<Session['kind'], ActorProfile>> = {
@@ -159,6 +179,22 @@ function extractChangedPathsFromResultData(data: unknown): readonly RepoRelative
   return [];
 }
 
+/** The operator-facing line for a terminal state a domain function observed. */
+function describeTerminalState(state: TerminalState): string {
+  switch (state.kind) {
+    case 'merge-conflict':
+      return `pull request branch '${state.branch}' has a merge conflict`;
+    case 'required-check-failed':
+      return `required check '${state.check}' failed on pull request #${state.pullRequest.number}`;
+    case 'wait-timeout':
+      return `'${state.tool}' gave up after ${state.waitedSeconds} s`;
+    case 'operation-parked':
+      return `operation '${state.operationId}' was parked: ${state.reason}`;
+    case 'file-watcher-failed':
+      return `file watcher for '${state.file}' failed: ${state.reason}`;
+  }
+}
+
 /**
  * `20-contract.md` § L4 — dispatch pipeline. S6 wired the read path:
  * identify, authorize, validate input, materialise the clone (released
@@ -178,6 +214,44 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
   const mutationLockAcquireMs = deps.mutationLockAcquireMs ?? MUTATION_LOCK_ACQUIRE_MS_DEFAULT;
   const monitoringWaitCapSeconds = deps.monitoringWaitCapSeconds ?? MONITORING_WAIT_CAP_SECONDS_DEFAULT;
   const watermarks = deps.watermarks ?? DISK_WATERMARKS_DEFAULT;
+  const { terminalSink, notifier, store } = deps;
+
+  /**
+   * The one read-and-delete of an operation's sink entry (**R11**, **R12**).
+   * Every exit path that reaches a handler calls it, so an entry never
+   * outlives the operation that wrote it whether or not a settle follows.
+   */
+  function takeTerminal(operationId: OperationId): TerminalState | null {
+    if (!terminalSink) return null;
+    const state = terminalSink.get(operationId) ?? null;
+    terminalSink.delete(operationId);
+    return state;
+  }
+
+  function terminalNotification(declarationId: DeclarationId | null, state: TerminalState): NotificationRequest {
+    return { severity: 'attention', declarationId, subject: state, summary: describeTerminalState(state) };
+  }
+
+  /**
+   * A monitoring wait records nothing, so its row shares no state change and
+   * commits in a transaction of its own (`20-contract.md` § L4, S41.7). The
+   * envelope is never changed by a failure here: delivery is a side channel.
+   */
+  async function enqueueTerminal(operationId: OperationId, declarationId: DeclarationId | null, state: TerminalState): Promise<void> {
+    if (!notifier || !store) {
+      console.error(`dispatch: composition defect — a '${state.kind}' terminal state for operation '${operationId}' was taken with no ${!notifier ? 'notifier' : 'store'} to deliver it`);
+      return;
+    }
+    const request = terminalNotification(declarationId, state);
+    try {
+      const enqueued = await store.transaction(async (tx: StoreTransaction) => {
+        notifier.enqueue(request, tx);
+      });
+      if (!enqueued.ok) console.error(`dispatch: failed to enqueue '${state.kind}' notification for operation '${operationId}': ${enqueued.error.summary}`);
+    } catch (cause) {
+      console.error(`dispatch: failed to enqueue '${state.kind}' notification for operation '${operationId}': ${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  }
 
   /**
    * The last usage reading `checkWatermarkAfterMutation` observed, in
@@ -425,7 +499,15 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
       }
 
       const ctx = buildContext(request, entry, declaration, operationId, actorRef, cloneRoot);
-      return await invokeAndEnvelope(entry, ctx, clampMonitoringWaitInput(entry, request.input));
+      try {
+        return await invokeAndEnvelope(entry, ctx, clampMonitoringWaitInput(entry, request.input));
+      } finally {
+        // R12 — exactly one take per wait, on every exit after the handler is
+        // invoked, a thrown handler and a cancelled wait included. The sink,
+        // not the envelope's kind, decides whether a row is owed.
+        const terminal = takeTerminal(operationId);
+        if (terminal) await enqueueTerminal(operationId, declaration?.id ?? request.declarationId, terminal);
+      }
     } finally {
       if (releasePin) releasePin();
       admitted.value.release();
@@ -658,6 +740,21 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
       // name: `git_raw` is not the only mutating entry whose child can time
       // out, and the invariant is the same one regardless of which entry hit it.
       if (result.kind === 'timeout') {
+        // The audit record precedes the park, as it does on every other path
+        // that ends a call (S41.5). `journal.park` writes the
+        // `operation-parked` row itself, so nothing is enqueued here.
+        await audit.append({
+          at: clock.now(),
+          operationId,
+          declarationId: declaration.id,
+          generation: declaration.generation,
+          tool: entry.name,
+          actorRef,
+          context: effective.context,
+          form: 'call',
+          resultKind: result.kind,
+          changedPaths: [],
+        });
         const parked = await journal.park?.(operationId, result.summary);
         if (!parked?.ok) return infrastructure(`'${entry.name}' timed out, but its journal entry could not be parked: ${parked?.error.summary ?? 'journal park is unavailable'}`);
         await cloneStore.markAttention?.(declaration.id, result.summary);
@@ -679,10 +776,18 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
         changedPaths: result.ok ? extractChangedPathsFromResultData(result.data) : [],
       });
 
-      await journal.settle(operationId, null);
+      // R6 — the terminal state the handler observed, if any, settles with its
+      // row in one transaction. Taken here, after the audit record and
+      // immediately before the settle, so the delete cannot precede a failure
+      // that would leave the entry unsettled with its state already gone.
+      const terminal = takeTerminal(operationId);
+      await journal.settle(operationId, terminal ? terminalNotification(declaration.id, terminal) : null);
 
       return result;
     } finally {
+      // R11 — an exit that never reached the settle (a park, a refusal, a
+      // thrown handler) still leaves nothing behind.
+      terminalSink?.delete(operationId);
       // Idempotent and safe at every exit — the normal-completion path
       // above, a `return` on any error branch, or an unexpected rejection
       // from `acquireMutation`, `observeGitState`, `journal.begin`,
