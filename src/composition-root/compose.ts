@@ -31,7 +31,7 @@ import { createHostOperations } from '../host/host-operations.ts';
 import { PR_ENABLE_AUTO_MERGE_RECOVERY, PR_OPEN_RECOVERY } from '../host/recovery-descriptors.ts';
 import type { EnvVarName, OperationId } from '../shared/brands.ts';
 import { createModuleAdapter, toModuleHandler, type ModuleHandler } from '../module-adapter/module-adapter.ts';
-import { createDispatchPipeline, type Dispatch } from '../dispatch/dispatch-pipeline.ts';
+import { createDispatchPipeline, type Dispatch, type TerminalSink } from '../dispatch/dispatch-pipeline.ts';
 import { PRODUCTION_TOOL_DECLARATIONS } from './production-declarations.ts';
 import type { ModuleTargetName } from '../shared/brands.ts';
 import type { ContractCapabilitySet } from '../contract/capabilities.ts';
@@ -565,6 +565,11 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
   // above: one map, handed to both sides, so the value passes between them
   // without appearing in either signature.
   const hostCredentialBindings = new Map<OperationId, CredentialBinding | null>();
+  // The terminal states `HostOperations` observes, keyed by `operationId`
+  // (`20-contract.md` § L4, R11/R12). One map, handed to the writer here and to
+  // the dispatch pipeline that reads and deletes it below — the same shape as
+  // `hostCredentialBindings`.
+  const terminalSink: TerminalSink = new Map();
   const hostAdapter = createGitHubAdapter({
     clock: systemClock,
     exec,
@@ -596,6 +601,7 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
       return prepared.ok ? ok(prepared.value.credential) : err(prepared.error);
     },
     credentialBindings: hostCredentialBindings,
+    terminalSink,
     headShaFor: async (ctx) => {
       if (ctx.cloneRoot === null) return null;
       const head = await exec.runGit({ argv: ['rev-parse', 'HEAD'], cwd: ctx.cloneRoot, timeoutSeconds: 30, credential: null, signal: ctx.signal });
@@ -907,6 +913,11 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
     clock: systemClock,
     watermarks,
     recoverDeclaration: (declarationId) => lifecycle.recoverDeclaration(declarationId),
+    // All three or none (`20-contract.md` § L4): a take with nothing to
+    // deliver it through is a composition defect, not a silent drop.
+    terminalSink,
+    notifier,
+    store,
   });
   // Closes the forward reference `recovery.dispatch` opened above — set well
   // before boot's lazy recovery pass can reach a `resume` verdict, since that

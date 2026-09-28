@@ -234,6 +234,44 @@ test('an already-parked entry stays parked — a later pass observing a matching
   });
 });
 
+function outboxSubjects(volume: string): { severity: string; declarationId: string | null; kind: string }[] {
+  const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+  try {
+    const rows = db.prepare('SELECT severity, declaration_id, payload FROM notification_outbox ORDER BY created_at ASC').all() as { severity: string; declaration_id: string | null; payload: string }[];
+    return rows.map((row) => ({ severity: row.severity, declarationId: row.declaration_id, kind: (JSON.parse(row.payload) as { subject: { kind: string } }).subject.kind }));
+  } finally {
+    db.close();
+  }
+}
+
+test('S41.4 — a park recovery decides leaves exactly one operation-parked row, and a second pass adds none', async () => {
+  await migratedVolume(async (volume) => {
+    const { deps, journal } = await harness(volume, { observed: () => ok(observedDiverged()) });
+    await journal.begin(beginInputFor('op-6', 'some_withdrawn_tool'));
+
+    await recoverDeclaration(deps, 'repo-a' as never);
+    assert.deepEqual(outboxSubjects(volume), [{ severity: 'attention', declarationId: 'repo-a', kind: 'operation-parked' }]);
+
+    await recoverDeclaration(deps, 'repo-a' as never);
+    assert.equal(outboxSubjects(volume).length, 1, 'an entry already announced is not announced again');
+  });
+});
+
+test('S41.4 — a park whose journal write fails leaves no operation-parked row', async () => {
+  await migratedVolume(async (volume) => {
+    const { deps, journal } = await harness(volume, { observed: () => ok(observedDiverged()) });
+    await journal.begin(beginInputFor('op-7', 'some_withdrawn_tool'));
+    const failing: RecoveryDependencies = {
+      ...deps,
+      journal: { ...deps.journal, park: async () => err({ resultKind: 'infrastructure', retryable: false, summary: 'disk gone', code: 'intent-write-failed' } as never) },
+    };
+
+    await recoverDeclaration(failing, 'repo-a' as never);
+
+    assert.deepEqual(outboxSubjects(volume), []);
+  });
+});
+
 test('S8.7 — a resume runs through dispatch and takes the mutation lock in its own right, with recovery finished first', async () => {
   await migratedVolume(async (volume) => {
     const order: string[] = [];

@@ -2118,14 +2118,9 @@ caller that has the envelope may rely on the row having committed or the failure
 The take is the only thing that clears such an entry, and there is exactly one per wait, which is
 what makes **R11**'s "no entry survives" hold without a settle.
 
-The dependency members this adds to `DispatchPipelineDependencies`, alongside the `terminalSink`
-S41.1 wires, until the slice materialises them in `src/dispatch/dispatch-pipeline.ts`:
-
-```ts
-readonly terminalSink?: TerminalSink;
-readonly notifier?: Pick<Notifier, 'enqueue'>;
-readonly store?: Pick<StructuredStore, 'transaction'>;
-```
+`DispatchPipelineDependencies` carries `terminalSink`, `notifier` (`enqueue` only) and `store`
+(`transaction` only), all optional; the declaration in `src/dispatch/dispatch-pipeline.ts` is the
+canonical copy.
 
 What the declaration cannot say:
 
@@ -2771,14 +2766,6 @@ type HostError = ModuleErrorBase & (
 | `not-found` | The pull request, check or workflow does not exist | no | `precondition` |
 | `timed-out` | A bounded wait reached its cap | no | `timeout`; the notifier fires |
 
-**The three "the notifier fires" cells above are specified and not yet held.** No host terminal
-state reaches the notifier on the ordinary dispatch path today, so on that path those three are
-requirements rather than descriptions. Only the watcher fires it; boot recovery does not, because
-`Journal.classify` returns `terminal: null` on every `completed` verdict (**R3**, **R11**), so the
-recovery ladder's notify branch is never taken. Tracked as issue
-#49 — this paragraph goes when that closes. Recorded here because a reader cannot tell a rule the
-tree holds from one it owes by reading either the rule or the tree.
-
 ### Scheduler
 
 ```ts
@@ -3074,8 +3061,8 @@ responsible for maintaining it.
 | R8 | A resume step runs as an ordinary dispatch that takes the global mutation lock for itself, and completes before the triggering call acquires anything. It is never nested inside another operation's hold. | Lifecycle |
 | R9 | `resolveRunningAtBoot` runs no resume step and performs no git or host I/O. | Scheduler |
 | R10 | A `running` job is never simply fired again at boot. | Scheduler |
-| R11 | A `TerminalState` is written to the sink by the call that observed the terminal condition, and is read and removed by the settle for that same `operationId`. A monitoring wait never settles, so its entry is read and removed by the dispatch pipeline's take on the wait's exit instead (**R12**). Exactly one producer exists; `Journal.classify` is not one, per **R3**. No sink entry survives the operation that wrote it. **Specified, not yet held** — no sink exists and the pipeline settles every operation with `null`; issue #49, and this note goes when it closes. | Dispatch pipeline, Host adapter |
-| R12 | For every `monitoring-wait` operation, the dispatch pipeline takes the sink entry for its `operationId` exactly once, on every exit after the handler is invoked. If the take finds an entry, exactly one outbox row at `attention` naming that `TerminalState` is enqueued in its own store transaction before `dispatch` resolves. If it finds none, no row is enqueued. No monitoring wait begins a journal entry. **Specified, not yet held** — the monitoring-wait branch neither takes nor enqueues; S41, and this note goes when it lands. | Dispatch pipeline |
+| R11 | A `TerminalState` is written to the sink by the call that observed the terminal condition, and is read and removed by the settle for that same `operationId`. A monitoring wait never settles, so its entry is read and removed by the dispatch pipeline's take on the wait's exit instead (**R12**). Exactly one producer exists; `Journal.classify` is not one, per **R3**. No sink entry survives the operation that wrote it. | Dispatch pipeline, Host adapter |
+| R12 | For every `monitoring-wait` operation, the dispatch pipeline takes the sink entry for its `operationId` exactly once, on every exit after the handler is invoked. If the take finds an entry, exactly one outbox row at `attention` naming that `TerminalState` is enqueued in its own store transaction before `dispatch` resolves. If it finds none, no row is enqueued. No monitoring wait begins a journal entry. | Dispatch pipeline |
 
 ### Concurrency
 
