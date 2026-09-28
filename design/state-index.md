@@ -89,7 +89,7 @@
 | 318 | #318 | S50 — Every watcher outcome is audited, and every failure is told | S50.1, S50.2, S50.3, S50.4, S50.5, S50.6, S50.7 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 319 | #319 | S51 — A watched repository clones itself on first use | S51.1, S51.2, S51.3 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 320 | #320 | S52 — The watcher is proven against a real repository | S52.1, S52.2, S52.3, S52.4, S52.5 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
-| milestone/4 | #49 | Terminal-state detection never reaches the notifier on the ordinary dispatch or recovery paths | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
+| 330 | #330 | S53 — A tampered watcher folder stops delivery, and the operator hears once | S53.1, S53.2, S53.3, S53.4, S53.5, S53.6, S53.7, S53.8, S53.9, S53.10 | `c1fee0489483669410c59b88ba8e5d6e0740ca9c` |
 | milestone/6 | #61 | syncBase inlines rev-parse/is-ancestor plumbing that composites.ts keeps as private helpers | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/6 | #65 | `sendJson`/`readJsonBody` are independently reimplemented in six surface files | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #77 | Carry the watcher push SHA through auto-merge and reconciliation | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
