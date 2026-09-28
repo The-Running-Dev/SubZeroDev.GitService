@@ -1538,7 +1538,9 @@ which is what assigns `sequence`, `previousHash` and `hash`.
 Declared in `src/notifier/notifier.ts`.
 
 `enqueue` is synchronous and takes a transaction, so the row and the settle commit together.
-Delivery happens afterwards and never blocks the operation it describes.
+Delivery happens afterwards and never blocks the operation it describes. A caller with no state change
+to commit alongside the row opens a transaction holding only the row. The watcher, the maintenance
+pass and the monitoring-wait branch of the dispatch pipeline (§ *L4 — dispatch pipeline*) do this.
 
 `clearFailed`'s `actor` was accepted from the start but never recorded anywhere but a log line
 (S11) — none of the seven `AuditRecordBody` forms described an operator clearing an outbox row.
@@ -2103,6 +2105,62 @@ all — the findings carry exactly the fields each variant needs — but it mean
 back into structured data, a pull-request number back out of `String(n)` and a branch name back out of
 free text, with no type holding producer and consumer in step. **A second producer in the recovery
 path** is rejected under **R3** below.
+
+**A monitoring wait has no settle, so the pipeline is its sink's reader** (S41.7). `checks_await` is
+the only producer of `required-check-failed` and `wait-timeout`, and as a `monitoring-wait` it begins
+no journal entry, so the settle this section routes every other terminal state through never happens
+for it. The monitoring-wait branch therefore takes the sink entry itself: one read-and-delete for the
+wait's `operationId`, run on **every** exit of that branch after the handler is invoked, including a
+thrown handler and a cancelled wait. When the take finds an entry, the pipeline
+opens a store transaction holding only that row, enqueues one `NotificationRequest` at `attention`
+naming it against the call's `declarationId`, and commits — all before `dispatch` resolves, so a
+caller that has the envelope may rely on the row having committed or the failure having been logged.
+The take is the only thing that clears such an entry, and there is exactly one per wait, which is
+what makes **R11**'s "no entry survives" hold without a settle.
+
+The dependency members this adds to `DispatchPipelineDependencies`, alongside the `terminalSink`
+S41.1 wires, until the slice materialises them in `src/dispatch/dispatch-pipeline.ts`:
+
+```ts
+readonly terminalSink?: TerminalSink;
+readonly notifier?: Pick<Notifier, 'enqueue'>;
+readonly store?: Pick<StructuredStore, 'transaction'>;
+```
+
+What the declaration cannot say:
+
+- **The composition root wires all three or none.** They are optional only so that tests which never
+  reach a terminal state need not construct a store. A pipeline that takes an entry and has no
+  `notifier` or `store` to deliver it through logs that as a composition defect naming the
+  `operationId`. It never drops the entry silently, and it never leaves it in the sink to wait for a
+  reader that does not exist.
+- **The sink, not the envelope, decides.** The pipeline enqueues exactly when the take finds an entry,
+  whatever the envelope's kind. A `timeout` envelope the handler did not attribute to the wait running
+  out writes nothing to the sink, and the pipeline does not infer one from the envelope. A cancelled
+  wait is one of those.
+- **A failed enqueue does not change the envelope.** The wait's result is still true. The notification
+  is a side channel, and delivery never blocks the operation it describes. The failure is logged with
+  the `operationId` and the `TerminalState` kind, the watcher's handling of the same failure.
+- **The row commits in its own transaction because there is no state change to share one with.**
+  **R6**'s same-transaction rule exists to close the window in which an entry reads `settled` and no
+  row exists. A monitoring wait records nothing, so no such window can open. A crash after the wait
+  returns and before the row commits loses the notification. It contradicts no durable record,
+  because nothing records the wait as complete either. This is the window the watcher's
+  `file-watcher-failed` and the maintenance pass's summary already accept, and it is accepted here on
+  the same terms.
+- **A read writes nothing to the sink**, and the read branch neither takes nor enqueues. The adapter
+  raises `merge-conflict` only from `enableAutoMerge`. `required-check-failed` and `wait-timeout` are
+  raised only inside `awaitChecks`. A read tool that came to observe a terminal state would first
+  need an amendment saying whether a read may end an operation in one.
+
+Two alternatives were rejected. **Journalling the wait** so that it settles like a mutation would put
+its row under **R6** and close the crash window. It would also leave an unsettled entry for recovery
+after every crash mid-wait. With no descriptor, that entry parks, and a parked entry refuses every
+ordinary mutation on the declaration until an operator resolves what was only a read. That cost is
+paid to protect a notification whose loss contradicts nothing. **Enqueuing from `HostOperations`**
+would give L2 a store and a notifier. It would also give terminal states two outbox-writing paths
+that can disagree about the same kind, which undoes the one-producer, one-consumer shape the sink
+exists to have. See `design/90-decisions.md`, 2026-09-28.
 
 ### L4 — authorization
 
@@ -3016,7 +3074,8 @@ responsible for maintaining it.
 | R8 | A resume step runs as an ordinary dispatch that takes the global mutation lock for itself, and completes before the triggering call acquires anything. It is never nested inside another operation's hold. | Lifecycle |
 | R9 | `resolveRunningAtBoot` runs no resume step and performs no git or host I/O. | Scheduler |
 | R10 | A `running` job is never simply fired again at boot. | Scheduler |
-| R11 | A `TerminalState` is written to the sink by the call that observed the terminal condition, and is read and removed by the settle for that same `operationId`. Exactly one producer exists; `Journal.classify` is not one, per **R3**. No sink entry survives the operation that wrote it. **Specified, not yet held** — no sink exists and the pipeline settles every operation with `null`; issue #49, and this note goes when it closes. | Dispatch pipeline, Host adapter |
+| R11 | A `TerminalState` is written to the sink by the call that observed the terminal condition, and is read and removed by the settle for that same `operationId`. A monitoring wait never settles, so its entry is read and removed by the dispatch pipeline's take on the wait's exit instead (**R12**). Exactly one producer exists; `Journal.classify` is not one, per **R3**. No sink entry survives the operation that wrote it. **Specified, not yet held** — no sink exists and the pipeline settles every operation with `null`; issue #49, and this note goes when it closes. | Dispatch pipeline, Host adapter |
+| R12 | For every `monitoring-wait` operation, the dispatch pipeline takes the sink entry for its `operationId` exactly once, on every exit after the handler is invoked. If the take finds an entry, exactly one outbox row at `attention` naming that `TerminalState` is enqueued in its own store transaction before `dispatch` resolves. If it finds none, no row is enqueued. No monitoring wait begins a journal entry. **Specified, not yet held** — the monitoring-wait branch neither takes nor enqueues; S41, and this note goes when it lands. | Dispatch pipeline |
 
 ### Concurrency
 
