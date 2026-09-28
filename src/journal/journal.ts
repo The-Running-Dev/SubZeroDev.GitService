@@ -12,7 +12,7 @@ import type { RecoveryClassification, RecoveryDescriptor } from '../recovery/typ
 import { retentionCutoff, toRetentionReport, type RetentionReport } from '../shared/retention.ts';
 import { storeError } from '../store/errors.ts';
 import { journalError, type JournalError } from './errors.ts';
-import type { JournalBeginInput, JournalEntryState, JournalStep, NotificationRequest, OperationJournalEntry } from './types.ts';
+import type { JournalBeginInput, JournalEntryState, JournalStep, NotificationRequest, OperationJournalEntry, TerminalState } from './types.ts';
 
 export interface Journal {
   begin(input: JournalBeginInput): Promise<Outcome<OperationJournalEntry, JournalError>>;
@@ -291,7 +291,29 @@ export function createJournal(deps: JournalDependencies): Journal {
         if (existing.state === 'settled') {
           throw journalError({ code: 'invalid-transition', from: existing.state, to: 'attention' }, `cannot park a settled entry`);
         }
-        db.prepare(`UPDATE journal_entry SET state = 'attention', attention_reason = ?, updated_at = ? WHERE operation_id = ?`).run(reason, now, operationId);
+        db.exec('BEGIN;');
+        try {
+          db.prepare(`UPDATE journal_entry SET state = 'attention', attention_reason = ?, updated_at = ? WHERE operation_id = ?`).run(reason, now, operationId);
+          // Every park tells the operator, and the row commits with the state
+          // change for the same reason `settle`'s does. An entry already in
+          // `attention` was announced when it was first parked, so re-parking
+          // it adds no second row.
+          if (existing.state !== 'attention') {
+            const subject: TerminalState = { kind: 'operation-parked', operationId, reason };
+            db.prepare(
+              `INSERT INTO notification_outbox (id, severity, declaration_id, payload, status, attempts, last_attempt_at, last_error, created_at, delivered_at)
+               VALUES (?, 'attention', ?, ?, 'pending', 0, NULL, NULL, ?, NULL)`,
+            ).run(randomUUID(), existing.declarationId, JSON.stringify({ subject, summary: `'${existing.tool}' was parked: ${reason}` }), now);
+          }
+          db.exec('COMMIT;');
+        } catch (cause) {
+          try {
+            db.exec('ROLLBACK;');
+          } catch {
+            // The outer catch in `withDb` reports the original failure.
+          }
+          throw cause;
+        }
       });
     },
 
