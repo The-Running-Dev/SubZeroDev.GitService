@@ -1,6 +1,6 @@
 # Slices — SubZeroDev.Git
 
-Derived from `10-design.md` and `20-contract.md`. Fifty-two vertical slices. Each one ends
+Derived from `10-design.md` and `20-contract.md`. Fifty-three vertical slices. Each one ends
 runnable: it goes from an entry point to persistence and leaves nothing half-wired.
 
 ## How this document is kept
@@ -176,6 +176,21 @@ every route behind it. What it did not ship, because no console existed to put i
 issue is finished. The missing screen is picked up as new outstanding work in S32 instead, which is
 where it can be checked.
 
+**`S41.2` is retired, and `S41.7` to `S41.9` are appended, on 2026-09-28.** `S41.2` asked for one
+outbox row per terminal kind "in the same transaction as the settle", for all three kinds. Two of the
+three, `required-check-failed` and `wait-timeout`, are produced only by `checks_await`, and
+`checks_await` is a `monitoring-wait`: it never journals and never settles, so there is no settle for
+the row to share a transaction with. PR #326 landed the half of S41 that this does not touch and
+stopped there. Narrowing `S41.2` to the one kind that does settle would silently shrink what its
+checkbox refers to, so it is retired instead. `S41.7` is the contract amendment that decides how a
+monitoring wait delivers its terminal notification, and it has to run first even though it is
+numbered last, like `S12.8` and `S18.8`. `S41.8` carries the part of `S41.2` that still holds as
+written, and `S41.9` carries the part that waits on the amendment. The gate is recorded under
+§ *Contract gates*.
+
+**`S52.6` is appended, not folded into `S52.5`.** `S52.5` covers the corrected outcomes of S49 to S51.
+S53 was sliced after it, and widening `S52.5`'s range would change what an open checkbox refers to.
+
 ## Why this order
 
 The two bets the design cannot control were proven first, because both are cheap to test and both
@@ -280,10 +295,18 @@ credential or a hung module does — ordered by blast radius: a clone adopted ha
 branch force-deleted with commits nobody merged, then error kinds that name the wrong cause, then
 timeouts nothing enforces. **S48 is presentation**: every fact it shows already exists server-side.
 
-**The watcher runs last, as S49 to S52, and in dependency order.** S49 is contract-gated (§ *Contract
-gates*, below) and carries the SHA the rest of the watcher work names in its notices. S50 finishes the
-audit and notification path over it, S51 fixes a first-use gap on the same tick protocol, and S52 is
-the evidence harness that can only prove the corrected outcomes once all three have landed.
+**The watcher runs last, as S53, S49, S50, S51 and S52, in dependency order.** S53 was appended on
+2026-09-28, after the D18 and D19 decision of 2026-09-25 settled what S50's out-of-scope line had left
+open. It goes first among the watcher slices because it is not gated and its gap can be exploited
+today. While a state directory is tampered, the watcher can open one pull request per poll interval
+and then lose track of it. S49 is contract-gated (§ *Contract gates*, below) and carries the SHA the
+rest of the watcher work names in its notices. S50 finishes the audit and notification path over both.
+S51 fixes a first-use gap on the same tick protocol. S52 is the evidence harness, and it can only
+prove the corrected outcomes once all four have landed.
+
+S40 has landed. S41 is partly landed and is now contract-gated as well, so until `S41.7` is met the
+next slice that is not gated is S42. S42 needs only S41's park notification, and that part is already
+on `main`.
 
 ## Contract gates
 
@@ -292,7 +315,18 @@ committed separately and before the handler work depending on it. **No slice may
 signature absent from the contract** — where a slice needs tools, amending the contract is its
 first acceptance criterion, not an implementation detail.
 
-**One gate is live: S49, raised by this document on 2026-09-25.** The watcher has to pin an auto-merge
+**Two gates are live.** The newer one is **S41, raised by this document on 2026-09-28**. `S41.2`
+assumed that every terminal state a host call observes reaches the operator through that
+operation's `settle`. `checks_await` breaks that assumption. It is the only producer of
+`required-check-failed` and `wait-timeout`, and as a `monitoring-wait` it never journals, so it never
+settles. The terminal sink PR #326 writes for those two kinds therefore has no reader. The contract
+does not say how a monitoring wait's terminal state reaches the outbox, or who clears that sink entry
+when there is no settle, so this is an amendment and not an implementation detail. `S41.7` is that
+amendment, committed by `/contract` (opus, high) separately and before the rest of S41. `/slice`
+does not resume S41 until `S41.7` is met. The amendment decides the mechanism, including whether it
+reuses the sink at all. This section only names the gate.
+
+The older gate is **S49, raised by this document on 2026-09-25.** The watcher has to pin an auto-merge
 to the commit it pushed (#77), and `pr_enable_auto_merge`'s input carries no expected head today. Adding
 one changes a registered MCP tool's public input, so it is a contract amendment and not an
 implementation detail. `S49.1` is that amendment, committed by `/contract` (opus, high) separately
@@ -351,42 +385,8 @@ carries the reasoning.
 
 ## Outstanding
 
-Thirteen slices, S40 to S52, appended 2026-09-25. The first thirty-nine are landed and indexed below.
-
-## S40 — Only the operator's own console can clear what needs attention
-
-Delivers: An operator can hand a script a read-only token without that script being able to resolve a
-parked operation or clear a failing credential. Someone with no credentials at all can no longer fill
-the service's disk with client registrations, or its audit trail with revocations that revoked
-nothing.
-Touches: `src/surfaces/http-server.ts` (the two mutating attention routes), `src/surfaces/mcp-routes.ts`
-(client registration, token revocation), `src/authorization/authorization.ts` (`registerClient`,
-`revokeBearerToken`), `design/20-contract.md` (**A11**'s status note).
-Depends on: none
-Closes: #67, #275, #291
-Acceptance:
-  - S40.1 `POST /parked-operations/{operationId}/resolve` and
-    `POST /failing-credentials/{credentialRef}/{declarationId}/clear` refuse a bearer credential. This
-    holds for an operator-api token with every scope and for one whose only scope is `read`. Each
-    refusal changes nothing: the parked entry stays parked and the failing mark stays set.
-  - S40.2 Both routes accept an authenticated cookie session with a valid double-submit CSRF token, and
-    refuse the same session without one. The CSRF check runs on every request to these routes, not only
-    on some credential paths.
-  - S40.3 `GET /health` and `GET /parked-operations` still accept both a bearer credential holding
-    `read` and a cookie session, exactly as before.
-  - S40.4 **A11**'s "specified, not yet held" note in `design/20-contract.md` is removed in the same
-    change, along with the code comment in `http-server.ts` that defers the question to U4.
-  - S40.5 `POST /oauth/register` refuses a registration once the stored client count reaches a
-    deployment-fixed cap. The cap is declared beside the existing pending-authorization cap, and the
-    refusal stores nothing. A test registers up to the cap and asserts the next one is refused.
-  - S40.6 `POST /oauth/revoke` answers 200 for a known token, for an already-revoked token and for a
-    token that never existed.
-  - S40.7 Only a revocation that changed a stored row appends an audit record. That record's actor is
-    `kind: 'mcp'` with the revoked token's own client id and grant id, never an operator subject. A test
-    revokes a token that does not exist and asserts the audit chain length is unchanged.
-Out of scope: TOTP re-enrolment enforcement (#276) and the approving operator on a grant (#292). Both
-are decision-gated and wait for `/contract`. So is any change to which capabilities § *Scopes* makes
-console-only.
+Thirteen slices: S41 to S52, appended 2026-09-25, and S53, appended 2026-09-28. The first forty are
+landed and indexed below.
 
 ## S41 — Terminal outcomes and parked work reach the operator
 
@@ -397,15 +397,14 @@ Touches: `src/host/host-operations.ts`, `src/dispatch/dispatch-pipeline.ts`,
 `src/composition-root/compose.ts` (the terminal-state sink), `src/lifecycle/recovery.ts`,
 `src/journal/`, `design/20-contract.md` (§ *Error semantics › Host adapter*, **R11**),
 `design/10-design.md` (control-flow step 11, § *Failure modes*, § *Module boundaries*).
-Depends on: none
+Depends on: none. **Contract-gated** — see § *Contract gates*. Partly landed in PR #326: the journal
+writes the park notification, and `host-operations.ts` writes the sink.
 Closes: #49, #266, #272
 Acceptance:
   - S41.1 A composition-root-owned sink keyed on `operationId` carries a `TerminalState` from the host
     call that observed it to that operation's `Journal.settle`. `host-operations.ts` writes the sink on
     `merge-conflict`, `required-check-failed` and `wait-timeout`. The pipeline reads and deletes the
     entry immediately before `settle` and passes it in place of `null`.
-  - S41.2 Dispatching a host call that ends in each of those three conditions leaves exactly one outbox
-    row at `attention` naming that terminal kind. It is written in the same transaction as the settle.
   - S41.3 After every settle, whether successful, failed or terminal, the sink holds no entry for that
     `operationId` (**R11**). A host call that fails for any other reason writes nothing to the sink and
     enqueues no terminal notification.
@@ -418,6 +417,15 @@ Acceptance:
   - S41.6 In the same change, remove the four `design/` sites #49 names and **R11**'s "specified, not
     yet held" note. The § *Module boundaries* Scheduler row states the edge that actually exists
     afterwards.
+  - S41.7 **The contract amendment is committed first**, by `/contract`, although it is numbered last.
+    It fixes how a `monitoring-wait` that ends in `required-check-failed` or `wait-timeout` delivers
+    that terminal state to the outbox without a journal entry or a settle. It also fixes what clears
+    any sink entry that wait wrote. `/slice` does not resume S41 until this is met.
+  - S41.8 A mutating host call that ends in `merge-conflict` leaves exactly one outbox row at
+    `attention` naming `merge-conflict`, written in the same transaction as its settle.
+  - S41.9 A `checks_await` call that ends in `required-check-failed`, and one that ends in
+    `wait-timeout`, each leave exactly one outbox row at `attention` naming that kind, delivered as
+    `S41.7` fixes. Afterwards the sink holds no entry for either call's `operationId`.
 Out of scope: making `Journal.classify` terminal-aware. It stays terminal-blind by decision (#49,
 **R3**). Adding a field to `ToolResult` is `/design`'s. Recovery's other defects are S42's.
 
@@ -607,6 +615,54 @@ Acceptance:
     count.
 Out of scope: `GrantView.liveSessions` (#140, a decision). Any new console view.
 
+## S53 — A tampered watcher folder stops delivery, and the operator hears once
+
+Delivers: Suppose something swaps one of the watcher's own working folders for a link or a file. The
+operator then sees delivery for that one repository stop at once, and is told about it once. Today
+the watcher keeps opening pull requests it then loses track of, or crashes out without a word. Every
+other watched repository carries on as normal.
+Touches: `src/watcher/watcher.ts`, `src/watcher/types.ts`, `src/watcher/pending-pull-requests.ts`,
+`src/journal/types.ts` (the new `TerminalState` variant), `design/20-contract.md` (the two
+"Scaffold, until the implementing slice…" notes under D18 and *L2 — watcher*).
+Depends on: none
+Closes: no existing issue. Implements D18 and D19 (`90-decisions.md`, 2026-09-25).
+Acceptance:
+  - S53.1 A tick for a declaration where any of `processing/`, `processed/` or `failed/` is a symlink,
+    a reparse point or a plain file returns `skipped: 'state-directory-tampered'`. It claims no file
+    and makes no dispatch, Git or host call. This holds with an empty inbox. It also holds for a
+    declaration whose clone is dirty or needs attention: a test with a tampered `processed/` and a
+    dirty clone gets `state-directory-tampered`, not `clone-not-clean`.
+  - S53.2 In the same pass, a sound declaration beside a tampered one is unaffected. A test with one of
+    each asserts that the sound one opens its pull request.
+  - S53.3 The pre-claim gate and a tampered `processing/` at `recoverInterruptedClaims` each enqueue
+    one `watcher-state-directory-tampered` outbox row at `attention`, naming the directory, and write
+    no audit record. Three consecutive refusing ticks leave one row. A tick that finds all three
+    directories sound, followed by a refusing tick, leaves a second.
+  - S53.4 If `claim` finds `processing/` swapped after the gate passed, the file stays in the inbox and
+    the tick reports `state-directory-tampered`, never `claim-failed`.
+  - S53.5 A terminal move into a tampered `processed/` or `failed/` throws nothing. The file stays in
+    `processing/`, and its `file-watcher` audit record carries the protocol's own outcome. A
+    `file-watcher-failed` notification at `attention` names the refused directory, and the tick
+    returns its report.
+  - S53.6 A pull request the protocol opened is in the pending list before its file's terminal move is
+    attempted (**D19**). A test refuses the terminal move after `pr_open`, asserts the pending entry
+    exists, and asserts that the next reconciliation poll reads it.
+  - S53.7 In `recoverInterruptedClaims`, a tampered `failed/` leaves the file in `processing/`. It
+    writes the file's `interrupted-claim` audit record and a `file-watcher-failed` notification at
+    `attention`. A tampered `processing/` is not read through. In both cases `start` succeeds, and a
+    second declaration's interrupted claim is still recovered.
+  - S53.8 `runRetention` with a tampered `processed/` deletes nothing through it, and returns a
+    `RetentionReport.skipped` entry naming the declaration.
+  - S53.9 An existing real directory at any of the three names is used as found, and its mode is not
+    changed. A directory the watcher creates is owner-only on POSIX.
+  - S53.10 `WatcherError`, `WatchTickReport.skipped` and `TerminalState` carry the values the contract
+    fixes for D18. The two scaffold notes in `design/20-contract.md` are replaced with pointers to the
+    tree in the same change. Every `W08.3` and `W08.4` citation in `src/watcher/`, in code comments and
+    in test names, cites D18 instead.
+Out of scope: checking or correcting the mode or ownership of an existing directory, and auditing the
+file-less refusals in the hash chain. Both were rejected on 2026-09-25. Auditing terminal-move failures
+that are not tamper, and exceptions escaping a tick, are S50's. The pushed SHA is S49's.
+
 ## S49 — A watcher's auto-merge only merges the commit it pushed
 
 Delivers: An operator can trust that a pull request the file watcher opened is only ever merged at the
@@ -642,7 +698,7 @@ reach a console log, or nothing at all. Removing a repository cannot discard a p
 is still following.
 Touches: `src/watcher/watcher.ts`, `src/watcher/types.ts`, `src/declarations/declarations.ts`
 (`remove`).
-Depends on: S49 (the SHA named in S50.4)
+Depends on: S49 (the SHA named in S50.4), S53 (the tamper refusal S50.1 audits)
 Closes: #81, #82, #84, #88
 Acceptance:
   - S50.1 A terminal move that fails is audited and notified at `attention`, including a refusal on a
@@ -661,8 +717,8 @@ Acceptance:
     least one entry for the declaration, counting those entries. An absent or empty list does not
     block, and removal deletes nothing.
   - S50.7 Production watcher code contains no `as never` casts.
-Out of scope: deciding the state-directory tamper refusal behaviour — skip or throw, and invariant D18
-(`90-decisions.md` § *Open*, `/contract`). S50.1 audits whatever that behaviour is, without choosing it.
+Out of scope: implementing the state-directory tamper refusal, which is S53's. D18 and D19 fixed it on
+2026-09-25, and S50.1 audits it as S53 leaves it.
 
 ## S51 — A watched repository clones itself on first use
 
@@ -690,7 +746,7 @@ real repository and remote. Today it is asserted against mocks that never stage,
 rename anything, which cannot show parity with the blog's watcher that this one replaces.
 Touches: `src/watcher/` tests and a test fixture (scratch clone, bare remote, constrained GitHub CLI
 shim).
-Depends on: S49, S50, S51
+Depends on: S49, S50, S51, S53
 Closes: #87
 Acceptance:
   - S52.1 Integration tests run the watcher against a scratch clone and a bare remote, with a
@@ -702,6 +758,11 @@ Acceptance:
   - S52.4 A platform prerequisite that cannot be met is detected and skipped with a recorded reason.
     Symlink creation on an unelevated Windows host is one such case.
   - S52.5 Every corrected outcome from S49 to S51 is demonstrated with audit and outbox evidence.
+  - S52.6 Against the same real clone, a real symlink or plain file at each of `processing/`,
+    `processed/` and `failed/` produces the refusal D18's table names for that site. A refused
+    terminal move after a real `pr_open` leaves that pull request in the pending list (D19). Each case
+    is demonstrated with audit and outbox evidence, and a symlink the host cannot create is skipped
+    under `S52.4`.
 Out of scope: recreating the blog watcher's architecture. Adding new watcher behaviour.
 
 ---
@@ -751,6 +812,7 @@ Bodies retired; the closed issue is the record. Criteria are not re-derived from
 | **S38** | The blog's watched files become pull requests | [#158](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/158) |
 | **S21** | A second repository, driven end to end, unwatched | [#35](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/35) |
 | **S22** | The deployment is verifiable, reversible and documented | [#36](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/36) |
+| **S40** | Only the operator's own console can clear what needs attention | [#308](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/308) |
 
 Three rows carry a name this document changed after the issue was opened: #31 is titled "A dropped
 file becomes a pull request…" and #92 "A consumer can declare a safe content-drop protocol", both
