@@ -1,7 +1,8 @@
 import type { Clock } from '../clock/clock.ts';
 import type { CallContext, DomainOperation } from '../shared/call-context.ts';
-import type { GitSha, OperationId } from '../shared/brands.ts';
+import type { GitSha, OperationId, RegistryToolName } from '../shared/brands.ts';
 import type { Journal } from '../journal/journal.ts';
+import type { TerminalState } from '../journal/types.ts';
 import type { CredentialBinding, Exec } from '../exec/exec.ts';
 import { success, validation, authorization, precondition, timeout as timeoutResult, upstream, infrastructure, type ToolResult } from '../result/envelope.ts';
 import { diagnosticsFor } from '../shared/diagnostics.ts';
@@ -81,6 +82,14 @@ export interface HostOperationsDependencies {
    * `credentialEnv` already is between `CredentialResolver` and `Exec`.
    */
   readonly credentialBindings?: Map<OperationId, CredentialBinding | null>;
+  /**
+   * Where a `TerminalState` this module observed is left for the dispatch
+   * pipeline's settle to read, keyed by `operationId` (`20-contract.md`
+   * § Dispatch pipeline, **R11**). Written only where a terminal condition is
+   * *observed* — a merge conflict, a required check concluding red, a wait
+   * running out — and by nothing else. Absent, nothing is reported.
+   */
+  readonly terminalSink?: Map<OperationId, TerminalState>;
   readonly exec?: Pick<Exec, 'runGit'>;
   readonly pollIntervalSeconds?: number;
   /** Injectable so a wait test does not spend real seconds. */
@@ -155,6 +164,22 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
   const pollIntervalSeconds = deps.pollIntervalSeconds ?? POLL_INTERVAL_SECONDS_DEFAULT;
   const requiredChecksFor = deps.requiredChecksFor ?? (async () => []);
 
+  /** Records the terminal state a host error names, when it names one, then maps it as ever. */
+  function failWith(ctx: CallContext, error: HostError): ToolResult<never> {
+    if (error.code === 'merge-conflict') {
+      deps.terminalSink?.set(ctx.operationId, { kind: 'merge-conflict', branch: error.pullRequest.branch, headSha: error.headSha, baseSha: error.baseSha });
+    } else if (error.code === 'required-check-failed') {
+      deps.terminalSink?.set(ctx.operationId, { kind: 'required-check-failed', check: error.check, pullRequest: error.pullRequest });
+    }
+    return hostErrorToToolResult(error);
+  }
+
+  /** A wait that ran out. `checks_await` is the registry's only `monitoring-wait`. */
+  function waitTimedOut(ctx: CallContext, summary: string, waitedSeconds: number): ToolResult<never> {
+    deps.terminalSink?.set(ctx.operationId, { kind: 'wait-timeout', waitedSeconds, tool: 'checks_await' as RegistryToolName });
+    return timeoutResult(summary, waitedSeconds);
+  }
+
   /**
    * The `required-check-failed` judgement (issue #47), factored out because
    * it runs on **every poll** rather than once the last check concludes. A
@@ -199,7 +224,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
     // A lookup that failed is not evidence that there is no pull request.
     // Reporting the wait as concluded here would hide a red required check
     // behind a rate limit.
-    if (!openPullRequests.ok) return hostErrorToToolResult(openPullRequests.error);
+    if (!openPullRequests.ok) return failWith(ctx, openPullRequests.error);
 
     const pullRequest = openPullRequests.value.find((pr) => pr.headSha === ref) ?? null;
     if (pullRequest === null) {
@@ -217,7 +242,8 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
       );
     }
 
-    return hostErrorToToolResult(
+    return failWith(
+      ctx,
       hostError(
         { code: 'required-check-failed', check: failedRequired.name, pullRequest: pullRequest.ref },
         `required check '${failedRequired.name}' concluded failure on pull request #${pullRequest.ref.number}`,
@@ -287,7 +313,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
       const startedAtMs = Date.parse(clock.now());
       return withCredential(ctx, () => hostMutation(ctx, 'host.createPullRequest', async () => {
         const created = await adapter.createPullRequest(ctx, input);
-        if (!created.ok) return hostErrorToToolResult(created.error);
+        if (!created.ok) return failWith(ctx, created.error);
         return success(`opened pull request #${created.value.number}`, { ref: created.value }, diagnosticsFor(ctx, startedAtMs, clock));
       }));
     },
@@ -296,7 +322,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
       const startedAtMs = Date.parse(clock.now());
       return withCredential(ctx, async () => {
         const status = await adapter.readPullRequest(ctx, input.number);
-        if (!status.ok) return hostErrorToToolResult(status.error);
+        if (!status.ok) return failWith(ctx, status.error);
         return success(`pull request #${input.number} is ${status.value.state}`, { status: status.value }, diagnosticsFor(ctx, startedAtMs, clock));
       });
     },
@@ -305,7 +331,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
       const startedAtMs = Date.parse(clock.now());
       return withCredential(ctx, async () => {
         const listed = await adapter.listPullRequests(ctx, input.state);
-        if (!listed.ok) return hostErrorToToolResult(listed.error);
+        if (!listed.ok) return failWith(ctx, listed.error);
         return success(`${listed.value.length} pull request(s)`, { pullRequests: listed.value }, diagnosticsFor(ctx, startedAtMs, clock));
       });
     },
@@ -314,7 +340,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
       const startedAtMs = Date.parse(clock.now());
       return withCredential(ctx, async () => {
         const comments = await adapter.readPullRequestComments(ctx, input.number);
-        if (!comments.ok) return hostErrorToToolResult(comments.error);
+        if (!comments.ok) return failWith(ctx, comments.error);
         // Bodies are carried through verbatim as data. Nothing here reads them,
         // and the registry entry is annotated `untrustedOutput` so no consumer
         // mistakes them for instructions.
@@ -330,7 +356,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
       const startedAtMs = Date.parse(clock.now());
       return withCredential(ctx, () => hostMutation(ctx, 'host.enableAutoMerge', async () => {
         const enabled = await adapter.enableAutoMerge(ctx, input.number);
-        if (!enabled.ok) return hostErrorToToolResult(enabled.error);
+        if (!enabled.ok) return failWith(ctx, enabled.error);
         return success(
           `auto-merge enabled on pull request #${input.number}`,
           { number: input.number, autoMergeEnabled: true },
@@ -345,7 +371,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
       if (ref === null) return precondition('no commit to read checks for: the clone has no resolvable head', []);
       return withCredential(ctx, async () => {
         const checks = await adapter.readChecks(ctx, ref);
-        if (!checks.ok) return hostErrorToToolResult(checks.error);
+        if (!checks.ok) return failWith(ctx, checks.error);
         return success(`${checks.value.length} check(s) at ${ref}`, { ref, checks: checks.value }, diagnosticsFor(ctx, startedAtMs, clock));
       });
     },
@@ -388,12 +414,13 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
               await sleep(backoffMs);
               continue;
             }
-            return timeoutResult(
+            return waitTimedOut(
+              ctx,
               `checks at ${ref} were still rate-limited when the ${input.timeoutSeconds}s wait ran out`,
               input.timeoutSeconds,
             );
           }
-          return hostErrorToToolResult(checks.error);
+          return failWith(ctx, checks.error);
         }
         lastChecks = checks.value;
 
@@ -415,10 +442,11 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
         }
 
         if (ctx.signal.aborted) {
-          return timeoutResult(`the wait on ${ref} was cancelled`, input.timeoutSeconds);
+          return waitTimedOut(ctx, `the wait on ${ref} was cancelled`, input.timeoutSeconds);
         }
         if (Date.parse(clock.now()) + pollIntervalSeconds * 1000 >= deadlineMs) {
-          return timeoutResult(
+          return waitTimedOut(
+            ctx,
             `checks at ${ref} had not concluded within ${input.timeoutSeconds}s (${pending.length} still pending)`,
             input.timeoutSeconds,
           );
