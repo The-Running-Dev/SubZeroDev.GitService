@@ -101,7 +101,9 @@ export interface DispatchPipelineDependencies {
    * step it runs goes back through this same pipeline and must be able to
    * acquire both locks in its own right.
    */
-  readonly recoverDeclaration?: (declarationId: DeclarationId) => Promise<unknown>;
+  readonly recoverDeclaration?: (
+    declarationId: DeclarationId,
+  ) => Promise<void | { readonly ok: true } | { readonly ok: false; readonly error: { readonly summary: string } }>;
   /**
    * S41. **The composition root wires all three or none** — they are optional
    * only so a test that never reaches a terminal state need not build a store.
@@ -581,7 +583,13 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
       }
       recovering.add(declaration.id);
       try {
-        await deps.recoverDeclaration(declaration.id);
+        const pass = await deps.recoverDeclaration(declaration.id);
+        // A pass that could not finish its own bookkeeping decided nothing
+        // (S42.1, S42.2): the mutation is refused as `infrastructure`, and the
+        // declaration is not marked recovered, so the next call tries again.
+        if (pass !== undefined && !pass.ok) {
+          return infrastructure(`recovery of '${declaration.id}' could not finish: ${pass.error.summary}`);
+        }
         recovered.add(declaration.id);
       } finally {
         recovering.delete(declaration.id);

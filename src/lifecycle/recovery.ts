@@ -1,14 +1,28 @@
 import type { DeclarationId } from '../shared/brands.ts';
 import type { Session } from '../shared/session.ts';
+import { err, ok, type Outcome } from '../shared/outcome.ts';
 import type { Clock } from '../clock/clock.ts';
 import type { Journal } from '../journal/journal.ts';
+import type { JournalError } from '../journal/errors.ts';
 import type { OperationJournalEntry } from '../journal/types.ts';
 import type { CloneStore } from '../clone/clone-store.ts';
+import type { CloneStoreError } from '../clone/errors.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import type { RecoveryCatalogue } from '../recovery/catalogue.ts';
 import type { RecoveryClassification } from '../recovery/types.ts';
 import type { Dispatch } from '../dispatch/dispatch-pipeline.ts';
 import type { Notifier } from '../notifier/notifier.ts';
+
+/**
+ * Why a pass could not finish. Both members carry `resultKind: 'infrastructure'`
+ * (`ModuleErrorBase`): a pass that cannot write or read its own bookkeeping has
+ * decided nothing about the entry it stopped on, and the declaration stays as it
+ * was — `recovery-pending` for as long as an entry is unsettled — so the next
+ * caller tries again.
+ */
+export type RecoveryFailure = JournalError | CloneStoreError;
+
+export type RecoveryPassOutcome = Outcome<readonly RecoveryClassification[], RecoveryFailure>;
 
 export interface RecoveryDependencies {
   readonly journal: Pick<Journal, 'unsettled' | 'allUnsettled' | 'classify' | 'settle' | 'park'>;
@@ -48,21 +62,23 @@ export interface RecoveryDependencies {
  * descriptor itself names. A tree it cannot account for is parked for a
  * human, which is the honest outcome and the one the design chose over any
  * form of automatic rollback.
+ *
+ * A pass whose own bookkeeping fails — the journal cannot be read, a park
+ * cannot be written — stops and returns that failure rather than a verdict:
+ * whatever it had not yet settled or parked is still unsettled, so the clone
+ * stays `recovery-pending` and a later pass picks the rest up.
  */
-export async function recoverDeclaration(deps: RecoveryDependencies, declarationId: DeclarationId): Promise<readonly RecoveryClassification[]> {
+export async function recoverDeclaration(deps: RecoveryDependencies, declarationId: DeclarationId): Promise<RecoveryPassOutcome> {
   const declaration = await deps.declarations.get(declarationId);
-  if (declaration === null) return [];
+  if (declaration === null) return ok([]);
 
-  // A store that cannot be read is not a declaration with nothing to recover.
-  // Parking on the read failure keeps the distinction the `read-failed`
-  // variant exists to make: recovery states plainly that it does not know,
-  // rather than reporting the clean sweep an empty list used to imply.
+  // A store that cannot be read is not a declaration with nothing to recover,
+  // and it is not one with parked work either: the pass says plainly that it
+  // does not know and leaves the clone as it found it. Marking the clone
+  // `needs-attention` here would flag it with no parked entry behind the mark,
+  // which is a state nothing can clear (S42.2).
   const read = await deps.journal.unsettled(declarationId, declaration.generation);
-  if (!read.ok) {
-    const reason = `the journal could not be read, so this declaration's unsettled work is unknown: ${read.error.summary}`;
-    await deps.cloneStore.markAttention(declarationId, reason);
-    return [{ verdict: 'park', reason }];
-  }
+  if (!read.ok) return err(read.error);
 
   const entries = read.value;
   const verdicts: RecoveryClassification[] = [];
@@ -97,7 +113,8 @@ export async function recoverDeclaration(deps: RecoveryDependencies, declaration
       // the ladder cannot reach a verdict at all, and parking is the only
       // safe answer.
       const reason = `git state could not be observed during recovery: ${observed.error.summary}`;
-      await park(deps, entry, declarationId, reason);
+      const parked = await park(deps, entry, declarationId, reason);
+      if (!parked.ok) return parked;
       verdicts.push({ verdict: 'park', reason });
       continue;
     }
@@ -107,33 +124,27 @@ export async function recoverDeclaration(deps: RecoveryDependencies, declaration
     verdicts.push(verdict);
 
     switch (verdict.verdict) {
-      case 'nothing-happened':
+      case 'nothing-happened': {
+        await deps.journal.settle(entry.operationId, null);
+        break;
+      }
+
       case 'completed': {
-        // Both settle. `completed` may carry a `TerminalState` the operator
-        // should hear about; the request is passed to `settle`, which
-        // commits the outbox row in the same transaction as the state
-        // change (`10-design.md` § control flow #1, step 11: "the caller's
-        // connection died with the process, so suppressing it here would
-        // recreate the failure one level up").
-        const notify =
-          verdict.verdict === 'completed' && verdict.terminal
-            ? { severity: 'attention' as const, declarationId, subject: verdict.terminal, summary: `'${entry.tool}' reached a terminal state during recovery` }
-            : null;
-        const settled = await deps.journal.settle(entry.operationId, notify);
         // Recorded here, delivered once after the loop. Firing a pass per
         // entry started one concurrent pass for every recovered terminal
         // state, and each of them selected the same `pending` rows — so
         // recovering fifty entries sent up to fifty copies of every
         // notification. One pass at the end covers every row this ladder
         // enqueued.
-        if (settled.ok && notify) enqueuedNotification = true;
+        if (await settleCompleted(deps, entry, declarationId, verdict)) enqueuedNotification = true;
         break;
       }
 
       case 'resume': {
         if (!deps.dispatch || !deps.recoverySession) {
           const reason = `'${entry.tool}' asks to resume, but no dispatch is wired into recovery`;
-          await park(deps, entry, declarationId, reason);
+          const parked = await park(deps, entry, declarationId, reason);
+          if (!parked.ok) return parked;
           break;
         }
         // The resume goes through the pipeline and takes the global mutation
@@ -150,17 +161,35 @@ export async function recoverDeclaration(deps: RecoveryDependencies, declaration
           context: 'recovery',
           signal: new AbortController().signal,
         });
-        if (result.ok) {
-          await deps.journal.settle(entry.operationId, null);
-        } else {
-          await park(deps, entry, declarationId, `the resume step for '${entry.tool}' returned ${result.kind}: ${result.summary}`);
+        if (!result.ok) {
+          const parked = await park(deps, entry, declarationId, `the resume step for '${entry.tool}' returned ${result.kind}: ${result.summary}`);
+          if (!parked.ok) return parked;
+          break;
         }
+
+        // A resume that dispatched is not a resume that finished the job: the
+        // step can succeed and still leave the operation short of its
+        // post-state (S42.4). The entry settles only when the tree, read
+        // again, classifies `completed`; anything else parks it for a human.
+        const after = await deps.cloneStore.observeGitState(declarationId);
+        const reclassified = after.ok ? deps.journal.classify(entry, after.value, descriptor) : null;
+        if (reclassified?.verdict === 'completed') {
+          if (await settleCompleted(deps, entry, declarationId, reclassified)) enqueuedNotification = true;
+          break;
+        }
+        const why = after.ok
+          ? `it re-classified '${reclassified?.verdict}' rather than 'completed'`
+          : `git state could not be observed to confirm it: ${after.error.summary}`;
+        const parked = await park(deps, entry, declarationId, `the resume step for '${entry.tool}' succeeded, but the operation was not confirmed complete — ${why}`);
+        if (!parked.ok) return parked;
         break;
       }
 
-      case 'park':
-        await park(deps, entry, declarationId, verdict.reason);
+      case 'park': {
+        const parked = await park(deps, entry, declarationId, verdict.reason);
+        if (!parked.ok) return parked;
         break;
+      }
     }
   }
 
@@ -173,26 +202,124 @@ export async function recoverDeclaration(deps: RecoveryDependencies, declaration
     });
   }
 
-  return verdicts;
+  return ok(verdicts);
 }
 
-async function park(deps: RecoveryDependencies, entry: OperationJournalEntry, declarationId: DeclarationId, reason: string): Promise<void> {
-  await deps.journal.park(entry.operationId, reason);
-  // The clone is marked too, not only the entry: the dispatch gate reads
-  // clone state, and an entry parked without the clone following it would
-  // leave the declaration accepting ordinary mutations on a tree nobody has
-  // accounted for.
-  //
-  // These two writes are not atomic and cannot be — they are different
-  // stores. A crash between them is recovered on the next pass, which
-  // re-marks the clone from the still-parked entry (see the `attention`
-  // branch above). The journal is written first deliberately: an entry
-  // parked with an unmarked clone is repairable, whereas a marked clone with
-  // no parked entry would be a declaration nothing can ever unpark.
-  await deps.cloneStore.markAttention(declarationId, reason);
+/**
+ * Settles an entry whose verdict is `completed`. Returns whether a notification
+ * row was committed with the settle, so the caller can fire one delivery pass
+ * after the loop. `completed` may carry a `TerminalState` the operator should
+ * hear about; the request is passed to `settle`, which commits the outbox row
+ * in the same transaction as the state change (`10-design.md` § control flow
+ * #1, step 11: "the caller's connection died with the process, so suppressing
+ * it here would recreate the failure one level up").
+ */
+async function settleCompleted(
+  deps: RecoveryDependencies,
+  entry: OperationJournalEntry,
+  declarationId: DeclarationId,
+  verdict: Extract<RecoveryClassification, { readonly verdict: 'completed' }>,
+): Promise<boolean> {
+  const notify = verdict.terminal
+    ? { severity: 'attention' as const, declarationId, subject: verdict.terminal, summary: `'${entry.tool}' reached a terminal state during recovery` }
+    : null;
+  const settled = await deps.journal.settle(entry.operationId, notify);
+  return settled.ok && notify !== null;
+}
+
+/**
+ * Parks the entry, and only then marks the clone. The mark is written **after**
+ * the park succeeded and never otherwise (S42.1): the dispatch gate reads clone
+ * state, so an entry parked without the clone following it would leave the
+ * declaration accepting ordinary mutations on a tree nobody has accounted for —
+ * but a marked clone with no parked entry behind it is worse, because nothing
+ * can ever clear it (`resolveParkedOperation` acts on parked entries).
+ *
+ * These two writes are not atomic and cannot be — they are different stores.
+ * A crash between them is recovered on the next pass, which re-marks the clone
+ * from the still-parked entry (see the `attention` branch above). A park that
+ * fails returns its error and writes no mark; the entry stays unsettled, so the
+ * clone stays `recovery-pending` and the next pass tries again.
+ */
+async function park(deps: RecoveryDependencies, entry: OperationJournalEntry, declarationId: DeclarationId, reason: string): Promise<Outcome<void, RecoveryFailure>> {
+  const parked = await deps.journal.park(entry.operationId, reason);
+  if (!parked.ok) return err(parked.error);
+  const marked = await deps.cloneStore.markAttention(declarationId, reason);
+  return marked.ok ? ok(undefined) : err(marked.error);
 }
 
 /** The declarations boot reports as `recovery-pending` — those holding at least one unsettled entry. */
 export function declarationsWithUnsettledEntries(entries: readonly OperationJournalEntry[]): readonly DeclarationId[] {
   return [...new Set(entries.map((entry) => entry.declarationId))];
+}
+
+export interface SweepResult<E = RecoveryFailure> {
+  readonly declarationId: DeclarationId;
+  /** True when another caller had already claimed this declaration's pass, so the sweep did not run one. */
+  readonly skipped: boolean;
+  /** Null exactly when `skipped`. */
+  readonly outcome: Outcome<readonly RecoveryClassification[], E> | null;
+}
+
+export interface RecoveryPasses<E = RecoveryFailure> {
+  /**
+   * First use. Runs the pass for `declarationId` at most once at a time and, once
+   * it has succeeded, never again in this process: a caller arriving while a pass
+   * is in flight waits for that pass rather than starting a second, and a caller
+   * arriving after it succeeded gets its result. A pass that failed is forgotten,
+   * so the next caller retries.
+   */
+  recover(declarationId: DeclarationId): Promise<Outcome<readonly RecoveryClassification[], E>>;
+  /**
+   * The background sweep (S42.5): the given declarations, one at a time, in order.
+   * A declaration already claimed by first use — in flight or done — is skipped, so
+   * first use wins any race and each declaration is recovered exactly once.
+   */
+  sweep(declarationIds: readonly DeclarationId[]): Promise<readonly SweepResult<E>[]>;
+}
+
+/**
+ * The single claim table both callers go through, so "first use wins" is a
+ * property of one map rather than of two callers agreeing. It holds no lock and
+ * takes none: a resume the pass dispatches takes the global mutation lock in its
+ * own right, exactly as it does when first use is the caller (`20-contract.md`
+ * § L1 — lifecycle).
+ *
+ * Generic in the error type so the composition root can wire this against
+ * `Lifecycle.recoverDeclaration` (which reports `BootError`) with the same
+ * claim table `recoverDeclaration` itself uses (`RecoveryFailure`) — both are
+ * `ModuleErrorBase`-shaped, and the table only ever passes the error through.
+ */
+export function createRecoveryPasses<E = RecoveryFailure>(run: (declarationId: DeclarationId) => Promise<Outcome<readonly RecoveryClassification[], E>>): RecoveryPasses<E> {
+  const claims = new Map<DeclarationId, Promise<Outcome<readonly RecoveryClassification[], E>>>();
+
+  function claim(declarationId: DeclarationId): Promise<Outcome<readonly RecoveryClassification[], E>> {
+    const pass = run(declarationId).then(
+      (outcome) => {
+        if (!outcome.ok) claims.delete(declarationId);
+        return outcome;
+      },
+      (cause: unknown) => {
+        claims.delete(declarationId);
+        throw cause;
+      },
+    );
+    claims.set(declarationId, pass);
+    return pass;
+  }
+
+  return {
+    recover: (declarationId) => claims.get(declarationId) ?? claim(declarationId),
+    async sweep(declarationIds) {
+      const results: SweepResult<E>[] = [];
+      for (const declarationId of declarationIds) {
+        if (claims.has(declarationId)) {
+          results.push({ declarationId, skipped: true, outcome: null });
+          continue;
+        }
+        results.push({ declarationId, skipped: false, outcome: await claim(declarationId) });
+      }
+      return results;
+    },
+  };
 }

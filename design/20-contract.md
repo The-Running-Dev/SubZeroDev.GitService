@@ -1563,10 +1563,8 @@ having proved the volume excludes are different facts, and only the second is ev
 
 `recoverDeclaration` is the lazy pass, called on first use and by the background sweep — a single
 pass over every `recovery-pending` declaration once boot succeeds, since only boot creates that
-state. **Specified, not yet held**: no sweep is started, so an idle declaration stays
-`recovery-pending` until its first mutation; staged in `90-decisions.md` § *Open* (2026-09-13). Any resume
-step it runs goes through the injected dispatch and takes the global mutation lock for itself,
-completing before the triggering call acquires anything.
+state. Any resume step it runs goes through the injected dispatch and takes the global mutation lock
+for itself, completing before the triggering call acquires anything.
 
 Boot step 1's lock is taken through an injected seam, because the failure it must detect is a
 property of the volume rather than of this code, and a volume that does not exclude cannot be

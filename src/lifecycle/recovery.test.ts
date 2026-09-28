@@ -15,7 +15,8 @@ import type { Declaration } from '../declarations/types.ts';
 import type { JournalBeginInput } from '../journal/types.ts';
 import type { Notifier } from '../notifier/notifier.ts';
 import type { RecoveryClassification } from '../recovery/types.ts';
-import { declarationsWithUnsettledEntries, recoverDeclaration, type RecoveryDependencies } from './recovery.ts';
+import type { DeclarationId } from '../shared/brands.ts';
+import { createRecoveryPasses, declarationsWithUnsettledEntries, recoverDeclaration, type RecoveryDependencies } from './recovery.ts';
 
 const ACTOR = { kind: 'mcp' as const, subject: 'sub' as never, clientId: null, grantId: null };
 
@@ -50,6 +51,13 @@ function beginInputFor(operationId: string, tool = 'git_stage'): JournalBeginInp
 }
 
 const DECLARATION = { id: 'repo-a', generation: 1 } as unknown as Declaration;
+
+/** Unwraps a recovery pass in a test whose subject is what it decided, not whether it could finish. */
+function passVerdicts(result: Outcome<readonly RecoveryClassification[], { readonly summary: string }>): readonly RecoveryClassification[] {
+  assert.equal(result.ok, true, result.ok ? '' : `the pass failed: ${result.error.summary}`);
+  if (!result.ok) throw new Error('unreachable: the assertion above already failed');
+  return result.value;
+}
 
 interface Harness {
   readonly deps: RecoveryDependencies;
@@ -131,7 +139,7 @@ test('S11.7 — recovery settling a terminal state the caller never saw fires th
     });
 
     await journal.begin(beginInputFor('op-1'));
-    const verdicts = await recoverDeclaration(deps, 'repo-a' as never);
+    const verdicts = passVerdicts(await recoverDeclaration(deps, 'repo-a' as never));
 
     assert.deepEqual(verdicts, [terminal]);
     assert.equal(deliverCalls, 1, 'delivery was fired once the terminal-bearing settle committed');
@@ -154,7 +162,7 @@ test('S8.2 — an entry written but never acted on classifies nothing-happened a
     // the tree still matches the pre-state captured under the lock.
     await journal.begin(beginInputFor('op-1'));
 
-    const verdicts = await recoverDeclaration(deps, 'repo-a' as never);
+    const verdicts = passVerdicts(await recoverDeclaration(deps, 'repo-a' as never));
 
     assert.deepEqual(verdicts, [{ verdict: 'nothing-happened' }]);
     assert.deepEqual(read(await journal.unsettled('repo-a' as never, 1 as never)), [], 'the entry must be settled, not left unsettled');
@@ -173,7 +181,7 @@ test('S8.3 — an entry whose effect is already on disk classifies completed and
     });
     await journal.begin(beginInputFor('op-2'));
 
-    const verdicts = await recoverDeclaration(deps, 'repo-a' as never);
+    const verdicts = passVerdicts(await recoverDeclaration(deps, 'repo-a' as never));
 
     assert.deepEqual(verdicts, [{ verdict: 'completed', terminal: null }]);
     assert.deepEqual(read(await journal.unsettled('repo-a' as never, 1 as never)), []);
@@ -188,7 +196,7 @@ test('S8.5 — an entry whose tool has no descriptor in the catalogue parks as a
     const { deps, journal, marked } = await harness(volume, { observed: () => ok(observedDiverged()) });
     await journal.begin(beginInputFor('op-3', 'some_withdrawn_tool'));
 
-    const verdicts = await recoverDeclaration(deps, 'repo-a' as never);
+    const verdicts = passVerdicts(await recoverDeclaration(deps, 'repo-a' as never));
 
     assert.equal(verdicts.length, 1);
     assert.equal(verdicts[0]!.verdict, 'park');
@@ -213,7 +221,7 @@ test('an entry the ladder cannot observe parks rather than guessing', async () =
     });
     await journal.begin(beginInputFor('op-4'));
 
-    const verdicts = await recoverDeclaration(deps, 'repo-a' as never);
+    const verdicts = passVerdicts(await recoverDeclaration(deps, 'repo-a' as never));
 
     assert.equal(verdicts[0]!.verdict, 'park');
     assert.equal((read(await journal.parked())).length, 1);
@@ -227,7 +235,7 @@ test('an already-parked entry stays parked — a later pass observing a matching
     await journal.begin(beginInputFor('op-5'));
     await journal.park('op-5' as never, 'a human was asked to look at this');
 
-    const verdicts = await recoverDeclaration(deps, 'repo-a' as never);
+    const verdicts = passVerdicts(await recoverDeclaration(deps, 'repo-a' as never));
 
     assert.deepEqual(verdicts, [{ verdict: 'park', reason: 'a human was asked to look at this' }]);
     assert.equal((read(await journal.parked())).length, 1, 'the entry must still be parked');
@@ -275,12 +283,16 @@ test('S41.4 — a park whose journal write fails leaves no operation-parked row'
 test('S8.7 — a resume runs through dispatch and takes the mutation lock in its own right, with recovery finished first', async () => {
   await migratedVolume(async (volume) => {
     const order: string[] = [];
+    // The resume achieves what it set out to: the descriptor reports the
+    // post-state only once the dispatch has run, which is what S42.4's
+    // re-classification requires before it will settle.
+    let resumed = false;
     const { deps, journal } = await harness(volume, {
       observed: () => ok(observedDiverged()),
       descriptors: [
         {
           tool: 'git_stage' as never,
-          expectedPostState: () => false,
+          expectedPostState: () => resumed,
           resume: () => ({ tool: 'git_stage' as never, input: { paths: ['README.md'] } }),
         },
       ],
@@ -289,13 +301,14 @@ test('S8.7 — a resume runs through dispatch and takes the mutation lock in its
         // dispatch of its own, not something run under a lock the ladder is
         // already holding.
         order.push(`resume-dispatch:${request.context}`);
+        resumed = true;
         return { ok: true, kind: 'success', summary: 'resumed', data: null, findings: [], diagnostics: null } as never;
       },
     });
     await journal.begin(beginInputFor('op-6'));
 
     order.push('recovery-start');
-    const verdicts = await recoverDeclaration(deps, 'repo-a' as never);
+    const verdicts = passVerdicts(await recoverDeclaration(deps, 'repo-a' as never));
     order.push('recovery-end');
 
     assert.equal(verdicts[0]!.verdict, 'resume');
@@ -319,7 +332,7 @@ test('a resume whose dispatch fails parks the entry rather than settling it', as
     });
     await journal.begin(beginInputFor('op-7'));
 
-    const verdicts = await recoverDeclaration(deps, 'repo-a' as never);
+    const verdicts = passVerdicts(await recoverDeclaration(deps, 'repo-a' as never));
 
     assert.equal(verdicts[0]!.verdict, 'resume');
     assert.equal((read(await journal.parked())).length, 1);
@@ -345,6 +358,162 @@ test('a resume verdict with no dispatch wired parks rather than dropping the ent
 
     assert.equal((read(await journal.parked())).length, 1);
   });
+});
+
+test('S42.1 — a park whose journal write fails leaves the clone unmarked and returns infrastructure', async () => {
+  await migratedVolume(async (volume) => {
+    const { deps, journal, marked } = await harness(volume, { observed: () => ok(observedDiverged()) });
+    await journal.begin(beginInputFor('op-p1', 'some_withdrawn_tool'));
+    const failing: RecoveryDependencies = {
+      ...deps,
+      journal: { ...deps.journal, park: async () => err({ resultKind: 'infrastructure', retryable: false, summary: 'disk gone', code: 'intent-write-failed' } as never) },
+    };
+
+    const result = await recoverDeclaration(failing, 'repo-a' as never);
+
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.error.resultKind, 'infrastructure');
+    assert.deepEqual(marked, [], 'no attention mark without a parked entry behind it');
+    assert.equal(read(await journal.unsettled('repo-a' as never, 1 as never)).length, 1, 'the entry is still unsettled, so the clone derives as recovery-pending');
+    assert.equal(read(await journal.parked()).length, 0);
+  });
+});
+
+test('S42.2 — an unreadable journal leaves the clone recovery-pending and returns infrastructure', async () => {
+  await migratedVolume(async (volume) => {
+    const { deps, marked } = await harness(volume);
+    const unreadable: RecoveryDependencies = {
+      ...deps,
+      journal: { ...deps.journal, unsettled: async () => err({ resultKind: 'infrastructure', retryable: false, summary: 'store locked', code: 'read-failed' } as never) },
+    };
+
+    const result = await recoverDeclaration(unreadable, 'repo-a' as never);
+
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.error.resultKind, 'infrastructure');
+    assert.match(result.error.summary, /store locked/);
+    assert.deepEqual(marked, [], 'an unknown journal is not a parked one');
+  });
+});
+
+test('S42.3 — every clone recovery marks needs-attention has a parked entry that resolving accepts, and resolving releases the clone', async () => {
+  // One case per way the ladder parks. The clone is a state machine of its
+  // own here so the assertion is on the clone leaving `needs-attention`, not
+  // on a mark having been recorded.
+  const cases: { readonly name: string; readonly tool: string; readonly observed: () => Outcome<ObservedGitState, CloneStoreError> }[] = [
+    { name: 'no descriptor', tool: 'some_withdrawn_tool', observed: () => ok(observedDiverged()) },
+    { name: 'unobservable tree', tool: 'git_stage', observed: () => err(cloneStoreError({ code: 'corrupt-tree' }, 'git cannot read the tree')) },
+  ];
+  for (const scenario of cases) {
+    await migratedVolume(async (volume) => {
+      const { deps, journal } = await harness(volume, { observed: scenario.observed });
+      let cloneState: 'ready' | 'needs-attention' = 'ready';
+      const withClone: RecoveryDependencies = {
+        ...deps,
+        cloneStore: {
+          ...deps.cloneStore,
+          markAttention: async () => {
+            cloneState = 'needs-attention';
+            return ok(undefined);
+          },
+        },
+      };
+      await journal.begin(beginInputFor('op-r1', scenario.tool));
+
+      passVerdicts(await recoverDeclaration(withClone, 'repo-a' as never));
+      assert.equal(cloneState, 'needs-attention', `${scenario.name}: the pass marks the clone`);
+
+      // What `resolveParkedOperation` does: locate the entry among the parked
+      // ones, settle it, then release the clone once none remain.
+      const parked = read(await journal.parked()).filter((entry) => entry.declarationId === ('repo-a' as never));
+      assert.equal(parked.length, 1, `${scenario.name}: a marked clone has a parked entry behind it`);
+      const settled = await journal.settle(parked[0]!.operationId, null);
+      assert.equal(settled.ok, true, `${scenario.name}: resolving accepts the entry`);
+      if (read(await journal.parked()).every((entry) => entry.declarationId !== ('repo-a' as never))) cloneState = 'ready';
+      assert.equal(cloneState, 'ready', `${scenario.name}: the clone leaves needs-attention`);
+    });
+  }
+});
+
+test('S42.4 — a resume that dispatches successfully but leaves the operation incomplete is parked, not settled', async () => {
+  await migratedVolume(async (volume) => {
+    const { deps, journal, marked } = await harness(volume, {
+      observed: () => ok(observedDiverged()),
+      descriptors: [
+        {
+          tool: 'git_stage' as never,
+          // The post-state never holds, so re-classifying after the resume
+          // still yields `resume`, not `completed`.
+          expectedPostState: () => false,
+          resume: () => ({ tool: 'git_stage' as never, input: { paths: ['README.md'] } }),
+        },
+      ],
+      dispatch: async () => ({ ok: true, kind: 'success', summary: 'resumed', data: null, findings: [], diagnostics: null }) as never,
+    });
+    await journal.begin(beginInputFor('op-i1'));
+
+    passVerdicts(await recoverDeclaration(deps, 'repo-a' as never));
+
+    const parked = read(await journal.parked());
+    assert.equal(parked.length, 1, 'the entry is parked');
+    assert.match(parked[0]!.attentionReason ?? '', /resume step/);
+    assert.equal(marked.length, 1, 'the clone follows the entry');
+  });
+});
+
+test('S42.5/S42.6 — the sweep recovers each pending declaration once, one at a time, and first use wins a race', async () => {
+  const runs: string[] = [];
+  let concurrent = 0;
+  let peak = 0;
+  const gates = new Map<string, () => void>();
+  const passes = createRecoveryPasses(async (declarationId: DeclarationId) => {
+    runs.push(declarationId);
+    concurrent += 1;
+    peak = Math.max(peak, concurrent);
+    if (declarationId === ('repo-b' as never)) await new Promise<void>((resolve) => gates.set('repo-b', resolve));
+    concurrent -= 1;
+    return ok([] as readonly RecoveryClassification[]);
+  });
+
+  // The sweep is held on repo-b, so repo-a and repo-c have not been reached yet.
+  const swept = passes.sweep(['repo-b', 'repo-a', 'repo-c'] as never);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(runs, ['repo-b']);
+
+  // First use of repo-c arrives ahead of the sweep.
+  const firstUse = await passes.recover('repo-c' as never);
+  assert.equal(firstUse.ok, true);
+  assert.deepEqual(runs, ['repo-b', 'repo-c']);
+
+  gates.get('repo-b')!();
+  const results = await swept;
+
+  assert.deepEqual([...runs].sort(), ['repo-a', 'repo-b', 'repo-c'], 'every declaration recovered exactly once');
+  assert.equal(results.find((r) => r.declarationId === ('repo-c' as never))?.skipped, true, 'the sweep skipped the declaration first use had already taken');
+  assert.equal(results.filter((r) => !r.skipped).length, 2);
+  assert.equal(peak, 2, 'only the first-use pass overlapped the held sweep pass; the sweep itself never ran two at once');
+
+  const again = await passes.recover('repo-a' as never);
+  assert.equal(again.ok, true);
+  assert.equal(runs.filter((id) => id === 'repo-a').length, 1, 'a later first use does not repeat a pass that already succeeded');
+});
+
+test('S42.5 — a pass that failed is retried by the next caller rather than remembered as done', async () => {
+  let attempts = 0;
+  const passes = createRecoveryPasses(async () => {
+    attempts += 1;
+    return attempts === 1
+      ? err({ resultKind: 'infrastructure', retryable: false, summary: 'disk gone' } as never)
+      : ok([] as readonly RecoveryClassification[]);
+  });
+
+  const swept = await passes.sweep(['repo-a'] as never);
+  assert.equal(swept[0]!.outcome?.ok, false);
+  const retried = await passes.recover('repo-a' as never);
+  assert.equal(retried.ok, true);
+  assert.equal(attempts, 2);
 });
 
 test('boot reports one entry per declaration holding unsettled work, not one per entry', () => {
