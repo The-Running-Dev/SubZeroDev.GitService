@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { systemClock } from '../clock/clock.ts';
@@ -201,6 +201,53 @@ test('an orderly release removes the lease file, so a clean restart is NOT repor
     } finally {
       second.value.guard.release();
     }
+  });
+});
+
+test('S43.1 — a takeover released before confirmTakeoverAudited() restores the previous holder, instead of deleting the evidence', async () => {
+  await withVolumeAsync(async (volume) => {
+    const stale: InstanceLease = {
+      instanceId: 'dead-instance',
+      bootId: 'dead-boot',
+      hostName: 'dead-host',
+      startedAt: '2026-01-01T00:00:00.000Z' as never,
+    };
+    writeFileSync(path.join(volume, LEASE_FILENAME), `${JSON.stringify(stale, null, 2)}\n`, 'utf8');
+
+    const result = acquireLease({ volumeRoot: volume, clock: systemClock });
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.notEqual(result.value.takenOverFrom, null, 'this acquisition is a real takeover');
+
+    // Simulates a boot that took over the lease and then failed before its
+    // takeover audit record was durably appended — release() runs without
+    // confirmTakeoverAudited() ever being called.
+    result.value.guard.release();
+
+    assert.equal(existsSync(path.join(volume, LEASE_FILENAME)), true, 'the lease file is not simply deleted');
+    const onDisk = JSON.parse(readFileSync(path.join(volume, LEASE_FILENAME), 'utf8')) as InstanceLease;
+    assert.deepEqual(onDisk, stale, 'the original previous holder is restored so the next boot audits it');
+  });
+});
+
+test('S43.1 — once confirmTakeoverAudited() is called, release() removes the lease file as an orderly shutdown always has', async () => {
+  await withVolumeAsync(async (volume) => {
+    const stale: InstanceLease = {
+      instanceId: 'dead-instance',
+      bootId: 'dead-boot',
+      hostName: 'dead-host',
+      startedAt: '2026-01-01T00:00:00.000Z' as never,
+    };
+    writeFileSync(path.join(volume, LEASE_FILENAME), `${JSON.stringify(stale, null, 2)}\n`, 'utf8');
+
+    const result = acquireLease({ volumeRoot: volume, clock: systemClock });
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+
+    result.value.confirmTakeoverAudited();
+    result.value.guard.release();
+
+    assert.equal(existsSync(path.join(volume, LEASE_FILENAME)), false, 'a confirmed, orderly release still removes the lease file');
   });
 });
 

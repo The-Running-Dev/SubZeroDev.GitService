@@ -404,7 +404,7 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       // throws) and S4 (a chain break is reported, never fatal).
       const takenOverFrom = leaseResult.value.takenOverFrom;
       if (takenOverFrom) {
-        await deps.audit.append({
+        const appended = await deps.audit.append({
           at: deps.clock.now(),
           operationId: null,
           declarationId: null,
@@ -415,6 +415,10 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
           form: 'lease-takeover',
           previousHolder: takenOverFrom,
         });
+        // Only once the record is durably appended: if this boot now fails
+        // before shutdown, the lease guard must still see the takeover as
+        // unrecorded and restore `takenOverFrom` for the next boot to audit.
+        if (appended.appended) leaseResult.value.confirmTakeoverAudited();
         if (deps.onTakeover) deps.onTakeover(takenOverFrom, leaseResult.value.lease);
       }
 
@@ -442,10 +446,10 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       // upgrade" that never happened (review finding). `registryEntries`
       // absent means "this `Lifecycle` was not given one", not "the
       // registry is empty" — those are different facts, and only the
-      // second one is revalidation's to act on. Steps 6 and 7 run
-      // concurrently: both re-validate against state loaded earlier in
-      // this same boot (the journal; the registry), and neither depends on
-      // the other's result.
+      // second one is revalidation's to act on. **Step 7 runs only after
+      // step 6 has finished** — step 6 can return a job to `pending`, and a
+      // job returned to `pending` must still be revalidated in this same
+      // boot rather than falling into a window before revalidation ran.
       const compiledRegistryForRevalidation: CompiledRegistry | null = deps.registryEntries
         ? {
             fingerprint: registry.value.contractFingerprint,
@@ -454,10 +458,9 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
             contractCapabilitySet: registry.value.contractCapabilitySet,
           }
         : null;
-      const [jobsResolved, jobsParked] = await Promise.all([
-        deps.scheduler ? deps.scheduler.resolveRunningAtBoot() : Promise.resolve(NO_JOBS),
-        deps.scheduler && compiledRegistryForRevalidation ? deps.scheduler.revalidatePending(compiledRegistryForRevalidation) : Promise.resolve([]),
-      ]);
+      const jobsResolved = deps.scheduler ? await deps.scheduler.resolveRunningAtBoot() : NO_JOBS;
+      const jobsParked =
+        deps.scheduler && compiledRegistryForRevalidation ? await deps.scheduler.revalidatePending(compiledRegistryForRevalidation) : [];
 
       // Invariant B6 — an image upgrade may remove or change a tool named by
       // an active declaration's file-watcher pair. The declarations store is
