@@ -587,7 +587,15 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
         // honest answer; the alternative reads as a clean bill of health.
         return err(bootError({ code: 'store-failed', cause: storeError({ code: 'io-failed' }, 'no journal is wired into this lifecycle') }, 'recovery is not wired into this lifecycle'));
       }
-      return ok(await runRecoveryLadder(deps.recovery, declarationId));
+      const pass = await runRecoveryLadder(deps.recovery, declarationId);
+      if (!pass.ok) {
+        // The pass stopped on its own bookkeeping (S42.1, S42.2): nothing was
+        // decided and the clone stays `recovery-pending`. Reported as the same
+        // `infrastructure` failure the other store faults use.
+        const summary = pass.error.summary;
+        return err(bootError({ code: 'store-failed', cause: storeError({ code: 'io-failed' }, summary) }, summary));
+      }
+      return ok(pass.value);
     },
 
     /**

@@ -7,6 +7,7 @@ import { systemClock } from '../clock/clock.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
 import { createAudit } from '../audit/audit.ts';
 import { createLifecycle } from '../lifecycle/boot.ts';
+import { createRecoveryPasses } from '../lifecycle/recovery.ts';
 import { createOperatorIdentity, SESSION_ABSOLUTE_SECONDS_DEFAULT } from '../operator-identity/operator-identity.ts';
 import { createExec } from '../exec/exec.ts';
 import type { CredentialBinding } from '../exec/exec.ts';
@@ -899,6 +900,7 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
     entries: toolDeclarations,
     contractCapabilitySet,
   };
+  const recoveryPasses = createRecoveryPasses((declarationId) => lifecycle.recoverDeclaration(declarationId));
   const dispatchPipeline = createDispatchPipeline({
     registry,
     ceiling,
@@ -912,7 +914,10 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
     exec,
     clock: systemClock,
     watermarks,
-    recoverDeclaration: (declarationId) => lifecycle.recoverDeclaration(declarationId),
+    // First use goes through the same claim table the background sweep below
+    // does (S42.5, S42.6), so whichever reaches a declaration first is the only
+    // one that recovers it.
+    recoverDeclaration: (declarationId) => recoveryPasses.recover(declarationId),
     // All three or none (`20-contract.md` § L4): a take with nothing to
     // deliver it through is a composition defect, not a silent drop.
     terminalSink,
@@ -925,6 +930,30 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
   // received (`10-design.md` § Boot and recovery: recovery is lazy, not a
   // boot step).
   dispatchRef = dispatchPipeline.dispatch;
+
+  // S42.5 — the one background recovery pass. A declaration whose interrupted
+  // operation nobody touches would otherwise stay `recovery-pending` until its
+  // first mutation. Started once per boot, after `dispatchRef` is set (a resume
+  // step dispatches through it), one declaration at a time; first use claims a
+  // declaration through the same table and wins any race. Unref'd and never
+  // fatal: a failed pass leaves the declaration `recovery-pending`, which is
+  // exactly what first use would have found.
+  let recoverySweepInFlight: Promise<unknown> | null = null;
+  const recoverySweepTimer = setTimeout(() => {
+    recoverySweepInFlight = recoveryPasses
+      .sweep(booted.value.recoveryPending)
+      .then((results) => {
+        for (const result of results) {
+          if (result.outcome !== null && !result.outcome.ok) {
+            console.warn(`server: background recovery of '${result.declarationId}' did not finish (${result.outcome.error.summary})`);
+          }
+        }
+      })
+      .catch((error: unknown) => {
+        console.error(`server: background recovery sweep failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+  }, 0);
+  recoverySweepTimer.unref();
 
   // S16 — what actually drives `Scheduler.tick`. `Scheduler`'s own contract
   // interface has no start/stop (unlike `Watcher`'s), so this is the
@@ -1114,6 +1143,7 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
     clearInterval(deliveryTimer);
     clearInterval(schedulerTimer);
     clearInterval(maintenanceTimer);
+    clearTimeout(recoverySweepTimer);
     // `watcher.stop()` itself waits out any tick already in flight (a tick
     // does the same class of writes as a delivery pass — git push, PR open,
     // store/audit transactions), so it is awaited alongside `deliveryInFlight`
@@ -1133,6 +1163,7 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
         .catch(() => undefined)
         .then(() => Promise.resolve(schedulerTickInFlight).catch(() => undefined))
         .then(() => Promise.resolve(maintenanceInFlight).catch(() => undefined))
+        .then(() => Promise.resolve(recoverySweepInFlight).catch(() => undefined))
         .then(() => watcherStopped.catch(() => undefined))
         .then(() => lifecycle.shutdown('signal'))
         .then(() => process.exit(0));

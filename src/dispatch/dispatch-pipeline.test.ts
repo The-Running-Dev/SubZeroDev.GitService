@@ -1505,8 +1505,9 @@ test('S8.10 — recovery discards nothing: a real clone keeps every commit, stas
 
     // The ladder must actually have done all four things — a test that
     // silently classified nothing would also report an unchanged tree.
+    assert.equal(verdicts.ok, true);
     assert.deepEqual(
-      verdicts.map((v) => v.verdict),
+      verdicts.ok ? verdicts.value.map((v) => v.verdict) : [],
       ['nothing-happened', 'park', 'completed', 'resume'],
     );
     assert.equal(survivors(), before, 'recovery removed a commit, a stash, an untracked file or a branch');
@@ -1525,10 +1526,18 @@ test('a resume dispatched from inside the lazy pass is not refused by the pass i
     const clonePath = await materialise(cloneStore, declarations);
     writeFileSync(path.join(clonePath, 'README.md'), 'fixture\nchanged\n', 'utf8');
 
+    // Captured before recovery runs, not from the entry's own (fabricated,
+    // below) `preState` — S42.4 re-classifies against freshly observed state,
+    // so `expectedPostState` here has to answer honestly false until the
+    // resume has actually staged the file, then true once it has.
+    const baseline = await cloneStore.observeGitState('repo-a' as never);
+    assert.equal(baseline.ok, true);
+    const baselineIndexDigest = baseline.ok ? baseline.value.indexDigest : null;
+
     const catalogue = createRecoveryCatalogue();
     catalogue.register({
       tool: 'git_stage' as never,
-      expectedPostState: () => false,
+      expectedPostState: (_entry, observed) => observed.indexDigest !== baselineIndexDigest,
       resume: () => ({ tool: 'git_stage' as never, input: { paths: ['README.md'] } }),
     });
 
