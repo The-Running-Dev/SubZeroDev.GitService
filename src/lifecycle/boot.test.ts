@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { systemClock } from '../clock/clock.ts';
 import { compiler } from '../contract/compiler.ts';
@@ -1176,6 +1176,127 @@ test('boot without a scheduler wired reports the honest empty jobsResolved/reval
       if (!booted.ok) return;
       assert.deepEqual(booted.value.jobsResolved, { markedDone: [], markedNeedsAttention: [], returnedToPending: [], leftRunning: [] });
       assert.deepEqual(booted.value.revalidation, { jobsParked: [], entriesParked: [] });
+    } finally {
+      await lifecycle.shutdown('operator');
+    }
+  });
+});
+
+test('S43.1 — a takeover that fails before its own audit record is written still lets the next boot audit the original holder', async () => {
+  await withVolumeAsync(async (volume) => {
+    const staleLease = { instanceId: 'dead-instance', bootId: 'dead-boot', hostName: 'dead-host', startedAt: '2026-01-01T00:00:00.000Z' };
+    writeFileSync(path.join(volume, 'lease.json'), `${JSON.stringify(staleLease, null, 2)}\n`, 'utf8');
+
+    // Takes over the stale lease, then fails at step 2 — before migration
+    // ever runs, so its own takeover audit record is never appended.
+    const { lifecycle: failing } = lifecycleFor(volume);
+    writeFileSync(path.join(volume, 'build', 'registry.json'), `${'{"fingerprint":"tampered"}'}\n`, 'utf8');
+    const failed = await failing.boot();
+    assert.equal(failed.ok, false);
+    if (failed.ok) return;
+    assert.equal(failed.error.code, 'fingerprint-mismatch');
+
+    // A second, real boot must still see and audit the original holder —
+    // not report no takeover, and not name the failed boot in between.
+    const { lifecycle, audit } = lifecycleFor(volume);
+    const booted = await lifecycle.boot();
+    try {
+      assert.equal(booted.ok, true);
+      if (!booted.ok) return;
+      const page = await audit.query({ declarationId: null, tool: null, actorSubject: null, form: 'lease-takeover', from: null, to: null, limit: 10, cursor: null });
+      assert.equal(page.ok, true);
+      if (!page.ok) return;
+      assert.equal(page.value.records.length, 1, 'exactly one takeover is audited');
+      const record = page.value.records[0] as unknown as { previousHolder: { instanceId: string } };
+      assert.equal(record.previousHolder.instanceId, 'dead-instance', 'the original holder, not the failed boot that took over from it');
+    } finally {
+      await lifecycle.shutdown('operator');
+    }
+  });
+});
+
+test('S43.1 — a takeover that fails after opening the store still lets the next boot audit the original holder', async () => {
+  await withVolumeAsync(async (volume) => {
+    const seed = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    await seed.open();
+    await seed.migrate();
+    await seed.close();
+    writeFileSync(path.join(volume, 'store.sqlite'), 'not a database', 'utf8');
+
+    const staleLease = { instanceId: 'dead-instance-2', bootId: 'dead-boot-2', hostName: 'dead-host-2', startedAt: '2026-01-01T00:00:00.000Z' };
+    writeFileSync(path.join(volume, 'lease.json'), `${JSON.stringify(staleLease, null, 2)}\n`, 'utf8');
+
+    const failingStore = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    const failingAudit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const failing = createLifecycle({
+      volumeRoot: volume,
+      buildDir: writeBuildDir(volume),
+      clock: systemClock,
+      store: failingStore,
+      audit: failingAudit,
+      operatorIdentity: operatorIdentityFor(volume, failingAudit),
+      consoleDir: writeConsoleDir(volume),
+      ceiling: EMPTY_CEILING,
+      revalidateFileWatchers: async () => ok(undefined),
+    });
+
+    const failed = await failing.boot();
+    assert.equal(failed.ok, false, 'the corrupt store fails boot before migration ever runs');
+
+    // The corrupt file is this test's induced fault, not evidence to keep —
+    // clear it so the second, real boot can open a fresh store.
+    writeFileSync(path.join(volume, 'store.sqlite'), '', 'utf8');
+    const { lifecycle, audit } = lifecycleFor(volume);
+    const booted = await lifecycle.boot();
+    try {
+      assert.equal(booted.ok, true);
+      if (!booted.ok) return;
+      const page = await audit.query({ declarationId: null, tool: null, actorSubject: null, form: 'lease-takeover', from: null, to: null, limit: 10, cursor: null });
+      assert.equal(page.ok, true);
+      if (!page.ok) return;
+      assert.equal(page.value.records.length, 1, 'exactly one takeover is audited');
+      const record = page.value.records[0] as unknown as { previousHolder: { instanceId: string } };
+      assert.equal(record.previousHolder.instanceId, 'dead-instance-2', 'the original holder, not the failed boot that took over from it');
+    } finally {
+      await lifecycle.shutdown('operator');
+    }
+  });
+});
+
+test('S43.2 — a boot that took over nothing, and fails, leaves no lease file behind', async () => {
+  await withVolumeAsync(async (volume) => {
+    const { lifecycle } = lifecycleFor(volume);
+    writeFileSync(path.join(volume, 'build', 'registry.json'), `${'{"fingerprint":"tampered"}'}\n`, 'utf8');
+    const failed = await lifecycle.boot();
+    assert.equal(failed.ok, false);
+    assert.equal(existsSync(path.join(volume, 'lease.json')), false, 'no takeover happened, so nothing is left to restore');
+  });
+});
+
+test('S43.3 — step 7 does not start until step 6 has finished returning every job to pending', async () => {
+  await withVolumeAsync(async (volume) => {
+    let step6Finished = false;
+    let step7StartedEarly = false;
+
+    const { lifecycle } = lifecycleFor(volume, undefined, {
+      registryEntries: [],
+      scheduler: {
+        resolveRunningAtBoot: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          step6Finished = true;
+          return { markedDone: [], markedNeedsAttention: [], returnedToPending: ['job-1' as never], leftRunning: [] };
+        },
+        revalidatePending: async () => {
+          if (!step6Finished) step7StartedEarly = true;
+          return [];
+        },
+        runRetention: async () => ({ module: 'scheduler', deletedRows: 0, freedBytes: 0, skipped: [] }),
+      },
+    });
+    try {
+      const booted = await lifecycle.boot();
+      assert.equal(booted.ok, true);
+      assert.equal(step7StartedEarly, false, 'step 7 must not start until step 6 has finished writing its jobs back to pending');
     } finally {
       await lifecycle.shutdown('operator');
     }

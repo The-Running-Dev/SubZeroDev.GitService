@@ -128,6 +128,15 @@ export interface LeaseOutcome {
   readonly selfTestPassed: boolean;
   /** The lease left behind by a holder that died without releasing, if there was one. */
   readonly takenOverFrom: InstanceLease | null;
+  /**
+   * Call once the lease-takeover audit record naming `takenOverFrom` has been
+   * durably appended. Until this is called, `guard.release()` treats the
+   * takeover as unrecorded: if this instance fails before calling it, release
+   * restores `takenOverFrom` onto the lease file instead of deleting it, so
+   * the next boot still sees the original previous holder and audits it,
+   * rather than losing that evidence to this instance's own unwind.
+   */
+  confirmTakeoverAudited(): void;
 }
 
 export type LeaseFailure =
@@ -224,14 +233,25 @@ export function acquireLease(options: AcquireLeaseOptions): { ok: true; value: L
   // The order matters: drop the file first, then the lock. Releasing the lock
   // first opens a window where another instance can acquire and write its own
   // lease, which this release would then delete.
+  let takeoverAudited = false;
   const guard: LeaseGuard = {
     release(): void {
       try {
-        if (existsSync(leasePath)) unlinkSync(leasePath);
+        if (previous && !takeoverAudited) {
+          // This instance took over the lease but failed (or is shutting
+          // down) before the takeover it caused was durably audited. Restore
+          // the original previous holder's record rather than deleting it,
+          // so the next boot still sees the true previous holder and audits
+          // the takeover — instead of losing that evidence to this unwind.
+          writeFileSync(leasePath, `${JSON.stringify(previous, null, 2)}\n`, 'utf8');
+        } else if (existsSync(leasePath)) {
+          unlinkSync(leasePath);
+        }
       } catch {
-        // A lease file we cannot remove is not worth failing shutdown over;
-        // the worst case is the next boot reporting a takeover that did not
-        // happen, which is the condition this whole branch exists to avoid.
+        // A lease file we cannot write or remove is not worth failing
+        // shutdown over; the worst case is the next boot reporting a
+        // takeover that did not happen (or missing one that did), which is
+        // the condition this whole branch exists to minimise, not eliminate.
       }
       attempt.guard.release();
     },
@@ -239,6 +259,14 @@ export function acquireLease(options: AcquireLeaseOptions): { ok: true; value: L
 
   return {
     ok: true,
-    value: { lease, guard, selfTestPassed: true, takenOverFrom: previous },
+    value: {
+      lease,
+      guard,
+      selfTestPassed: true,
+      takenOverFrom: previous,
+      confirmTakeoverAudited(): void {
+        takeoverAudited = true;
+      },
+    },
   };
 }
