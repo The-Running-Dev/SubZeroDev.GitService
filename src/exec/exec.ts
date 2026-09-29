@@ -184,7 +184,12 @@ export function createExec(options: ExecOptions): Exec {
       HOME: neutralHome,
       USERPROFILE: neutralHome,
       GIT_CONFIG_NOSYSTEM: '1',
-      GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+      // A path git will never find a file at, not a null device — git opens
+      // `GIT_CONFIG_GLOBAL` as a real file and treats a missing one as an
+      // empty config, but rejects `NUL` on Windows with "unable to access
+      // 'NUL': Invalid argument" (exit 128), failing every git invocation.
+      // One path serves both platforms since neither ever creates it.
+      GIT_CONFIG_GLOBAL: path.join(neutralHome, 'no-global-gitconfig'),
       GIT_TERMINAL_PROMPT: '0',
     };
   }
