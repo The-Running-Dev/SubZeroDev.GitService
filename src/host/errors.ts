@@ -10,6 +10,7 @@ export type HostError = ModuleErrorBase &
     | { readonly code: 'server-error'; readonly status: number; readonly attempts: number }
     | { readonly code: 'auth-rejected'; readonly ref: CredentialRef; readonly declarationId: DeclarationId }
     | { readonly code: 'merge-conflict'; readonly pullRequest: PullRequestRef; readonly headSha: GitSha; readonly baseSha: GitSha }
+    | { readonly code: 'head-moved'; readonly pullRequest: PullRequestRef; readonly expectedHeadSha: GitSha; readonly headSha: GitSha }
     | { readonly code: 'required-check-failed'; readonly check: string; readonly pullRequest: PullRequestRef }
     | { readonly code: 'not-found'; readonly resource: string }
     | { readonly code: 'timed-out'; readonly limitSeconds: number }
@@ -34,6 +35,7 @@ const RESULT_KIND: Readonly<Record<HostError['code'], ModuleErrorBase['resultKin
   'server-error': 'upstream',
   'auth-rejected': 'upstream',
   'merge-conflict': 'precondition',
+  'head-moved': 'precondition',
   'required-check-failed': 'precondition',
   'not-found': 'precondition',
   'timed-out': 'timeout',
@@ -45,6 +47,7 @@ const RETRYABLE: Readonly<Record<HostError['code'], boolean>> = {
   'server-error': false,
   'auth-rejected': false,
   'merge-conflict': false,
+  'head-moved': false,
   'required-check-failed': false,
   'not-found': false,
   'timed-out': false,

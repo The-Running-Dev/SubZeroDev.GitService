@@ -100,6 +100,8 @@ export interface PrCommentsData {
 
 export interface PrEnableAutoMergeInput {
   readonly number: number;
+  /** Null means unguarded. Never defaulted from a host read (`20-contract.md` A13). */
+  readonly expectedHeadSha: GitSha | null;
 }
 
 export interface PrEnableAutoMergeData {

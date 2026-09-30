@@ -1068,6 +1068,9 @@ test('S17.15 — a failed file in one declaration does not block the tick from p
   });
 });
 
+const PUSHED_SHA = 'a'.repeat(40);
+const MOVED_SHA = 'b'.repeat(40);
+
 function pendingEntry(overrides: Partial<PendingPullRequest> = {}): PendingPullRequest {
   return {
     declarationId: 'repo-a' as never,
@@ -1075,6 +1078,7 @@ function pendingEntry(overrides: Partial<PendingPullRequest> = {}): PendingPullR
     branch: 'watcher/post-1' as never,
     openedAt: systemClock.now(),
     sourceFile: 'post.md' as never,
+    headSha: PUSHED_SHA as never,
     ...overrides,
   };
 }
@@ -1407,5 +1411,84 @@ test('#80 — a second terminal drop sharing the first drop\'s original name is 
     const afterSecond = readdirSync(path.join(root, 'failed'));
     const dataFiles = afterSecond.filter((f) => f.endsWith('-post.md'));
     assert.equal(dataFiles.length, 2, 'both drops are retained under distinct paths in failed/, not clobbering each other');
+  });
+});
+
+test('S49.2/S49.4 — auto-merge and the pending record carry the head git_push returned, and reconciliation pins to it', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+    const dispatchLog: DispatchRequest[] = [];
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration({ fileWatcher: { planTool: 'plan_tool' as never, applyTool: 'apply_tool' as never, autoMerge: true } })] }),
+      dispatch: scriptedDispatch(dispatchLog, successfulHandlers()),
+    });
+    await createWatcher(deps).tick();
+
+    const enable = dispatchLog.find((r) => r.toolName === 'pr_enable_auto_merge')!;
+    assert.deepEqual(enable.input, { number: 7, expectedHeadSha: PUSHED_SHA });
+    assert.equal(readPendingPullRequests(volume, 'repo-a' as never).entries[0]!.headSha, PUSHED_SHA);
+  });
+});
+
+test('S49.2 — a push result without a valid headSha fails closed at git_push and reaches no host operation', async () => {
+  for (const data of [{ branch: 'watcher/post-1', alreadyUpToDate: false }, { branch: 'watcher/post-1', headSha: 'not-a-sha', alreadyUpToDate: false }, { branch: 'watcher/post-1', headSha: 'A'.repeat(40), alreadyUpToDate: false }]) {
+    await withVolumeAsync(async (volume) => {
+      const root = inboxRoot(volume, 'repo-a');
+      mkdirSync(root, { recursive: true });
+      writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+      const dispatchLog: DispatchRequest[] = [];
+      const { deps } = baseDeps(volume, {
+        declarations: stubDeclarations({ current: [fixtureDeclaration({ fileWatcher: { planTool: 'plan_tool' as never, applyTool: 'apply_tool' as never, autoMerge: true } })] }),
+        dispatch: scriptedDispatch(dispatchLog, { ...successfulHandlers(), git_push: () => success('pushed', data, diag()) as unknown as ToolResult<never> }),
+      });
+      const reports = await createWatcher(deps).tick();
+      assert.equal(reports[0]!.outcome?.kind, 'rejected');
+      if (reports[0]!.outcome?.kind === 'rejected') assert.equal(reports[0]!.outcome.step, 'git_push');
+      const names = dispatchLog.map((r) => r.toolName as string);
+      assert.equal(names.includes('pr_open'), false);
+      assert.equal(names.includes('pr_enable_auto_merge'), false);
+      assert.equal(existsSync(path.join(root, 'processed')), false);
+      assert.equal(readPendingPullRequests(volume, 'repo-a' as never).entries.length, 0);
+    });
+  }
+});
+
+test('S49.4/S49.5 — reconciliation supplies the persisted head, not the head pr_status now reports', async () => {
+  await withVolumeAsync(async (volume) => {
+    writePendingPullRequests(volume, 'repo-a' as never, { entries: [pendingEntry({ number: 9 })] });
+    const dispatchLog: DispatchRequest[] = [];
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch(dispatchLog, {
+        repo_status: () => repoStatus(false),
+        pr_status: () => prStatusResult('merged', { number: 9, headSha: MOVED_SHA }),
+        reconcile_after_merge: () => success('reconciled', {}, diag()) as unknown as ToolResult<never>,
+      }),
+    });
+    await createWatcher(deps).tick();
+    const reconcile = dispatchLog.find((r) => r.toolName === 'reconcile_after_merge')!;
+    assert.deepEqual(reconcile.input, { pullRequestNumber: 9, expectedHeadSha: PUSHED_SHA });
+  });
+});
+
+test('S49.2 — an invalid pending entry is discarded with no dispatch and paged once at attention', async () => {
+  await withVolumeAsync(async (volume) => {
+    const { headSha: _dropped, ...legacy } = pendingEntry({ number: 11 });
+    writePendingPullRequests(volume, 'repo-a' as never, { entries: [legacy as never, pendingEntry({ number: 12, headSha: 'zz' as never })] });
+    const dispatchLog: DispatchRequest[] = [];
+    const { deps, notifications } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch(dispatchLog, { repo_status: () => repoStatus(false) }),
+    });
+    const watcher = createWatcher(deps);
+    await watcher.tick();
+    assert.equal(dispatchLog.some((r) => r.toolName === 'pr_status' || r.toolName === 'reconcile_after_merge'), false);
+    assert.equal(notifications.length, 2);
+    assert.equal(notifications.every((n) => n.subject.kind === 'watcher-pending-record-discarded' && n.severity === 'attention'), true);
+    assert.deepEqual(readPendingPullRequests(volume, 'repo-a' as never).entries, []);
+    await watcher.tick();
+    assert.equal(notifications.length, 2, 'paged once, not per tick');
   });
 });

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, utimesSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { err, ok, type Outcome } from '../shared/outcome.ts';
-import { watchedFileName, type DeclarationId, type IsoUtcTimestamp, type RegistryToolName, type SessionId, type Subject } from '../shared/brands.ts';
+import { gitSha, watchedFileName, type DeclarationId, type GitSha, type IsoUtcTimestamp, type RegistryToolName, type SessionId, type Subject } from '../shared/brands.ts';
 import type { ActorRef } from '../shared/actor.ts';
 import type { Session } from '../shared/session.ts';
 import type { Clock } from '../clock/clock.ts';
@@ -22,7 +22,7 @@ import type { OperationContextKind } from '../shared/actor.ts';
 import { directoryBytes, unlinkAndCountBytes, type RetentionReport } from '../shared/retention.ts';
 import { watcherError, type WatcherError } from './errors.ts';
 import type { FileWatcherPlanData, PendingPullRequest, WatchTickReport } from './types.ts';
-import { readPendingPullRequests, writePendingPullRequests } from './pending-pull-requests.ts';
+import { readPendingPullRequestsWithDiscards, readPendingPullRequests, writePendingPullRequests, type DiscardedPendingEntry } from './pending-pull-requests.ts';
 
 /** `20-contract.md` § L2 — watcher. */
 export interface Watcher {
@@ -210,6 +210,14 @@ function readPullRequestRef(value: JsonValue | undefined): PullRequestRef | null
   return { number: ref.number, url: ref.url as PullRequestRef['url'], branch: ref.branch as PullRequestRef['branch'] };
 }
 
+/** `git_push`'s `headSha`, validated. D20: the only source of the SHA both merge operations are pinned to. */
+function readPushedHeadSha(value: JsonValue | undefined): GitSha | null {
+  const headSha = asRecord(value)?.headSha;
+  if (typeof headSha !== 'string') return null;
+  const parsed = gitSha(headSha);
+  return parsed.ok ? parsed.value : null;
+}
+
 /** `pr_status`'s `state` and `headSha` — the only two the reconciliation reads. */
 function readPullRequestState(value: JsonValue | undefined): { readonly state: string; readonly headSha: string } | null {
   const status = asRecord(asRecord(value)?.status);
@@ -288,7 +296,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
    * independently with no outer lock, per the design's own "the composite is
    * not wrapped in an outer lock".
    */
-  async function runProtocol(declaration: Declaration, session: Session, file: string, content: string): Promise<WatchedFileOutcome> {
+  async function runProtocol(declaration: Declaration, session: Session, file: string, content: string, pushed: { headSha: GitSha | null }): Promise<WatchedFileOutcome> {
     const fw = declaration.fileWatcher;
     if (fw === null) {
       // Unreachable in practice: `tick` only selects declarations from
@@ -338,8 +346,12 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     const committed = await callTool('git_commit', { message: plan.commitMessage }, declaration, session);
     if (!committed.ok) return rejectedOutcome('git_commit', committed.kind, committed.summary);
 
-    const pushed = await callTool('git_push', { branch: plan.branch }, declaration, session);
-    if (!pushed.ok) return rejectedOutcome('git_push', pushed.kind, pushed.summary);
+    const pushResult = await callTool('git_push', { branch: plan.branch }, declaration, session);
+    if (!pushResult.ok) return rejectedOutcome('git_push', pushResult.kind, pushResult.summary);
+    // D20: no valid pushed head, no pull request — nothing reaches the host.
+    const pushedHeadSha = readPushedHeadSha(pushResult.data);
+    if (pushedHeadSha === null) return rejectedOutcome('git_push', 'infrastructure', 'the push result did not carry a valid headSha, so auto-merge and reconciliation cannot be pinned to the pushed commit');
+    pushed.headSha = pushedHeadSha;
 
     const prOpened = await callTool(
       'pr_open',
@@ -358,7 +370,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
       // commit nobody is told about is not delivery", not "an
       // auto-merge-enabled pull request"). A failed enable-call must not
       // relabel an already-delivered file as failed; it is not retried here.
-      await callTool('pr_enable_auto_merge', { number: prRef.number }, declaration, session);
+      await callTool('pr_enable_auto_merge', { number: prRef.number, expectedHeadSha: pushedHeadSha as string }, declaration, session);
     }
 
     return { kind: 'succeeded', pullRequest: prRef };
@@ -400,6 +412,24 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     });
     if (!notified.ok) {
       console.error(`watcher: failed to enqueue attention notification for '${file}' (declaration '${declarationId}'): ${notified.error.summary}`);
+    }
+  }
+
+  async function notifyDiscardedPending(declarationId: DeclarationId, discarded: DiscardedPendingEntry): Promise<void> {
+    const label = discarded.pullRequestNumber === null ? 'a pull request whose number is unreadable' : `pull request #${discarded.pullRequestNumber}`;
+    const notified = await store.transaction(async (tx: StoreTransaction) => {
+      notifier.enqueue(
+        {
+          severity: 'attention',
+          declarationId,
+          subject: { kind: 'watcher-pending-record-discarded', pullRequestNumber: discarded.pullRequestNumber, branch: discarded.branch },
+          summary: `the pending record for ${label} failed validation and was discarded without reconciliation; finish it by hand`,
+        },
+        tx,
+      );
+    });
+    if (!notified.ok) {
+      console.error(`watcher: failed to enqueue discarded-record notification for declaration '${declarationId}': ${notified.error.summary}`);
     }
   }
 
@@ -510,8 +540,15 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
    * reached this tick.
    */
   async function reconcilePendingPullRequests(declaration: Declaration, session: Session): Promise<{ reconciled: readonly PendingPullRequest[]; stillPending: readonly PendingPullRequest[] }> {
-    const list = readPendingPullRequests(volumeRoot, declaration.id);
-    if (list.entries.length === 0) return { reconciled: [], stillPending: [] };
+    const list = readPendingPullRequestsWithDiscards(volumeRoot, declaration.id);
+    if (list.entries.length === 0 && list.discarded.length === 0) return { reconciled: [], stillPending: [] };
+
+    // D20: page before the rewrite that drops them. A failed rewrite leaves the
+    // entry in place and the next tick pages again, which is accepted.
+    if (list.discarded.length > 0) {
+      for (const discarded of list.discarded) await notifyDiscardedPending(declaration.id, discarded);
+      writePendingPullRequests(volumeRoot, declaration.id, { entries: list.entries });
+    }
 
     const reconciled: PendingPullRequest[] = [];
     const stillPending: PendingPullRequest[] = [];
@@ -539,7 +576,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
         } else if (statusData.state === 'closed') {
           // Removed without reconciliation (S24.2) — neither list.
         } else {
-          await callTool('reconcile_after_merge', { pullRequestNumber: entry.number, expectedHeadSha: statusData.headSha }, declaration, session);
+          await callTool('reconcile_after_merge', { pullRequestNumber: entry.number, expectedHeadSha: entry.headSha as string }, declaration, session);
           reconciled.push(entry);
         }
       }
@@ -587,11 +624,12 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
 
     const processingPath = path.join(processingDirFor(declaration.id), candidate);
     const read = readStrictUtf8(processingPath);
+    const pushed: { headSha: GitSha | null } = { headSha: null };
     let outcome: WatchedFileOutcome;
     if (!read.ok) {
       outcome = rejectedOutcome('read', 'validation', 'the claimed file is not readable as strict UTF-8');
     } else {
-      outcome = await runProtocol(declaration, session, candidate, read.value);
+      outcome = await runProtocol(declaration, session, candidate, read.value, pushed);
     }
 
     if (outcome.kind === 'succeeded') {
@@ -603,6 +641,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
         branch: outcome.pullRequest.branch,
         openedAt: clock.now(),
         sourceFile: candidate as never,
+        headSha: pushed.headSha as GitSha, // runProtocol only succeeds after recording it (D20)
       };
       writePendingPullRequests(volumeRoot, declaration.id, { entries: [...pending.entries, entry] });
     } else {

@@ -287,6 +287,17 @@ const PR_NUMBER_INPUT_SCHEMA = {
   additionalProperties: false,
 } as unknown as JsonSchema;
 
+/** `expectedHeadSha` is required-but-nullable: null is a deliberate "unguarded", never an omission (A13). */
+const PR_ENABLE_AUTO_MERGE_INPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    number: { type: 'number' },
+    expectedHeadSha: { type: ['string', 'null'] },
+  },
+  required: ['number', 'expectedHeadSha'],
+  additionalProperties: false,
+} as unknown as JsonSchema;
+
 const PR_STATUS_OUTPUT_SCHEMA = {
   type: 'object',
   properties: { status: PULL_REQUEST_STATUS_SCHEMA },
@@ -732,7 +743,7 @@ export const PRODUCTION_TOOL_DECLARATIONS: readonly ToolDeclaration[] = [
   {
     name: toolName('pr_enable_auto_merge'),
     description: 'Asks the host to merge a pull request once its required checks pass. This is the only merge path: no merge tool and no rebase tool exists. The registry\'s only schedulable production operation.',
-    inputSchema: PR_NUMBER_INPUT_SCHEMA,
+    inputSchema: PR_ENABLE_AUTO_MERGE_INPUT_SCHEMA,
     outputSchema: PR_ENABLE_AUTO_MERGE_OUTPUT_SCHEMA,
     scopes: ['write'],
     capabilities: ['host.pr.write'],

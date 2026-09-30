@@ -609,12 +609,8 @@ The union is written out rather than derived from `WatchedFileStage` because `sr
 may not import the watcher.
 
 **A pending pull-request record pins the commit the watcher pushed — D20.** `PendingPullRequest`
-gains the head SHA `git_push` returned for that file's branch. Scaffold, until S49 adds it in
-`src/watcher/types.ts`:
-
-```ts
-  readonly headSha: GitSha;
-```
+gains the head SHA `git_push` returned for that file's branch, declared in
+`src/watcher/types.ts`.
 
 It is the only head the watcher ever treats as its own. The field is written once, from the push
 result, and never refreshed from a host read: a head read back from `pr_status` is whatever the branch
@@ -622,12 +618,8 @@ holds *now*, which is the one value the record exists to be compared against. It
 a record without a valid one is not a record the watcher acts on — see *L2 — watcher*.
 
 An entry the reader cannot validate — any member missing or malformed, `headSha` included — is
-discarded and paged rather than silently dropped. Scaffold, until S49 adds it to `TerminalState` in
-`src/journal/types.ts`:
-
-```ts
-  | { readonly kind: 'watcher-pending-record-discarded'; readonly pullRequestNumber: number | null; readonly branch: BranchName | null }
-```
+discarded and paged rather than silently dropped, as the `watcher-pending-record-discarded` variant of
+`TerminalState` declared in `src/journal/types.ts`.
 
 Both members are nullable because the entry being discarded is by definition one whose fields could
 not all be trusted; each carries what parsed as its declared type, and null otherwise.
@@ -1875,11 +1867,7 @@ cap — including one whose next poll would overrun it — is a `timeout` envelo
 field rather than inferring conclusion from the check list.
 
 **`pr_enable_auto_merge` can be pinned to a commit — A13** (S49.1). `PrEnableAutoMergeInput` gains
-one member. Scaffold, until S49 adds it in `src/host/types.ts`:
-
-```ts
-  readonly expectedHeadSha: GitSha | null;
-```
+one member, declared in `src/host/types.ts`.
 
 The property is always present and null means unguarded, the same shape as
 `ReconcileAfterMergeInput.expectedHeadSha`. The tool therefore stops sharing the bare pull-request
@@ -1905,12 +1893,8 @@ number input schema the read tools use. What the declaration cannot say:
   watcher supplies the SHA to both.
 - **`head-moved` pages, as `merge-conflict` does.** Both mean the pull request will not merge at the
   commit that was asked for, and both need a person. `HostOperations` writes the variant to the
-  terminal sink where it constructs the error (**R11**). Scaffold, until S49 adds it to
-  `TerminalState` in `src/journal/types.ts`:
-
-  ```ts
-    | { readonly kind: 'head-moved'; readonly pullRequest: PullRequestRef; readonly expectedHeadSha: GitSha; readonly headSha: GitSha }
-  ```
+  terminal sink where it constructs the error (**R11**); the variant is declared in
+  `TerminalState` in `src/journal/types.ts`.
 
 - **A stored input from before this amendment is refused, not guessed at.** A scheduled
   `pr_enable_auto_merge` job whose input lacks the property fails the schema at fire time and at boot
@@ -2852,11 +2836,7 @@ type HostError = ModuleErrorBase & (
 );
 ```
 
-`head-moved` is added by S49. Scaffold, until it is in `src/host/types.ts`:
-
-```ts
-  | { readonly code: 'head-moved'; readonly pullRequest: PullRequestRef; readonly expectedHeadSha: GitSha; readonly headSha: GitSha }
-```
+`head-moved` is declared in `src/host/errors.ts` with the other variants.
 
 | Variant | Raised when | Retryable | Caller does |
 |---|---|---|---|
@@ -3150,7 +3130,7 @@ responsible for maintaining it.
 | A10 | Every capability in the contract set is placed in at least one scope by `### Scopes`'s rule. Equivalently: `expandScopes(['read','write','raw','schedule'], contract)` equals the declaration-scoped members of `contract`. A capability the rule cannot place fails the build as `capability-unscopable` rather than expanding to nothing. | Compiler, Authorization |
 | A11 | No route reaches an instance-scoped capability's effect from a credential that cannot carry that capability. A route whose action is gated by `declaration.manage`, `auth.manage`, `audit.read` or `attention.resolve` accepts `cookie` only — **A7** makes those four unholdable by any token, so a bearer branch on such a route can check nothing and therefore gates nothing. | Surfaces |
 | A12 | The console filters a navigation entry on the operator's effective grant for the selected declaration, never on that declaration's raw `capabilityGrant`. The intersection is computed by `Declarations.effectiveGrant` on the server; no surface recomputes **A1** client-side. **Specified, not yet held** — the console still filters on the raw grant and the declaration reads carry no `effectiveGrant`; issue #144, and this note goes when it closes. | Surfaces, Console |
-| A13 | For every `enableAutoMerge` call whose `expectedHeadSha` is non-null, no auto-merge request reaches the host unless the adapter's own read of the pull request's head in that call equals `expectedHeadSha`, and the request that does reach it carries `expectedHeadSha` as the host's match-head guard. A mismatch at either point returns `head-moved`, never a success. **Specified, not yet held** — the input has no `expectedHeadSha` and the request carries no guard; S49, and this note goes when it lands. | Host adapter |
+| A13 | For every `enableAutoMerge` call whose `expectedHeadSha` is non-null, no auto-merge request reaches the host unless the adapter's own read of the pull request's head in that call equals `expectedHeadSha`, and the request that does reach it carries `expectedHeadSha` as the host's match-head guard. A mismatch at either point returns `head-moved`, never a success. | Host adapter |
 
 ### Recovery and ordering
 
@@ -3245,7 +3225,7 @@ responsible for maintaining it.
 | D17 | A watcher tick claims no file and makes no dispatch, Git or host call for a declaration unless its clone carries no attention mark **and** `isClean` returned `clean: true` on that tick. A tick refused by either leaves the inbox exactly as it found it. | Watcher |
 | D18 | No watcher code path reads, writes, renames into, lists or deletes through a state directory — `processing/`, `processed/`, `failed/` — that is tampered: present, and not reported as a directory by a link-preserving stat. A tick claims no file and makes no dispatch, Git or host call for a declaration while any of its three is tampered. A refusal is returned as data at every site and never thrown, and never stops work for another declaration or fails `start`. | Watcher |
 | D19 | A pull request the watcher opened is in its declaration's pending pull-request list before that file's terminal move is attempted. | Watcher |
-| D20 | Every pending pull-request entry the watcher acts on carries a valid `headSha` equal to the `headSha` its file's `git_push` returned. Every `pr_enable_auto_merge` and `reconcile_after_merge` the watcher dispatches carries that SHA as `expectedHeadSha`: never null, and never a value read from the host. An entry that fails validation reaches no dispatch, is removed by the tick that reads it, and is paged as `watcher-pending-record-discarded`. **Specified, not yet held** — the entry has no `headSha`, auto-merge is dispatched unpinned, and reconcile is pinned to the head `pr_status` read; S49 and issue #77, and this note goes when S49 lands. | Watcher |
+| D20 | Every pending pull-request entry the watcher acts on carries a valid `headSha` equal to the `headSha` its file's `git_push` returned. Every `pr_enable_auto_merge` and `reconcile_after_merge` the watcher dispatches carries that SHA as `expectedHeadSha`: never null, and never a value read from the host. An entry that fails validation reaches no dispatch, is removed by the tick that reads it, and is paged as `watcher-pending-record-discarded`. | Watcher |
 
 ---
 

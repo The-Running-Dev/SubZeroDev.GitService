@@ -1,4 +1,4 @@
-import type { BranchName, DeclarationId, IsoUtcTimestamp, RepoRelativePath, WatchedFileName } from '../shared/brands.ts';
+import type { BranchName, DeclarationId, GitSha, IsoUtcTimestamp, RepoRelativePath, WatchedFileName } from '../shared/brands.ts';
 import type { JsonValue } from '../contract/json.ts';
 import type { WatchedFileOutcome } from '../audit/types.ts';
 
@@ -49,6 +49,8 @@ export interface PendingPullRequest {
   readonly branch: BranchName;
   readonly openedAt: IsoUtcTimestamp;
   readonly sourceFile: WatchedFileName;
+  /** The head `git_push` returned; both merge operations are pinned to it (D20). */
+  readonly headSha: GitSha;
 }
 
 export interface PendingPullRequestList {

@@ -29,7 +29,7 @@ export interface HostAdapter {
   readPullRequest(ctx: CallContext, number: number): Promise<Outcome<PullRequestStatus, HostError>>;
   listPullRequests(ctx: CallContext, state: PullRequestState | null): Promise<Outcome<readonly PullRequestStatus[], HostError>>;
   readPullRequestComments(ctx: CallContext, number: number): Promise<Outcome<readonly HostComment[], HostError>>;
-  enableAutoMerge(ctx: CallContext, number: number): Promise<Outcome<void, HostError>>;
+  enableAutoMerge(ctx: CallContext, number: number, expectedHeadSha: GitSha | null): Promise<Outcome<void, HostError>>;
   readChecks(ctx: CallContext, ref: GitSha): Promise<Outcome<readonly CheckStatus[], HostError>>;
   readDeployStatus(ctx: CallContext, workflow: string, ref: GitSha): Promise<Outcome<DeployStatus, HostError>>;
   remainingBudget(ref: CredentialRef): RequestBudget;
@@ -481,7 +481,15 @@ export function createGitHubAdapter(deps: GitHubAdapterDependencies): HostAdapte
       return ok(comments);
     },
 
-    async enableAutoMerge(ctx, number): Promise<Outcome<void, HostError>> {
+    async enableAutoMerge(ctx, number, expectedHeadSha): Promise<Outcome<void, HostError>> {
+      const headMoved = (ref: PullRequestRef, headSha: GitSha, expected: GitSha): Outcome<never, HostError> =>
+        err(
+          hostError(
+            { code: 'head-moved', pullRequest: ref, expectedHeadSha: expected, headSha },
+            `pull request #${number} on branch '${ref.branch}' moved from the expected head ${expected} to ${headSha}; auto-merge was not enabled`,
+          ),
+        );
+
       // GitHub's `--auto` merge API always exits 0, even against a pull
       // request that can never merge — it leaves auto-merge queued forever
       // instead of reporting the conflict, so the command's own failure below
@@ -492,7 +500,16 @@ export function createGitHubAdapter(deps: GitHubAdapterDependencies): HostAdapte
       // design/90-decisions.md, 2026-08-30.
       for (let attempt = 1; attempt <= MERGEABILITY_POLL_ATTEMPTS; attempt++) {
         const preflight = await readPullRequest(ctx, number);
-        if (!preflight.ok) break;
+        // A guarded call that cannot read the head cannot honour the guard.
+        if (!preflight.ok) {
+          if (expectedHeadSha !== null) return err(preflight.error);
+          break;
+        }
+        // The head comparison runs before the mergeability judgement: a moved
+        // head's conflict state is not the pushed commit's.
+        if (expectedHeadSha !== null && preflight.value.headSha !== expectedHeadSha) {
+          return headMoved(preflight.value.ref, preflight.value.headSha, expectedHeadSha);
+        }
         if (preflight.value.mergeable === false) {
           return err(
             hostError(
@@ -505,8 +522,20 @@ export function createGitHubAdapter(deps: GitHubAdapterDependencies): HostAdapte
         if (attempt < MERGEABILITY_POLL_ATTEMPTS) await sleep(MERGEABILITY_POLL_INTERVAL_MS);
       }
 
-      const result = await gh(ctx, 'mutation', ['pr', 'merge', String(number), '--auto', '--squash']);
+      const mergeArgs = ['pr', 'merge', String(number), '--auto', '--squash'];
+      if (expectedHeadSha !== null) mergeArgs.push('--match-head-commit', expectedHeadSha);
+      const result = await gh(ctx, 'mutation', mergeArgs);
       if (result.ok) return ok(undefined);
+
+      // A refused guarded request may be the guard doing its job. Only a
+      // re-read that shows a different head says so; anything else keeps the
+      // host's own error.
+      if (expectedHeadSha !== null) {
+        const reread = await readPullRequest(ctx, number);
+        if (reread.ok && reread.value.headSha !== expectedHeadSha) {
+          return headMoved(reread.value.ref, reread.value.headSha, expectedHeadSha);
+        }
+      }
 
       // A pull request the host will not merge is terminal, and the operator
       // needs both heads to see why. That costs a read the failure path did
