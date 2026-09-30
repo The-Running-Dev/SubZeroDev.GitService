@@ -608,6 +608,30 @@ until the slice implementing D18 adds it to `TerminalState` in `src/journal/type
 The union is written out rather than derived from `WatchedFileStage` because `src/journal/` is L1 and
 may not import the watcher.
 
+**A pending pull-request record pins the commit the watcher pushed — D20.** `PendingPullRequest`
+gains the head SHA `git_push` returned for that file's branch. Scaffold, until S49 adds it in
+`src/watcher/types.ts`:
+
+```ts
+  readonly headSha: GitSha;
+```
+
+It is the only head the watcher ever treats as its own. The field is written once, from the push
+result, and never refreshed from a host read: a head read back from `pr_status` is whatever the branch
+holds *now*, which is the one value the record exists to be compared against. It is not nullable, and
+a record without a valid one is not a record the watcher acts on — see *L2 — watcher*.
+
+An entry the reader cannot validate — any member missing or malformed, `headSha` included — is
+discarded and paged rather than silently dropped. Scaffold, until S49 adds it to `TerminalState` in
+`src/journal/types.ts`:
+
+```ts
+  | { readonly kind: 'watcher-pending-record-discarded'; readonly pullRequestNumber: number | null; readonly branch: BranchName | null }
+```
+
+Both members are nullable because the entry being discarded is by definition one whose fields could
+not all be trusted; each carries what parsed as its declared type, and null otherwise.
+
 ### Instance lease
 
 Declared in `src/lifecycle/lease.ts`.
@@ -1275,6 +1299,13 @@ rule that a failing credential is marked for one declaration and never reference
 A missing or unparseable pending pull-request list is treated as empty and never thrown — a bad
 read must not crash a tick.
 
+**An entry that fails validation inside a readable list is not treated as absent** (**D20**). It
+reaches no dispatch, the tick that finds it removes it on its rewrite, and it is paged once as
+`watcher-pending-record-discarded`. This is the list's only migration story, and it is deliberate: an
+entry written before S49 carries no `headSha`, so every such entry is discarded unreconciled and
+named to the operator, who finishes that pull request by hand. Nothing rewrites old lists in place,
+because the SHA they lack cannot be recovered from anything the watcher trusts.
+
 **The audit segments are the trail; `audit_chain_head` is an advisory mirror.** The row exists so
 the head can be read without walking the files, and so a cleanly truncated tail is detectable. It
 is never the source of truth: the head is re-derivable from the last parseable record of the
@@ -1843,6 +1874,51 @@ because every check reached a conclusion. In the tree it is never returned: a wa
 cap — including one whose next poll would overrun it — is a `timeout` envelope. Callers still read the
 field rather than inferring conclusion from the check list.
 
+**`pr_enable_auto_merge` can be pinned to a commit — A13** (S49.1). `PrEnableAutoMergeInput` gains
+one member. Scaffold, until S49 adds it in `src/host/types.ts`:
+
+```ts
+  readonly expectedHeadSha: GitSha | null;
+```
+
+The property is always present and null means unguarded, the same shape as
+`ReconcileAfterMergeInput.expectedHeadSha`. The tool therefore stops sharing the bare pull-request
+number input schema the read tools use. What the declaration cannot say:
+
+- **Null is today's behaviour, exactly.** Callers opt in to the guard. The watcher always supplies
+  it (**D20**); nothing else is required to.
+- **It must never acquire a default drawn from the host.** A default of "the head as it reads now"
+  pins whatever is on the branch at call time, which is the one thing the guard exists to refuse.
+  Absent a caller-supplied SHA the call is unguarded, and says so by being null.
+- **Non-null is checked twice, and the second check is the host's.** The adapter compares its own
+  read of the pull request's head against `expectedHeadSha` before it issues any request, and on a
+  mismatch issues none and returns `head-moved`. The request it does issue carries the SHA as the
+  host's match-head guard (`gh pr merge --match-head-commit`), so a push landing between that read
+  and the request is refused by the host rather than enabled. A refused request whose re-read head
+  differs from `expectedHeadSha` is `head-moved`; one whose re-read cannot confirm that keeps the host
+  error it was. The head comparison runs before the mergeability judgement, because whether a commit
+  nobody asked for would merge cleanly is not a question worth answering.
+- **The guard binds at the moment auto-merge is enabled, and the contract relies on nothing
+  after it.** Whether the host keeps auto-merge queued when the branch moves later is the host's
+  policy, not a property this service states. A head moved after enabling is caught by
+  `reconcile_after_merge`'s own `expectedHeadSha`, which refuses with `precondition`. That is why the
+  watcher supplies the SHA to both.
+- **`head-moved` pages, as `merge-conflict` does.** Both mean the pull request will not merge at the
+  commit that was asked for, and both need a person. `HostOperations` writes the variant to the
+  terminal sink where it constructs the error (**R11**). Scaffold, until S49 adds it to
+  `TerminalState` in `src/journal/types.ts`:
+
+  ```ts
+    | { readonly kind: 'head-moved'; readonly pullRequest: PullRequestRef; readonly expectedHeadSha: GitSha; readonly headSha: GitSha }
+  ```
+
+- **A stored input from before this amendment is refused, not guessed at.** A scheduled
+  `pr_enable_auto_merge` job whose input lacks the property fails the schema at fire time and at boot
+  re-validation (`input-invalid`), and goes to `needs-attention` naming the upgrade under the
+  scheduler's existing semantics. It is never fired, whether unguarded or pinned to a head chosen on
+  its behalf. An unsettled journal entry for the tool is not re-dispatched either, because its
+  recovery descriptor's `resume` is null.
+
 The seven registry entries S10 ships:
 
 | `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
@@ -1998,6 +2074,29 @@ on the first gate or recovery refusal for that declaration, and again only after
 three directories sound and re-armed it. Every refusing tick still reports its skip; the latch governs
 paging only. It is in-memory by design — a restart re-pages a tamper still present, which is the
 moment an operator would want to hear about it again.
+
+**The pushed head is carried, never re-read — D20** (S49). What the watcher may rely on and what it
+must never do:
+
+- **The SHA comes from `git_push` and nowhere else.** The watcher narrows the push result's `headSha`
+  before `pr_open`. A push result without a valid SHA is `step-failed` at `git_push`: the file goes to
+  `failed/`, no pull request is opened, and nothing reaches the host.
+- **It is pinned on both host calls that can merge or settle the pull request.**
+  `pr_enable_auto_merge` is dispatched with `expectedHeadSha` set to that SHA, and every
+  `reconcile_after_merge` for the pending entry is dispatched with the entry's `headSha`. Neither is
+  ever null from the watcher, and neither is ever a head read back from the host — passing a
+  `pr_status` head to the reconcile check compares the branch with itself and always passes.
+- **The pending entry carries the same SHA**, so a tick that settles the pull request after a restart
+  pins exactly what the file's own push produced.
+- **A pending entry that fails validation is discarded, not skipped.** The tick that reads it makes no
+  dispatch for it, removes it on its rewrite of the list, and enqueues one
+  `watcher-pending-record-discarded` at `attention`. A rewrite that fails leaves the entry in place, and
+  the next tick pages again: a duplicate page is accepted over a silently lost one. Other entries in
+  the same list are unaffected.
+- **A `head-moved` refusal is a host outcome, not a watcher failure.** The file is already delivered
+  once `pr_open` succeeds, so it still moves to `processed/`. The pull request stays open and unmerged;
+  the dispatch's own audit record and the terminal sink's page are the only report of it, and the
+  watcher enqueues no second one and makes no second attempt against the moved head.
 
 ### L3 — module adapter
 
@@ -2753,6 +2852,12 @@ type HostError = ModuleErrorBase & (
 );
 ```
 
+`head-moved` is added by S49. Scaffold, until it is in `src/host/types.ts`:
+
+```ts
+  | { readonly code: 'head-moved'; readonly pullRequest: PullRequestRef; readonly expectedHeadSha: GitSha; readonly headSha: GitSha }
+```
+
 | Variant | Raised when | Retryable | Caller does |
 |---|---|---|---|
 | `unreachable` | DNS, TLS or transport failure | not inside the call | `upstream` |
@@ -2760,6 +2865,7 @@ type HostError = ModuleErrorBase & (
 | `server-error` | 5xx after up to three retries, **read operations only** | already retried | `upstream` |
 | `auth-rejected` | The credential was refused | no | `upstream`, and mark the reference failing for **this declaration only** |
 | `merge-conflict` | The pull request cannot merge | no — **terminal** | `precondition` naming the branch and both heads; the notifier fires. There is no rebase tool |
+| `head-moved` | `enableAutoMerge` was given a non-null `expectedHeadSha` and the pull request's head is a different commit — at the adapter's own read, or at the host's refusal of the match-head guard confirmed by a re-read | no — **terminal** | `precondition` naming the pull request, the expected head and the actual one; no auto-merge request was enabled; the notifier fires. Never retried against the new head: that head is the commit nobody asked to merge |
 | `required-check-failed` | A declared required check concluded failure. `checks_await`'s judgement also refuses — without this variant — when it cannot establish whether a failure was required, or cannot attribute one to a pull request; see `### L2 — host adapter` | no — terminal | `precondition` naming the check and pull request; the notifier fires |
 | `not-found` | The pull request, check or workflow does not exist | no | `precondition` |
 | `timed-out` | A bounded wait reached its cap | no | `timeout`; the notifier fires |
@@ -2815,7 +2921,7 @@ type WatcherError = ModuleErrorBase & (
 | `not-permitted` | Either deployment switch is off | no | Do not start. Both default off |
 | `watched-file-unreadable` | A candidate cannot be read, or the claimed file's bytes are not strict UTF-8 | no | Move it to `failed/`. Raised before `planTool` is dispatched, so it makes no dispatch, Git or host call. A symlink is never a candidate in the first place |
 | `claim-failed` | The rename into `processing/` failed | next tick | Leave the file in the inbox |
-| `step-failed` | Any dispatched step up to and including `pr_open` returned a non-success envelope | no | Move to `failed/` with a sibling error file naming the step and its result. Never delete. A failed `pr_enable_auto_merge` after `pr_open` succeeded is not this variant: the file is delivered and moves to `processed/`, and the failure is audited and notified |
+| `step-failed` | Any dispatched step up to and including `pr_open` returned a non-success envelope, or `git_push` succeeded without a valid `headSha` (**D20**) | no | Move to `failed/` with a sibling error file naming the step and its result. Never delete. A failed `pr_enable_auto_merge` after `pr_open` succeeded is not this variant: the file is delivered and moves to `processed/`, and the failure is audited and notified |
 | `interrupted-claim` | A file sits in `processing/` at startup | **never reprocessed** | Move to `failed/` with an explanation — it may already have an open pull request |
 | `apply-paths-mismatch` | A readable post-apply observation's changed set differs from `declared` or leaves `permitted`, or a readable post-stage observation differs from `declared` or reports any entry in `unstaged` | no | `infrastructure`: the consumer's apply handler broke the protocol. Mark the clone needs-attention, move the file to `failed/` with a sibling error file carrying all four sets, and dispatch nothing further. The audit outcome is `rejected`, naming the observation as its step |
 | `state-directory-tampered` | A site in D18's refusal table finds its state directory tampered: an entry at the name that a link-preserving stat does not report as a directory | not by the watcher; the next tick re-checks, and it clears once an operator replaces the entry with a real directory or removes it | Refuse exactly as that table's row says — never follow the entry, never throw. It is never a `claim-failed` and never a `step-failed`: nothing was attempted that could fail |
@@ -3044,6 +3150,7 @@ responsible for maintaining it.
 | A10 | Every capability in the contract set is placed in at least one scope by `### Scopes`'s rule. Equivalently: `expandScopes(['read','write','raw','schedule'], contract)` equals the declaration-scoped members of `contract`. A capability the rule cannot place fails the build as `capability-unscopable` rather than expanding to nothing. | Compiler, Authorization |
 | A11 | No route reaches an instance-scoped capability's effect from a credential that cannot carry that capability. A route whose action is gated by `declaration.manage`, `auth.manage`, `audit.read` or `attention.resolve` accepts `cookie` only — **A7** makes those four unholdable by any token, so a bearer branch on such a route can check nothing and therefore gates nothing. | Surfaces |
 | A12 | The console filters a navigation entry on the operator's effective grant for the selected declaration, never on that declaration's raw `capabilityGrant`. The intersection is computed by `Declarations.effectiveGrant` on the server; no surface recomputes **A1** client-side. **Specified, not yet held** — the console still filters on the raw grant and the declaration reads carry no `effectiveGrant`; issue #144, and this note goes when it closes. | Surfaces, Console |
+| A13 | For every `enableAutoMerge` call whose `expectedHeadSha` is non-null, no auto-merge request reaches the host unless the adapter's own read of the pull request's head in that call equals `expectedHeadSha`, and the request that does reach it carries `expectedHeadSha` as the host's match-head guard. A mismatch at either point returns `head-moved`, never a success. **Specified, not yet held** — the input has no `expectedHeadSha` and the request carries no guard; S49, and this note goes when it lands. | Host adapter |
 
 ### Recovery and ordering
 
@@ -3138,6 +3245,7 @@ responsible for maintaining it.
 | D17 | A watcher tick claims no file and makes no dispatch, Git or host call for a declaration unless its clone carries no attention mark **and** `isClean` returned `clean: true` on that tick. A tick refused by either leaves the inbox exactly as it found it. | Watcher |
 | D18 | No watcher code path reads, writes, renames into, lists or deletes through a state directory — `processing/`, `processed/`, `failed/` — that is tampered: present, and not reported as a directory by a link-preserving stat. A tick claims no file and makes no dispatch, Git or host call for a declaration while any of its three is tampered. A refusal is returned as data at every site and never thrown, and never stops work for another declaration or fails `start`. | Watcher |
 | D19 | A pull request the watcher opened is in its declaration's pending pull-request list before that file's terminal move is attempted. | Watcher |
+| D20 | Every pending pull-request entry the watcher acts on carries a valid `headSha` equal to the `headSha` its file's `git_push` returned. Every `pr_enable_auto_merge` and `reconcile_after_merge` the watcher dispatches carries that SHA as `expectedHeadSha`: never null, and never a value read from the host. An entry that fails validation reaches no dispatch, is removed by the tick that reads it, and is paged as `watcher-pending-record-discarded`. **Specified, not yet held** — the entry has no `headSha`, auto-merge is dispatched unpinned, and reconcile is pinned to the head `pr_status` read; S49 and issue #77, and this note goes when S49 lands. | Watcher |
 
 ---
 
