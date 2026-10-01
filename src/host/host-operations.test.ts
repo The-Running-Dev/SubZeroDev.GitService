@@ -137,7 +137,7 @@ test('S10.1: enable_auto_merge writes its journal step before the gh call', asyn
   const recorder = recordingJournal();
   const ops = operations(gh, { journal: recorder.journal });
 
-  const result = await ops.enableAutoMerge(context(), { number: 7 });
+  const result = await ops.enableAutoMerge(context(), { number: 7, expectedHeadSha: null });
 
   assert.equal(result.ok, true);
   assert.deepEqual(recorder.steps, ['host.enableAutoMerge']);
@@ -270,7 +270,7 @@ test('S10.4: a merge conflict returns precondition naming the branch and both he
   ]);
   const ops = operations(gh);
 
-  const result = await ops.enableAutoMerge(context(), { number: 7 });
+  const result = await ops.enableAutoMerge(context(), { number: 7, expectedHeadSha: null });
 
   assert.equal(result.ok, false);
   assert.equal(result.kind, 'precondition');
@@ -303,7 +303,7 @@ test('S10.4 (issue #198): a real merge conflict is still detected even though Gi
   ]);
   const ops = operations(gh);
 
-  const result = await ops.enableAutoMerge(context(), { number: 7 });
+  const result = await ops.enableAutoMerge(context(), { number: 7, expectedHeadSha: null });
 
   assert.equal(result.ok, false);
   assert.equal(result.kind, 'precondition');
@@ -336,7 +336,7 @@ test('S10.4: an unresolved mergeability at call time still enables auto-merge, r
   ]);
   const ops = operations(gh);
 
-  const result = await ops.enableAutoMerge(context(), { number: 7 });
+  const result = await ops.enableAutoMerge(context(), { number: 7, expectedHeadSha: null });
 
   assert.equal(result.ok, true);
   const viewCalls = gh.calls.filter((a) => a[1] === 'view').length;
@@ -843,4 +843,78 @@ test('review: a prepared binding is cleared once the call is over, and is never 
 
   assert.equal((await ops.readPullRequest(context(), { number: 7 })).ok, true);
   assert.equal(bindings.size, 0, 'a resolved binding must not outlive the call it was prepared for');
+});
+
+function viewJson(headRefOid: string, mergeable = 'MERGEABLE'): string {
+  return JSON.stringify({
+    number: 7,
+    url: 'https://github.com/acme/repo/pull/7',
+    headRefName: 'slice/S49',
+    headRefOid,
+    baseRefOid: 'c'.repeat(40),
+    state: 'OPEN',
+    mergeCommit: null,
+    mergeable,
+    autoMergeRequest: null,
+  });
+}
+
+test('S49.3: a guarded auto-merge passes --match-head-commit with the expected head on the constructed gh invocation', async () => {
+  const gh = stubGh([
+    { when: (a) => a[1] === 'view', reply: () => stdout(viewJson(HEAD)) },
+    { when: (a) => a[1] === 'merge', reply: () => stdout('') },
+  ]);
+  const result = await operations(gh).enableAutoMerge(context(), { number: 7, expectedHeadSha: HEAD });
+
+  assert.equal(result.ok, true);
+  const merge = gh.calls.find((a) => a[1] === 'merge')!;
+  const at = merge.indexOf('--match-head-commit');
+  assert.ok(at >= 0, 'the guard flag is on the invocation');
+  assert.equal(merge[at + 1], HEAD);
+});
+
+test('S49.3: an unguarded auto-merge carries no --match-head-commit', async () => {
+  const gh = stubGh([
+    { when: (a) => a[1] === 'view', reply: () => stdout(viewJson(HEAD)) },
+    { when: (a) => a[1] === 'merge', reply: () => stdout('') },
+  ]);
+  await operations(gh).enableAutoMerge(context(), { number: 7, expectedHeadSha: null });
+  assert.equal(gh.calls.find((a) => a[1] === 'merge')!.includes('--match-head-commit'), false);
+});
+
+test('S49.5: a head that moved after the push is refused as head-moved before any merge request, even when it also conflicts', async () => {
+  const moved = 'd'.repeat(40);
+  const gh = stubGh([
+    { when: (a) => a[1] === 'view', reply: () => stdout(viewJson(moved, 'CONFLICTING')) },
+    { when: (a) => a[1] === 'merge', reply: () => stdout('') },
+  ]);
+  const result = await operations(gh).enableAutoMerge(context(), { number: 7, expectedHeadSha: HEAD });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.kind, 'precondition');
+  assert.deepEqual(
+    (result.findings ?? []).map((f) => `${f.path}=${f.message}`),
+    ['pullRequest=7', `expectedHeadSha=${HEAD}`, `headSha=${moved}`],
+  );
+  assert.equal(gh.calls.some((a) => a[1] === 'merge'), false);
+});
+
+test('S49.5: a refused guarded request whose re-read shows a different head is head-moved; otherwise the host error stands', async () => {
+  const moved = 'd'.repeat(40);
+  let reads = 0;
+  const raceGh = stubGh([
+    { when: (a) => a[1] === 'view', reply: () => stdout(viewJson(++reads === 1 ? HEAD : moved)) },
+    { when: (a) => a[1] === 'merge', reply: () => ({ ok: false, error: execError({ code: 'nonzero-exit', exitCode: 1 } as never, 'head commit mismatch') }) as never },
+  ]);
+  const raced = await operations(raceGh).enableAutoMerge(context(), { number: 7, expectedHeadSha: HEAD });
+  assert.equal(raced.ok, false);
+  assert.equal((raced.findings ?? []).some((f) => f.rule === 'head-moved'), true);
+});
+
+test('S49: pr_enable_auto_merge input requires expectedHeadSha (nullable) and rejects a pre-amendment input', () => {
+  const declaration = PRODUCTION_TOOL_DECLARATIONS.find((d) => d.name === 'pr_enable_auto_merge')!;
+  assert.equal(validateAgainstSchema(declaration.inputSchema, { number: 7 }).length > 0, true);
+  assert.equal(validateAgainstSchema(declaration.inputSchema, { number: 7, expectedHeadSha: null }).length, 0);
+  assert.equal(validateAgainstSchema(declaration.inputSchema, { number: 7, expectedHeadSha: HEAD }).length, 0);
+  assert.equal(validateAgainstSchema(declaration.inputSchema, { number: 7, expectedHeadSha: 5 }).length > 0, true);
 });

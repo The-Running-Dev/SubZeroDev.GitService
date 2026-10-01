@@ -53,10 +53,12 @@ export type NotificationSeverity = 'attention' | 'info';
 
 export type TerminalState =
   | { readonly kind: 'merge-conflict'; readonly branch: BranchName; readonly headSha: GitSha; readonly baseSha: GitSha }
+  | { readonly kind: 'head-moved'; readonly pullRequest: PullRequestRef; readonly expectedHeadSha: GitSha; readonly headSha: GitSha }
   | { readonly kind: 'required-check-failed'; readonly check: string; readonly pullRequest: PullRequestRef }
   | { readonly kind: 'wait-timeout'; readonly waitedSeconds: number; readonly tool: RegistryToolName }
   | { readonly kind: 'operation-parked'; readonly operationId: OperationId; readonly reason: string }
-  | { readonly kind: 'file-watcher-failed'; readonly file: WatchedFileName; readonly reason: string };
+  | { readonly kind: 'file-watcher-failed'; readonly file: WatchedFileName; readonly reason: string }
+  | { readonly kind: 'watcher-pending-record-discarded'; readonly pullRequestNumber: number | null; readonly branch: BranchName | null };
 
 export interface MaintenanceSummary {
   readonly kind: 'maintenance-pass';

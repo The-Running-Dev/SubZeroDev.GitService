@@ -246,10 +246,17 @@
           "properties": {
             "number": {
               "type": "number"
+            },
+            "expectedHeadSha": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
-            "number"
+            "number",
+            "expectedHeadSha"
           ],
           "additionalProperties": false
         }
@@ -777,10 +784,17 @@
           "properties": {
             "number": {
               "type": "number"
+            },
+            "expectedHeadSha": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
-            "number"
+            "number",
+            "expectedHeadSha"
           ],
           "additionalProperties": false
         }
@@ -1308,10 +1322,17 @@
           "properties": {
             "number": {
               "type": "number"
+            },
+            "expectedHeadSha": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
-            "number"
+            "number",
+            "expectedHeadSha"
           ],
           "additionalProperties": false
         }
@@ -1839,10 +1860,17 @@
           "properties": {
             "number": {
               "type": "number"
+            },
+            "expectedHeadSha": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
-            "number"
+            "number",
+            "expectedHeadSha"
           ],
           "additionalProperties": false
         }

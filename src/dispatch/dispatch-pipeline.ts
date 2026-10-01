@@ -186,6 +186,8 @@ function describeTerminalState(state: TerminalState): string {
   switch (state.kind) {
     case 'merge-conflict':
       return `pull request branch '${state.branch}' has a merge conflict`;
+    case 'head-moved':
+      return `pull request #${state.pullRequest.number} moved from ${state.expectedHeadSha} to ${state.headSha}; auto-merge was not enabled`;
     case 'required-check-failed':
       return `required check '${state.check}' failed on pull request #${state.pullRequest.number}`;
     case 'wait-timeout':
@@ -194,6 +196,8 @@ function describeTerminalState(state: TerminalState): string {
       return `operation '${state.operationId}' was parked: ${state.reason}`;
     case 'file-watcher-failed':
       return `file watcher for '${state.file}' failed: ${state.reason}`;
+    case 'watcher-pending-record-discarded':
+      return `a pending pull-request record (${state.pullRequestNumber === null ? 'number unreadable' : `#${state.pullRequestNumber}`}, branch ${state.branch === null ? 'unreadable' : `'${state.branch}'`}) failed validation and was discarded; finish that pull request by hand`;
   }
 }
 

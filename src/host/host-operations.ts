@@ -141,6 +141,12 @@ export function hostErrorToToolResult(error: HostError): ToolResult<never> {
         { path: 'headSha', rule: 'merge-conflict', message: error.headSha as string },
         { path: 'baseSha', rule: 'merge-conflict', message: error.baseSha as string },
       ]);
+    case 'head-moved':
+      return precondition(error.summary, [
+        { path: 'pullRequest', rule: 'head-moved', message: String(error.pullRequest.number) },
+        { path: 'expectedHeadSha', rule: 'head-moved', message: error.expectedHeadSha as string },
+        { path: 'headSha', rule: 'head-moved', message: error.headSha as string },
+      ]);
     case 'required-check-failed':
       // Both fields, because `TerminalState.required-check-failed` needs both:
       // a check name with no pull request tells an operator that something
@@ -168,6 +174,8 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
   function failWith(ctx: CallContext, error: HostError): ToolResult<never> {
     if (error.code === 'merge-conflict') {
       deps.terminalSink?.set(ctx.operationId, { kind: 'merge-conflict', branch: error.pullRequest.branch, headSha: error.headSha, baseSha: error.baseSha });
+    } else if (error.code === 'head-moved') {
+      deps.terminalSink?.set(ctx.operationId, { kind: 'head-moved', pullRequest: error.pullRequest, expectedHeadSha: error.expectedHeadSha, headSha: error.headSha });
     } else if (error.code === 'required-check-failed') {
       deps.terminalSink?.set(ctx.operationId, { kind: 'required-check-failed', check: error.check, pullRequest: error.pullRequest });
     }
@@ -356,7 +364,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
     async enableAutoMerge(ctx, input): Promise<ToolResult<PrEnableAutoMergeData>> {
       const startedAtMs = Date.parse(clock.now());
       return withCredential(ctx, () => hostMutation(ctx, 'host.enableAutoMerge', async () => {
-        const enabled = await adapter.enableAutoMerge(ctx, input.number);
+        const enabled = await adapter.enableAutoMerge(ctx, input.number, input.expectedHeadSha);
         if (!enabled.ok) return failWith(ctx, enabled.error);
         return success(
           `auto-merge enabled on pull request #${input.number}`,
