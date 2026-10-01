@@ -48,7 +48,6 @@
 | 25 | #41 | The kit lives at D:\Downloads\agent-kit, which is a staging path, not a home | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
 | 27 | #54 | Naming — repository, image, MCP server and service names are unsettled | — | `c316c787456f6da803938f27de6341059aca1481` |
 | 28 | #55 | S2's dual-lock-holder refusal has never been run against a real Docker bind mount | — | `02ab6bc823cf0145a515fdda9f48a24161dcc432` |
-| 265 | #265 | A clone can get stuck "needs attention" with nothing able to clear it | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 266 | #266 | Parking an operation never notifies anyone | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 267 | #267 | A resumed operation is marked done without re-checking its outcome | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 268 | #268 | A rejected host credential is never marked failing | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
@@ -78,20 +77,17 @@
 | 292 | #292 | There's no record of which operator approved a given MCP access grant | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 301 | #301 | Add a doc-citation checker to CI | — | `082d1df8f15bae3125e78e06155fe1c59fe3cafc` |
 | 310 | #310 | S42 — Recovery never strands a clone, and never waits for a caller | S42.1, S42.2, S42.3, S42.4, S42.5, S42.6, S42.7 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
-| 311 | #311 | S43 — Boot keeps its evidence, and its steps in order | S43.1, S43.2, S43.3, S43.4 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 312 | #312 | S44 — A clone on disk is exactly what it claims to be | S44.1, S44.2, S44.3, S44.4, S44.5 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 313 | #313 | S45 — Composites keep what they did not merge | S45.1, S45.2, S45.3, S45.4, S45.5 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 314 | #314 | S46 — Every error names what actually happened | S46.1, S46.2, S46.3, S46.4, S46.5, S46.6, S46.7, S46.8, S46.9 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 315 | #315 | S47 — Nothing waits forever, and a busy store is retried | S47.1, S47.2, S47.3, S47.4 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 316 | #316 | S48 — The console and the health view show what is real | S48.1, S48.2, S48.3, S48.4, S48.5 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
-| 317 | #317 | S49 — A watcher's auto-merge only merges the commit it pushed | S49.1, S49.2, S49.3, S49.4, S49.5, S49.6 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 318 | #318 | S50 — Every watcher outcome is audited, and every failure is told | S50.1, S50.2, S50.3, S50.4, S50.5, S50.6, S50.7 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 319 | #319 | S51 — A watched repository clones itself on first use | S51.1, S51.2, S51.3 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 320 | #320 | S52 — The watcher is proven against a real repository | S52.1, S52.2, S52.3, S52.4, S52.5, S52.6 | `70413caf7ace545ab150ddd8dcfeb76c1756fd69` |
 | 330 | #330 | S53 — A tampered watcher folder stops delivery, and the operator hears once | S53.1, S53.2, S53.3, S53.4, S53.5, S53.6, S53.7, S53.8, S53.9, S53.10 | `c1fee0489483669410c59b88ba8e5d6e0740ca9c` |
 | milestone/6 | #61 | syncBase inlines rev-parse/is-ancestor plumbing that composites.ts keeps as private helpers | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/6 | #65 | `sendJson`/`readJsonBody` are independently reimplemented in six surface files | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
-| milestone/3 | #77 | Carry the watcher push SHA through auto-merge and reconciliation | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #81 | Audit and notify every content-drop watcher failure | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #82 | Finalize a merged watcher PR even when reconciliation fails | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #84 | Make declaration orphaning and removal aware of content-drop state | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
