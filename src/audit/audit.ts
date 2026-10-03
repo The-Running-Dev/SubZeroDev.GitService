@@ -2,6 +2,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { appendFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { applyStoreBusyTimeout } from '../shared/store-busy.ts';
 import { createHash } from 'node:crypto';
 import { sha256Hex, type IsoUtcTimestamp, type Sha256Hex } from '../shared/brands.ts';
 import type { Outcome } from '../shared/outcome.ts';
@@ -355,6 +356,7 @@ export function createAudit(options: AuditOptions): Audit {
     if (dbUnavailable) return null;
     try {
       db = new DatabaseSync(dbPath);
+      applyStoreBusyTimeout(db);
       return db;
     } catch {
       dbUnavailable = true;

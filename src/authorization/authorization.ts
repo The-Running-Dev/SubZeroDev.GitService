@@ -2,6 +2,7 @@ import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { applyStoreBusyTimeout } from '../shared/store-busy.ts';
 import { ok, err, type Outcome } from '../shared/outcome.ts';
 import type { ClientId, DeclarationId, Generation, GrantId, IsoUtcTimestamp, McpResourceUri, SaltedHash, SessionId, Subject, TokenId } from '../shared/brands.ts';
 import type { BearerToken, HttpsUrl } from '../shared/brands.ts';
@@ -210,6 +211,7 @@ function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): Outcome<T, 
   try {
     mkdirSync(volumeRoot, { recursive: true });
     db = new DatabaseSync(path.join(volumeRoot, 'store.sqlite'));
+    applyStoreBusyTimeout(db);
     db.exec('PRAGMA foreign_keys = ON;');
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);

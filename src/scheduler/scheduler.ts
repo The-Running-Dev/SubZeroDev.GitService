@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import { applyStoreBusyTimeout } from '../shared/store-busy.ts';
 import { ok, err, type Outcome } from '../shared/outcome.ts';
 import type { ClientId, DeclarationId, Generation, GrantId, IsoUtcTimestamp, RegistryToolName, ScheduledJobId, SessionId, Subject } from '../shared/brands.ts';
 import type { ActorKind } from '../shared/actor.ts';
@@ -141,6 +142,7 @@ function openDb(volumeRoot: string): Outcome<DatabaseSync, SchedulerError> {
   try {
     mkdirSync(volumeRoot, { recursive: true });
     const db = new DatabaseSync(path.join(volumeRoot, 'store.sqlite'));
+    applyStoreBusyTimeout(db);
     db.exec('PRAGMA foreign_keys = ON;');
     return ok(db);
   } catch (cause) {

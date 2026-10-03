@@ -2686,3 +2686,93 @@ test('2026-08-13 post-S27 reconciliation — the refuse watermark gates a mutati
     assert.equal(readingsTaken, 2, 'the refused call still takes its own post-mutation reading in its own finally');
   });
 });
+
+// --- S47: nothing waits forever ---
+
+test('S47.1: a module tool that never settles returns timeout at its declared limit and its context carries start + timeoutSeconds', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, locks, exec }) => {
+    const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
+    const moduleAdapter = createModuleAdapter();
+    let seenDeadlineMs = 0;
+    let seenSignal: AbortSignal | null = null;
+    moduleAdapter.register('fixture.hangs' as never, (ctx) => {
+      seenDeadlineMs = Date.parse(ctx.deadline);
+      seenSignal = ctx.signal;
+      return new Promise(() => {});
+    });
+    const entry = fixtureTool({
+      name: 'fixture_hangs',
+      capabilities: ['repo.read'],
+      target: { kind: 'module', target: 'fixture.hangs' as never },
+      limits: { timeoutSeconds: 1, maxResultBytes: 1_000_000 },
+    });
+    const pipeline = createDispatchPipeline({
+      exec,
+      registry: registryOf([entry]),
+      ceiling: CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      clock: systemClock,
+    });
+
+    const startedMs = Date.now();
+    const result = await pipeline.dispatch({
+      toolName: 'fixture_hangs' as never,
+      input: {},
+      session: sessionWith(['repo.read']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+    const elapsedMs = Date.now() - startedMs;
+
+    assert.equal(result.kind, 'timeout');
+    assert.ok(elapsedMs >= 900 && elapsedMs < 4000, `returned after ${elapsedMs} ms, expected about 1000`);
+    assert.ok(seenDeadlineMs - startedMs >= 900 && seenDeadlineMs - startedMs <= 2500, `deadline was ${seenDeadlineMs - startedMs} ms after start`);
+    assert.equal((seenSignal as AbortSignal | null)?.aborted, true, 'the handler is told to stop');
+  });
+});
+
+test('S47.1: a module tool that settles within its limit is unaffected and its timer does not outlive it', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, locks, exec }) => {
+    const audit = createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock });
+    const moduleAdapter = createModuleAdapter();
+    let seenSignal: AbortSignal | null = null;
+    moduleAdapter.register('fixture.quick' as never, async (ctx) => {
+      seenSignal = ctx.signal;
+      return success('ok', {}, { operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation, durationMs: 0 });
+    });
+    const entry = fixtureTool({
+      name: 'fixture_quick',
+      capabilities: ['repo.read'],
+      target: { kind: 'module', target: 'fixture.quick' as never },
+      limits: { timeoutSeconds: 1, maxResultBytes: 1_000_000 },
+    });
+    const pipeline = createDispatchPipeline({
+      exec,
+      registry: registryOf([entry]),
+      ceiling: CAPABILITY_SET,
+      moduleAdapter,
+      declarations,
+      cloneStore,
+      locks,
+      audit,
+      clock: systemClock,
+    });
+    const result = await pipeline.dispatch({
+      toolName: 'fixture_quick' as never,
+      input: {},
+      session: sessionWith(['repo.read']),
+      declarationId: 'repo-a' as never,
+      scheduledJobId: null,
+      context: 'normal',
+      signal: new AbortController().signal,
+    });
+    assert.equal(result.ok, true);
+    assert.equal((seenSignal as AbortSignal | null)?.aborted, false, 'a completed call is not aborted after the fact');
+  });
+});

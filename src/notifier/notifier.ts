@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import { applyStoreBusyTimeout } from '../shared/store-busy.ts';
 import type { Clock } from '../clock/clock.ts';
 import { err, ok, type Outcome } from '../shared/outcome.ts';
 import type { HttpsUrl, IsoUtcTimestamp, OutboxRowId } from '../shared/brands.ts';
@@ -134,6 +135,7 @@ function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): DbOutcome<T
   try {
     mkdirSync(volumeRoot, { recursive: true });
     db = new DatabaseSync(path.join(volumeRoot, 'store.sqlite'));
+    applyStoreBusyTimeout(db);
     db.exec('PRAGMA foreign_keys = ON;');
   } catch (cause) {
     return { ok: false, reason: cause instanceof Error ? cause.message : String(cause) };

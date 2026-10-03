@@ -2,6 +2,7 @@ import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { applyStoreBusyTimeout } from '../shared/store-busy.ts';
 import { ok, err, type Outcome } from '../shared/outcome.ts';
 import type { DeclarationId, Generation, IsoUtcTimestamp, OperationId, RegistryToolName, ScheduledJobId } from '../shared/brands.ts';
 import type { ActorRef, OperationContextKind } from '../shared/actor.ts';
@@ -77,6 +78,7 @@ function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): Outcome<T, 
     // return the promised `Outcome` error, not reject and leak them.
     mkdirSync(volumeRoot, { recursive: true });
     db = new DatabaseSync(path.join(volumeRoot, 'store.sqlite'));
+    applyStoreBusyTimeout(db);
     db.exec('PRAGMA foreign_keys = ON;');
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);

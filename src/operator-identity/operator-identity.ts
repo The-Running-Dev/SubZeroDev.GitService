@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { applyStoreBusyTimeout } from '../shared/store-busy.ts';
 import type { HttpsUrl, IsoUtcTimestamp, SessionId, Subject } from '../shared/brands.ts';
 import { ok, err, type Outcome } from '../shared/outcome.ts';
 import { timingSafeStringEqual } from '../shared/timing-safe.ts';
@@ -176,6 +177,7 @@ function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): Outcome<T, 
   let db: DatabaseSync;
   try {
     db = new DatabaseSync(dbPath);
+    applyStoreBusyTimeout(db);
   } catch {
     return err(operatorIdentityError({ code: 'store-failed', cause: storeError({ code: 'io-failed' }, 'could not open the store') }, 'the structured store is unavailable'));
   }

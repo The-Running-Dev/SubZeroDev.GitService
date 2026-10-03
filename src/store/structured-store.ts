@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { applyStoreBusyTimeout, isStoreBusy } from '../shared/store-busy.ts';
 import { err, ok, type Outcome } from '../shared/outcome.ts';
 import { isoUtcTimestamp, type IsoUtcTimestamp } from '../shared/brands.ts';
 import type { Clock } from '../clock/clock.ts';
@@ -205,6 +206,7 @@ export function createStructuredStore(options: StructuredStoreOptions): Structur
       try {
         mkdirSync(volumeRoot, { recursive: true });
         db = new DatabaseSync(storePath);
+        applyStoreBusyTimeout(db);
         db.exec('PRAGMA foreign_keys = ON;');
         return ok(undefined);
       } catch {
@@ -354,6 +356,11 @@ export function createStructuredStore(options: StructuredStoreOptions): Structur
           // Already rolled back by the failure itself.
         }
         const message = cause instanceof Error ? cause.message : String(cause);
+        // The busy timeout (S47.3) has already waited out the contention it
+        // could; reaching here means the lock outlasted the bound.
+        if (isStoreBusy(cause)) {
+          return err(storeError({ code: 'busy', attempts: 1 }, message, true));
+        }
         if (/CHECK constraint|UNIQUE constraint|FOREIGN KEY|NOT NULL constraint/i.test(message)) {
           return err(storeError({ code: 'constraint-violated', constraint: message }, message));
         }

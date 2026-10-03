@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, rmSync, statfsSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { applyStoreBusyTimeout } from '../shared/store-busy.ts';
 import { ok, err, type Outcome } from '../shared/outcome.ts';
 import { sha256Hex, type BranchName, type ClonePath, type CloneUrl, type DeclarationId, type Generation, type GitSha, type IsoUtcTimestamp, type OperationId, type RegistryToolName, type Sha256Hex } from '../shared/brands.ts';
 import { canonicalize } from '../shared/canonical-json.ts';
@@ -196,6 +197,7 @@ function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): Outcome<T, 
   let db: DatabaseSync;
   try {
     db = new DatabaseSync(path.join(volumeRoot, 'store.sqlite'));
+    applyStoreBusyTimeout(db);
     db.exec('PRAGMA foreign_keys = ON;');
   } catch {
     return err(storeError({ code: 'io-failed' }, 'could not open the structured store'));
