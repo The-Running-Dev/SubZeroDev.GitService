@@ -641,6 +641,30 @@ test('S24.4 — an empty pending pull-request list file never blocks declaration
   });
 });
 
+test('S50.6 — declaration.remove refuses watcher-directory-not-empty while the pending list holds entries, counting them, and deletes nothing', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declarations = declarationsFor(volume);
+    assert.equal((await declarations.declare(declareInputFor('repo-50'), OPERATOR)).ok, true);
+
+    const pendingFile = path.join(volume, 'watcher-pending-pull-requests', 'repo-50.json');
+    mkdirSync(path.dirname(pendingFile), { recursive: true });
+    writeFileSync(pendingFile, JSON.stringify({ entries: [{ number: 1 }, { number: 2 }] }), 'utf8');
+    assert.equal((await declarations.orphan('repo-50' as DeclareInput['id'], OPERATOR)).ok, true);
+
+    const refused = await declarations.remove('repo-50' as DeclareInput['id'], OPERATOR);
+    assert.equal(refused.ok, false);
+    if (!refused.ok) {
+      assert.equal(refused.error.code, 'watcher-directory-not-empty');
+      if (refused.error.code === 'watcher-directory-not-empty') assert.equal(refused.error.files, 2);
+    }
+    assert.equal(existsSync(pendingFile), true, 'removal deletes nothing');
+    assert.notEqual(await declarations.get('repo-50' as DeclareInput['id']), null, 'the declaration is still there');
+
+    writeFileSync(pendingFile, JSON.stringify({ entries: [] }), 'utf8');
+    assert.equal((await declarations.remove('repo-50' as DeclareInput['id'], OPERATOR)).ok, true, 'an empty list does not block');
+  });
+});
+
 test('S24.4 — a re-declared id does not inherit the previous era\'s pending pull-request list, whether adopted from orphaned or declared fresh after remove', async () => {
   await withMigratedVolume(async (volume) => {
     const declarations = declarationsFor(volume);
@@ -664,6 +688,9 @@ test('S24.4 — a re-declared id does not inherit the previous era\'s pending pu
     writeFileSync(pendingFile, JSON.stringify({ entries: [{ declarationId: 'repo-11', number: 9, branch: 'watcher/post-2', openedAt: systemClock.now(), sourceFile: 'post-2.md' }] }), 'utf8');
     const reorphaned = await declarations.orphan('repo-11' as DeclareInput['id'], OPERATOR);
     assert.equal(reorphaned.ok, true);
+    // S50.6: removal refuses while the list holds an entry, so only an entry-less list can be left behind.
+    assert.equal((await declarations.remove('repo-11' as DeclareInput['id'], OPERATOR)).ok, false);
+    writeFileSync(pendingFile, JSON.stringify({ entries: [] }), 'utf8');
     const removed = await declarations.remove('repo-11' as DeclareInput['id'], OPERATOR);
     assert.equal(removed.ok, true);
 

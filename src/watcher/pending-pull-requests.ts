@@ -25,11 +25,11 @@ function isWellFormedEntry(value: unknown): value is PendingPullRequest {
 
 /**
  * `20-contract.md` § Files on the volume: "Pending pull-request list, one per
- * declaration". Kept as its own file per declaration under a directory
- * `declaration.remove`'s watcher-directory-emptiness check (`declarations.ts`)
- * never inspects — the list is service bookkeeping, not a copy of anything a
- * producer handed over, so an empty list must never block removal the way a
- * leftover watched file does.
+ * declaration". Kept as its own file per declaration, outside the watched tree.
+ * It is service bookkeeping, not a copy of anything a producer handed over, so an
+ * empty list never blocks `declaration.remove` the way a leftover watched file
+ * does — but an entry in it is a pull request still being followed, and
+ * `declarations.ts` (`countPendingPullRequests`) refuses removal while one exists (S50.6).
  */
 export function pendingPullRequestsPath(volumeRoot: string, declarationId: DeclarationId): string {
   return path.join(volumeRoot, 'watcher-pending-pull-requests', `${declarationId as string}.json`);
