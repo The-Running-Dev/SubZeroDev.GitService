@@ -59,7 +59,7 @@ export interface PendingPullRequestList {
 
 export interface WatchTickReport {
   readonly declarationId: DeclarationId;
-  readonly skipped: 'clone-not-clean' | 'clone-needs-attention' | null;
+  readonly skipped: 'clone-not-clean' | 'clone-needs-attention' | 'state-directory-tampered' | null;
   readonly claimed: WatchedFileName | null;
   readonly outcome: WatchedFileOutcome | null;
   readonly reconciled: readonly PendingPullRequest[];

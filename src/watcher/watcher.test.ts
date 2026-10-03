@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync, utimesSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync, utimesSync } from 'node:fs';
 import path from 'node:path';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
 import { systemClock, type Clock } from '../clock/clock.ts';
@@ -421,122 +421,328 @@ test('S17.4 — a symlink is never a candidate; a link-preserving stat refuses i
   });
 });
 
-test('W08.3 — claim() refuses a symlinked processing/, leaving the file in the inbox and nothing written through the link', async () => {
+type StateDirectoryName = 'processing' | 'processed' | 'failed';
+const STATE_DIRECTORIES: readonly StateDirectoryName[] = ['processing', 'processed', 'failed'];
+
+/** A plain file at a state directory's name is a tamper that needs no symlink privilege to plant, so it runs on every dev host. */
+function tamper(root: string, name: StateDirectoryName): void {
+  writeFileSync(path.join(root, name), 'not a directory', 'utf8');
+}
+
+function tamperPages(notifications: readonly NotificationRequest[]): NotificationRequest[] {
+  return notifications.filter((n) => n.subject.kind === 'watcher-state-directory-tampered');
+}
+
+function failurePages(notifications: readonly NotificationRequest[]): NotificationRequest[] {
+  return notifications.filter((n) => n.subject.kind === 'file-watcher-failed');
+}
+
+function pageReason(page: NotificationRequest): string {
+  return (page.subject as { reason: string }).reason;
+}
+
+function watcherOutcomeKinds(auditLog: readonly AuditAppendInput[]): string[] {
+  return auditLog.flatMap((record) => (record.form === 'file-watcher' ? [record.outcome.kind] : []));
+}
+
+test('S53.1 — a tick refuses a declaration whose state directory is tampered, with an empty inbox, and makes no dispatch, Git or host call', async () => {
+  for (const name of STATE_DIRECTORIES) {
+    await withVolumeAsync(async (volume) => {
+      const root = inboxRoot(volume, 'repo-a');
+      mkdirSync(root, { recursive: true });
+      tamper(root, name);
+
+      const calls = { isClean: 0 };
+      const { deps, dispatchLog } = baseDeps(volume, {
+        declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+        cloneStore: stubCloneStore({ current: 'ready' }, calls),
+      });
+      const reports = await createWatcher(deps).tick();
+
+      assert.equal(reports[0]!.skipped, 'state-directory-tampered', `${name}/ tampered`);
+      assert.equal(reports[0]!.claimed, null);
+      assert.equal(reports[0]!.outcome, null);
+      assert.equal(dispatchLog.length, 0);
+      assert.equal(calls.isClean, 0, 'the tree is never observed either');
+      assert.equal(readFileSync(path.join(root, name), 'utf8'), 'not a directory', 'the tampering entry is left untouched');
+    });
+  }
+});
+
+test('S53.1 — the tamper gate runs ahead of the clone gates: a tampered processed/ with a dirty or parked clone is still state-directory-tampered', async () => {
+  const states: { current: CloneState; clean?: boolean }[] = [{ current: 'ready', clean: false }, { current: 'needs-attention' }];
+  for (const state of states) {
+    await withVolumeAsync(async (volume) => {
+      const root = inboxRoot(volume, 'repo-a');
+      mkdirSync(root, { recursive: true });
+      writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+      tamper(root, 'processed');
+
+      const { deps } = baseDeps(volume, {
+        declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+        cloneStore: stubCloneStore(state),
+      });
+      const reports = await createWatcher(deps).tick();
+
+      assert.equal(reports[0]!.skipped, 'state-directory-tampered');
+      assert.equal(existsSync(path.join(root, 'post.md')), true, 'the file stays in the inbox');
+    });
+  }
+});
+
+test('S53.1 — a symlinked processing/ is refused by the gate and nothing is written through the link', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+    const outsideDir = path.join(volume, 'outside-processing');
+    mkdirSync(outsideDir, { recursive: true });
+    try {
+      symlinkSync(outsideDir, path.join(root, 'processing'), 'dir');
+    } catch {
+      return; // No symlink privilege on this host (common on unelevated Windows); the plain-file tests carry the same assertions.
+    }
+
+    const { deps, dispatchLog } = baseDeps(volume, { declarations: stubDeclarations({ current: [fixtureDeclaration()] }) });
+    const reports = await createWatcher(deps).tick();
+
+    assert.equal(reports[0]!.skipped, 'state-directory-tampered');
+    assert.equal(existsSync(path.join(root, 'post.md')), true);
+    assert.deepEqual(readdirSync(outsideDir), []);
+    assert.equal(dispatchLog.length, 0);
+  });
+});
+
+test('S53.2 — a sound declaration beside a tampered one still opens its pull request', async () => {
+  await withVolumeAsync(async (volume) => {
+    const rootA = inboxRoot(volume, 'repo-a');
+    const rootB = inboxRoot(volume, 'repo-b');
+    mkdirSync(rootA, { recursive: true });
+    mkdirSync(rootB, { recursive: true });
+    writeFileSync(path.join(rootA, 'post.md'), 'content', 'utf8');
+    writeFileSync(path.join(rootB, 'post.md'), 'content', 'utf8');
+    tamper(rootA, 'processed');
+
+    const dispatchLog: DispatchRequest[] = [];
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration(), fixtureDeclaration({ id: 'repo-b' as Declaration['id'] })] }),
+      dispatch: scriptedDispatch(dispatchLog, successfulHandlers()),
+    });
+    const reports = await createWatcher(deps).tick();
+
+    assert.equal(reports[0]!.skipped, 'state-directory-tampered');
+    assert.equal(reports[1]!.skipped, null);
+    assert.equal(reports[1]!.outcome?.kind, 'succeeded');
+    assert.deepEqual(dispatchLog.filter((r) => r.toolName === 'pr_open').map((r) => r.declarationId), ['repo-b']);
+    assert.equal(dispatchLog.some((r) => r.declarationId === 'repo-a'), false, 'nothing at all was dispatched for the tampered declaration');
+    assert.equal(existsSync(path.join(rootA, 'post.md')), true, 'the tampered declaration keeps its file in the inbox');
+  });
+});
+
+test('S53.3 — the gate pages once per tamper at attention, writes no audit record, and a sound tick re-arms the page', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    tamper(root, 'failed');
+
+    const { deps, notifications, auditLog } = baseDeps(volume, { declarations: stubDeclarations({ current: [fixtureDeclaration()] }) });
+    const watcher = createWatcher(deps);
+
+    for (let i = 0; i < 3; i += 1) assert.equal((await watcher.tick())[0]!.skipped, 'state-directory-tampered');
+    const pages = tamperPages(notifications);
+    assert.equal(pages.length, 1, 'three consecutive refusing ticks leave one row');
+    assert.equal(pages[0]!.severity, 'attention');
+    assert.deepEqual(pages[0]!.subject, { kind: 'watcher-state-directory-tampered', directory: 'failed' });
+    assert.equal(auditLog.length, 0, 'a file-less refusal writes no audit record');
+
+    rmSync(path.join(root, 'failed'));
+    assert.equal((await watcher.tick())[0]!.skipped, null, 'all three directories sound again');
+    tamper(root, 'failed');
+    assert.equal((await watcher.tick())[0]!.skipped, 'state-directory-tampered');
+    assert.equal(tamperPages(notifications).length, 2, 'a refusal after a sound tick pages again');
+    assert.equal(auditLog.length, 0);
+  });
+});
+
+test('S53.3 — a tampered processing/ at recoverInterruptedClaims pages once at attention and writes no audit record', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    tamper(root, 'processing');
+
+    const { deps, notifications, auditLog } = baseDeps(volume, { declarations: stubDeclarations({ current: [fixtureDeclaration()] }) });
+    const recovered = await createWatcher(deps).recoverInterruptedClaims();
+
+    assert.equal(recovered.length, 0);
+    const pages = tamperPages(notifications);
+    assert.equal(pages.length, 1);
+    assert.equal(pages[0]!.severity, 'attention');
+    assert.deepEqual(pages[0]!.subject, { kind: 'watcher-state-directory-tampered', directory: 'processing' });
+    assert.equal(auditLog.length, 0);
+  });
+});
+
+test('S53.4 — a processing/ swapped after the gate passed leaves the file in the inbox and reports state-directory-tampered, never claim-failed', async () => {
   await withVolumeAsync(async (volume) => {
     const root = inboxRoot(volume, 'repo-a');
     mkdirSync(root, { recursive: true });
     writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
 
-    const outsideDir = path.join(volume, 'outside-processing');
-    mkdirSync(outsideDir, { recursive: true });
-
-    let symlinked = true;
-    try {
-      symlinkSync(outsideDir, path.join(root, 'processing'), 'dir');
-    } catch {
-      symlinked = false;
-    }
-    if (!symlinked) {
-      // No symlink privilege on this host (common on unelevated Windows) — nothing to assert.
-      return;
-    }
-
-    const dispatchLog: DispatchRequest[] = [];
-    const { deps } = baseDeps(volume, {
+    const base = stubCloneStore({ current: 'ready' });
+    const { deps, dispatchLog, notifications, auditLog } = baseDeps(volume, {
       declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
-      dispatch: scriptedDispatch(dispatchLog, { repo_status: () => repoStatus(false) }),
+      cloneStore: {
+        ...base,
+        async isClean(declarationId) {
+          tamper(root, 'processing'); // the swap lands between the gate and the claim
+          return base.isClean(declarationId);
+        },
+      },
     });
-    const watcher = createWatcher(deps);
-    const reports = await watcher.tick();
+    const reports = await createWatcher(deps).tick();
 
-    assert.equal(reports[0]!.claimed, null, 'the tampered processing/ was never claimed into');
-    assert.equal(reports[0]!.outcome?.kind, 'rejected');
-    if (reports[0]!.outcome?.kind === 'rejected') assert.equal(reports[0]!.outcome.step, 'claim');
-    assert.equal(existsSync(path.join(root, 'post.md')), true, 'the file stays in the inbox');
-    assert.deepEqual(readdirSync(outsideDir), [], 'nothing is written through the symlink');
-    assert.equal(dispatchLog.some((r) => r.toolName === 'plan_tool'), false);
+    assert.equal(reports[0]!.skipped, 'state-directory-tampered');
+    assert.equal(reports[0]!.claimed, null);
+    assert.equal(reports[0]!.outcome, null, 'not a claim-failed rejection');
+    assert.equal(existsSync(path.join(root, 'post.md')), true);
+    assert.equal(dispatchLog.length, 0);
+    assert.equal(auditLog.length, 0);
+    assert.equal(tamperPages(notifications).length, 1);
   });
 });
 
-/**
- * A reparse point needs elevated privilege to create on an unelevated Windows
- * host (the `symlinked` guard above skips there), but `isTamperedStateDir`
- * refuses any non-directory entry, not only a symlink — a plain file planted
- * at the same name is refused the same way, and needs no privilege to create.
- * This is what makes the fix checkable by reverting it on every dev host.
- */
-test('W08.3 — claim() refuses a processing/ that is a plain file, not a directory', async () => {
+test('S53.5 — a terminal move into a tampered processed/ throws nothing: the file stays in processing/, the audit outcome is the protocol\'s own, and a page names the directory', async () => {
   await withVolumeAsync(async (volume) => {
     const root = inboxRoot(volume, 'repo-a');
     mkdirSync(root, { recursive: true });
     writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
-    writeFileSync(path.join(root, 'processing'), 'not a directory', 'utf8');
 
+    const handlers = successfulHandlers();
+    const realPrOpen = handlers.pr_open!;
+    handlers.pr_open = (req) => {
+      tamper(root, 'processed'); // swapped after the gate passed, before the terminal move
+      return realPrOpen(req);
+    };
+    const { deps, auditLog, notifications } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch([], handlers),
+    });
+    const reports = await createWatcher(deps).tick();
+
+    assert.equal(reports[0]!.outcome?.kind, 'succeeded', 'the tick returns its report normally');
+    assert.equal(existsSync(path.join(root, 'processing', 'post.md')), true, 'the file stays in processing/');
+    assert.deepEqual(watcherOutcomeKinds(auditLog), ['succeeded'], 'the protocol\'s own outcome');
+    const failures = failurePages(notifications);
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0]!.severity, 'attention');
+    assert.match(pageReason(failures[0]!), /'processed\/'/);
+  });
+});
+
+test('S53.5 — a terminal move into a tampered failed/ throws nothing and names failed/', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+
+    const handlers = handlersUpTo('plan_tool', upstream('remote rejected', null) as unknown as ToolResult<never>);
+    const failing = handlers.plan_tool!;
+    handlers.plan_tool = (req) => {
+      tamper(root, 'failed');
+      return failing(req);
+    };
+    const { deps, auditLog, notifications } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch([], handlers),
+    });
+    const reports = await createWatcher(deps).tick();
+
+    assert.equal(reports[0]!.outcome?.kind, 'rejected');
+    assert.equal(existsSync(path.join(root, 'processing', 'post.md')), true);
+    assert.deepEqual(watcherOutcomeKinds(auditLog), ['rejected']);
+    const failures = failurePages(notifications);
+    assert.equal(failures.length, 1, 'one page, carrying both the protocol failure and the refused directory');
+    assert.match(pageReason(failures[0]!), /'failed\/'/);
+  });
+});
+
+test('S53.6 — a pull request the protocol opened is in the pending list before its terminal move, and the next reconciliation poll reads it (D19)', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+
+    const handlers = successfulHandlers();
+    const realPrOpen = handlers.pr_open!;
+    handlers.pr_open = (req) => {
+      tamper(root, 'processed');
+      return realPrOpen(req);
+    };
     const dispatchLog: DispatchRequest[] = [];
     const { deps } = baseDeps(volume, {
       declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
-      dispatch: scriptedDispatch(dispatchLog, { repo_status: () => repoStatus(false) }),
+      dispatch: scriptedDispatch(dispatchLog, { ...handlers, pr_status: () => prStatusResult('open') }),
     });
     const watcher = createWatcher(deps);
+    await watcher.tick();
+
+    const pending = readPendingPullRequests(volume, 'repo-a' as never);
+    assert.equal(pending.entries.length, 1, 'the entry exists although the terminal move was refused');
+    assert.equal(pending.entries[0]!.number, 7);
+
+    rmSync(path.join(root, 'processed'));
+    mkdirSync(path.join(root, 'processed'));
     const reports = await watcher.tick();
-
-    assert.equal(reports[0]!.claimed, null, 'the tampered processing/ was never claimed into');
-    assert.equal(reports[0]!.outcome?.kind, 'rejected');
-    if (reports[0]!.outcome?.kind === 'rejected') assert.equal(reports[0]!.outcome.step, 'claim');
-    assert.equal(existsSync(path.join(root, 'post.md')), true, 'the file stays in the inbox');
-    assert.equal(readFileSync(path.join(root, 'processing'), 'utf8'), 'not a directory', 'the tampering file is left untouched');
+    assert.equal(reports[0]!.stillPending.length, 1);
+    assert.equal(dispatchLog.some((r) => r.toolName === 'pr_status'), true, 'the poll reads the recorded pull request');
   });
 });
 
-test('W08.3 — recoverInterruptedClaims() refuses a symlinked processing/, never reading or moving files through the link', async () => {
+test('S53.7 — recovery with a tampered failed/ leaves the file in processing/, audits it, pages, and start succeeds', async () => {
   await withVolumeAsync(async (volume) => {
-    const outsideDir = path.join(volume, 'outside-processing');
-    mkdirSync(outsideDir, { recursive: true });
-    writeFileSync(path.join(outsideDir, 'secret.md'), 'not the watcher\'s to move', 'utf8');
+    const rootA = inboxRoot(volume, 'repo-a');
+    mkdirSync(path.join(rootA, 'processing'), { recursive: true });
+    writeFileSync(path.join(rootA, 'processing', 'stuck.md'), 'content', 'utf8');
+    tamper(rootA, 'failed');
 
-    const root = inboxRoot(volume, 'repo-a');
-    mkdirSync(root, { recursive: true });
-
-    let symlinked = true;
-    try {
-      symlinkSync(outsideDir, path.join(root, 'processing'), 'dir');
-    } catch {
-      symlinked = false;
-    }
-    if (!symlinked) {
-      return;
-    }
-
-    const { deps } = baseDeps(volume, {
-      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
-    });
+    const { deps, auditLog, notifications } = baseDeps(volume, { declarations: stubDeclarations({ current: [fixtureDeclaration()] }) });
     const watcher = createWatcher(deps);
-    const recovered = await watcher.recoverInterruptedClaims();
+    const started = await watcher.start();
+    await watcher.stop();
 
-    assert.equal(recovered.length, 0, 'the tampered processing/ is skipped, not recovered from');
-    assert.equal(existsSync(path.join(outsideDir, 'secret.md')), true, 'the file outside the inbox is never touched');
-    assert.equal(existsSync(path.join(root, 'failed')), false, 'nothing was moved to failed/ through the link');
+    assert.equal(started.ok, true);
+    assert.equal(existsSync(path.join(rootA, 'processing', 'stuck.md')), true, 'offered again on the next start');
+    assert.deepEqual(watcherOutcomeKinds(auditLog), ['interrupted-claim']);
+    const failures = failurePages(notifications);
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0]!.severity, 'attention');
+    assert.match(pageReason(failures[0]!), /'failed\/'/);
   });
 });
 
-test('W08.3 — recoverInterruptedClaims() refuses a processing/ that is a plain file, not a directory', async () => {
+test('S53.7 — recovery with a tampered processing/ reads nothing through it, start succeeds, and another declaration is still recovered', async () => {
   await withVolumeAsync(async (volume) => {
-    const root = inboxRoot(volume, 'repo-a');
-    mkdirSync(root, { recursive: true });
-    writeFileSync(path.join(root, 'processing'), 'not a directory', 'utf8');
+    const rootA = inboxRoot(volume, 'repo-a');
+    const rootB = inboxRoot(volume, 'repo-b');
+    mkdirSync(rootA, { recursive: true });
+    tamper(rootA, 'processing');
+    mkdirSync(path.join(rootB, 'processing'), { recursive: true });
+    writeFileSync(path.join(rootB, 'processing', 'stuck.md'), 'content', 'utf8');
 
-    const { deps } = baseDeps(volume, {
-      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
-    });
+    const { deps, auditLog } = baseDeps(volume, { declarations: stubDeclarations({ current: [fixtureDeclaration()] }) });
     const watcher = createWatcher(deps);
-    const recovered = await watcher.recoverInterruptedClaims();
+    const started = await watcher.start();
+    await watcher.stop();
 
-    assert.equal(recovered.length, 0, 'the tampered processing/ is skipped, not recovered from');
-    assert.equal(existsSync(path.join(root, 'failed')), false, 'nothing was moved to failed/');
+    assert.equal(started.ok, true);
+    assert.equal(readFileSync(path.join(rootA, 'processing'), 'utf8'), 'not a directory');
+    assert.equal(existsSync(path.join(rootB, 'processing', 'stuck.md')), false);
+    assert.equal(readdirSync(path.join(rootB, 'failed')).some((name) => name.endsWith('-stuck.md')), true, 'the second declaration is recovered');
+    assert.deepEqual(auditLog.map((a) => a.declarationId), ['repo-b']);
   });
 });
 
-test('W08.3 — runRetention() refuses a symlinked processed/, never deleting files through the link, and reports the refusal', async () => {
+test('S53.8 — runRetention refuses a symlinked processed/, never deleting through the link, and names the declaration', async () => {
   await withVolumeAsync(async (volume) => {
     const outsideDir = path.join(volume, 'outside-processed');
     mkdirSync(outsideDir, { recursive: true });
@@ -547,100 +753,58 @@ test('W08.3 — runRetention() refuses a symlinked processed/, never deleting fi
 
     const root = inboxRoot(volume, 'repo-a');
     mkdirSync(root, { recursive: true });
-
-    let symlinked = true;
     try {
       symlinkSync(outsideDir, path.join(root, 'processed'), 'dir');
     } catch {
-      symlinked = false;
-    }
-    if (!symlinked) {
-      return;
+      return; // No symlink privilege on this host; the plain-file test below carries the same assertions.
     }
 
-    const { deps } = baseDeps(volume, {
-      declarations: stubDeclarations({ current: [] }),
-    });
-    const watcher = createWatcher(deps);
-    const report = await watcher.runRetention();
+    const { deps } = baseDeps(volume, { declarations: stubDeclarations({ current: [] }) });
+    const report = await createWatcher(deps).runRetention();
 
     assert.equal(existsSync(outsideFile), true, 'the file outside the inbox is never deleted through the link');
     assert.equal(report.deletedRows, 0);
-    assert.equal(report.skipped.some((s) => s.includes('processed')), true, 'the refusal is reported');
+    assert.equal(report.skipped.some((s) => s.includes('processed') && s.includes('repo-a')), true, 'the refusal names the declaration');
   });
 });
 
-test('W08.3 — runRetention() refuses a processed/ that is a plain file, not a directory', async () => {
+test('S53.8 — runRetention refuses a processed/ that is a plain file, not a directory, and names the declaration', async () => {
   await withVolumeAsync(async (volume) => {
     const root = inboxRoot(volume, 'repo-a');
     mkdirSync(root, { recursive: true });
-    writeFileSync(path.join(root, 'processed'), 'not a directory', 'utf8');
+    tamper(root, 'processed');
 
     const { deps } = baseDeps(volume, { declarations: stubDeclarations({ current: [] }) });
-    const watcher = createWatcher(deps);
-    const report = await watcher.runRetention();
+    const report = await createWatcher(deps).runRetention();
 
     assert.equal(report.deletedRows, 0);
-    assert.equal(report.skipped.some((s) => s.includes('processed')), true, 'the refusal is reported');
+    assert.equal(report.skipped.some((s) => s.includes('processed') && s.includes('repo-a')), true, 'the refusal names the declaration');
     assert.equal(readFileSync(path.join(root, 'processed'), 'utf8'), 'not a directory', 'the tampering file is left untouched');
   });
 });
 
-test('W08.3 — moveToProcessed refuses a symlinked processed/ by throwing, leaving the claimed file safely in processing/', async () => {
+test('S53.9 — an existing real directory at each state-directory name is used as found, and its mode is not changed', async () => {
   await withVolumeAsync(async (volume) => {
     const root = inboxRoot(volume, 'repo-a');
     mkdirSync(root, { recursive: true });
     writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+    for (const name of STATE_DIRECTORIES) mkdirSync(path.join(root, name), { mode: 0o755 });
 
-    const outsideDir = path.join(volume, 'outside-processed');
-    mkdirSync(outsideDir, { recursive: true });
-
-    let symlinked = true;
-    try {
-      symlinkSync(outsideDir, path.join(root, 'processed'), 'dir');
-    } catch {
-      symlinked = false;
-    }
-    if (!symlinked) {
-      return;
-    }
-
-    const dispatchLog: DispatchRequest[] = [];
     const { deps } = baseDeps(volume, {
       declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
-      dispatch: scriptedDispatch(dispatchLog, successfulHandlers()),
+      dispatch: scriptedDispatch([], successfulHandlers()),
     });
-    const watcher = createWatcher(deps);
+    const reports = await createWatcher(deps).tick();
 
-    await assert.rejects(() => watcher.tick(), /is not a real directory/);
-
-    assert.equal(existsSync(path.join(root, 'processing', 'post.md')), true, 'the already-claimed file stays safely in processing/, never lost');
-    assert.deepEqual(readdirSync(outsideDir), [], 'nothing is written through the symlink');
+    assert.equal(reports[0]!.outcome?.kind, 'succeeded');
+    assert.equal(readdirSync(path.join(root, 'processed')).some((name) => name.endsWith('-post.md')), true, 'used as found');
+    if (process.platform !== 'win32') {
+      for (const name of ['processing', 'processed'] as const) assert.equal(statSync(path.join(root, name)).mode & 0o777, 0o755, `${name}/ mode untouched`);
+    }
   });
 });
 
-test('W08.3 — moveToProcessed refuses a processed/ that is a plain file, not a directory, by throwing', async () => {
-  await withVolumeAsync(async (volume) => {
-    const root = inboxRoot(volume, 'repo-a');
-    mkdirSync(root, { recursive: true });
-    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
-    writeFileSync(path.join(root, 'processed'), 'not a directory', 'utf8');
-
-    const dispatchLog: DispatchRequest[] = [];
-    const { deps } = baseDeps(volume, {
-      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
-      dispatch: scriptedDispatch(dispatchLog, successfulHandlers()),
-    });
-    const watcher = createWatcher(deps);
-
-    await assert.rejects(() => watcher.tick(), /is not a real directory/);
-
-    assert.equal(existsSync(path.join(root, 'processing', 'post.md')), true, 'the already-claimed file stays safely in processing/, never lost');
-    assert.equal(readFileSync(path.join(root, 'processed'), 'utf8'), 'not a directory', 'the tampering file is left untouched');
-  });
-});
-
-test('W08.4 — protected watcher directories are created with restrictive permissions on POSIX', async () => {
+test('S53.9 — protected watcher directories the watcher creates are owner-only on POSIX', async () => {
   if (process.platform === 'win32') return; // POSIX mode bits are not enforced the same way on Windows.
   await withVolumeAsync(async (volume) => {
     const root = inboxRoot(volume, 'repo-a');

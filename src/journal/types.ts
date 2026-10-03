@@ -58,7 +58,8 @@ export type TerminalState =
   | { readonly kind: 'wait-timeout'; readonly waitedSeconds: number; readonly tool: RegistryToolName }
   | { readonly kind: 'operation-parked'; readonly operationId: OperationId; readonly reason: string }
   | { readonly kind: 'file-watcher-failed'; readonly file: WatchedFileName; readonly reason: string }
-  | { readonly kind: 'watcher-pending-record-discarded'; readonly pullRequestNumber: number | null; readonly branch: BranchName | null };
+  | { readonly kind: 'watcher-pending-record-discarded'; readonly pullRequestNumber: number | null; readonly branch: BranchName | null }
+  | { readonly kind: 'watcher-state-directory-tampered'; readonly directory: 'processing' | 'processed' | 'failed' };
 
 export interface MaintenanceSummary {
   readonly kind: 'maintenance-pass';

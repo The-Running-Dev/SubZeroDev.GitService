@@ -211,6 +211,8 @@ function describeTerminalState(state: TerminalState): string {
       return `file watcher for '${state.file}' failed: ${state.reason}`;
     case 'watcher-pending-record-discarded':
       return `a pending pull-request record (${state.pullRequestNumber === null ? 'number unreadable' : `#${state.pullRequestNumber}`}, branch ${state.branch === null ? 'unreadable' : `'${state.branch}'`}) failed validation and was discarded; finish that pull request by hand`;
+    case 'watcher-state-directory-tampered':
+      return `the watcher's '${state.directory}/' directory is not a real directory; delivery for this repository is stopped until it is replaced or removed`;
   }
 }
 

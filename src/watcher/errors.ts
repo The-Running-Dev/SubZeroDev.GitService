@@ -18,6 +18,7 @@ export type WatcherError = ModuleErrorBase &
         readonly unstaged: readonly RepoRelativePath[];
         readonly permitted: readonly RepoRelativePath[];
       }
+    | { readonly code: 'state-directory-tampered'; readonly directory: 'processing' | 'processed' | 'failed' }
   );
 
 /**
@@ -45,6 +46,9 @@ function watcherErrorResultKind(variant: WatcherErrorVariant): ResultKind {
     case 'interrupted-claim':
     case 'apply-paths-mismatch':
       return 'infrastructure';
+    case 'state-directory-tampered':
+      // D18: a refusal of an entry the watcher did not make, not a transient failure.
+      return 'precondition';
     case 'not-permitted':
       return 'authorization';
   }
