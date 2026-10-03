@@ -17,6 +17,7 @@ import {
 import { isJsonObject, type JsonValue } from '../contract/json.ts';
 import { ok, err, type Outcome } from '../shared/outcome.ts';
 import type { CallContext, DomainOperation } from '../shared/call-context.ts';
+import { observeChild, refusingSignalled, withParkScope, type ParkSink } from '../shared/park-sink.ts';
 import type { Clock } from '../clock/clock.ts';
 import type { CredentialBinding, Exec, MutableEnv } from '../exec/exec.ts';
 import type { ExecError } from '../exec/errors.ts';
@@ -117,6 +118,13 @@ export interface GitOperationsDependencies {
   readonly credentialEnv?: MutableEnv;
   /** Test seam only; production omits it and therefore uses the frozen 60-second hatch budget. */
   readonly rawTimeoutSeconds?: number;
+  /**
+   * `20-contract.md` § L4 — dispatch pipeline, **R13**. Where a mutating call
+   * whose child ended `signalled` asks the pipeline to park it. `raw` never
+   * writes it: it parks its own entry. Wired to every writer and the pipeline,
+   * or to none.
+   */
+  readonly parkSink?: ParkSink;
 }
 
 export interface GitOperations {
@@ -182,7 +190,11 @@ function daysSince(iso: IsoUtcTimestamp | null, clock: Clock): number | null {
 }
 
 export function createGitOperations(deps: GitOperationsDependencies): GitOperations {
-  const { clock, exec, locks } = deps;
+  const { clock, locks } = deps;
+  // Every child this module starts — the shared primitives' included — passes
+  // through `observeChild`, which writes nothing outside a mutating handler's
+  // park scope (**R13**).
+  const exec: GitOperationsDependencies['exec'] = { runGit: async (options) => observeChild(await deps.exec.runGit(options)) };
   const rawTimeoutSeconds = deps.rawTimeoutSeconds ?? GIT_RAW_COMMAND_TIMEOUT_SECONDS;
   const audit: Pick<Audit, 'append'> = deps.audit ?? { append: async () => ({ appended: true, sequence: 0 }) };
 
@@ -579,6 +591,10 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
     if (error.code === 'timed-out') {
       return timeoutResult(describe(error.summary), error.limitSeconds);
     }
+    // A killed child's stderr is a fragment, so it is neither matched for an
+    // authentication rejection nor reported as the remote's answer. The park
+    // entry was written where the child ended (`remoteGit`).
+    if (error.code === 'signalled') return infrastructure(describe(error.summary));
     const stderr = execStderr(error);
     if (looksLikeAuthRejection(stderr)) {
       await markRejected(ctx, ref, stderr);
@@ -696,9 +712,9 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
     return ok(config);
   }
 
-  return {
+  const operations: GitOperations = {
     async status(ctx, _input: RepoStatusInput): Promise<ToolResult<RepoStatusData>> {
-      const startedAtMs = Date.now();
+      const startedAtMs = clock.monotonicMs();
       const configResult = await loadRepositoryConfig(ctx);
       if (!configResult.ok) return toToolResultError(configResult.error);
       const cwd = ctx.cloneRoot as ClonePath;
@@ -734,7 +750,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
     },
 
     async log(ctx, input: GitLogInput): Promise<ToolResult<GitLogData>> {
-      const startedAtMs = Date.now();
+      const startedAtMs = clock.monotonicMs();
       const configResult = await loadRepositoryConfig(ctx);
       if (!configResult.ok) return toToolResultError(configResult.error);
       const cwd = ctx.cloneRoot as ClonePath;
@@ -768,7 +784,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
     },
 
     async branches(ctx, _input: BranchesInput): Promise<ToolResult<BranchesData>> {
-      const startedAtMs = Date.now();
+      const startedAtMs = clock.monotonicMs();
       const configResult = await loadRepositoryConfig(ctx);
       if (!configResult.ok) return toToolResultError(configResult.error);
       const cwd = ctx.cloneRoot as ClonePath;
@@ -783,7 +799,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
     },
 
     async health(ctx, _input: RepoHealthInput): Promise<ToolResult<RepoHealthData>> {
-      const startedAtMs = Date.now();
+      const startedAtMs = clock.monotonicMs();
       const configResult = await loadRepositoryConfig(ctx);
       if (!configResult.ok) return toToolResultError(configResult.error);
       const cwd = ctx.cloneRoot as ClonePath;
@@ -824,7 +840,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
     },
 
     async diff(ctx, input: GitDiffInput): Promise<ToolResult<GitDiffData>> {
-      const startedAtMs = Date.now();
+      const startedAtMs = clock.monotonicMs();
       if (ctx.cloneRoot === null) return infrastructure('no clone materialised for this operation');
       const cwd = ctx.cloneRoot;
       const signal = ctx.signal;
@@ -845,7 +861,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
     },
 
     async stage(ctx, input: GitStageInput): Promise<ToolResult<GitStageData>> {
-      const startedAtMs = Date.now();
+      const startedAtMs = clock.monotonicMs();
       if (ctx.cloneRoot === null) return infrastructure('no clone materialised for this operation');
       const cwd = ctx.cloneRoot;
       const signal = ctx.signal;
@@ -863,7 +879,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
     },
 
     async commit(ctx, input: GitCommitInput): Promise<ToolResult<GitCommitData>> {
-      const startedAtMs = Date.now();
+      const startedAtMs = clock.monotonicMs();
       if (ctx.cloneRoot === null) return infrastructure('no clone materialised for this operation');
       const cwd = ctx.cloneRoot;
       const signal = ctx.signal;
@@ -921,7 +937,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
     },
 
     async restorePaths(ctx, input: RestorePathsInput): Promise<ToolResult<RestorePathsData>> {
-      const startedAtMs = Date.now();
+      const startedAtMs = clock.monotonicMs();
       if (ctx.cloneRoot === null) return infrastructure('no clone materialised for this operation');
       const cwd = ctx.cloneRoot;
       const signal = ctx.signal;
@@ -939,7 +955,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
     },
 
     async push(ctx, input: GitPushInput): Promise<ToolResult<GitPushData>> {
-      const startedAtMs = Date.now();
+      const startedAtMs = clock.monotonicMs();
       if (ctx.cloneRoot === null) return infrastructure('no clone materialised for this operation');
       const cwd = ctx.cloneRoot;
       const signal = ctx.signal;
@@ -992,7 +1008,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
     },
 
     async fetch(ctx, _input: GitFetchInput): Promise<ToolResult<GitFetchData>> {
-      const startedAtMs = Date.now();
+      const startedAtMs = clock.monotonicMs();
       const configResult = await loadRepositoryConfig(ctx);
       if (!configResult.ok) return toToolResultError(configResult.error);
       const cwd = ctx.cloneRoot as ClonePath;
@@ -1023,7 +1039,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
     },
 
     async syncBase(ctx, _input: SyncBaseInput): Promise<ToolResult<SyncBaseData>> {
-      const startedAtMs = Date.now();
+      const startedAtMs = clock.monotonicMs();
       const configResult = await loadRepositoryConfig(ctx);
       if (!configResult.ok) return toToolResultError(configResult.error);
       const cwd = ctx.cloneRoot as ClonePath;
@@ -1083,7 +1099,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
     },
 
     async raw(ctx, input: GitRawInput): Promise<ToolResult<GitRawData>> {
-      const startedAtMs = Date.now();
+      const startedAtMs = clock.monotonicMs();
       if (ctx.cloneRoot === null || ctx.declarationId === null) {
         const summary = 'no clone or declaration materialised for this operation';
         await finishRawJournal(ctx.operationId, ctx.declarationId, false, summary);
@@ -1134,6 +1150,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       const cwd = ctx.cloneRoot;
       let result: ToolResult<GitRawData>;
       let changedPaths: readonly RepoRelativePath[] | null = [];
+      let signalledChild = false;
       const before = await rawStatus(cwd, ctx.signal);
       if (!before.ok) {
         result = infrastructure(`git.raw refused before acting because its initial status could not be observed: ${before.error.summary}`);
@@ -1168,6 +1185,9 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
               );
             } else if (executed.error.code === 'timed-out') {
               result = timeoutResult(withPostStateNote(executed.error.summary), executed.error.limitSeconds);
+            } else if (executed.error.code === 'signalled') {
+              result = infrastructure(withPostStateNote(executed.error.summary));
+              signalledChild = true;
             } else if (executed.error.code === 'cancelled') {
               result = conflict(withPostStateNote(executed.error.summary), null);
             } else if (executed.error.code === 'nonzero-exit') {
@@ -1188,13 +1208,42 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       // itself succeeded — a timed-out child leaves what it did mid-operation
       // unaccounted for even when the tree looks unchanged — and parked
       // whenever `changedPaths` is `null`, meaning the post-state observation
-      // failed outright, whatever the child's own outcome was.
-      const mustPark = result.kind === 'timeout' || changedPaths === null;
+      // failed outright, whatever the child's own outcome was. A `signalled`
+      // child parks for the same reason a timed-out one does, and likewise
+      // whether or not the observation succeeded: the paths that differ say
+      // nothing about what a killed command left half-written in the object
+      // store, the refs or the index lock.
+      const mustPark = result.kind === 'timeout' || changedPaths === null || signalledChild;
       await finishRawJournal(ctx.operationId, ctx.declarationId, mustPark, result.summary);
       return result;
     },
 
     loadRepositoryConfig,
     validateWritePath,
+  };
+
+  // **R13.** Each mutating handler (`raw` excepted — it parks itself) is a
+  // park-sink writer for the call it runs in: a child of its own that ends
+  // `signalled` makes the call return `infrastructure` and asks the pipeline
+  // to park it. The reads share the helpers above and are not wrapped, which
+  // is what keeps them from ever writing an entry.
+  const parkingOn = <TInput, TData>(handler: DomainOperation<TInput, TData>): DomainOperation<TInput, TData> =>
+    (ctx, input) => withParkScope(deps.parkSink, ctx.operationId, () => handler(ctx, input));
+  const refusingOn = <TInput, TData>(handler: DomainOperation<TInput, TData>): DomainOperation<TInput, TData> =>
+    (ctx, input) => refusingSignalled(ctx.operationId, () => handler(ctx, input));
+  return {
+    ...operations,
+    // A read whose child was killed returns `infrastructure` and parks nothing (S46.13).
+    status: refusingOn(operations.status),
+    log: refusingOn(operations.log),
+    branches: refusingOn(operations.branches),
+    health: refusingOn(operations.health),
+    diff: refusingOn(operations.diff),
+    stage: parkingOn(operations.stage),
+    commit: parkingOn(operations.commit),
+    restorePaths: parkingOn(operations.restorePaths),
+    push: parkingOn(operations.push),
+    fetch: parkingOn(operations.fetch),
+    syncBase: parkingOn(operations.syncBase),
   };
 }

@@ -10,6 +10,7 @@ import type { JsonValue } from '../contract/json.ts';
 import { retentionCutoff, toRetentionReport, type RetentionReport } from '../shared/retention.ts';
 import type { NotificationRequest } from '../journal/types.ts';
 import type { StoreTransaction } from '../store/structured-store.ts';
+import { storeError } from '../store/errors.ts';
 import { appendIdentityEvent, type Audit } from '../audit/audit.ts';
 import { notifierError, type NotifierError } from './errors.ts';
 import type { DeliveryReport, OutboxRow, OutboxRowStatus } from './types.ts';
@@ -117,6 +118,16 @@ function toRow(row: OutboxRowDb): OutboxRow {
 }
 
 type DbOutcome<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly reason: string };
+
+/**
+ * A fault in the outbox store, never in the webhook. `delivery-failed` means
+ * the transport was reached for, and a store that could not be read says
+ * nothing about it, so reporting one as the other sends an operator to check
+ * a webhook that is fine.
+ */
+function storeFailed(summary: string): NotifierError {
+  return notifierError({ code: 'store-failed', cause: storeError({ code: 'io-failed' }, summary) }, summary);
+}
 
 function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): DbOutcome<T> {
   let db: DatabaseSync;
@@ -303,7 +314,7 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
         delivered: 0,
         failed: 0,
         stillPending: 0,
-        errors: [notifierError({ code: 'delivery-failed', status: null, attempts: 0 }, `the outbox could not be read, so no row was attempted: ${selected.reason}`)],
+        errors: [storeFailed(`the outbox could not be read, so no row was attempted: ${selected.reason}`)],
       };
     }
 
@@ -318,14 +329,13 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
       // it rather than double-counting a delivery it did not make.
       const won = claim(row, row.status as OutboxRowStatus);
       if (!won.ok) {
-        stillPending += 1;
-        errors.push(
-          notifierError(
-            { code: 'delivery-failed', status: null, attempts: row.attempts },
-            `outbox row '${row.id}' could not be claimed for delivery, so it was not attempted: ${won.reason}`,
-          ),
-        );
-        continue;
+        // A claim that fails is the store failing, and the rows behind this
+        // one sit in the same store: attempting them would send each to the
+        // webhook with no claim held, which is exactly what the claim exists
+        // to prevent. Stop here, and count what was left as still pending.
+        stillPending += selected.value.length - selected.value.indexOf(row);
+        errors.push(storeFailed(`outbox row '${row.id}' could not be claimed for delivery, so it and every row after it was not attempted: ${won.reason}`));
+        break;
       }
       if (!won.value) continue;
 
@@ -371,8 +381,7 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
         });
         stillPending += 1;
         errors.push(
-          notifierError(
-            { code: 'delivery-failed', status: null, attempts: outcome.attempts },
+          storeFailed(
             released.ok
               ? `outbox row '${row.id}' reached '${nextStatus}' but the status could not be written back, so it stays pending and will be attempted again: ${written.reason}`
               : `outbox row '${row.id}' reached '${nextStatus}' but the status could not be written back and the claim could not be released, so it stays in-flight until the next restart sweeps it: ${written.reason}`,
@@ -457,7 +466,7 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
           delivered: 0,
           failed: 0,
           stillPending: 0,
-          errors: [notifierError({ code: 'delivery-failed', status: null, attempts: 0 }, `claims left by a previous process could not be swept, so no row was attempted: ${swept.reason}`)],
+          errors: [storeFailed(`claims left by a previous process could not be swept, so no row was attempted: ${swept.reason}`)],
         };
       }
       return serialised(() => deliverRows(['pending']));
@@ -498,7 +507,7 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
         ),
       );
       if (!cleared.ok) {
-        return err(notifierError({ code: 'delivery-failed', status: null, attempts: 0 }, `outbox row '${id}' could not be cleared: ${cleared.reason}`));
+        return err(storeFailed(`outbox row '${id}' could not be cleared: ${cleared.reason}`));
       }
       if (cleared.value === 0) {
         return err(notifierError({ code: 'row-not-found', rowId: id }, `no failed outbox row '${id}'`));

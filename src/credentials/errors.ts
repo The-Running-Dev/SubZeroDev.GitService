@@ -1,5 +1,6 @@
 import type { CredentialRef, RemoteHost } from '../shared/brands.ts';
 import type { ModuleErrorBase } from '../shared/result-kind.ts';
+import type { StoreError } from '../store/errors.ts';
 import type { CredentialFailureMark } from './types.ts';
 
 /** `20-contract.md` § Error semantics › Credentials. */
@@ -9,13 +10,17 @@ export type CredentialError = ModuleErrorBase &
     | { readonly code: 'reference-unreadable'; readonly ref: CredentialRef }
     | { readonly code: 'host-not-permitted'; readonly ref: CredentialRef; readonly host: RemoteHost }
     | { readonly code: 'marked-failing'; readonly mark: CredentialFailureMark }
+    | { readonly code: 'allowed-hosts-unreadable' }
+    | { readonly code: 'store-failed'; readonly cause: StoreError }
   );
 
 /**
  * The four `resultKind`s the contract's own table fixes: `precondition` for a
- * reference that names nothing, `infrastructure` for one that cannot be read,
- * `authorization` for a remote the reference is not allowed to reach, and
- * `upstream` for a mark left by an earlier rejection.
+ * reference that names nothing, `infrastructure` for one that cannot be read
+ * (and for the two faults that are no one reference's: an unreadable allowlist
+ * manifest and an unreadable mark store), `authorization` for a remote the
+ * reference is not allowed to reach, and `upstream` for a mark left by an
+ * earlier rejection. `store-failed` is retryable exactly when its cause is.
  *
  * No variant carries a secret value, and none can: the only reference-shaped
  * data any of them holds is the *name*, which is what the design means by "a
@@ -30,5 +35,6 @@ export function credentialError<T extends { readonly code: CredentialError['code
         : variant.code === 'marked-failing'
           ? 'upstream'
           : 'infrastructure';
-  return { resultKind, retryable: false, summary, ...variant } as unknown as CredentialError;
+  const retryable = 'cause' in variant && variant.code === 'store-failed' ? (variant as unknown as { cause: StoreError }).cause.retryable : false;
+  return { resultKind, retryable, summary, ...variant } as unknown as CredentialError;
 }

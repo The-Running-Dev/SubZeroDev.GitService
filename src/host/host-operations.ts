@@ -1,5 +1,6 @@
 import type { Clock } from '../clock/clock.ts';
 import type { CallContext, DomainOperation } from '../shared/call-context.ts';
+import { withParkScope, type ParkSink } from '../shared/park-sink.ts';
 import type { GitSha, OperationId, RegistryToolName } from '../shared/brands.ts';
 import type { Journal } from '../journal/journal.ts';
 import type { TerminalState } from '../journal/types.ts';
@@ -91,6 +92,12 @@ export interface HostOperationsDependencies {
    * running out — and by nothing else. Absent, nothing is reported.
    */
   readonly terminalSink?: Map<OperationId, TerminalState>;
+  /**
+   * Where a mutating call whose `gh` child ended `signalled` asks the pipeline
+   * to park it (`20-contract.md` § Dispatch pipeline, **R13**). Wired to every
+   * writer and the pipeline, or to none.
+   */
+  readonly parkSink?: ParkSink;
   /**
    * Where an `auth-rejected` result is remembered, so the host path marks the
    * credential failing for that declaration exactly as the git path does
@@ -311,7 +318,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
       // effect nothing can classify.
       return infrastructure(`could not record the '${step}' journal step before the host call: ${appended.error.summary}`);
     }
-    return call();
+    return withParkScope(deps.parkSink, ctx.operationId, call);
   }
 
   async function resolveRef(ctx: CallContext, requested: GitSha | null): Promise<GitSha | null> {
@@ -343,7 +350,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
 
   return {
     async createPullRequest(ctx, input): Promise<ToolResult<PrOpenData>> {
-      const startedAtMs = Date.parse(clock.now());
+      const startedAtMs = clock.monotonicMs();
       return withCredential(ctx, () => hostMutation(ctx, 'host.createPullRequest', async () => {
         const created = await adapter.createPullRequest(ctx, input);
         if (!created.ok) return failWith(ctx, created.error);
@@ -352,7 +359,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
     },
 
     async readPullRequest(ctx, input): Promise<ToolResult<PrStatusData>> {
-      const startedAtMs = Date.parse(clock.now());
+      const startedAtMs = clock.monotonicMs();
       return withCredential(ctx, async () => {
         const status = await adapter.readPullRequest(ctx, input.number);
         if (!status.ok) return failWith(ctx, status.error);
@@ -361,7 +368,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
     },
 
     async listPullRequests(ctx, input): Promise<ToolResult<PrListData>> {
-      const startedAtMs = Date.parse(clock.now());
+      const startedAtMs = clock.monotonicMs();
       return withCredential(ctx, async () => {
         const listed = await adapter.listPullRequests(ctx, input.state);
         if (!listed.ok) return failWith(ctx, listed.error);
@@ -370,7 +377,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
     },
 
     async readPullRequestComments(ctx, input): Promise<ToolResult<PrCommentsData>> {
-      const startedAtMs = Date.parse(clock.now());
+      const startedAtMs = clock.monotonicMs();
       return withCredential(ctx, async () => {
         const comments = await adapter.readPullRequestComments(ctx, input.number);
         if (!comments.ok) return failWith(ctx, comments.error);
@@ -386,7 +393,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
     },
 
     async enableAutoMerge(ctx, input): Promise<ToolResult<PrEnableAutoMergeData>> {
-      const startedAtMs = Date.parse(clock.now());
+      const startedAtMs = clock.monotonicMs();
       return withCredential(ctx, () => hostMutation(ctx, 'host.enableAutoMerge', async () => {
         const enabled = await adapter.enableAutoMerge(ctx, input.number, input.expectedHeadSha);
         if (!enabled.ok) return failWith(ctx, enabled.error);
@@ -399,7 +406,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
     },
 
     async readChecks(ctx, input): Promise<ToolResult<ChecksStatusData>> {
-      const startedAtMs = Date.parse(clock.now());
+      const startedAtMs = clock.monotonicMs();
       const ref = await resolveRef(ctx, input.ref);
       if (ref === null) return precondition('no commit to read checks for: the clone has no resolvable head', []);
       return withCredential(ctx, async () => {
@@ -421,6 +428,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
      */
     async awaitChecks(ctx, input): Promise<ToolResult<ChecksAwaitData>> {
       const startedAtMs = Date.parse(clock.now());
+      const startedMonotonicMs = clock.monotonicMs();
       const ref = await resolveRef(ctx, input.ref);
       if (ref === null) return precondition('no commit to wait on: the clone has no resolvable head', []);
 
@@ -471,7 +479,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
           return success(
             `every check at ${ref} concluded after ${waitedSeconds}s`,
             { ref, checks: lastChecks, concluded: true, waitedSeconds },
-            diagnosticsFor(ctx, startedAtMs, clock),
+            diagnosticsFor(ctx, startedMonotonicMs, clock),
           );
         }
 

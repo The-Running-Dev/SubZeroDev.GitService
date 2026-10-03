@@ -49,6 +49,14 @@ export interface DispatchRequest {
  */
 export type TerminalSink = Map<OperationId, TerminalState>;
 
+/**
+ * `20-contract.md` § L4 — a `ParkCause` a mutating domain function left for
+ * the pipeline to take (**R13**). Declared in `src/shared/park-sink.ts`, where
+ * the L2 writers can reach it, and re-exported here.
+ */
+export type { ParkCause, ParkSink } from '../shared/park-sink.ts';
+import type { ParkSink } from '../shared/park-sink.ts';
+
 export type Dispatch = (request: DispatchRequest) => Promise<ToolResult<JsonValue>>;
 
 export interface DispatchPipeline {
@@ -111,6 +119,11 @@ export interface DispatchPipelineDependencies {
    * composition defect and never dropped silently.
    */
   readonly terminalSink?: TerminalSink;
+  /**
+   * **R13.** Wired to every writer — `GitOperations`, `Composites`,
+   * `HostOperations` — and to this pipeline, or to none.
+   */
+  readonly parkSink?: ParkSink;
   readonly notifier?: Pick<Notifier, 'enqueue'>;
   readonly store?: Pick<StructuredStore, 'transaction'>;
 }
@@ -220,7 +233,7 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
   const mutationLockAcquireMs = deps.mutationLockAcquireMs ?? MUTATION_LOCK_ACQUIRE_MS_DEFAULT;
   const monitoringWaitCapSeconds = deps.monitoringWaitCapSeconds ?? MONITORING_WAIT_CAP_SECONDS_DEFAULT;
   const watermarks = deps.watermarks ?? DISK_WATERMARKS_DEFAULT;
-  const { terminalSink, notifier, store } = deps;
+  const { terminalSink, parkSink, notifier, store } = deps;
 
   /**
    * The one read-and-delete of an operation's sink entry (**R11**, **R12**).
@@ -736,6 +749,13 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
       const ctx = buildContext(effective, entry, declaration, operationId, actorRef, cloneRoot, precomputedWritablePathPrefixes);
       const result = await invokeAndEnvelope(entry, ctx, effective.input);
 
+      // R13 — taken exactly once, here, whatever the envelope says: a handler
+      // that ran a child ending `signalled` left an entry, and the call parks
+      // by the entry, never by the envelope's kind. `git_raw` writes none and
+      // parks itself.
+      const parkCause = parkSink?.get(operationId) ?? null;
+      parkSink?.delete(operationId);
+
       // git_raw completes its own journal entry (settled or parked) inside
       // the handler, for the same reason it writes its own audit trail
       // there: its argv is caller-authored, so a post-state that came back
@@ -751,8 +771,9 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
       // achieved is not knowable. Generic on `result.kind`, not on the tool
       // name: `git_raw` is not the only mutating entry whose child can time
       // out, and the invariant is the same one regardless of which entry hit it.
-      if (result.kind === 'timeout') {
-        // The audit record precedes the park, as it does on every other path
+      if (parkCause !== null || result.kind === 'timeout') {
+        // A park supersedes any terminal state the handler also observed: the
+        // `finally` below deletes it unread. The audit record precedes the park, as it does on every other path
         // that ends a call (S41.5). `journal.park` writes the
         // `operation-parked` row itself, so nothing is enqueued here.
         await audit.append({
@@ -768,7 +789,10 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
           changedPaths: [],
         });
         const parked = await journal.park?.(operationId, result.summary);
-        if (!parked?.ok) return infrastructure(`'${entry.name}' timed out, but its journal entry could not be parked: ${parked?.error.summary ?? 'journal park is unavailable'}`);
+        if (!parked?.ok) {
+          const ended = parkCause !== null ? 'ended on a signal' : 'timed out';
+          return infrastructure(`'${entry.name}' ${ended}, but its journal entry could not be parked: ${parked?.error.summary ?? 'journal park is unavailable'}`);
+        }
         await cloneStore.markAttention?.(declaration.id, result.summary);
         return result;
       }
@@ -800,6 +824,7 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
       // R11 — an exit that never reached the settle (a park, a refusal, a
       // thrown handler) still leaves nothing behind.
       terminalSink?.delete(operationId);
+      parkSink?.delete(operationId);
       // Idempotent and safe at every exit — the normal-completion path
       // above, a `return` on any error branch, or an unexpected rejection
       // from `acquireMutation`, `observeGitState`, `journal.begin`,

@@ -435,7 +435,7 @@ test('S34.3 — clearFailed appends an identity-event audit record once the clea
   });
 });
 
-test('S11.4 — all four NotifierError variants are constructible, and each is produced by a real path; counts stated', async () => {
+test('S11.4 — all five NotifierError variants are constructible, and each is produced by a real path; counts stated', async () => {
   const produced = new Set<string>();
 
   // 1. no-transport-configured — a pass with no webhook set.
@@ -513,7 +513,23 @@ test('S11.4 — all four NotifierError variants are constructible, and each is p
     produced.add(cleared.error.code);
   });
 
-  const expected = ['no-transport-configured', 'delivery-failed', 'retries-exhausted', 'row-not-found'];
+  // 5. store-failed — an outbox that cannot be read; the webhook is never reached for.
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin(beginInputFor('op-1'));
+    await journal.settle('op-1' as never, TERMINAL_NOTIFICATIONS[0]!);
+    rmSync(path.join(volume, 'store.sqlite'), { force: true });
+    mkdirSync(path.join(volume, 'store.sqlite'), { recursive: true });
+    const report = await createNotifier({
+      volumeRoot: volume,
+      clock: systemClock,
+      webhookUrl: 'https://hooks.example.invalid/notify' as never,
+      deliverFn: async () => ({ ok: true, status: 200 }),
+    }).deliverPending();
+    for (const error of report.errors) produced.add(error.code);
+  });
+
+  const expected = ['no-transport-configured', 'delivery-failed', 'retries-exhausted', 'row-not-found', 'store-failed'];
   assert.deepEqual([...produced].sort(), [...expected].sort(), `all ${expected.length} NotifierError variants must be reachable — produced ${produced.size}`);
 });
 
@@ -801,5 +817,143 @@ test('S25.3 — runRetention deletes a delivered row past the window, and never 
     const remaining = (after.prepare('SELECT id FROM notification_outbox ORDER BY id').all() as { id: string }[]).map((r) => r.id);
     after.close();
     assert.deepEqual(remaining, ['old-failed', 'recent-delivered']);
+  });
+});
+
+/** Seeds `count` pending rows, one settled operation each. */
+async function seedPending(volume: string, count: number): Promise<void> {
+  const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+  for (let i = 0; i < count; i++) {
+    await journal.begin(beginInputFor(`op-${i}`));
+    await journal.settle(`op-${i}` as never, TERMINAL_NOTIFICATIONS[i % TERMINAL_NOTIFICATIONS.length]!);
+  }
+}
+
+function forceStoreFault(volume: string, trigger: string): void {
+  const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+  db.exec(trigger);
+  db.close();
+}
+
+test('S46.5 — an outbox that cannot be read is store-failed, never delivery-failed, and nothing is sent', async () => {
+  await migratedVolume(async (volume) => {
+    await seedPending(volume, 2);
+    let sent = 0;
+    const notifier = createNotifier({
+      volumeRoot: volume,
+      clock: systemClock,
+      webhookUrl: 'https://hooks.example.invalid/notify' as never,
+      deliverFn: async () => {
+        sent += 1;
+        return { ok: true, status: 200 };
+      },
+    });
+    rmSync(path.join(volume, 'store.sqlite'), { force: true });
+    mkdirSync(path.join(volume, 'store.sqlite'), { recursive: true });
+
+    const report = await notifier.deliverPending();
+    assert.equal(sent, 0, 'no row is attempted after a failed read');
+    assert.equal(report.errors.length, 1);
+    assert.equal(report.errors[0]!.code, 'store-failed');
+    assert.equal(report.errors[0]!.resultKind, 'infrastructure');
+    assert.equal(report.errors.some((e) => e.code === 'delivery-failed'), false);
+  });
+});
+
+test('S46.5 — a failed claim is store-failed and no row, this one or a later one, is attempted', async () => {
+  await migratedVolume(async (volume) => {
+    await seedPending(volume, 3);
+    forceStoreFault(
+      volume,
+      `CREATE TRIGGER refuse_claim BEFORE UPDATE ON notification_outbox
+       WHEN NEW.status = 'in-flight'
+       BEGIN SELECT RAISE(ABORT, 'forced claim failure'); END;`,
+    );
+    let sent = 0;
+    const report = await createNotifier({
+      volumeRoot: volume,
+      clock: systemClock,
+      webhookUrl: 'https://hooks.example.invalid/notify' as never,
+      deliverFn: async () => {
+        sent += 1;
+        return { ok: true, status: 200 };
+      },
+    }).deliverPending();
+
+    assert.equal(sent, 0, 'nothing is POSTed once a claim has failed');
+    assert.deepEqual(counts(report), { delivered: 0, failed: 0, stillPending: 3 }, 'every unattempted row is still pending');
+    assert.deepEqual(report.errors.map((e) => e.code), ['store-failed'], 'one store fault reported once, not delivery-failed per row');
+    assert.deepEqual(readOutboxRows(volume).map((r) => r.status), ['pending', 'pending', 'pending']);
+  });
+});
+
+test('S46.5 — a failed sweep is store-failed and no row is attempted', async () => {
+  await migratedVolume(async (volume) => {
+    await seedPending(volume, 1);
+    forceStoreFault(
+      volume,
+      `CREATE TRIGGER refuse_sweep BEFORE UPDATE ON notification_outbox
+       WHEN NEW.status = 'pending' AND OLD.status = 'in-flight'
+       BEGIN SELECT RAISE(ABORT, 'forced sweep failure'); END;`,
+    );
+    forceStoreFault(volume, `UPDATE notification_outbox SET status = 'in-flight'`);
+    let sent = 0;
+    const report = await createNotifier({
+      volumeRoot: volume,
+      clock: systemClock,
+      webhookUrl: 'https://hooks.example.invalid/notify' as never,
+      deliverFn: async () => {
+        sent += 1;
+        return { ok: true, status: 200 };
+      },
+    }).redriveUndelivered();
+
+    assert.equal(sent, 0);
+    assert.deepEqual(report.errors.map((e) => e.code), ['store-failed']);
+  });
+});
+
+test('S46.5 — a failed write-back and a failed clear are store-failed', async () => {
+  await migratedVolume(async (volume) => {
+    await seedPending(volume, 1);
+    forceStoreFault(
+      volume,
+      `CREATE TRIGGER refuse_writeback BEFORE UPDATE ON notification_outbox
+       WHEN NEW.status = 'delivered'
+       BEGIN SELECT RAISE(ABORT, 'forced write-back failure'); END;`,
+    );
+    const notifier = createNotifier({
+      volumeRoot: volume,
+      clock: systemClock,
+      webhookUrl: 'https://hooks.example.invalid/notify' as never,
+      maxAttempts: 1,
+      deliverFn: async () => ({ ok: true, status: 200 }),
+    });
+    const report = await notifier.deliverPending();
+    assert.equal(report.delivered, 0);
+    assert.deepEqual(report.errors.map((e) => e.code), ['store-failed']);
+  });
+
+  await migratedVolume(async (volume) => {
+    await seedPending(volume, 1);
+    const notifier = createNotifier({
+      volumeRoot: volume,
+      clock: systemClock,
+      webhookUrl: 'https://hooks.example.invalid/notify' as never,
+      maxAttempts: 1,
+      deliverFn: async () => ({ ok: false, status: 500 }),
+    });
+    await notifier.deliverPending();
+    const failed = await notifier.listFailed();
+    forceStoreFault(
+      volume,
+      `CREATE TRIGGER refuse_clear BEFORE UPDATE ON notification_outbox
+       WHEN OLD.status = 'failed'
+       BEGIN SELECT RAISE(ABORT, 'forced clear failure'); END;`,
+    );
+    const cleared = await notifier.clearFailed(failed[0]!.id, ACTOR);
+    assert.equal(cleared.ok, false);
+    if (cleared.ok) return;
+    assert.equal(cleared.error.code, 'store-failed');
   });
 });

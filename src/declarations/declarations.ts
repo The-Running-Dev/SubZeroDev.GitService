@@ -13,6 +13,7 @@ import {
   type GrantEpoch,
   type GrantId,
   type IsoUtcTimestamp,
+  type OperationId,
   type PathPrefix,
   type RegistryToolName,
   type RemoteHost,
@@ -481,7 +482,15 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
       });
       if (!written.ok) {
         if (written.error.code === 'constraint-violated') {
-          return err(declarationError({ code: 'already-exists' }, `declaration '${input.id}' is already active`));
+          // A constraint violation is not proof of a duplicate: the same code
+          // covers a CHECK, a NOT NULL or a foreign key. `already-exists`
+          // is answered only when an active row for this id is actually
+          // there (a racing declare won); anything else is a store fault
+          // and says so.
+          const now = await get(input.id);
+          if (now && now.state === 'active') {
+            return err(declarationError({ code: 'already-exists' }, `declaration '${input.id}' is already active`));
+          }
         }
         return err(declarationError({ code: 'store-failed', cause: written.error }, written.error.summary));
       }
@@ -588,6 +597,25 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
         return err(declarationError({ code: 'not-found' }, `no active declaration '${id}'`));
       }
 
+      // S46.8 — the unsettled entries are read before the state flip, so a
+      // failed read fails the orphan with the declaration still `active`
+      // rather than being reported as "nothing outstanding" after the flip
+      // has already committed. The read is not part of the transaction below:
+      // it only needs the generation the flip will commit under.
+      let retainedJournalEntries: OperationId[] = [];
+      if (deps.journal) {
+        const unsettled = await deps.journal.unsettled(id, existing.generation);
+        if (!unsettled.ok) {
+          return err(
+            declarationError(
+              { code: 'store-failed', cause: unsettled.error.code === 'read-failed' ? unsettled.error.cause : storeError({ code: 'io-failed' }, unsettled.error.summary) },
+              `could not read the unsettled journal entries for '${id}', so it was not orphaned: ${unsettled.error.summary}`,
+            ),
+          );
+        }
+        retainedJournalEntries = unsettled.value.map((entry) => entry.operationId);
+      }
+
       const now = clock.now();
       const written = withDb(volumeRoot, (db) =>
         withLocalTransaction(db, (tx) => {
@@ -616,16 +644,6 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
         }),
       );
       if (!written.ok) return err(declarationError({ code: 'store-failed', cause: written.error }, written.error.summary));
-
-      // Issue #248 — the journal read is not part of the transaction above:
-      // it neither writes nor needs to observe the state flip atomically,
-      // only the generation the flip already committed under. A failed read
-      // is reported the same as "nothing outstanding" rather than failing
-      // the whole (already-committed) orphan — the same inherited ambiguity
-      // `CloneStore.isSafeToEvict`'s own `deps.journal.unsettled` read
-      // accepts (issue #42), not a new one introduced here.
-      const unsettled = deps.journal ? await deps.journal.unsettled(id, existing.generation) : null;
-      const retainedJournalEntries = unsettled && unsettled.ok ? unsettled.value.map((entry) => entry.operationId) : [];
 
       // `fileWatcherStopped` is true whenever this declaration named a file
       // watcher, because the state flip to `orphaned` above is itself what

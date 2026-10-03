@@ -228,7 +228,9 @@ export function createExec(options: ExecOptions): Exec {
       }
     }
 
-    const started = Date.now();
+    // Monotonic, so a wall-clock step (NTP, a manual change) during the child's
+    // life can neither shorten nor negate the duration it reports.
+    const started = performance.now();
 
     return new Promise((resolve) => {
       let child: ReturnType<typeof spawn>;
@@ -279,7 +281,7 @@ export function createExec(options: ExecOptions): Exec {
       });
 
       child.on('close', (code, signal) => {
-        const durationMs = Date.now() - started;
+        const durationMs = Math.max(0, Math.round(performance.now() - started));
         const stdout = scrubText(Buffer.concat(stdoutChunks).toString('utf8'));
         const stderr = scrubText(Buffer.concat(stderrChunks).toString('utf8'));
 
@@ -292,7 +294,10 @@ export function createExec(options: ExecOptions): Exec {
           return;
         }
         if (signal !== null || code === null) {
-          finish(err(execError({ code: 'spawn-failed' }, `'${executable}' terminated abnormally`)));
+          // The child started, so whatever it was doing it may have done:
+          // `spawn-failed` would say it never ran. A caller parks a mutating
+          // call on this exactly as it does on `timed-out`.
+          finish(err(execError({ code: 'signalled', signal }, signal === null ? `'${executable}' ended without an exit code or a signal` : `'${executable}' was killed by ${signal}`)));
           return;
         }
 

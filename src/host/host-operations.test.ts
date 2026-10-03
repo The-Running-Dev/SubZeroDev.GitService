@@ -11,6 +11,7 @@ import { PRODUCTION_TOOL_DECLARATIONS } from '../composition-root/production-dec
 import { validateAgainstSchema } from '../contract/json-schema.ts';
 import { createGitHubAdapter } from './github-adapter.ts';
 import { createHostOperations } from './host-operations.ts';
+import type { ParkSink } from '../shared/park-sink.ts';
 import { PR_ENABLE_AUTO_MERGE_RECOVERY, PR_OPEN_RECOVERY } from './recovery-descriptors.ts';
 
 const DECLARATION = 'repo-a' as DeclarationId;
@@ -229,6 +230,41 @@ test('S10.3: a mutation retries a 5xx zero times', async () => {
   assert.equal(result.ok, false);
   assert.equal(gh.calls.length, 1, 'a retried mutation is how one pull request becomes two');
   assert.match(result.summary, /503 after 1 attempt/);
+});
+
+function ghSignalled(): Outcome<ExecResult, ExecError> {
+  return err(execError({ code: 'signalled', signal: 'SIGKILL' }, 'gh was killed by SIGKILL'));
+}
+
+test('S46.12: a mutating host call whose gh child ends signalled leaves a park entry, returns infrastructure, and is never read as unreachable', async () => {
+  const gh = stubGh([{ when: () => true, reply: ghSignalled }]);
+  const parkSink: ParkSink = new Map();
+  const adapter = createGitHubAdapter({ clock: systemClock, exec: gh.exec, sleep: async () => {}, baseBranchFor: async () => 'main' as never });
+  const ops = createHostOperations({ clock: systemClock, adapter, journal: recordingJournal().journal, headShaFor: async () => HEAD, sleep: async () => {}, parkSink });
+
+  const result = await ops.createPullRequest(context(), { title: 't', body: 'b', headBranch: null, draft: false });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.kind, 'infrastructure');
+  assert.match(result.summary, /SIGKILL/);
+  assert.doesNotMatch(result.summary, /could not be reached/);
+  assert.equal(gh.calls.length, 1, 'a killed mutation is never retried');
+  assert.deepEqual([...parkSink.values()], [{ kind: 'signalled', signal: 'SIGKILL' }]);
+  assert.deepEqual([...parkSink.keys()], ['op-1']);
+});
+
+test('S46.13: a host read whose gh child ends signalled returns infrastructure without retrying and writes no park entry', async () => {
+  const gh = stubGh([{ when: () => true, reply: ghSignalled }]);
+  const parkSink: ParkSink = new Map();
+  const adapter = createGitHubAdapter({ clock: systemClock, exec: gh.exec, sleep: async () => {}, baseBranchFor: async () => 'main' as never });
+  const ops = createHostOperations({ clock: systemClock, adapter, journal: recordingJournal().journal, headShaFor: async () => HEAD, sleep: async () => {}, parkSink });
+
+  const result = await ops.readPullRequest(context(), { number: 7 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.kind, 'infrastructure');
+  assert.equal(gh.calls.length, 1, 'a read is not retried on a signal either');
+  assert.equal(parkSink.size, 0);
 });
 
 test('S10.3: a read recovering on its second attempt makes exactly two calls', async () => {

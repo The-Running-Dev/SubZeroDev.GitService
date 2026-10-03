@@ -15,7 +15,7 @@ import { createDeclarations, type Declarations } from '../declarations/declarati
 import { createDispatchPipeline } from '../dispatch/dispatch-pipeline.ts';
 import { createModuleAdapter } from '../module-adapter/module-adapter.ts';
 import { fixtureTool, httpTarget } from '../contract/fixtures.ts';
-import { success } from '../result/envelope.ts';
+import { isError, success, type ResultKind, type ToolResult } from '../result/envelope.ts';
 import { createStubCloneStore } from '../clone/testing/stub-clone-store.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './http-server.ts';
 import { createMcpRoutesState } from './mcp-routes.ts';
@@ -44,9 +44,12 @@ const CEILING = new Set(['repo.read', 'git.raw']) as unknown as ContractCapabili
 const READ_TOOL = fixtureTool({ name: 'repo_status', capabilities: ['repo.read'], scopes: ['read'], executionClass: 'read', target: httpTarget('t.read') });
 const RAW_TOOL = fixtureTool({ name: 'git_raw', capabilities: ['git.raw'], scopes: ['raw'], executionClass: 'read', target: httpTarget('t.raw') });
 
+/** What the stubbed tool answers with. A test sets it before a call; the default is a success. */
+let stubbedResult: ToolResult<JsonValue> = success('ok', {}, { operationId: null, declarationId: null, generation: null, durationMs: 0 });
+
 const STUB_HTTP_ADAPTER: Pick<HttpAdapter, 'invoke'> = {
   async invoke() {
-    return success('ok', {}, { operationId: null, declarationId: null, generation: null, durationMs: 0 });
+    return stubbedResult;
   },
 };
 
@@ -535,4 +538,54 @@ test('S14.9 — running proxy.ts directly (as an MCP client config would) actual
   // `.catch` reports on stderr with exit code 1.
   assert.equal(result.status, 1, `expected proxy.ts to run its entry point and exit 1 on missing env, got status=${result.status}, stderr=${result.stderr}`);
   assert.match(result.stderr, /SZG_ORIGIN, SZG_DECLARATION_ID and SZG_BEARER_TOKEN must all be set/);
+});
+
+const EVERY_RESULT_KIND: readonly ResultKind[] = ['success', 'validation', 'precondition', 'conflict', 'authorization', 'upstream', 'timeout', 'infrastructure'];
+
+test('S46.7 — isError is true only for upstream, timeout and infrastructure, and a test covers every ResultKind', async () => {
+  assert.deepEqual(
+    EVERY_RESULT_KIND.filter((kind) => isError(kind)),
+    ['upstream', 'timeout', 'infrastructure'],
+    'the helper itself is the contract (invariant E2)',
+  );
+  await withVolumeAsync(async (volume) => {
+    await withServer(volume, async ({ baseUrl, declarations }) => {
+      await declareRepo(declarations, 'repo-e2', ['repo.read']);
+      const { accessToken } = await fullOAuthFlow(baseUrl, 'repo-e2', ['read']);
+      const init = await mcpInitialize(baseUrl, 'repo-e2', accessToken);
+      assert.equal(init.status, 200);
+      try {
+        for (const kind of EVERY_RESULT_KIND) {
+          stubbedResult =
+            kind === 'success'
+              ? success('ok', {}, { operationId: null, declarationId: null, generation: null, durationMs: 0 })
+              : { ok: false, kind, summary: `a ${kind} result` };
+          const call = await mcpCall(baseUrl, 'repo-e2', init.sessionId!, 'tools/call', { name: 'repo_status', arguments: {} });
+          const result = call.body.result as { isError: boolean; content: { text: string }[] };
+          assert.equal((JSON.parse(result.content[0]!.text) as { kind: string }).kind, kind, `the stub delivered a '${kind}' result`);
+          assert.equal(result.isError, isError(kind), `isError for '${kind}'`);
+        }
+      } finally {
+        stubbedResult = success('ok', {}, { operationId: null, declarationId: null, generation: null, durationMs: 0 });
+      }
+    });
+  });
+});
+
+test('S46.7 — the cross-repository refusal is an authorization result, so it is not an isError tool fault', async () => {
+  await withVolumeAsync(async (volume) => {
+    await withServer(volume, async ({ baseUrl, declarations }) => {
+      await declareRepo(declarations, 'repo-a7', ['repo.read']);
+      await declareRepo(declarations, 'repo-b7', ['repo.read']);
+      const { accessToken } = await fullOAuthFlow(baseUrl, 'repo-a7', ['read']);
+      const init = await mcpInitialize(baseUrl, 'repo-a7', accessToken);
+      assert.equal(init.status, 200);
+
+      const crossed = await mcpCall(baseUrl, 'repo-b7', init.sessionId!, 'tools/call', { name: 'repo_status', arguments: {} });
+      assert.equal(crossed.status, 403);
+      const result = crossed.body.result as { isError: boolean; content: { text: string }[] };
+      assert.equal((JSON.parse(result.content[0]!.text) as { kind: string }).kind, 'authorization');
+      assert.equal(result.isError, false);
+    });
+  });
 });

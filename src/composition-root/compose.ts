@@ -32,7 +32,7 @@ import { createHostOperations } from '../host/host-operations.ts';
 import { PR_ENABLE_AUTO_MERGE_RECOVERY, PR_OPEN_RECOVERY } from '../host/recovery-descriptors.ts';
 import type { EnvVarName, OperationId } from '../shared/brands.ts';
 import { createModuleAdapter, toModuleHandler, type ModuleHandler } from '../module-adapter/module-adapter.ts';
-import { createDispatchPipeline, type Dispatch, type TerminalSink } from '../dispatch/dispatch-pipeline.ts';
+import { createDispatchPipeline, type Dispatch, type ParkSink, type TerminalSink } from '../dispatch/dispatch-pipeline.ts';
 import { PRODUCTION_TOOL_DECLARATIONS } from './production-declarations.ts';
 import type { ModuleTargetName } from '../shared/brands.ts';
 import type { ContractCapabilitySet } from '../contract/capabilities.ts';
@@ -541,7 +541,12 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
   // pipeline. `PRODUCTION_TOOL_DECLARATIONS` is plain data (no compiler
   // call), which is what keeps invariant B8 (the compiler absent from the
   // runtime image) intact here.
-  const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit, journal, declarations, credentials, credentialEnv, cloneStore });
+  // (`20-contract.md` § L4, **R13**). One map, handed to all three writers —
+  // git operations, host operations, composites — and to the pipeline that
+  // takes from it. All or none: a writer without the pipeline leaves an entry
+  // nothing takes, and a pipeline without the writers never parks a signal.
+  const parkSink: ParkSink = new Map();
+  const gitOperations = createGitOperations({ clock: systemClock, exec, locks, audit, journal, declarations, credentials, credentialEnv, cloneStore, parkSink });
   gitOperationsRef = gitOperations;
   const notifier = createNotifier({ volumeRoot, clock: systemClock, webhookUrl: resolveNotifierWebhook(), audit });
   const moduleAdapter = createModuleAdapter();
@@ -604,6 +609,7 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
     credentialBindings: hostCredentialBindings,
     credentials,
     terminalSink,
+    parkSink,
     headShaFor: async (ctx) => {
       if (ctx.cloneRoot === null) return null;
       const head = await exec.runGit({ argv: ['rev-parse', 'HEAD'], cwd: ctx.cloneRoot, timeoutSeconds: 30, credential: null, signal: ctx.signal });
@@ -631,7 +637,7 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
 
   // S12 — the two composites, journaling every sub-step through the same
   // `Journal` S7's local mutations never needed to.
-  const composites = createComposites({ clock: systemClock, exec, gitOperations, hostOperations, journal });
+  const composites = createComposites({ clock: systemClock, exec, gitOperations, hostOperations, journal, parkSink });
   moduleAdapter.register('composites.prepareBranch' as ModuleTargetName, toModuleHandler(composites.prepareBranch));
   moduleAdapter.register('composites.reconcileAfterMerge' as ModuleTargetName, toModuleHandler(composites.reconcileAfterMerge));
 
@@ -922,6 +928,7 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
     // All three or none (`20-contract.md` § L4): a take with nothing to
     // deliver it through is a composition defect, not a silent drop.
     terminalSink,
+    parkSink,
     notifier,
     store,
   });

@@ -5,6 +5,7 @@ export type ExecError = ModuleErrorBase &
     | { readonly code: 'spawn-failed' }
     | { readonly code: 'nonzero-exit'; readonly exitCode: number; readonly stdout: string; readonly stderr: string }
     | { readonly code: 'timed-out'; readonly limitSeconds: number }
+    | { readonly code: 'signalled'; readonly signal: string | null }
     | { readonly code: 'argv-rejected'; readonly rule: string }
     | { readonly code: 'cancelled' }
   );
@@ -17,7 +18,10 @@ export type ExecError = ModuleErrorBase &
  * own table row names: `infrastructure` for the two the caller re-classifies
  * from `cause`, `timeout` for the cap, `validation` for a rejected vector
  * (`argv-rejected`: "no authority could ever permit it"), `conflict` for a
- * cancelled signal.
+ * cancelled signal. `signalled` is `infrastructure`: there is no limit to
+ * report, so `timeout` would name one that did not apply. That it is not
+ * `timed-out` changes the envelope kind and nothing about parking, which a
+ * mutating call reaches through the park sink.
  */
 export function execError<T extends { readonly code: ExecError['code'] }>(variant: T, summary: string): ExecError {
   const resultKind =

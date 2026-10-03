@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import type { BranchName, ClonePath, GitSha } from '../shared/brands.ts';
 import type { CallContext, DomainOperation } from '../shared/call-context.ts';
+import { observeChild, withParkScope, type ParkSink } from '../shared/park-sink.ts';
 import type { Clock } from '../clock/clock.ts';
 import type { Exec } from '../exec/exec.ts';
 import type { Journal } from '../journal/journal.ts';
@@ -43,12 +44,17 @@ export interface CompositesDependencies {
   readonly gitOperations: Pick<GitOperations, 'fetch' | 'loadRepositoryConfig'>;
   readonly hostOperations: Pick<HostOperations, 'readPullRequest'>;
   readonly journal: Pick<Journal, 'appendStep'>;
+  /** `20-contract.md` § Dispatch pipeline, **R13**. Wired to every writer and the pipeline, or to none. */
+  readonly parkSink?: ParkSink;
 }
 
 const LOCAL_COMMAND_TIMEOUT_SECONDS = 30;
 
 export function createComposites(deps: CompositesDependencies): Composites {
-  const { clock, exec, gitOperations, hostOperations, journal } = deps;
+  const { clock, gitOperations, hostOperations, journal } = deps;
+  // Every local child this module starts — the shared primitives' included —
+  // passes through `observeChild` (**R13**).
+  const exec: CompositesDependencies['exec'] = { runGit: async (options) => observeChild(await deps.exec.runGit(options)) };
 
   async function git(cwd: ClonePath, args: readonly string[], signal: AbortSignal) {
     return exec.runGit({ argv: args, cwd, timeoutSeconds: LOCAL_COMMAND_TIMEOUT_SECONDS, credential: null, signal });
@@ -176,13 +182,13 @@ export function createComposites(deps: CompositesDependencies): Composites {
     };
   }
 
-  return {
+  const composites: Composites = {
     /**
      * `20-contract.md` § L2 — composites. `TODO-NEXT.md` §7.2's seven
      * invariants, §7.3's algorithm, generalised off blog-specific naming.
      */
     async prepareBranch(ctx, input: PrepareBranchInput): Promise<ToolResult<PrepareBranchData>> {
-      const startedAtMs = Date.now();
+      const startedAtMs = clock.monotonicMs();
       if (ctx.cloneRoot === null) return infrastructure('no clone materialised for this operation');
       const cwd = ctx.cloneRoot;
       const signal = ctx.signal;
@@ -326,7 +332,7 @@ export function createComposites(deps: CompositesDependencies): Composites {
      * `20-contract.md` § L2 — composites. `TODO-NEXT.md` §7.5's algorithm.
      */
     async reconcileAfterMerge(ctx, input: ReconcileAfterMergeInput): Promise<ToolResult<ReconcileAfterMergeData>> {
-      const startedAtMs = Date.now();
+      const startedAtMs = clock.monotonicMs();
       if (ctx.cloneRoot === null) return infrastructure('no clone materialised for this operation');
       const cwd = ctx.cloneRoot;
       const signal = ctx.signal;
@@ -400,5 +406,12 @@ export function createComposites(deps: CompositesDependencies): Composites {
       const data: ReconcileAfterMergeData = { baseBranch, baseSha, mergeCommitSha: status.mergeCommitSha, deletedBranch };
       return success(`reconciled '${baseBranch}' onto merge commit ${status.mergeCommitSha}${kept === null ? '' : `; no branch was deleted: ${kept}`}`, data, diagnosticsFor(ctx, startedAtMs, clock));
     },
+  };
+
+  // **R13.** Both composites are mutating, so a child of theirs that ends
+  // `signalled` makes the call return `infrastructure` and parks it.
+  return {
+    prepareBranch: (ctx, input) => withParkScope(deps.parkSink, ctx.operationId, () => composites.prepareBranch(ctx, input)),
+    reconcileAfterMerge: (ctx, input) => withParkScope(deps.parkSink, ctx.operationId, () => composites.reconcileAfterMerge(ctx, input)),
   };
 }

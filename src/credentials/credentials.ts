@@ -8,6 +8,7 @@ import type { Clock } from '../clock/clock.ts';
 import { appendIdentityEvent, type Audit } from '../audit/audit.ts';
 import type { CredentialBinding, MutableEnv } from '../exec/exec.ts';
 import { credentialError, type CredentialError } from './errors.ts';
+import { storeError } from '../store/errors.ts';
 import type { CredentialFailureMark } from './types.ts';
 
 export interface CredentialResolver {
@@ -228,15 +229,15 @@ export function createCredentialResolver(deps: CredentialResolverDependencies): 
 
       // Fail closed. A store that cannot be read is not a store with no marks
       // in it, and treating the two alike would hand out a credential the
-      // service has already been told is failing. `reference-unreadable` is
-      // the only `infrastructure`-class variant the contract's four-way
-      // `CredentialError` gives this module; its summary names the real cause
-      // so an operator is not sent to look at the mount for a store fault.
+      // service has already been told is failing. The error is `store-failed`,
+      // not `reference-unreadable`: the fault is in the data volume, and the
+      // reference's own files are fine, so an operator must not be sent to
+      // look at the mount.
       const markRead = readMark(ref, declarationId);
       if (!markRead.ok) {
         return err(
           credentialError(
-            { code: 'reference-unreadable', ref },
+            { code: 'store-failed', cause: storeError({ code: 'io-failed' }, markRead.reason) },
             `could not read the failure marks for '${ref}' on '${declarationId}', so it is not known whether this credential is marked failing: ${markRead.reason}`,
           ),
         );
@@ -274,7 +275,10 @@ export function createCredentialResolver(deps: CredentialResolverDependencies): 
       try {
         parsed = JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown;
       } catch {
-        return err(credentialError({ code: 'reference-unreadable', ref }, `the credential mount's '${ALLOWED_HOSTS_MANIFEST}' could not be read`));
+        // The manifest is mount-wide, so the fault is no one reference's:
+        // `reference-unreadable` would send an operator to a secret file that
+        // is fine. Fails closed, because the caller refuses on any error.
+        return err(credentialError({ code: 'allowed-hosts-unreadable' }, `the credential mount's '${ALLOWED_HOSTS_MANIFEST}' could not be read or parsed, so no host is permitted`));
       }
       if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return ok([]);
       const entry = (parsed as Record<string, unknown>)[ref as string];

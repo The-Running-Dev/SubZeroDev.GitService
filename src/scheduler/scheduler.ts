@@ -579,7 +579,7 @@ function schedulerErrorToToolResult(error: SchedulerError): ToolResult<never> {
 export function createSchedulerOperations(scheduler: Pick<Scheduler, 'create' | 'list' | 'cancel'>, clock: Clock): SchedulerOperations {
   return {
     async create(ctx, input): Promise<ToolResult<ScheduledJobCreateData>> {
-      const startedAtMs = Date.parse(clock.now());
+      const startedAtMs = clock.monotonicMs();
       if (ctx.declarationId === null) return infrastructure(`'scheduled_job_create' requires a declaration in context`);
       const created = await scheduler.create({ declarationId: ctx.declarationId, tool: input.tool, input: input.input, notBefore: input.notBefore, onMissed: input.onMissed }, ctx);
       if (!created.ok) return schedulerErrorToToolResult(created.error);
@@ -587,13 +587,13 @@ export function createSchedulerOperations(scheduler: Pick<Scheduler, 'create' | 
     },
 
     async list(ctx, input): Promise<ToolResult<ScheduledJobListData>> {
-      const startedAtMs = Date.parse(clock.now());
+      const startedAtMs = clock.monotonicMs();
       const jobs = await scheduler.list(ctx.declarationId, input.status);
       return success(`${jobs.length} scheduled job(s)`, { jobs }, diagnosticsFor(ctx, startedAtMs, clock));
     },
 
     async cancel(ctx, input): Promise<ToolResult<ScheduledJobCancelData>> {
-      const startedAtMs = Date.parse(clock.now());
+      const startedAtMs = clock.monotonicMs();
       const cancelled = await scheduler.cancel(input.id, ctx, input.reason);
       if (!cancelled.ok) return schedulerErrorToToolResult(cancelled.error);
       return success(`cancelled scheduled job '${cancelled.value.id}'`, { job: cancelled.value }, diagnosticsFor(ctx, startedAtMs, clock));

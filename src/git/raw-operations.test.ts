@@ -453,3 +453,28 @@ test('git_raw records unknown changed paths when its post-state cannot be observ
     assert.equal(attentionMarks.length, 1);
   } finally { f.cleanup(); }
 });
+
+test('S46.11 — git_raw parks a signalled child even when its post-state observation succeeded, and never settles it', async () => {
+  const f = fixture();
+  try {
+    const fake: Exec = {
+      async runGit(request) {
+        if (request.argv[0] === 'status') return ok({ exitCode: 0, stdout: '', stderr: '', durationMs: 1, timedOut: false });
+        return { ok: false, error: execError({ code: 'signalled', signal: 'SIGKILL' }, 'git gc was killed by SIGKILL') };
+      },
+      scrub: (value) => value,
+      scrubJson: (value) => value,
+      async runGh() { throw new Error('not used'); },
+    };
+    const { operations, records, parked, settled, applied, attentionMarks } = operationsFor(f, { exec: fake });
+    const result = await operations.raw(context(f.work), { argv: ['gc'] });
+    assert.equal(result.kind, 'infrastructure');
+    assert.match(result.summary, /SIGKILL/);
+    assert.deepEqual(records.map((record) => record.form), ['hatch-intent', 'hatch-outcome']);
+    assert.equal(parked.length, 1);
+    assert.equal(settled.length, 0);
+    assert.equal(applied.length, 0);
+    assert.equal(attentionMarks.length, 1);
+    assert.equal(attentionMarks[0]?.reason, parked[0]?.reason);
+  } finally { f.cleanup(); }
+});
