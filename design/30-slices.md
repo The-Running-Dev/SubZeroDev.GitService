@@ -304,8 +304,8 @@ rest of the watcher work names in its notices. S50 finishes the audit and notifi
 S51 fixes a first-use gap on the same tick protocol. S52 is the evidence harness, and it can only
 prove the corrected outcomes once all four have landed.
 
-S40 to S45 and S49 have landed, so the next slice that is not gated is S46. S46 to S48 depend on
-nothing outstanding.
+S40 to S45 and S49 have landed. S46 is gated on `S46.10` (§ *Contract gates*, below), so the next
+slice that is not gated is S47. S46 to S48 depend on nothing outstanding.
 
 ## Contract gates
 
@@ -314,7 +314,16 @@ committed separately and before the handler work depending on it. **No slice may
 signature absent from the contract** — where a slice needs tools, amending the contract is its
 first acceptance criterion, not an implementation detail.
 
-**No gate is live.** Two closed on and after 2026-09-28. S41's gate, `S41.7`, was met by the amendment
+**One gate is live: `S46.10`, raised by this document on 2026-10-03.** The amendment of that date
+(**#343**) gave `ExecError` a `signalled` variant and made a signalled mutating call park its journal
+entry, as a `timed-out` one does. It fixed *that* the entry parks and not *how* the park is reached.
+Dispatch parks only on a `timeout` envelope. `ToolResult` carries nothing else that could ask for a
+park. The only channel from a handler to dispatch that the contract fixes, `TerminalSink`, carries a
+`TerminalState`. And `HostError` has no variant for a signalled `gh` child, so the host adapter reports
+one as `unreachable` and the call settles. Closing the gate is `/contract`'s, committed separately and
+before the rest of S46. This document names the gap and leaves the shape to the amendment.
+
+Two earlier gates closed on and after 2026-09-28. S41's gate, `S41.7`, was met by the amendment
 that PR #328 merged (**R12**), and S41 has landed. **S49's gate, raised by this document on
 2026-09-25,** was `S49.1`: the watcher has to pin an auto-merge to the commit it pushed (#77), and
 `pr_enable_auto_merge`'s input carried no expected head, so adding one changed a registered MCP tool's
@@ -378,21 +387,31 @@ forty-six are landed and indexed below.
 
 Delivers: An operator reading a failure sees the cause that actually occurred. That rules out a
 constraint violation labelled a duplicate, a killed child process labelled a spawn failure, or a store
-fault labelled a delivery failure. An orphan report either states what is still in flight or refuses,
-and never quietly says "nothing".
-Touches: `src/declarations/declarations.ts`, `src/exec/exec.ts`, `src/credentials/credentials.ts`,
+fault labelled a delivery failure. A change to a repository that was killed partway through is set
+aside for the operator to look at, exactly as one that ran out of time is, rather than recorded as
+finished. An orphan report either states what is still in flight or refuses, and never quietly says
+"nothing".
+Touches: `design/20-contract.md` (`S46.10` only), `src/declarations/declarations.ts`,
+`src/exec/exec.ts`, `src/exec/errors.ts`, `src/credentials/credentials.ts`,
 `src/credentials/declaration-credential.ts`, `src/notifier/notifier.ts`, `src/shared/diagnostics.ts`,
-`src/surfaces/mcp-routes.ts`, `src/shared/result-kind.ts`.
+`src/surfaces/mcp-routes.ts`, `src/shared/result-kind.ts`, `src/git/git-operations.ts`,
+`src/dispatch/dispatch-pipeline.ts`, `src/host/github-adapter.ts`, `src/host/errors.ts`,
+`src/host/host-operations.ts`.
 Depends on: none
 Closes: #248, #269, #284 (items 1 and 3–7)
 Acceptance:
   - S46.1 `declare` returns `already-exists` only when the id already exists. Any other constraint
     violation returns `store-failed`.
-  - S46.2 A child process killed by a signal is not reported as `spawn-failed`.
-  - S46.3 An unreadable mark store or allowlist manifest is not reported as `reference-unreadable`.
+  - S46.2 A child process that started and was killed by a signal exec did not send returns
+    `signalled`, carrying the signal's name. `spawn-failed` is returned only for a child that never
+    started.
+  - S46.3 An unreadable or unparseable `_allowed-hosts.json` returns `allowed-hosts-unreadable`, and
+    an unreadable failure-mark store returns `store-failed`. Neither is reported as
+    `reference-unreadable`, and both refuse the credential.
   - S46.4 A declaration credential outside the permitted hosts returns `host-not-permitted`, not an
     untyped authorization error.
-  - S46.5 A notifier store failure is not reported as `delivery-failed`.
+  - S46.5 A notifier store failure returns `store-failed` and is not reported as `delivery-failed`.
+    No row is attempted after a failed read, claim or sweep.
   - S46.6 `durationMs` is measured on a monotonic clock, never by subtracting two wall-clock readings.
   - S46.7 An MCP tool result sets `isError` true only for `upstream`, `timeout` and `infrastructure`.
     It uses the existing `isError(kind)` helper, and a test covers every `ResultKind`.
@@ -402,8 +421,25 @@ Acceptance:
   - S46.9 Tests cover the orphan read three ways: an unsettled entry (its id is reported), a clean
     journal (an empty list), and a failed read (a refusal, never an empty list). The code comment
     claiming the clone store accepts the same ambiguity is removed.
-Out of scope: the `sendJson`/`readJsonBody` consolidation (#65, `/fix`). Adding error variants the
-contract does not already declare. If an item above needs one, stop for `/contract`.
+  - S46.10 Contract gate, committed separately and before the rest of S46, and appended rather than
+    placed first under the id rule: `20-contract.md` fixes how a mutating call whose child ended
+    `signalled` reaches the journal park, and what the host adapter returns for a signalled `gh`
+    child. § *Contract gates* states the gap.
+  - S46.11 A mutating call whose git child ends `signalled` returns `infrastructure`, parks its
+    journal entry, and marks the clone `needs-attention` with the same reason. Its audit record is
+    written before the park. This is the path a `timed-out` child already takes. `git_raw` parks a
+    signalled child even when its post-state observation succeeded.
+  - S46.12 A mutating host call whose `gh` child ends `signalled` is parked by the same rule as
+    S46.11. It is never settled as `unreachable`.
+  - S46.13 A read whose child ends `signalled` returns `infrastructure`, parks nothing, and leaves the
+    clone's state unchanged. Tests drive S46.11 to S46.13 with an exec double that returns
+    `signalled`.
+Out of scope: the `sendJson`/`readJsonBody` consolidation (#65, `/fix`). Writing the `S46.10`
+amendment inside the slice: it is `/contract`'s, and it lands first. Any error variant beyond those
+`S46.10` and the 2026-10-03 amendment fix. If an item above needs one, stop for `/contract`. Parking
+a signalled `git clone` during materialisation: the partial clone is already removed and its row reset
+to `absent`, so nothing is left unaccounted for. Parking on any `infrastructure` result other than a
+signalled child.
 
 ## S47 — Nothing waits forever, and a busy store is retried
 
