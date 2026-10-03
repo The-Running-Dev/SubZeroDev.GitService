@@ -65,7 +65,8 @@ function fixtureDeclaration(id: string, cloneUrl: string, capabilityGrant: reado
     generation: 1 as Declaration['generation'],
     cloneUrl: cloneUrl as Declaration['cloneUrl'],
     host: 'generic',
-    credentialRef: 'unused' as Declaration['credentialRef'],
+    // S44.1: a clone with no resolver wired is anonymous only for a null ref, which the type forbids and the clone path still honours.
+    credentialRef: null as unknown as Declaration['credentialRef'],
     capabilityGrant: new Set(capabilityGrant) as unknown as Declaration['capabilityGrant'],
     writablePathPrefixes: [],
     pinned: false,
