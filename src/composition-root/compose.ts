@@ -602,6 +602,7 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
       return prepared.ok ? ok(prepared.value.credential) : err(prepared.error);
     },
     credentialBindings: hostCredentialBindings,
+    credentials,
     terminalSink,
     headShaFor: async (ctx) => {
       if (ctx.cloneRoot === null) return null;
