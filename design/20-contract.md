@@ -1768,7 +1768,11 @@ outcome carries `changedPaths: []` because that child caused no change. If the p
 fails after the child ran, the outcome record carries `changedPaths: null`, meaning unknown — never
 an empty set — and a child that otherwise succeeded returns `infrastructure`. A primary timeout,
 cancellation or non-zero child result remains the returned result kind while the outcome summary
-also records that post-state observation failed.
+also records that post-state observation failed. A `signalled` child returns `infrastructure` and
+parks the entry even when the post-state observation succeeded and `changedPaths` is known. Knowing
+which paths differ says nothing about what the killed command left half-written in the object store,
+the refs or the index lock. The handler parks through its own journal completion and writes nothing
+to the park sink (`### L4 — dispatch pipeline`).
 
 The registry entry S15 ships:
 
@@ -2240,6 +2244,75 @@ would give L2 a store and a notifier. It would also give terminal states two out
 that can disagree about the same kind, which undoes the one-producer, one-consumer shape the sink
 exists to have. See `design/90-decisions.md`, 2026-09-28.
 
+**A signalled child reaches the park through a second per-operation sink** (S46.10). The `ExecError`
+table requires a mutating call whose child ended `signalled` to park its journal entry, and the
+envelope that call returns is `infrastructure`, a kind the pipeline must not park on in general: most
+`infrastructure` results, an unreadable config file among them, leave the tree exactly as the call
+found it. So the envelope cannot carry the request, and the handler that saw the signal says so on a
+channel of its own:
+
+```ts
+type ParkCause = { readonly kind: 'signalled'; readonly signal: string | null };
+type ParkSink = Map<OperationId, ParkCause>;
+```
+
+Declared beside `TerminalSink` in `src/dispatch/dispatch-pipeline.ts` once S46 lands; until then this
+block is the scaffold. Owned by the composition root, which hands the one map to `GitOperations`,
+`Composites`, `HostOperations` and the pipeline, keyed on `operationId` for the reason
+`TerminalSink` is. `DispatchPipelineDependencies` gains `parkSink`, optional on the same terms as
+`terminalSink`.
+
+What the declarations cannot say:
+
+- **The writer is the mutating handler that ran the child, at the point it observes the signal.**
+  Any child the handler starts on a mutating call counts, a preflight read and a best-effort cleanup
+  such as `rebase --abort` included. The call is parked, not the child: what a sibling child did
+  before the kill is no better accounted for than what the killed one did. A handler that writes an
+  entry returns `infrastructure` naming the child and its signal, whatever it would otherwise have
+  returned, so a parked call never reports `success` and never reports a failure kind that tells the
+  caller the repository refused. `classifyRemoteFailure` is one such writer: a signalled push, fetch
+  or base sync is `infrastructure`, never `upstream`, and its streams are not classified, because a
+  killed child's stderr is a fragment.
+- **A read and a monitoring wait never write one.** Their envelope is `infrastructure` and nothing
+  parks, as the `ExecError` row says. `CloneStore.ensure` never writes one either: a signalled clone
+  during materialisation removes the partial directory and resets the row to `absent`, so nothing is
+  left unaccounted for.
+- **The pipeline takes the entry once, on every exit of the mutating branch after the handler is
+  invoked**, the take being a read and a delete for the call's `operationId`. When it finds one,
+  the call ends on the path a `timeout` envelope already takes, in the same order: the audit record,
+  then `Journal.park` with the envelope's summary as the reason, then `markAttention` with that same
+  reason, then the envelope is returned unchanged. It is never settled, and `markApplied` is never
+  called for it. A failed park returns `infrastructure` saying the entry could not be parked, as the
+  timeout path does. The sink decides, not the envelope: the pipeline does not read the kind to decide
+  whether to park, and it does not park an `infrastructure` envelope that came with no entry.
+- **A park supersedes a terminal state.** If the same call also wrote a `TerminalState`, it is
+  removed unread by the `finally` that already clears the terminal sink. `Journal.park` enqueues its own
+  `operation-parked` row, and that row is the operator's notification. Delivering both would announce
+  one fault twice under two names, one of which describes an outcome nobody can now vouch for.
+- **`git_raw` writes nothing to this sink.** It completes its own journal entry for the reason given
+  above the timeout path, and its own park rule covers a signalled child. See `### L2 — git
+  operations`.
+- **The composition root wires the sink to every writer and to the pipeline, or to none.** A writer
+  holding a sink the pipeline does not read would leave entries no take removes, breaking **R13**. A
+  pipeline reading a sink no writer holds would settle every signalled call, which is the defect this
+  section exists to close.
+
+Five alternatives were rejected. **Parking on every `infrastructure` envelope from a mutating call**
+needs no channel, but it parks the declaration for faults that changed nothing, and a parked entry
+refuses every ordinary mutation until an operator resolves it. S46 rules it out by name. **Writing the
+cause into `TerminalSink` as a new `TerminalState`** reuses an existing map, but `TerminalState` is
+the outbox subject union that webhook consumers observe, and a request to park is control flow, not a
+notification. It would also notify twice, since the park already writes its own row. **Having each
+handler park its own entry, as `git_raw` does**, gives every mutating module the journal, the audit
+trail and the clone store. The pipeline would still need to be told not to settle, so a channel would
+be needed anyway. **Writing the entry from exec** would put it in one place, but exec runs every
+child, reads and materialisation clones included, and it does not know whether its caller is a
+mutation. **A presence-only `Set<OperationId>`** carries no reason, so a cause added later by
+amendment could not be told apart from this one. The typed union keeps "only a signalled child parks"
+checkable by the compiler. The two alternatives rejected for `TerminalSink` above, a `ToolResult`
+member and parsing the findings, are rejected here for the same reasons. See `design/90-decisions.md`,
+2026-10-03, S46.10.
+
 ### L4 — authorization
 
 Declared in `src/authorization/authorization.ts`, with its records in `src/authorization/types.ts`.
@@ -2594,7 +2667,7 @@ type ExecError = ModuleErrorBase & (
 | `spawn-failed` | The fixed executable could not be started. Never raised for a child that started — whatever happened after that, the child may have acted | no | `infrastructure` — the environment is wrong, not the request |
 | `nonzero-exit` | The child exited non-zero; `stdout` and `stderr` are already scrubbed | no | Classify by domain: auth rejection to `upstream`, a refused push to `precondition`; informational commands retain both streams for diagnosis |
 | `timed-out` | The declared cap elapsed and the child was killed | no | `timeout`, and park the journal entry — what the command achieved is not knowable |
-| `signalled` | The child started and ended without an exit code, killed by a signal exec did not send for the cap or the caller's abort. `signal` is the signal's name, `null` only if the platform reported neither a code nor a signal | no | `infrastructure`, and on a mutating call park the journal entry, as for `timed-out` and for the same reason. The envelope kind differs because there is no limit to report and raising one would not help; the park does not, because the tree is exactly as unaccounted for. A read reports `infrastructure` and parks nothing |
+| `signalled` | The child started and ended without an exit code, killed by a signal exec did not send for the cap or the caller's abort. `signal` is the signal's name, `null` only if the platform reported neither a code nor a signal | no | `infrastructure`, and on a mutating call park the journal entry, as for `timed-out` and for the same reason. The envelope kind differs because there is no limit to report and raising one would not help; the park does not, because the tree is exactly as unaccounted for. A read reports `infrastructure` and parks nothing. The park is reached through the park sink (`### L4 — dispatch pipeline`), never through the envelope |
 | `argv-rejected` | Declared, never raised by exec itself — the rule is judged in § L2 — git operations before `git_raw` reaches exec, and returned there as `validation` directly. The rule: the vector selects an executable, injects or writes configuration, carries credentials or a foreign or opaque remote operand, names a remote-helper transport (`<transport>::<address>`), or persists a remote | no | `validation`; no authority could ever permit it |
 | `cancelled` | The caller's signal aborted | no | `conflict`, releasing locks in reverse acquisition order |
 
@@ -2847,10 +2920,12 @@ type HostError = ModuleErrorBase & (
   | { readonly code: 'required-check-failed'; readonly check: string; readonly pullRequest: PullRequestRef }
   | { readonly code: 'not-found'; readonly resource: string }
   | { readonly code: 'timed-out'; readonly limitSeconds: number }
+  | { readonly code: 'signalled'; readonly signal: string | null }
 );
 ```
 
-`head-moved` is declared in `src/host/errors.ts` with the other variants.
+`head-moved` is declared in `src/host/errors.ts` with the other variants. `signalled` is added there
+by S46, and this block is its scaffold until then.
 
 | Variant | Raised when | Retryable | Caller does |
 |---|---|---|---|
@@ -2863,6 +2938,7 @@ type HostError = ModuleErrorBase & (
 | `required-check-failed` | A declared required check concluded failure. `checks_await`'s judgement also refuses — without this variant — when it cannot establish whether a failure was required, or cannot attribute one to a pull request; see `### L2 — host adapter` | no — terminal | `precondition` naming the check and pull request; the notifier fires |
 | `not-found` | The pull request, check or workflow does not exist | no | `precondition` |
 | `timed-out` | A bounded wait reached its cap | no | `timeout`; the notifier fires |
+| `signalled` | The `gh` child ended with `ExecError` `signalled`. `signal` is carried from it unchanged. Raised before any stderr classification, because a killed child's stderr is a fragment. **Never `unreachable`**, which would tell the caller the host was not reached, when the request may have reached it and taken effect | no — not retried even on a read, since the kill was no transport fault | `infrastructure`. On a mutating method, `HostOperations` writes the park entry and the call parks (`### L4 — dispatch pipeline`). On a read or a monitoring wait, nothing parks and no `TerminalState` is written |
 
 ### Scheduler
 
@@ -3162,6 +3238,7 @@ responsible for maintaining it.
 | R10 | A `running` job is never simply fired again at boot. | Scheduler |
 | R11 | A `TerminalState` is written to the sink by the call that observed the terminal condition, and is read and removed by the settle for that same `operationId`. A monitoring wait never settles, so its entry is read and removed by the dispatch pipeline's take on the wait's exit instead (**R12**). Exactly one producer exists; `Journal.classify` is not one, per **R3**. No sink entry survives the operation that wrote it. | Dispatch pipeline, Host adapter |
 | R12 | For every `monitoring-wait` operation, the dispatch pipeline takes the sink entry for its `operationId` exactly once, on every exit after the handler is invoked. If the take finds an entry, exactly one outbox row at `attention` naming that `TerminalState` is enqueued in its own store transaction before `dispatch` resolves. If it finds none, no row is enqueued. No monitoring wait begins a journal entry. | Dispatch pipeline |
+| R13 | A park-sink entry is written only by a mutating handler, `git_raw` excepted, during a call in which a child it started ended `signalled`, and that call's envelope is `infrastructure`. The dispatch pipeline takes it exactly once, on every exit of the mutating branch after the handler is invoked. A call whose take finds an entry is parked and never settled, and its audit record is appended before the park. No read or monitoring wait writes an entry, and no entry survives the operation that wrote it. *Specified, not yet held: S46 implements it.* | Dispatch pipeline, Git operations, Composites, Host adapter |
 
 ### Concurrency
 
