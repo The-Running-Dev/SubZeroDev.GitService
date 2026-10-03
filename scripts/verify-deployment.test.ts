@@ -124,6 +124,7 @@ async function withServer<T>(volume: string, commitSha: GitSha, fn: (handle: Ser
     cloneStore: createStubCloneStore(),
     dispatchPipeline,
     contractCapabilitySet: CEILING,
+    ceiling: CEILING as never,
     origin: 'http://localhost',
     mcpState: createMcpRoutesState(),
   });

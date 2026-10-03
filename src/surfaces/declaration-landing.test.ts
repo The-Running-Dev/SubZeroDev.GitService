@@ -69,8 +69,9 @@ function declarationsWithOneRow(): Declarations {
     async remove() {
       throw new Error('stub: remove not exercised');
     },
-    effectiveGrant() {
-      return new Set() as unknown as ReturnType<Declarations['effectiveGrant']>;
+    effectiveGrant(_contract, ceiling, declaration) {
+      const granted = declaration === null ? [] : [...declaration.capabilityGrant];
+      return new Set(granted.filter((c) => (ceiling as unknown as ReadonlySet<string>).has(c))) as unknown as ReturnType<Declarations['effectiveGrant']>;
     },
     effectiveWritablePrefixes(declaration) {
       return declaration.writablePathPrefixes;
@@ -158,6 +159,7 @@ async function withServer<T>(volume: string, cloneStore: CloneStore, fn: (baseUr
     cloneStore,
     dispatchPipeline: createStubDispatchPipeline(),
     contractCapabilitySet: CEILING,
+    ceiling: CEILING as never,
     origin: 'http://localhost',
     mcpState: createMcpRoutesState(),
   });
@@ -227,6 +229,32 @@ test('S19.4 — GET /declarations reports capabilityGrant as a real, sorted arra
       assert.equal(res.status, 200);
       const rows = (await res.json()) as readonly { readonly declaration: { readonly capabilityGrant: readonly string[] } }[];
       assert.deepEqual(rows[0]!.declaration.capabilityGrant, ['audit.read', 'repo.read']);
+    });
+  });
+});
+
+test('S48.1 — GET /declarations carries effectiveGrant beside the unchanged capabilityGrant, narrowed by the ceiling', async () => {
+  await withVolumeAsync(async (volume) => {
+    await withServer(volume, readyDirtyCloneStore(), async (baseUrl) => {
+      const cookie = await enrolAndLogin(baseUrl);
+      const res = await fetch(`${baseUrl}/declarations`, { headers: { Cookie: cookie } });
+      assert.equal(res.status, 200);
+      const rows = (await res.json()) as readonly { readonly declaration: { readonly capabilityGrant: readonly string[]; readonly effectiveGrant: readonly string[] } }[];
+      assert.deepEqual(rows[0]!.declaration.capabilityGrant, ['audit.read', 'repo.read'], 'the declared grant is unchanged');
+      assert.deepEqual(rows[0]!.declaration.effectiveGrant, ['repo.read'], 'audit.read is outside the ceiling, so it is not effective');
+    });
+  });
+});
+
+test('S48.1 — GET /declarations/{id} carries effectiveGrant beside the unchanged capabilityGrant', async () => {
+  await withVolumeAsync(async (volume) => {
+    await withServer(volume, readyDirtyCloneStore(), async (baseUrl) => {
+      const cookie = await enrolAndLogin(baseUrl);
+      const res = await fetch(`${baseUrl}/declarations/watch-1`, { headers: { Cookie: cookie } });
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as { readonly declaration: { readonly capabilityGrant: readonly string[]; readonly effectiveGrant: readonly string[] } };
+      assert.deepEqual(body.declaration.capabilityGrant, ['audit.read', 'repo.read']);
+      assert.deepEqual(body.declaration.effectiveGrant, ['repo.read']);
     });
   });
 });

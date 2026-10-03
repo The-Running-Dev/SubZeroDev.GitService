@@ -55,6 +55,7 @@ async function withServer<T>(volume: string, consoleDir: string | undefined, fn:
     cloneStore: createStubCloneStore(),
     dispatchPipeline: createStubDispatchPipeline(),
     contractCapabilitySet: CEILING,
+    ceiling: CEILING as never,
     origin: 'http://localhost',
     mcpState: createMcpRoutesState(),
     ...(consoleDir ? { consoleDir } : {}),

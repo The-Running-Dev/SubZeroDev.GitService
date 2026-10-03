@@ -119,6 +119,7 @@ async function withServer<T>(volume: string, fn: (handle: ServerHandle) => Promi
     cloneStore: createStubCloneStore(),
     dispatchPipeline,
     contractCapabilitySet: CEILING,
+    ceiling: CEILING as never,
     origin: 'http://localhost',
     mcpState: createMcpRoutesState(),
   });

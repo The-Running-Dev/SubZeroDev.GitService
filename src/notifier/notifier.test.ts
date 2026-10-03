@@ -362,6 +362,35 @@ test('with no webhook, a pass writes nothing and reports the condition once rath
   });
 });
 
+test('S48.5 — with no transport configured, countHeldPending counts the rows held pending, and a failed row is not among them', async () => {
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    for (const [i, notify] of TERMINAL_NOTIFICATIONS.entries()) {
+      await journal.begin(beginInputFor(`op-${i}`));
+      await journal.settle(`op-${i}` as never, notify);
+    }
+    const notifier = createNotifier({ volumeRoot: volume, clock: systemClock, webhookUrl: null });
+    assert.equal(await notifier.countHeldPending(), TERMINAL_NOTIFICATIONS.length);
+    assert.equal((await notifier.listFailed()).length, 0, 'held rows are not failed rows');
+
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    db.prepare(`UPDATE notification_outbox SET status = 'failed' WHERE id = (SELECT id FROM notification_outbox LIMIT 1)`).run();
+    db.close();
+    assert.equal(await notifier.countHeldPending(), TERMINAL_NOTIFICATIONS.length - 1, 'a failed row is reported as failed, not as held');
+  });
+});
+
+test('S48.5 — with a transport configured, pending rows are in ordinary retry and are not reported as held', async () => {
+  await migratedVolume(async (volume) => {
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    await journal.begin(beginInputFor('op-0'));
+    await journal.settle('op-0' as never, TERMINAL_NOTIFICATIONS[0]!);
+    const notifier = createNotifier({ volumeRoot: volume, clock: systemClock, webhookUrl: 'https://hooks.example.invalid/notify' as never });
+    assert.equal(readOutboxRows(volume).length, 1);
+    assert.equal(await notifier.countHeldPending(), 0);
+  });
+});
+
 test('clearFailed resets a failed row to pending without deleting it, and refuses a row that is not failed', async () => {
   await migratedVolume(async (volume) => {
     const journal = createJournal({ volumeRoot: volume, clock: systemClock });

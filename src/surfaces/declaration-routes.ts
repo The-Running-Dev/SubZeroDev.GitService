@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { declarationId, pathPrefix, credentialRef, type DeclarationId, type RegistryToolName } from '../shared/brands.ts';
 import type { ActorRef } from '../shared/actor.ts';
 import { sortedArray } from '../shared/sorted-array.ts';
-import type { DeclarationScopedCapability, HostKind } from '../contract/capabilities.ts';
+import type { ContractCapabilitySet, DeclarationScopedCapability, DeploymentCeiling, HostKind, SessionGrant } from '../contract/capabilities.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import type { DeclarationError } from '../declarations/errors.ts';
 import type { AmendInput, Declaration, DeclareInput } from '../declarations/types.ts';
@@ -15,6 +15,9 @@ import { csrfOk, requireSession, type ConsoleAuthDependencies } from './console-
 export interface DeclarationRoutesDependencies extends ConsoleAuthDependencies {
   readonly declarations: Declarations;
   readonly cloneStore: CloneStore;
+  /** A1 layers 1 and 2: the inputs to `effectiveGrant` on every serialised declaration (A12). */
+  readonly contractCapabilitySet: ContractCapabilitySet;
+  readonly ceiling: DeploymentCeiling;
   /**
    * Declarations holding at least one unsettled journal entry (S8).
    *
@@ -105,8 +108,16 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
  * a declaration's granted capabilities to decide which registered views to
  * show; without this a landing-view row could never carry that data at all.
  */
-function serializeDeclaration(d: Declaration): Omit<Declaration, 'capabilityGrant'> & { readonly capabilityGrant: readonly string[] } {
-  return { ...d, capabilityGrant: sortedArray(d.capabilityGrant) };
+function serializeDeclaration(
+  deps: DeclarationRoutesDependencies,
+  d: Declaration,
+): Omit<Declaration, 'capabilityGrant'> & { readonly capabilityGrant: readonly string[]; readonly effectiveGrant: readonly string[] } {
+  // A12: the console filters on the effective grant, computed here and never
+  // in the browser. The operator console session holds the whole contract
+  // set (`tool-routes.ts`'s `sessionFor`), so contract and ceiling are what
+  // narrow it.
+  const effective = deps.declarations.effectiveGrant(deps.contractCapabilitySet, deps.ceiling, d, deps.contractCapabilitySet as unknown as SessionGrant);
+  return { ...d, capabilityGrant: sortedArray(d.capabilityGrant), effectiveGrant: sortedArray(effective) };
 }
 
 function declarationErrorStatus(error: DeclarationError): number {
@@ -303,7 +314,7 @@ export async function handleDeclarationRoute(
       const rawClone = described.ok ? described.value : null;
       const { branch, dirty } = await landingViewFields(deps.cloneStore, rawClone);
       const clone = withRecoveryOverlay(rawClone, awaiting);
-      return { declaration: serializeDeclaration(d), clone, branch, dirty };
+      return { declaration: serializeDeclaration(deps, d), clone, branch, dirty };
     });
     sendJson(res, 200, rows);
     return true;
@@ -326,7 +337,7 @@ export async function handleDeclarationRoute(
       sendDeclarationError(res, result.error);
       return true;
     }
-    sendJson(res, 201, serializeDeclaration(result.value));
+    sendJson(res, 201, serializeDeclaration(deps, result.value));
     return true;
   }
 
@@ -349,7 +360,7 @@ export async function handleDeclarationRoute(
     const rawClone = described.ok ? described.value : null;
     const { branch, dirty } = await landingViewFields(deps.cloneStore, rawClone);
     const clone = withRecoveryOverlay(rawClone, awaiting);
-    sendJson(res, 200, { declaration: serializeDeclaration(declaration), clone, branch, dirty });
+    sendJson(res, 200, { declaration: serializeDeclaration(deps, declaration), clone, branch, dirty });
     return true;
   }
 
@@ -370,7 +381,7 @@ export async function handleDeclarationRoute(
       sendDeclarationError(res, result.error);
       return true;
     }
-    sendJson(res, 200, serializeDeclaration(result.value));
+    sendJson(res, 200, serializeDeclaration(deps, result.value));
     return true;
   }
 

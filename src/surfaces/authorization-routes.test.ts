@@ -71,6 +71,7 @@ async function withServer<T>(volume: string, fn: (baseUrl: string) => Promise<T>
     cloneStore: createStubCloneStore(),
     dispatchPipeline: createStubDispatchPipeline(),
     contractCapabilitySet: CEILING,
+    ceiling: CEILING as never,
     origin: 'http://localhost',
     mcpState: createMcpRoutesState(),
   });

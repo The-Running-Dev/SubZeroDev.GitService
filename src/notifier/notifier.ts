@@ -21,6 +21,12 @@ export interface Notifier {
   deliverPending(): Promise<DeliveryReport>;
   redriveUndelivered(): Promise<DeliveryReport>;
   listFailed(): Promise<readonly OutboxRow[]>;
+  /**
+   * Rows held `pending` because no transport is configured — the health
+   * view's count, apart from `failed` rows. With a transport configured a
+   * `pending` row is in ordinary retry and is not held, so this is `0`.
+   */
+  countHeldPending(): Promise<number>;
   clearFailed(id: OutboxRowId, actor: ActorRef): Promise<Outcome<void, NotifierError>>;
   runRetention(): Promise<RetentionReport>;
 }
@@ -477,6 +483,12 @@ export function createNotifier(deps: NotifierDependencies): Notifier {
     async listFailed(): Promise<readonly OutboxRow[]> {
       const rows = withDb(volumeRoot, (db) => db.prepare(`SELECT * FROM notification_outbox WHERE status = 'failed' ORDER BY created_at ASC`).all() as unknown as OutboxRowDb[]);
       return rows.ok ? rows.value.map(toRow) : [];
+    },
+
+    async countHeldPending(): Promise<number> {
+      if (webhookUrl !== null) return 0;
+      const counted = withDb(volumeRoot, (db) => (db.prepare(`SELECT COUNT(*) AS n FROM notification_outbox WHERE status = 'pending'`).get() as { n: number }).n);
+      return counted.ok ? counted.value : 0;
     },
 
     /**

@@ -85,6 +85,8 @@ export interface DeclarationListRow {
     readonly cloneUrl: string;
     readonly pinned: boolean;
     readonly capabilityGrant: readonly string[];
+    /** A12: the server-computed A1 intersection; the console filters on this, never on `capabilityGrant`. */
+    readonly effectiveGrant: readonly string[];
     readonly [key: string]: unknown;
   };
   readonly clone: {
@@ -209,6 +211,7 @@ export interface HealthReportDto {
   readonly provisioningPending: boolean;
   readonly auditChain: AuditChainStateDto;
   readonly failedOutboxRows: number;
+  readonly heldPendingOutboxRows: number;
   readonly failingCredentialRefs: readonly CredentialFailureMarkDto[];
   readonly parkedOperations: number;
   readonly volume: VolumeUsageDto;
