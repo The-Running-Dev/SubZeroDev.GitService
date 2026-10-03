@@ -59,23 +59,16 @@
 | 280 | #280 | The HTTP adapter's timeout doesn't cover reading the response body | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 281 | #281 | Database access has no retry or timeout when the database is busy | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 284 | #284 | Several error results are labelled for conditions that don't match what actually happened | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
-| 286 | #286 | A file-watcher declaration can sit stuck with a misleading status until something else creates its clone | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 287 | #287 | Overriding the safety check on a corrupted clone destroys it instead of setting it aside | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 288 | #288 | A declaration's generation number can be reused after the declaration is removed and redeclared | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 289 | #289 | An interrupted operation on an idle declaration can go unnoticed indefinitely | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 291 | #291 | Revoking an OAuth token can grow the audit trail without real authorization, and misattributes it | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 292 | #292 | There's no record of which operator approved a given MCP access grant | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 301 | #301 | Add a doc-citation checker to CI | — | `082d1df8f15bae3125e78e06155fe1c59fe3cafc` |
-| 318 | #318 | S50 — Every watcher outcome is audited, and every failure is told | S50.1, S50.2, S50.3, S50.4, S50.5, S50.6, S50.7 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
-| 319 | #319 | S51 — A watched repository clones itself on first use | S51.1, S51.2, S51.3 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
+| 318 | #318 | S50 — Every watcher outcome is audited, and every failure is told | S50.1, S50.2, S50.3, S50.4, S50.5, S50.6, S50.7 | `9ed7f5a54e55ebf04ab2d227f5347d04cfbdcf4a` |
 | 320 | #320 | S52 — The watcher is proven against a real repository | S52.1, S52.2, S52.3, S52.4, S52.5, S52.6 | `70413caf7ace545ab150ddd8dcfeb76c1756fd69` |
-| 330 | #330 | S53 — A tampered watcher folder stops delivery, and the operator hears once | S53.1, S53.2, S53.3, S53.4, S53.5, S53.6, S53.7, S53.8, S53.9, S53.10 | `c1fee0489483669410c59b88ba8e5d6e0740ca9c` |
 | milestone/6 | #65 | `sendJson`/`readJsonBody` are independently reimplemented in six surface files | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
-| milestone/3 | #81 | Audit and notify every content-drop watcher failure | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
-| milestone/3 | #82 | Finalize a merged watcher PR even when reconciliation fails | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
-| milestone/3 | #84 | Make declaration orphaning and removal aware of content-drop state | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #87 | Build an evidence-grade test harness for the content-drop watcher | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
-| milestone/3 | #88 | Enforce watcher contract types at every persistence and dispatch boundary | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/6 | #113 | Test-DesignDrift.ps1 accepts non-slice titles that merely begin with an S-number | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/5 | #135 | Decide how the lease guard's blind spot on non-locking filesystems gets resolved | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/5 | #136 | Decide whether a stale MCP client tool catalogue needs a refresh mechanism | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |

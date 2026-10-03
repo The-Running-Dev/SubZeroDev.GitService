@@ -304,8 +304,8 @@ rest of the watcher work names in its notices. S50 finishes the audit and notifi
 S51 fixes a first-use gap on the same tick protocol. S52 is the evidence harness, and it can only
 prove the corrected outcomes once all four have landed.
 
-S40 to S49 have landed. No gate is live (§ *Contract gates*, below), so the next slice is S53, with
-S50 to S52 following in the order above.
+S40 to S49 and S53 have landed. No gate is live (§ *Contract gates*, below), so the next slice is S50,
+with S51 and S52 following in the order above.
 
 ## Contract gates
 
@@ -377,56 +377,8 @@ carries the reasoning.
 
 ## Outstanding
 
-Four slices: S50 to S52, appended 2026-09-25, and S53, appended 2026-09-28. The other
-forty-nine are landed and indexed below.
-
-## S53 — A tampered watcher folder stops delivery, and the operator hears once
-
-Delivers: Suppose something swaps one of the watcher's own working folders for a link or a file. The
-operator then sees delivery for that one repository stop at once, and is told about it once. Today
-the watcher keeps opening pull requests it then loses track of, or crashes out without a word. Every
-other watched repository carries on as normal.
-Touches: `src/watcher/watcher.ts`, `src/watcher/types.ts`, `src/watcher/pending-pull-requests.ts`,
-`src/journal/types.ts` (the new `TerminalState` variant), `design/20-contract.md` (the two
-"Scaffold, until the implementing slice…" notes under D18 and *L2 — watcher*).
-Depends on: none
-Closes: no existing issue. Implements D18 and D19 (`90-decisions.md`, 2026-09-25).
-Acceptance:
-  - S53.1 A tick for a declaration where any of `processing/`, `processed/` or `failed/` is a symlink,
-    a reparse point or a plain file returns `skipped: 'state-directory-tampered'`. It claims no file
-    and makes no dispatch, Git or host call. This holds with an empty inbox. It also holds for a
-    declaration whose clone is dirty or needs attention: a test with a tampered `processed/` and a
-    dirty clone gets `state-directory-tampered`, not `clone-not-clean`.
-  - S53.2 In the same pass, a sound declaration beside a tampered one is unaffected. A test with one of
-    each asserts that the sound one opens its pull request.
-  - S53.3 The pre-claim gate and a tampered `processing/` at `recoverInterruptedClaims` each enqueue
-    one `watcher-state-directory-tampered` outbox row at `attention`, naming the directory, and write
-    no audit record. Three consecutive refusing ticks leave one row. A tick that finds all three
-    directories sound, followed by a refusing tick, leaves a second.
-  - S53.4 If `claim` finds `processing/` swapped after the gate passed, the file stays in the inbox and
-    the tick reports `state-directory-tampered`, never `claim-failed`.
-  - S53.5 A terminal move into a tampered `processed/` or `failed/` throws nothing. The file stays in
-    `processing/`, and its `file-watcher` audit record carries the protocol's own outcome. A
-    `file-watcher-failed` notification at `attention` names the refused directory, and the tick
-    returns its report.
-  - S53.6 A pull request the protocol opened is in the pending list before its file's terminal move is
-    attempted (**D19**). A test refuses the terminal move after `pr_open`, asserts the pending entry
-    exists, and asserts that the next reconciliation poll reads it.
-  - S53.7 In `recoverInterruptedClaims`, a tampered `failed/` leaves the file in `processing/`. It
-    writes the file's `interrupted-claim` audit record and a `file-watcher-failed` notification at
-    `attention`. A tampered `processing/` is not read through. In both cases `start` succeeds, and a
-    second declaration's interrupted claim is still recovered.
-  - S53.8 `runRetention` with a tampered `processed/` deletes nothing through it, and returns a
-    `RetentionReport.skipped` entry naming the declaration.
-  - S53.9 An existing real directory at any of the three names is used as found, and its mode is not
-    changed. A directory the watcher creates is owner-only on POSIX.
-  - S53.10 `WatcherError`, `WatchTickReport.skipped` and `TerminalState` carry the values the contract
-    fixes for D18. The two scaffold notes in `design/20-contract.md` are replaced with pointers to the
-    tree in the same change. Every `W08.3` and `W08.4` citation in `src/watcher/`, in code comments and
-    in test names, cites D18 instead.
-Out of scope: checking or correcting the mode or ownership of an existing directory, and auditing the
-file-less refusals in the hash chain. Both were rejected on 2026-09-25. Auditing terminal-move failures
-that are not tamper, and exceptions escaping a tick, are S50's. The pushed SHA is S49's.
+Three slices: S50 to S52, appended 2026-09-25. The other
+fifty are landed and indexed below.
 
 ## S50 — Every watcher outcome is audited, and every failure is told
 
@@ -560,6 +512,7 @@ Bodies retired; the closed issue is the record. Criteria are not re-derived from
 | **S46** | Every error names what actually happened | [#314](../../issues/314), closed | S46.1–S46.13 | `0b88d38` |
 | **S47** | Nothing waits forever, and a busy store is retried | [#315](../../issues/315), closed | S47.1–S47.4 | `0b88d38` |
 | **S48** | The console and the health view show what is real | [#316](../../issues/316), closed | S48.1–S48.5 | `0b88d38` |
+| **S53** | A tampered watcher folder stops delivery, and the operator hears once | [#330](../../issues/330), closed | S53.1–S53.10 | `f3f0d7b` |
 
 Three rows carry a name this document changed after the issue was opened: #31 is titled "A dropped
 file becomes a pull request…" and #92 "A consumer can declare a safe content-drop protocol", both
