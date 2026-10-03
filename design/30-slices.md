@@ -304,7 +304,7 @@ rest of the watcher work names in its notices. S50 finishes the audit and notifi
 S51 fixes a first-use gap on the same tick protocol. S52 is the evidence harness, and it can only
 prove the corrected outcomes once all four have landed.
 
-S40 to S43 and S49 have landed, so the next slice that is not gated is S44. S44 to S48 depend on
+S40 to S45 and S49 have landed, so the next slice that is not gated is S46. S46 to S48 depend on
 nothing outstanding.
 
 ## Contract gates
@@ -371,58 +371,8 @@ carries the reasoning.
 
 ## Outstanding
 
-Nine slices: S44 to S48 and S50 to S52, appended 2026-09-25, and S53, appended 2026-09-28. The other
-forty-four are landed and indexed below.
-
-## S44 — A clone on disk is exactly what it claims to be
-
-Delivers: An operator can trust that a clone the service calls ready really is complete, was fetched
-with the credential its repository declares, and is only released when no generation of that
-repository still has work in it. A busy lock tells them to retry rather than reporting that something
-is broken.
-Touches: `src/clone/clone-store.ts`.
-Depends on: none
-Closes: #270, #282, #283, #290, #284 (item 2 only)
-Acceptance:
-  - S44.1 A credential that fails to resolve aborts a first clone and surfaces the credential error under
-    its existing result kind. This covers no resolver configured, a reference that is not permitted, and
-    a secret that is unavailable. No directory is left behind. Only an explicit `credentialRef: null`
-    clones anonymously.
-  - S44.2 Boot re-derivation and `ensure` both recognise a directory left by a crash mid-clone, and
-    remove it rather than adopting it as `ready`. A test plants such a directory, restarts, and asserts
-    the next `ensure` re-clones.
-  - S44.3 A lock refusal inside `ensure` returns `conflict`, not `store-failed` or `infrastructure`.
-  - S44.4 `isSafeToEvict` with `acrossAllGenerations: true` counts unsettled journal entries from every
-    generation of the declaration. With `false`, it counts only the stored row's generation. A test
-    with an unsettled entry on an earlier generation gets opposite answers for the two values.
-  - S44.5 No path returns `needs-attention` for a clone with no row and no directory.
-Out of scope: quarantining a corrupt tree instead of deleting it (#287, gated on `/design`), and
-generation high-water marks (#288, gated on `/contract`).
-
-## S45 — Composites keep what they did not merge
-
-Delivers: An operator whose pull request just merged keeps any local commits that never made it into
-the merge. A repository with an unreadable configuration is reported as a problem with that
-repository, not with the service. A credential the git host rejects is remembered as failing on every
-path.
-Touches: `src/composites/composites.ts`, `src/git/git-operations.ts`, `src/git/primitives.ts` (new),
-`src/exec/primitives.ts`, `src/host/host-operations.ts`.
-Depends on: none
-Closes: #61, #268, #271, #285
-Acceptance:
-  - S45.1 After a merge, the local branch is deleted only when its tip equals the merged pull request's
-    head commit, and never with a force flag. Otherwise the branch is kept, and the result reports that
-    no branch was deleted and why.
-  - S45.2 A test adds a local commit past the merged head and asserts the branch and commit survive.
-  - S45.3 Both composites return `precondition` with findings for an unparseable repository
-    configuration. The findings match what the direct git tools return for the same file.
-  - S45.4 An `auth-rejected` result from the host adapter calls `markFailing` for the credential, as the
-    git path does. A test asserts the mark is set after a host rejection.
-  - S45.5 `revParse`, `isAncestor` and `currentBranch` live in `src/git/primitives.ts`.
-    `composites.ts` and `git-operations.ts` call the shared versions and hold no private copies. The
-    existing normalisation holds: `null` on failure, and a boolean from the exit status.
-Out of scope: any rebase or force-delete path, which is blocked by the brief. Changing
-`reconcile_after_merge`'s public input.
+Seven slices: S46 to S48 and S50 to S52, appended 2026-09-25, and S53, appended 2026-09-28. The other
+forty-six are landed and indexed below.
 
 ## S46 — Every error names what actually happened
 
@@ -681,6 +631,8 @@ Bodies retired; the closed issue is the record. Criteria are not re-derived from
 | **S42** | Recovery never strands a clone, and never waits for a caller | [#310](../../issues/310), closed | S42.1–S42.7 | `8a89cf0` |
 | **S43** | Boot keeps its evidence, and its steps in order | [#311](../../issues/311), closed | S43.1–S43.4 | `8a89cf0` |
 | **S49** | A watcher's auto-merge only merges the commit it pushed | [#317](../../issues/317), closed | S49.1–S49.6 | `8a89cf0` |
+| **S44** | A clone on disk is exactly what it claims to be | [#312](../../issues/312), closed | S44.1–S44.5 | `8663eee` |
+| **S45** | Composites keep what they did not merge | [#313](../../issues/313), closed | S45.1–S45.5 | `8663eee` |
 
 Three rows carry a name this document changed after the issue was opened: #31 is titled "A dropped
 file becomes a pull request…" and #92 "A consumer can declare a safe content-drop protocol", both
