@@ -61,17 +61,37 @@ function stubDeclarations(active: { current: readonly Declaration[] }): Pick<Dec
  * needs-attention short-circuit never reaches `isClean` at all.
  */
 function stubCloneStore(
-  state: { current: CloneState; clean?: boolean; cleanError?: boolean },
+  state: { current: CloneState; clean?: boolean; cleanError?: boolean; describeError?: boolean; ensureError?: CloneStoreError; ensureCalls?: number; order?: string[] },
   calls?: { isClean: number },
   attentionLog?: { readonly declarationId: unknown; readonly reason: string }[],
-): Pick<CloneStore, 'describe' | 'isClean' | 'markAttention'> {
+): Pick<CloneStore, 'describe' | 'ensure' | 'isClean' | 'markAttention'> {
   return {
     async describe(declarationId) {
+      if (state.describeError) {
+        const error: CloneStoreError = { resultKind: 'infrastructure', retryable: false, code: 'recovery-pending', summary: 'stub: forced describe failure' };
+        return { ok: false, error };
+      }
       const clone: Clone = { declarationId, generation: 1 as never, state: state.current, path: 'unused' as never, sizeBytes: 0, lastOperationAt: null, observedRemote: null, attentionReason: null };
       return { ok: true, value: clone };
     },
+    async ensure(_declaration, _holder, _signal) {
+      state.ensureCalls = (state.ensureCalls ?? 0) + 1;
+      state.order?.push('ensure');
+      if (state.ensureError) return { ok: false, error: state.ensureError };
+      state.current = 'ready';
+      const clone: Clone = { declarationId: _declaration.id, generation: 1 as never, state: 'ready', path: 'unused' as never, sizeBytes: 0, lastOperationAt: null, observedRemote: null, attentionReason: null };
+      return {
+        ok: true,
+        value: {
+          clone,
+          materialisationLock: { holder: _holder, release() { state.order?.push('release-lock'); } },
+          activePin: { release() { state.order?.push('release-pin'); } },
+        } as never,
+      };
+    },
     async isClean(_declarationId) {
       if (calls) calls.isClean += 1;
+      state.order?.push('isClean');
       if (state.cleanError) {
         const error: CloneStoreError = { resultKind: 'precondition', retryable: false, code: 'corrupt-tree', summary: 'stub: forced isClean failure' };
         return { ok: false, error };
@@ -874,6 +894,146 @@ test('#78 — a clean-tree check that fails to observe (isClean returns an error
     assert.equal(reports[0]!.skipped, 'clone-not-clean');
     assert.equal(existsSync(path.join(root, 'post.md')), true, 'the file stays in the inbox');
     assert.equal(dispatchLog.length, 0, 'a failure to observe cleanliness makes no dispatch, git, or host call either');
+  });
+});
+
+for (const unmaterialised of ['absent', 'evicted'] as const) {
+  test(`S51.1 — a ${unmaterialised} clone is materialised on the first tick and a pull request is opened on that same tick`, async () => {
+    await withVolumeAsync(async (volume) => {
+      const root = inboxRoot(volume, 'repo-a');
+      mkdirSync(root, { recursive: true });
+      writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+
+      const order: string[] = [];
+      const cloneState = { current: unmaterialised as CloneState, order };
+      const dispatchLog: DispatchRequest[] = [];
+      const { deps } = baseDeps(volume, {
+        declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+        cloneStore: stubCloneStore(cloneState),
+        dispatch: scriptedDispatch(dispatchLog, successfulHandlers()),
+      });
+      const reports = await createWatcher(deps).tick();
+
+      assert.equal(reports[0]!.skipped, null);
+      assert.equal(reports[0]!.claimed, 'post.md');
+      assert.equal(reports[0]!.outcome?.kind, 'succeeded');
+      assert.equal(dispatchLog.some((request) => request.toolName === ('pr_open' as never)), true, 'a pull request is opened on the first tick');
+      assert.deepEqual(order, ['ensure', 'release-lock', 'release-pin', 'isClean'], 'materialised first, handle released, then the clean-tree gate on that same tick');
+      assert.equal(cloneState.current, 'ready');
+    });
+  });
+}
+
+test('S51.1 — an absent clone with nothing in the inbox is not cloned', async () => {
+  await withVolumeAsync(async (volume) => {
+    mkdirSync(inboxRoot(volume, 'repo-a'), { recursive: true });
+    const cloneState = { current: 'absent' as CloneState, ensureCalls: 0 };
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      cloneStore: stubCloneStore(cloneState),
+      dispatch: scriptedDispatch([], {}),
+    });
+    const reports = await createWatcher(deps).tick();
+    assert.equal(reports[0]!.skipped, null);
+    assert.equal(reports[0]!.claimed, null);
+    assert.equal(cloneState.ensureCalls, 0, 'first use is a dropped file, not a poll');
+  });
+});
+
+test('S51.1 — a clone that materialises dirty is still gated by isClean on that same tick', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+    const cloneState = { current: 'absent' as CloneState, clean: false, ensureCalls: 0 };
+    const dispatchLog: DispatchRequest[] = [];
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      cloneStore: stubCloneStore(cloneState),
+      dispatch: scriptedDispatch(dispatchLog, {}),
+    });
+    const reports = await createWatcher(deps).tick();
+    assert.equal(cloneState.ensureCalls, 1);
+    assert.equal(reports[0]!.skipped, 'clone-not-clean');
+    assert.equal(existsSync(path.join(root, 'post.md')), true);
+    assert.equal(dispatchLog.length, 0);
+  });
+});
+
+test('S51.2 — a dirty clone is reported clone-not-clean without materialising or observing it again', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+    const cloneState = { current: 'dirty' as CloneState, ensureCalls: 0 };
+    const dispatchLog: DispatchRequest[] = [];
+    const { deps } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      cloneStore: stubCloneStore(cloneState),
+      dispatch: scriptedDispatch(dispatchLog, {}),
+    });
+    const reports = await createWatcher(deps).tick();
+    assert.equal(reports[0]!.skipped, 'clone-not-clean');
+    assert.equal(cloneState.ensureCalls, 0);
+    assert.equal(existsSync(path.join(root, 'post.md')), true, 'the file stays in the inbox');
+    assert.equal(dispatchLog.length, 0);
+  });
+});
+
+test('S51.2 — only needs-attention is reported clone-needs-attention; a clone whose state cannot be read is not', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+
+    const cases: readonly { readonly label: string; readonly state: { current: CloneState; describeError?: boolean }; readonly expected: string }[] = [
+      { label: 'needs-attention', state: { current: 'needs-attention' }, expected: 'clone-needs-attention' },
+      { label: 'recovery-pending', state: { current: 'recovery-pending' }, expected: 'clone-not-clean' },
+      { label: 'describe failure', state: { current: 'ready', describeError: true }, expected: 'clone-not-clean' },
+    ];
+    for (const { label, state, expected } of cases) {
+      const { deps } = baseDeps(volume, {
+        declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+        cloneStore: stubCloneStore(state),
+        dispatch: scriptedDispatch([], {}),
+      });
+      const reports = await createWatcher(deps).tick();
+      assert.equal(reports[0]!.skipped, expected, label);
+      assert.equal(existsSync(path.join(root, 'post.md')), true, `${label}: the file stays in the inbox`);
+    }
+  });
+});
+
+test('S51.3 — a clone that fails to materialise is reported with its failure, not as clone-needs-attention, and the file stays in the inbox', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+
+    const ensureError: CloneStoreError = { resultKind: 'upstream', retryable: false, code: 'clone-timeout', limitSeconds: 60, summary: "clone of 'repo-a' exceeded its 60s cap" };
+    const cloneState = { current: 'absent' as CloneState, ensureError, ensureCalls: 0 };
+    const dispatchLog: DispatchRequest[] = [];
+    const { deps, auditLog, notifications } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      cloneStore: stubCloneStore(cloneState),
+      dispatch: scriptedDispatch(dispatchLog, {}),
+    });
+    const reports = await createWatcher(deps).tick();
+
+    assert.notEqual(reports[0]!.skipped, 'clone-needs-attention');
+    assert.equal(reports[0]!.skipped, null);
+    assert.equal(reports[0]!.claimed, null);
+    assert.equal(reports[0]!.outcome?.kind, 'rejected');
+    if (reports[0]!.outcome?.kind === 'rejected') {
+      assert.equal(reports[0]!.outcome.step, 'clone');
+      assert.equal(reports[0]!.outcome.result, 'upstream');
+      assert.match(reports[0]!.outcome.reason, /exceeded its 60s cap/);
+    }
+    assert.equal(existsSync(path.join(root, 'post.md')), true, 'the file stays in the inbox');
+    assert.equal(dispatchLog.length, 0);
+    assert.equal(auditLog.length, 1, 'the failure is audited');
+    assert.equal(notifications.length, 1, 'and the operator is told');
+    assert.equal(notifications[0]!.severity, 'attention');
   });
 });
 

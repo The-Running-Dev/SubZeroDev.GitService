@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, utimesSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { err, ok, type Outcome } from '../shared/outcome.ts';
-import { gitSha, watchedFileName, type DeclarationId, type WatchedFileName, type GitSha, type IsoUtcTimestamp, type RegistryToolName, type SessionId, type Subject } from '../shared/brands.ts';
+import { gitSha, watchedFileName, type DeclarationId, type WatchedFileName, type GitSha, type IsoUtcTimestamp, type OperationId, type RegistryToolName, type SessionId, type Subject } from '../shared/brands.ts';
 import type { ActorRef } from '../shared/actor.ts';
 import type { Session } from '../shared/session.ts';
 import type { Clock } from '../clock/clock.ts';
@@ -10,6 +10,7 @@ import type { Dispatch } from '../dispatch/dispatch-pipeline.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import type { Declaration } from '../declarations/types.ts';
 import type { CloneStore } from '../clone/clone-store.ts';
+import type { CloneStoreError } from '../clone/errors.ts';
 import type { Audit } from '../audit/audit.ts';
 import type { PullRequestRef, WatchedFileOutcome } from '../audit/types.ts';
 import type { Notifier } from '../notifier/notifier.ts';
@@ -45,7 +46,7 @@ export interface WatcherDependencies {
   readonly clock: Clock;
   readonly dispatch: Dispatch;
   readonly declarations: Pick<Declarations, 'list'>;
-  readonly cloneStore: Pick<CloneStore, 'describe' | 'isClean' | 'markAttention'>;
+  readonly cloneStore: Pick<CloneStore, 'describe' | 'ensure' | 'isClean' | 'markAttention'>;
   readonly audit: Pick<Audit, 'append'>;
   readonly notifier: Pick<Notifier, 'enqueue'>;
   readonly store: Pick<StructuredStore, 'transaction'>;
@@ -163,7 +164,9 @@ function readStrictUtf8(fullPath: string): { readonly ok: true; readonly value: 
  * through `dispatch`, so this module imports neither `GitOperations` nor
  * `HostAdapter`. `CloneStore.describe` and `CloneStore.isClean` are the two
  * exceptions, and both are read directly rather than through `dispatch`
- * (issue #78): distinguishing `clone-not-clean` from `clone-needs-attention`
+ * (issue #78); `CloneStore.ensure` is the third, called only to materialise
+ * an `absent` or `evicted` clone on first use (S51). Distinguishing
+ * `clone-not-clean` from `clone-needs-attention`
  * (`WatchTickReport.skipped`) needs the clone's own lifecycle state, which a
  * `repo_status` read cannot report, and the clean-tree gate itself must
  * observe Git at the moment of the call rather than trust that lifecycle
@@ -707,6 +710,20 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     return { reconciled, stillPending };
   }
 
+  /**
+   * S51: the same `CloneStore.ensure` every other first use goes through. The handle is released at
+   * once — the clean-tree gate and the protocol's dispatched calls each take what they need, and the
+   * watcher holds nothing across them (invariant C3, as a read does).
+   */
+  async function materialiseClone(declaration: Declaration): Promise<Outcome<void, CloneStoreError>> {
+    const holder = { operationId: randomUUID() as OperationId, declarationId: declaration.id, tool: 'file-watcher' as RegistryToolName, heldSince: clock.now() };
+    const ensured = await cloneStore.ensure(declaration, holder, new AbortController().signal);
+    if (!ensured.ok) return ensured;
+    ensured.value.materialisationLock.release();
+    ensured.value.activePin.release();
+    return ok(undefined);
+  }
+
   async function tickOneDeclaration(declaration: Declaration): Promise<WatchTickReport> {
     const session = watcherSessionFor(declaration);
 
@@ -722,12 +739,31 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     const { reconciled, stillPending } = await reconcilePendingPullRequests(declaration, session);
 
     const described = await cloneStore.describe(declaration.id);
-    if (!described.ok || described.value.state !== 'ready') {
-      // Any non-`ready` clone state (`absent`, `materialising`, `dirty`,
-      // `recovery-pending`, `evicted`, `needs-attention`) is reported as
-      // `clone-needs-attention` here — a not-yet-materialised or otherwise
-      // non-ready clone has no tree for `isClean` to observe.
+    const cloneState = described.ok ? described.value.state : null;
+    // S51: only a clone genuinely parked is a mark to clear. A clone whose state cannot be read, or
+    // that waits on recovery, has no tree the gate can vouch for — "a failure to observe is not a clean
+    // tree either", the same fold `isClean` below gets.
+    if (cloneState === 'needs-attention') {
       return emptyReport(declaration.id, 'clone-needs-attention', reconciled, stillPending);
+    }
+    if (cloneState === null || cloneState === 'dirty' || cloneState === 'recovery-pending') {
+      return emptyReport(declaration.id, 'clone-not-clean', reconciled, stillPending);
+    }
+
+    let candidate: WatchedFileName | null = null;
+    if (cloneState !== 'ready') {
+      // `absent`, `evicted`, `materialising`: servable on first use (`10-design.md` § Servability of an
+      // unmaterialised declaration, D15). First use is a dropped file, so a poll over an empty inbox
+      // clones nothing.
+      candidate = pickCandidate(declaration.id);
+      if (candidate === null) return emptyReport(declaration.id, null, reconciled, stillPending);
+      const materialised = await materialiseClone(declaration);
+      if (!materialised.ok) {
+        // S51.3: told, not parked. The file stays in the inbox, so the next tick retries it.
+        const outcome = rejectedOutcome('clone', materialised.error.resultKind, materialised.error.summary);
+        await auditAndNotify(declaration.id, declaration.generation, session.actorRef, 'normal', candidate, outcome);
+        return { declarationId: declaration.id, skipped: null, claimed: null, outcome, reconciled, stillPending };
+      }
     }
 
     // `20-contract.md` § L2 — watcher: "the clean-tree gate is
@@ -740,7 +776,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
       return emptyReport(declaration.id, 'clone-not-clean', reconciled, stillPending);
     }
 
-    const candidate = pickCandidate(declaration.id);
+    candidate ??= pickCandidate(declaration.id);
     if (candidate === null) return emptyReport(declaration.id, null, reconciled, stillPending);
 
     const claimed = claim(declaration.id, candidate);
