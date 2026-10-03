@@ -2708,7 +2708,7 @@ type DeclarationError = ModuleErrorBase & (
 | `adoption-refused` | Re-declaring an id whose orphaned clone is not clean, across every generation | no | `precondition` naming the blockers. The exit is to push the work, then `clone.remove` |
 | `remote-mismatch` | The orphaned clone points at a different remote | no | `precondition`. Never repoint an existing checkout |
 | `clone-still-present` | `declaration.remove` while a clone remains | no | `precondition` naming `clone.remove` |
-| `watcher-directory-not-empty` | `declaration.remove` while the inbox holds files | no | `precondition` |
+| `watcher-directory-not-empty` | `declaration.remove` while the inbox holds files or the pending pull-request list holds an entry; `files` counts both | no | `precondition` |
 | `not-orphaned` | `declaration.remove` on an `active` declaration | no | `precondition` |
 | `store-failed` | The underlying write failed | only if the cause is | `infrastructure`, after the store's own bounded retry |
 

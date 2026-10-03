@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, utimesSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { err, ok, type Outcome } from '../shared/outcome.ts';
-import { gitSha, watchedFileName, type DeclarationId, type GitSha, type IsoUtcTimestamp, type RegistryToolName, type SessionId, type Subject } from '../shared/brands.ts';
+import { gitSha, watchedFileName, type DeclarationId, type WatchedFileName, type GitSha, type IsoUtcTimestamp, type RegistryToolName, type SessionId, type Subject } from '../shared/brands.ts';
 import type { ActorRef } from '../shared/actor.ts';
 import type { Session } from '../shared/session.ts';
 import type { Clock } from '../clock/clock.ts';
@@ -96,8 +96,24 @@ function mismatchReason(observation: 'after-apply' | 'after-stage', declared: re
 
 type StateDirectory = 'processing' | 'processed' | 'failed';
 
-/** A terminal move's result: refusing a tampered directory is data, never a throw (D18). */
-type MoveResult = { readonly moved: true } | { readonly moved: false; readonly refused: StateDirectory };
+/**
+ * A terminal move's result: refusing a tampered directory is data, never a throw (D18),
+ * and a filesystem error during the move is data too (S50.1), so neither escapes the tick unrecorded.
+ */
+type MoveFailure =
+  | { readonly directory: StateDirectory; readonly cause: 'refused' }
+  | { readonly directory: StateDirectory; readonly cause: 'error'; readonly message: string };
+type MoveResult = { readonly moved: true } | { readonly moved: false; readonly failure: MoveFailure };
+
+function describeMoveFailure(failure: MoveFailure): string {
+  return failure.cause === 'refused'
+    ? `'${failure.directory}/' is not a real directory, so the file stays in 'processing/' (D18)`
+    : `the move into '${failure.directory}/' failed (${failure.message}), so the file may remain in 'processing/' (D8)`;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 /**
  * `20-contract.md` § L2 — watcher, D18: `processing/`, `processed/`, and
@@ -224,10 +240,12 @@ function readPushedHeadSha(value: JsonValue | undefined): GitSha | null {
 }
 
 /** `pr_status`'s `state` and `headSha` — the only two the reconciliation reads. */
-function readPullRequestState(value: JsonValue | undefined): { readonly state: string; readonly headSha: string } | null {
+function readPullRequestState(value: JsonValue | undefined): { readonly state: string; readonly headSha: string; readonly ref: PullRequestRef } | null {
   const status = asRecord(asRecord(value)?.status);
   if (status === null || typeof status.state !== 'string' || typeof status.headSha !== 'string') return null;
-  return { state: status.state, headSha: status.headSha };
+  const ref = readPullRequestRef(status);
+  if (ref === null) return null;
+  return { state: status.state, headSha: status.headSha, ref };
 }
 
 export function createWatcher(deps: WatcherDependencies): Watcher {
@@ -292,6 +310,12 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     });
   }
 
+  /** What `runProtocol` learned that its `WatchedFileOutcome` has no room for. */
+  interface ProtocolProgress {
+    headSha: GitSha | null;
+    autoMergeFailure: { readonly result: ResultKind; readonly reason: string } | null;
+  }
+
   /**
    * The full per-file protocol `20-contract.md` § L2 — watcher fixes: the
    * declaration-selected plan tool, `prepare_branch`, the declaration-selected
@@ -301,7 +325,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
    * independently with no outer lock, per the design's own "the composite is
    * not wrapped in an outer lock".
    */
-  async function runProtocol(declaration: Declaration, session: Session, file: string, content: string, pushed: { headSha: GitSha | null }): Promise<WatchedFileOutcome> {
+  async function runProtocol(declaration: Declaration, session: Session, file: string, content: string, progress: ProtocolProgress): Promise<WatchedFileOutcome> {
     const fw = declaration.fileWatcher;
     if (fw === null) {
       // Unreachable in practice: `tick` only selects declarations from
@@ -356,7 +380,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     // D20: no valid pushed head, no pull request — nothing reaches the host.
     const pushedHeadSha = readPushedHeadSha(pushResult.data);
     if (pushedHeadSha === null) return rejectedOutcome('git_push', 'infrastructure', 'the push result did not carry a valid headSha, so auto-merge and reconciliation cannot be pinned to the pushed commit');
-    pushed.headSha = pushedHeadSha;
+    progress.headSha = pushedHeadSha;
 
     const prOpened = await callTool(
       'pr_open',
@@ -369,13 +393,19 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     if (prRef === null) return rejectedOutcome('pr_open', 'infrastructure', 'the pull request was opened but its ref was unreadable, so the file cannot be recorded as delivered');
 
     if (fw.autoMerge) {
-      // Best-effort: the pull request is already open, which is the point at
-      // which the design calls the file delivered (`10-design.md` §
-      // "the unattended pull request is followed to its end" — "a local
-      // commit nobody is told about is not delivery", not "an
-      // auto-merge-enabled pull request"). A failed enable-call must not
-      // relabel an already-delivered file as failed; it is not retried here.
-      await callTool('pr_enable_auto_merge', { number: prRef.number, expectedHeadSha: pushedHeadSha as string }, declaration, session);
+      // The pull request is already open, which is the point at which the
+      // design calls the file delivered (`10-design.md` § "the unattended pull
+      // request is followed to its end" — "a local commit nobody is told
+      // about is not delivery", not "an auto-merge-enabled pull request"). A
+      // failed enable-call must not relabel an already-delivered file as
+      // failed and is not retried here, but it is recorded for the caller to
+      // audit and notify (S50.3), naming the pull request that stays open.
+      try {
+        const enabled = await callTool('pr_enable_auto_merge', { number: prRef.number, expectedHeadSha: pushedHeadSha as string }, declaration, session);
+        if (!enabled.ok) progress.autoMergeFailure = { result: enabled.kind, reason: enabled.summary };
+      } catch (error) {
+        progress.autoMergeFailure = { result: 'infrastructure', reason: errorMessage(error) };
+      }
     }
 
     return { kind: 'succeeded', pullRequest: prRef };
@@ -386,9 +416,9 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     generation: Declaration['generation'] | null,
     actorRef: ActorRef,
     context: OperationContextKind,
-    file: string,
+    file: WatchedFileName,
     outcome: WatchedFileOutcome,
-    refused: StateDirectory | null = null,
+    moveFailure: MoveFailure | null = null,
   ): Promise<void> {
     await audit.append({
       at: clock.now(),
@@ -399,21 +429,21 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
       actorRef,
       context,
       form: 'file-watcher',
-      file: file as never,
+      file,
       outcome,
     });
 
-    // D18: a refused terminal move keeps the protocol's own audit outcome above and adds a page naming the directory.
-    if (outcome.kind === 'succeeded' && refused === null) return;
+    // D18, S50.1: a failed terminal move keeps the protocol's own audit outcome above and adds a page naming the directory.
+    if (outcome.kind === 'succeeded' && moveFailure === null) return;
     const outcomeReason =
       outcome.kind === 'succeeded' ? `pull request #${outcome.pullRequest.number} was opened` : outcome.kind === 'rejected' ? `step '${outcome.step}' returned ${outcome.result}: ${outcome.reason}` : outcome.reason;
-    const reason = refused === null ? outcomeReason : `${outcomeReason}; '${refused}/' is not a real directory, so the file stays in 'processing/' (D18)`;
+    const reason = moveFailure === null ? outcomeReason : `${outcomeReason}; ${describeMoveFailure(moveFailure)}`;
     const notified = await store.transaction(async (tx: StoreTransaction) => {
       notifier.enqueue(
         {
           severity: 'attention',
           declarationId,
-          subject: { kind: 'file-watcher-failed', file: file as never, reason },
+          subject: { kind: 'file-watcher-failed', file, reason },
           summary: `watched file '${file}' failed for declaration '${declarationId}': ${reason}`,
         },
         tx,
@@ -498,32 +528,40 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
 
   function moveToFailed(declarationId: DeclarationId, sourcePath: string, file: string, reasonText: string): MoveResult {
     const failedDir = failedDirFor(declarationId);
-    if (isTamperedStateDir(failedDir)) return { moved: false, refused: 'failed' };
-    mkdirSync(failedDir, { recursive: true, mode: PROTECTED_DIR_MODE });
-    const failedName = uniqueTerminalName(failedDir, timestampPrefix(clock.now()), file);
-    renameSync(sourcePath, path.join(failedDir, failedName));
-    writeFileSync(path.join(failedDir, `${failedName}.error.txt`), reasonText, 'utf8');
-    return { moved: true };
+    if (isTamperedStateDir(failedDir)) return { moved: false, failure: { directory: 'failed', cause: 'refused' } };
+    try {
+      mkdirSync(failedDir, { recursive: true, mode: PROTECTED_DIR_MODE });
+      const failedName = uniqueTerminalName(failedDir, timestampPrefix(clock.now()), file);
+      renameSync(sourcePath, path.join(failedDir, failedName));
+      writeFileSync(path.join(failedDir, `${failedName}.error.txt`), reasonText, 'utf8');
+      return { moved: true };
+    } catch (error) {
+      return { moved: false, failure: { directory: 'failed', cause: 'error', message: errorMessage(error) } };
+    }
   }
 
   function moveToProcessed(declarationId: DeclarationId, sourcePath: string, file: string): MoveResult {
     const processedDir = processedDirFor(declarationId);
-    if (isTamperedStateDir(processedDir)) return { moved: false, refused: 'processed' };
-    mkdirSync(processedDir, { recursive: true, mode: PROTECTED_DIR_MODE });
-    const target = path.join(processedDir, uniqueTerminalName(processedDir, timestampPrefix(clock.now()), file));
-    renameSync(sourcePath, target);
-    // `renameSync` never updates mtime, and `runRetention` ages files in
-    // `processed/` off their mtime — left alone, a file that sat unclaimed in
-    // the inbox for close to `processedFileDays` would carry that original
-    // drop-time mtime through delivery and become eligible for deletion right
-    // after landing here.
-    const deliveredAt = new Date(clock.now());
-    utimesSync(target, deliveredAt, deliveredAt);
-    return { moved: true };
+    if (isTamperedStateDir(processedDir)) return { moved: false, failure: { directory: 'processed', cause: 'refused' } };
+    try {
+      mkdirSync(processedDir, { recursive: true, mode: PROTECTED_DIR_MODE });
+      const target = path.join(processedDir, uniqueTerminalName(processedDir, timestampPrefix(clock.now()), file));
+      renameSync(sourcePath, target);
+      // `renameSync` never updates mtime, and `runRetention` ages files in
+      // `processed/` off their mtime — left alone, a file that sat unclaimed in
+      // the inbox for close to `processedFileDays` would carry that original
+      // drop-time mtime through delivery and become eligible for deletion right
+      // after landing here.
+      const deliveredAt = new Date(clock.now());
+      utimesSync(target, deliveredAt, deliveredAt);
+      return { moved: true };
+    } catch (error) {
+      return { moved: false, failure: { directory: 'processed', cause: 'error', message: errorMessage(error) } };
+    }
   }
 
   /** The candidate the next claim should try, or null when the inbox holds no eligible file — a symlink (S17.4) or a subdirectory never qualifies. */
-  function pickCandidate(declarationId: DeclarationId): string | null {
+  function pickCandidate(declarationId: DeclarationId): WatchedFileName | null {
     const root = inboxRootFor(declarationId);
     if (!existsSync(root)) return null;
     const names = readdirSync(root)
@@ -540,7 +578,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
       if (stat.isSymbolicLink() || !stat.isFile()) continue;
       const validated = watchedFileName(name);
       if (!validated.ok) continue;
-      return name;
+      return validated.value;
     }
     return null;
   }
@@ -567,6 +605,26 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     return { declarationId, skipped, claimed: null, outcome: null, reconciled, stillPending };
   }
 
+  /** S50.4: one `reconcile_after_merge` attempt for a pull request reported merged; the normal outcome is audited, a failure audited and notified at `attention`. */
+  async function reconcileMerged(declaration: Declaration, session: Session, entry: PendingPullRequest, ref: PullRequestRef): Promise<void> {
+    let failure: { readonly result: ResultKind; readonly reason: string } | null = null;
+    try {
+      const result = await callTool('reconcile_after_merge', { pullRequestNumber: entry.number, expectedHeadSha: entry.headSha as string }, declaration, session);
+      if (!result.ok) failure = { result: result.kind, reason: result.summary };
+    } catch (error) {
+      failure = { result: 'infrastructure', reason: errorMessage(error) };
+    }
+    const outcome: WatchedFileOutcome =
+      failure === null
+        ? { kind: 'succeeded', pullRequest: ref }
+        : rejectedOutcome(
+            'reconcile_after_merge',
+            failure.result,
+            `pull request #${entry.number} on branch '${entry.branch}' merged at pushed head ${entry.headSha as string}, but reconciling the clone failed: ${failure.reason}`,
+          );
+    await auditAndNotify(declaration.id, declaration.generation, session.actorRef, 'normal', entry.sourceFile, outcome);
+  }
+
   /**
    * `20-contract.md` § L2 — watcher, `PendingPullRequestList`, and `30-slices.md`
    * § S24. "Each tick re-reads host state" (S24.2) — independent of the
@@ -578,7 +636,9 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
    * fails — never retried, per S24.2's own text. Both dispatch calls go
    * through the ordinary pipeline, which already audits the call and, for a
    * timeout, parks and later notifies via boot recovery (`10-design.md` §
-   * control flow #1) — no separate audit or notification is added here.
+   * control flow #1). On top of that, S50.4 audits the file's terminal
+   * outcome once a merged pull request is reconciled, and tells the operator
+   * when that reconciliation failed.
    *
    * The list is written after **each** entry is resolved, not once after the
    * whole loop: a process killed mid-tick — the same event
@@ -603,7 +663,17 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
 
     for (let index = 0; index < list.entries.length; index += 1) {
       const entry = list.entries[index]!;
-      const statusResult = await callTool('pr_status', { number: entry.number }, declaration, session);
+      let statusResult: ToolResult<JsonValue>;
+      try {
+        statusResult = await callTool('pr_status', { number: entry.number }, declaration, session);
+      } catch (error) {
+        // S50.2: an exception while following a pull request is attributed to the file that opened it; the entry stays pending.
+        const reason = `pull request #${entry.number} on branch '${entry.branch}' could not be followed: ${errorMessage(error)}`;
+        await auditAndNotify(declaration.id, declaration.generation, session.actorRef, 'normal', entry.sourceFile, rejectedOutcome('pr_status', 'infrastructure', reason));
+        stillPending.push(entry);
+        writePendingPullRequests(volumeRoot, declaration.id, { entries: [...stillPending, ...list.entries.slice(index + 1)] });
+        continue;
+      }
       const statusData = statusResult.ok ? readPullRequestState(statusResult.data) : null;
 
       if (!statusResult.ok || statusData === null) {
@@ -624,7 +694,9 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
         } else if (statusData.state === 'closed') {
           // Removed without reconciliation (S24.2) — neither list.
         } else {
-          await callTool('reconcile_after_merge', { pullRequestNumber: entry.number, expectedHeadSha: entry.headSha as string }, declaration, session);
+          // S50.4: the record leaves the list after this one attempt whatever it returns — the write
+          // below runs on every path out of here — so a failure is told rather than retried forever.
+          await reconcileMerged(declaration, session, entry, statusData.ref);
           reconciled.push(entry);
         }
       }
@@ -686,40 +758,61 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     }
 
     const processingPath = path.join(processingDirFor(declaration.id), candidate);
-    const read = readStrictUtf8(processingPath);
-    const pushed: { headSha: GitSha | null } = { headSha: null };
+    const progress: ProtocolProgress = { headSha: null, autoMergeFailure: null };
     let outcome: WatchedFileOutcome;
-    if (!read.ok) {
-      outcome = rejectedOutcome('read', 'validation', 'the claimed file is not readable as strict UTF-8');
-    } else {
-      outcome = await runProtocol(declaration, session, candidate, read.value, pushed);
+    let moveFailure: MoveFailure | null = null;
+    try {
+      const read = readStrictUtf8(processingPath);
+      if (!read.ok) {
+        outcome = rejectedOutcome('read', 'validation', 'the claimed file is not readable as strict UTF-8');
+      } else {
+        outcome = await runProtocol(declaration, session, candidate, read.value, progress);
+      }
+
+      if (outcome.kind === 'succeeded') {
+        // D19: the pull request is recorded before the terminal move is attempted, so a
+        // refused or failed move can never leave an open pull request nobody follows.
+        const pending = readPendingPullRequests(volumeRoot, declaration.id);
+        const entry: PendingPullRequest = {
+          declarationId: declaration.id,
+          number: outcome.pullRequest.number,
+          branch: outcome.pullRequest.branch,
+          openedAt: clock.now(),
+          sourceFile: candidate,
+          headSha: progress.headSha as GitSha, // runProtocol only succeeds after recording it (D20)
+        };
+        writePendingPullRequests(volumeRoot, declaration.id, { entries: [...pending.entries, entry] });
+        const moved = moveToProcessed(declaration.id, processingPath, candidate);
+        if (!moved.moved) moveFailure = moved.failure;
+      } else {
+        const reasonText = outcome.kind === 'rejected' ? `step '${outcome.step}' returned ${outcome.result}: ${outcome.reason}` : outcome.reason;
+        const moved = moveToFailed(declaration.id, processingPath, candidate, reasonText);
+        if (!moved.moved) moveFailure = moved.failure;
+      }
+    } catch (error) {
+      // S50.2: an exception after the claim is recorded against the claimed file. The file stays in
+      // 'processing/' — what the protocol did before throwing is unknown — and D8 moves it at the next start.
+      outcome = rejectedOutcome('tick', 'infrastructure', `the tick threw while delivering the file, which stays in 'processing/': ${errorMessage(error)}`);
     }
 
-    let refused: StateDirectory | null = null;
-    if (outcome.kind === 'succeeded') {
-      // D19: the pull request is recorded before the terminal move is attempted, so a
-      // refused or failed move can never leave an open pull request nobody follows.
-      const pending = readPendingPullRequests(volumeRoot, declaration.id);
-      const entry: PendingPullRequest = {
-        declarationId: declaration.id,
-        number: outcome.pullRequest.number,
-        branch: outcome.pullRequest.branch,
-        openedAt: clock.now(),
-        sourceFile: candidate as never,
-        headSha: pushed.headSha as GitSha, // runProtocol only succeeds after recording it (D20)
-      };
-      writePendingPullRequests(volumeRoot, declaration.id, { entries: [...pending.entries, entry] });
-      const moved = moveToProcessed(declaration.id, processingPath, candidate);
-      if (!moved.moved) refused = moved.refused;
-    } else {
-      const reasonText = outcome.kind === 'rejected' ? `step '${outcome.step}' returned ${outcome.result}: ${outcome.reason}` : outcome.reason;
-      const moved = moveToFailed(declaration.id, processingPath, candidate, reasonText);
-      if (!moved.moved) refused = moved.refused;
+    await auditAndNotify(declaration.id, declaration.generation, session.actorRef, 'normal', candidate, outcome, moveFailure);
+    if (progress.autoMergeFailure !== null && outcome.kind === 'succeeded') {
+      // S50.3: the file is delivered and stays where it moved to; the open pull request is what the operator is told about.
+      await auditAndNotify(
+        declaration.id,
+        declaration.generation,
+        session.actorRef,
+        'normal',
+        candidate,
+        rejectedOutcome(
+          'pr_enable_auto_merge',
+          progress.autoMergeFailure.result,
+          `pull request #${outcome.pullRequest.number} (${outcome.pullRequest.url as string}) is open but auto-merge could not be enabled: ${progress.autoMergeFailure.reason}`,
+        ),
+      );
     }
 
-    await auditAndNotify(declaration.id, declaration.generation, session.actorRef, 'normal', candidate, outcome, refused);
-
-    return { declarationId: declaration.id, skipped: null, claimed: candidate as never, outcome, reconciled, stillPending };
+    return { declarationId: declaration.id, skipped: null, claimed: candidate, outcome, reconciled, stillPending };
   }
 
   return {
@@ -810,8 +903,14 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
             "found in 'processing/' at startup — a prior run was interrupted mid-delivery and this file may already have an open pull request; it is never reprocessed";
           const outcome: WatchedFileOutcome = { kind: 'interrupted-claim', reason };
           const moved = moveToFailed(declarationId, full, fileEntry, reason);
-          await auditAndNotify(declarationId, null, RECOVERY_ACTOR_REF, 'recovery', fileEntry, outcome, moved.moved ? null : moved.refused);
-          reports.push({ declarationId, skipped: null, claimed: fileEntry as never, outcome, reconciled: [], stillPending: [] });
+          const name = watchedFileName(fileEntry);
+          if (!name.ok) {
+            // Only a name this watcher did not claim fails the check; no WatchedFileName exists to record it under.
+            console.error(`watcher: '${fileEntry}' in processing/ for declaration '${declarationId}' is not a valid watched file name; it was moved without an audit record`);
+            continue;
+          }
+          await auditAndNotify(declarationId, null, RECOVERY_ACTOR_REF, 'recovery', name.value, outcome, moved.moved ? null : moved.failure);
+          reports.push({ declarationId, skipped: null, claimed: name.value, outcome, reconciled: [], stillPending: [] });
         }
       }
 

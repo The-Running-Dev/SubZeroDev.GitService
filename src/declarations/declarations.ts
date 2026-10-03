@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { applyStoreBusyTimeout } from '../shared/store-busy.ts';
@@ -244,6 +244,21 @@ function clearPendingPullRequests(volumeRoot: string, id: DeclarationId): void {
     unlinkSync(full);
   } catch {
     // Nothing to clear — the common case.
+  }
+}
+
+/**
+ * S50.6: how many pull requests the watcher is still following for `id`, read from the
+ * same inlined path as `clearPendingPullRequests`. An absent, empty or unparseable list
+ * counts as zero (`20-contract.md` § Files on the volume: a bad read is empty, never thrown).
+ */
+function countPendingPullRequests(volumeRoot: string, id: DeclarationId): number {
+  const full = path.join(volumeRoot, 'watcher-pending-pull-requests', `${id as string}.json`);
+  try {
+    const parsed = JSON.parse(readFileSync(full, 'utf8')) as { entries?: unknown } | null;
+    return parsed !== null && Array.isArray(parsed.entries) ? parsed.entries.length : 0;
+  } catch {
+    return 0;
   }
 }
 
@@ -694,11 +709,15 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
       // path convention (`inboxRootFor`), inlined here rather than imported
       // because Declarations is L1 and Watcher is L2 — dependencies point
       // downward only (`10-design.md` § Module boundaries). The pending
-      // pull-request list lives outside that tree (`pending-pull-requests.ts`)
-      // precisely so an empty list never counts as "holds anything" here.
-      const watcherFileCount = countFiles(path.join(volumeRoot, 'watcher-inboxes', id));
+      // pull-request list lives outside that tree (`pending-pull-requests.ts`), so an
+      // empty list never counts as "holds anything" — but each entry in it is a pull
+      // request the watcher is still following, and removal would discard it (S50.6).
+      const inboxFileCount = countFiles(path.join(volumeRoot, 'watcher-inboxes', id));
+      const pendingCount = countPendingPullRequests(volumeRoot, id);
+      const watcherFileCount = inboxFileCount + pendingCount;
       if (watcherFileCount > 0) {
-        return err(declarationError({ code: 'watcher-directory-not-empty', files: watcherFileCount }, `the file-watcher directory for '${id}' still holds ${watcherFileCount} file(s)`));
+        const held = [inboxFileCount > 0 ? `${inboxFileCount} file(s) in the file-watcher directory` : null, pendingCount > 0 ? `${pendingCount} pull request(s) in its pending list` : null].filter((part) => part !== null).join(' and ');
+        return err(declarationError({ code: 'watcher-directory-not-empty', files: watcherFileCount }, `the watcher for '${id}' still holds ${held}`));
       }
 
       const deleted = withDb(volumeRoot, (db) => {

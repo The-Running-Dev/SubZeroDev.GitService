@@ -1445,13 +1445,13 @@ test('S24.2 — an entry resolved earlier in a tick is durably removed even when
       }),
     });
 
-    await assert.rejects(() => createWatcher(deps).tick());
+    await createWatcher(deps).tick();
 
     const remaining = readPendingPullRequests(volume, 'repo-a' as never);
     assert.deepEqual(
       remaining.entries.map((e) => e.number),
       [11],
-      'entry 10 was already resolved (closed, removed) and persisted before entry 11 threw',
+      'entry 10 was already resolved (closed, removed) and persisted before entry 11 threw; entry 11 stays pending',
     );
   });
 });
@@ -1655,4 +1655,208 @@ test('S49.2 — an invalid pending entry is discarded with no dispatch and paged
     await watcher.tick();
     assert.equal(notifications.length, 2, 'paged once, not per tick');
   });
+});
+
+// ---- S50 — every watcher outcome is audited, and every failure is told ----
+
+test('S50.1 — a terminal move into processed/ that throws is audited and notified at attention, and the tick still returns its report', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+
+    const handlers = successfulHandlers();
+    const realPrOpen = handlers.pr_open!;
+    handlers.pr_open = (req) => {
+      rmSync(path.join(root, 'processing', 'post.md')); // the rename source vanishes, so the move throws
+      return realPrOpen(req);
+    };
+    const { deps, auditLog, notifications } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch([], handlers),
+    });
+    const reports = await createWatcher(deps).tick();
+
+    assert.equal(reports[0]!.outcome?.kind, 'succeeded');
+    assert.deepEqual(watcherOutcomeKinds(auditLog), ['succeeded']);
+    const failures = failurePages(notifications);
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0]!.severity, 'attention');
+    assert.match(pageReason(failures[0]!), /the move into 'processed\/' failed/);
+    assert.equal(readPendingPullRequests(volume, 'repo-a' as never).entries.length, 1, 'D19: the pull request is still followed');
+  });
+});
+
+test('S50.1 — a terminal move into failed/ that throws is audited and notified at attention, naming failed/', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+
+    const handlers = handlersUpTo('plan_tool', upstream('remote rejected', null) as unknown as ToolResult<never>);
+    const failing = handlers.plan_tool!;
+    handlers.plan_tool = (req) => {
+      rmSync(path.join(root, 'processing', 'post.md'));
+      return failing(req);
+    };
+    const { deps, auditLog, notifications } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch([], handlers),
+    });
+    const reports = await createWatcher(deps).tick();
+
+    assert.equal(reports[0]!.outcome?.kind, 'rejected');
+    assert.deepEqual(watcherOutcomeKinds(auditLog), ['rejected']);
+    const failures = failurePages(notifications);
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0]!.severity, 'attention');
+    assert.match(pageReason(failures[0]!), /the move into 'failed\/' failed/);
+  });
+});
+
+test('S50.2 — an exception thrown mid-protocol is audited and notified at attention, the file stays in processing/, and the tick resolves', async () => {
+  await withVolumeAsync(async (volume) => {
+    const root = inboxRoot(volume, 'repo-a');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+
+    const handlers = successfulHandlers();
+    handlers.git_commit = () => {
+      throw new Error('simulated disk failure');
+    };
+    const { deps, auditLog, notifications } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch([], handlers),
+    });
+    const reports = await createWatcher(deps).tick();
+
+    assert.equal(reports[0]!.claimed, 'post.md');
+    assert.equal(reports[0]!.outcome?.kind, 'rejected');
+    assert.deepEqual(watcherOutcomeKinds(auditLog), ['rejected']);
+    const failures = failurePages(notifications);
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0]!.severity, 'attention');
+    assert.match(pageReason(failures[0]!), /simulated disk failure/);
+    assert.equal(existsSync(path.join(root, 'processing', 'post.md')), true, 'what the protocol did before throwing is unknown, so D8 moves the file at the next start');
+  });
+});
+
+test('S50.2 — an exception while following a pending pull request is audited and notified against the file that opened it, and the entry stays pending', async () => {
+  await withVolumeAsync(async (volume) => {
+    writePendingPullRequests(volume, 'repo-a' as never, { entries: [pendingEntry({ number: 11 })] });
+    const { deps, auditLog, notifications } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch([], {
+        repo_status: () => repoStatus(false),
+        pr_status: () => {
+          throw new Error('simulated crash mid-tick');
+        },
+      }),
+    });
+    const reports = await createWatcher(deps).tick();
+
+    assert.deepEqual(reports[0]!.stillPending.map((e) => e.number), [11]);
+    assert.deepEqual(watcherOutcomeKinds(auditLog), ['rejected']);
+    const failures = failurePages(notifications);
+    assert.equal(failures.length, 1);
+    assert.match(pageReason(failures[0]!), /#11.*simulated crash mid-tick/);
+    assert.equal(readPendingPullRequests(volume, 'repo-a' as never).entries.length, 1);
+  });
+});
+
+test('S50.3 — a failed pr_enable_auto_merge after pr_open leaves the file in processed/, audits and notifies at attention naming the open pull request', async () => {
+  for (const mode of ['error-result', 'throws'] as const) {
+    await withVolumeAsync(async (volume) => {
+      const root = inboxRoot(volume, 'repo-a');
+      mkdirSync(root, { recursive: true });
+      writeFileSync(path.join(root, 'post.md'), 'content', 'utf8');
+
+      const handlers = successfulHandlers();
+      handlers.pr_enable_auto_merge = () => {
+        if (mode === 'throws') throw new Error('host exploded');
+        return precondition('auto-merge is disabled on the repository', []) as unknown as ToolResult<never>;
+      };
+      const { deps, auditLog, notifications } = baseDeps(volume, {
+        declarations: stubDeclarations({ current: [fixtureDeclaration({ fileWatcher: { planTool: 'plan_tool' as never, applyTool: 'apply_tool' as never, autoMerge: true } })] }),
+        dispatch: scriptedDispatch([], handlers),
+      });
+      const reports = await createWatcher(deps).tick();
+
+      assert.equal(reports[0]!.outcome?.kind, 'succeeded', `${mode}: the file is delivered`);
+      assert.equal(readdirSync(path.join(root, 'processed')).length, 1, `${mode}: the file is in processed/`);
+      assert.equal(existsSync(path.join(root, 'failed')) && readdirSync(path.join(root, 'failed')).length > 0, false, `${mode}: never moved to failed/`);
+      assert.deepEqual(watcherOutcomeKinds(auditLog), ['succeeded', 'rejected']);
+      const rejected = auditLog.find((r) => r.form === 'file-watcher' && r.outcome.kind === 'rejected');
+      assert.equal(rejected?.form === 'file-watcher' && rejected.outcome.kind === 'rejected' ? rejected.outcome.step : null, 'pr_enable_auto_merge');
+      const failures = failurePages(notifications);
+      assert.equal(failures.length, 1, mode);
+      assert.equal(failures[0]!.severity, 'attention');
+      assert.match(pageReason(failures[0]!), /pull request #7 \(https:\/\/example\.com\/pr\/7\) is open/);
+      assert.equal(readPendingPullRequests(volume, 'repo-a' as never).entries.length, 1, `${mode}: still followed`);
+    });
+  }
+});
+
+test('S50.4/S50.5 — a merged pull request whose reconciliation succeeds is audited as succeeded with its ref, raises no page, and leaves the list', async () => {
+  await withVolumeAsync(async (volume) => {
+    writePendingPullRequests(volume, 'repo-a' as never, { entries: [pendingEntry({ number: 9, branch: 'watcher/post-9' as never })] });
+    const { deps, auditLog, notifications } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch([], {
+        repo_status: () => repoStatus(false),
+        pr_status: () => prStatusResult('merged', { number: 9, branch: 'watcher/post-9' }),
+        reconcile_after_merge: () => success('reconciled', {}, diag()) as unknown as ToolResult<never>,
+      }),
+    });
+    await createWatcher(deps).tick();
+
+    const record = auditLog.find((r) => r.form === 'file-watcher');
+    assert.equal(record?.form === 'file-watcher' ? record.outcome.kind : null, 'succeeded');
+    if (record?.form === 'file-watcher' && record.outcome.kind === 'succeeded') {
+      assert.equal(record.outcome.pullRequest.number, 9);
+      assert.equal(record.file, 'post.md');
+    }
+    assert.equal(failurePages(notifications).length, 0);
+    assert.equal(readPendingPullRequests(volume, 'repo-a' as never).entries.length, 0);
+  });
+});
+
+test('S50.4/S50.5 — a merged pull request whose reconciliation fails is audited and paged at attention naming the PR, branch, pushed SHA and reason, and leaves the list', async () => {
+  for (const mode of ['error-result', 'throws'] as const) {
+    await withVolumeAsync(async (volume) => {
+      writePendingPullRequests(volume, 'repo-a' as never, { entries: [pendingEntry({ number: 9, branch: 'watcher/post-9' as never })] });
+      const { deps, auditLog, notifications } = baseDeps(volume, {
+        declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+        dispatch: scriptedDispatch([], {
+          repo_status: () => repoStatus(false),
+          pr_status: () => prStatusResult('merged', { number: 9, branch: 'watcher/post-9' }),
+          reconcile_after_merge: () => {
+            if (mode === 'throws') throw new Error('pipeline fell over');
+            return precondition('base is not fast-forwardable', []) as unknown as ToolResult<never>;
+          },
+        }),
+      });
+      const reports = await createWatcher(deps).tick();
+
+      assert.deepEqual(reports[0]!.reconciled.map((e) => e.number), [9], mode);
+      assert.deepEqual(watcherOutcomeKinds(auditLog), ['rejected'], mode);
+      const failures = failurePages(notifications);
+      assert.equal(failures.length, 1, mode);
+      assert.equal(failures[0]!.severity, 'attention');
+      const reason = pageReason(failures[0]!);
+      assert.match(reason, /#9/);
+      assert.match(reason, /watcher\/post-9/);
+      assert.match(reason, new RegExp(PUSHED_SHA));
+      assert.match(reason, mode === 'throws' ? /pipeline fell over/ : /base is not fast-forwardable/);
+      assert.equal(readPendingPullRequests(volume, 'repo-a' as never).entries.length, 0, `${mode}: removed after the first attempt`);
+    });
+  }
+});
+
+test('S50.7 — production watcher code contains no `as never` casts', () => {
+  const dir = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
+  const offenders = readdirSync(dir)
+    .filter((name) => name.endsWith('.ts') && !name.endsWith('.test.ts'))
+    .filter((name) => /\bas never\b/.test(readFileSync(path.join(dir, name), 'utf8')));
+  assert.deepEqual(offenders, []);
 });
