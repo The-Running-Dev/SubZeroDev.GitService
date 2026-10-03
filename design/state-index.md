@@ -65,6 +65,7 @@
 | 291 | #291 | Revoking an OAuth token can grow the audit trail without real authorization, and misattributes it | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 292 | #292 | There's no record of which operator approved a given MCP access grant | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 301 | #301 | Add a doc-citation checker to CI | — | `082d1df8f15bae3125e78e06155fe1c59fe3cafc` |
+| 318 | #318 | S50 — Every watcher outcome is audited, and every failure is told | S50.1, S50.2, S50.3, S50.4, S50.5, S50.6, S50.7 | `9ed7f5a54e55ebf04ab2d227f5347d04cfbdcf4a` |
 | 320 | #320 | S52 — The watcher is proven against a real repository | S52.1, S52.2, S52.3, S52.4, S52.5, S52.6 | `70413caf7ace545ab150ddd8dcfeb76c1756fd69` |
 | milestone/6 | #65 | `sendJson`/`readJsonBody` are independently reimplemented in six surface files | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/3 | #87 | Build an evidence-grade test harness for the content-drop watcher | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
