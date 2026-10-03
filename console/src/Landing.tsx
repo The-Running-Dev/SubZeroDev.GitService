@@ -22,9 +22,10 @@ interface Props {
  * a reload rather than living only in this component's state.
  *
  * S19.4: a registered view's nav button is offered only once a declaration
- * is selected and only when that declaration's own `capabilityGrant`
+ * is selected and only when that declaration's server-computed
+ * `effectiveGrant` (A12: the A1 intersection, never the raw `capabilityGrant`)
  * contains every capability the view declares — `eligibleViews` reads the
- * selected row's grant, never a second, view-owned notion of which
+ * selected row's effective grant, never a second, view-owned notion of which
  * declaration it belongs to (S19.5).
  */
 export function Landing({ views, onSignedOut, onNavigateGrants, onNavigateAudit, onNavigateHealth, onNavigateParkedOperations, onNavigateView }: Props) {
@@ -57,7 +58,7 @@ export function Landing({ views, onSignedOut, onNavigateGrants, onNavigateAudit,
   if (rows === null) return <p>Loading…</p>;
 
   const selectedRow = selected ? (rows.find((row) => row.declaration.id === selected) ?? null) : null;
-  const eligible = selectedRow ? eligibleViews(views, selectedRow.declaration.capabilityGrant) : [];
+  const eligible = selectedRow ? eligibleViews(views, selectedRow.declaration.effectiveGrant) : [];
 
   return (
     <main>

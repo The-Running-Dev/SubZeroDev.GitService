@@ -102,6 +102,8 @@ export function Health({ onSignedOut, onBack }: Props) {
           <dd data-testid="health-parked-count">{health.parkedOperations}</dd>
           <dt>Failed outbox rows</dt>
           <dd data-testid="health-failed-outbox-count">{health.failedOutboxRows}</dd>
+          <dt>Outbox rows held (no transport configured)</dt>
+          <dd data-testid="health-held-pending-outbox-count">{health.heldPendingOutboxRows}</dd>
         </dl>
       </section>
 

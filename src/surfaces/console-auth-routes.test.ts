@@ -62,6 +62,7 @@ async function withServer<T>(volume: string, fn: (baseUrl: string, identity: Ope
     cloneStore: createStubCloneStore(),
     dispatchPipeline: createStubDispatchPipeline(),
     contractCapabilitySet: new Set() as unknown as ContractCapabilitySet,
+    ceiling: new Set() as never,
     origin: 'http://localhost',
     mcpState: createMcpRoutesState(),
   });

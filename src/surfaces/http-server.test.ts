@@ -17,7 +17,16 @@ import { createStubCloneStore } from '../clone/testing/stub-clone-store.ts';
 import { createStubDispatchPipeline } from '../dispatch/testing/stub-dispatch-pipeline.ts';
 import { createStubAuthorization, createStoreFailingAuthorization } from '../authorization/testing/stub-authorization.ts';
 import type { Authorization } from '../authorization/authorization.ts';
-import type { ContractCapabilitySet } from '../contract/capabilities.ts';
+import type { ContractCapabilitySet, DeploymentCeiling } from '../contract/capabilities.ts';
+import type { CloneStore } from '../clone/clone-store.ts';
+import { createCloneStore } from '../clone/clone-store.ts';
+import { createBareGitRemote } from '../clone/testing/git-fixture.ts';
+import { createExec } from '../exec/exec.ts';
+import { createLocks } from '../locks/locks.ts';
+import { createStructuredStore } from '../store/structured-store.ts';
+import { withVolumeAsync } from '../store/volume-fixture.ts';
+import { systemClock } from '../clock/clock.ts';
+import type { Declaration } from '../declarations/types.ts';
 
 const COMMIT_SHA = '0'.repeat(40) as GitSha;
 const CONTRACT_FINGERPRINT = '1'.repeat(64) as Sha256Hex;
@@ -94,6 +103,8 @@ interface ServerOptions {
   readonly clearFailingCredential?: SurfacesDependencies['clearFailingCredential'];
   readonly listFailedOutbox?: SurfacesDependencies['listFailedOutbox'];
   readonly clearFailedOutbox?: SurfacesDependencies['clearFailedOutbox'];
+  readonly cloneStore?: CloneStore;
+  readonly heldPendingOutboxRows?: number;
 }
 
 async function withServer<T>(options: ServerOptions, fn: (baseUrl: string) => Promise<T>): Promise<T> {
@@ -110,13 +121,15 @@ async function withServer<T>(options: ServerOptions, fn: (baseUrl: string) => Pr
     observeGitState: async () => options.observed ?? null,
     ...(options.resolve ? { resolveParkedOperation: async (operationId: string) => options.resolve!(operationId) } : {}),
     ...(options.failedOutboxRows !== undefined ? { failedOutboxRows: async () => options.failedOutboxRows! } : {}),
+    ...(options.heldPendingOutboxRows !== undefined ? { heldPendingOutboxRows: async () => options.heldPendingOutboxRows! } : {}),
     ...(options.clearFailingCredential ? { clearFailingCredential: options.clearFailingCredential } : {}),
     ...(options.listFailedOutbox ? { listFailedOutbox: options.listFailedOutbox } : {}),
     ...(options.clearFailedOutbox ? { clearFailedOutbox: options.clearFailedOutbox } : {}),
     identity: options.identity ?? createStubOperatorIdentity(),
     sessionAbsoluteSeconds: 43_200,
     declarations: createStubDeclarations(),
-    cloneStore: createStubCloneStore(),
+    cloneStore: options.cloneStore ?? createStubCloneStore(),
+    ceiling: new Set() as unknown as DeploymentCeiling,
     dispatchPipeline: createStubDispatchPipeline(),
     contractCapabilitySet: new Set() as unknown as ContractCapabilitySet,
     origin: 'http://localhost',
@@ -261,6 +274,7 @@ test('a throwing handler answers 500 and leaves the process serving, rather than
     sessionAbsoluteSeconds: 43_200,
     declarations: createStubDeclarations(),
     cloneStore: createStubCloneStore(),
+    ceiling: new Set() as unknown as DeploymentCeiling,
     dispatchPipeline: createStubDispatchPipeline(),
     contractCapabilitySet: new Set() as unknown as ContractCapabilitySet,
     origin: 'http://localhost',
@@ -300,6 +314,79 @@ test('S11 — /health reports a real failed-outbox-row count when a notifier is 
     const response = await fetch(`${baseUrl}/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
     const body = (await response.json()) as { failedOutboxRows: number };
     assert.equal(body.failedOutboxRows, 2);
+  });
+});
+
+test('S48.4 — /health reports the clone store\'s real volume usage, non-zero once a clone of known size exists', async () => {
+  await withVolumeAsync(async (volume) => {
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    await store.open();
+    await store.migrate();
+    await store.close();
+
+    const declaration = {
+      id: 'repo-health',
+      generation: 1,
+      cloneUrl: createBareGitRemote(),
+      host: 'generic',
+      credentialRef: null,
+      capabilityGrant: new Set(),
+      writablePathPrefixes: [],
+      pinned: false,
+      fileWatcher: null,
+      identity: { gitUserName: 'fixture', gitUserEmail: 'fixture@example.com' },
+      state: 'active',
+      grantEpoch: 0,
+      createdAt: systemClock.now(),
+      updatedAt: systemClock.now(),
+    } as unknown as Declaration;
+    const cloneStore = createCloneStore({
+      volumeRoot: volume,
+      clock: systemClock,
+      exec: createExec({ volumeRoot: volume }),
+      locks: createLocks(),
+      declarations: { async get(id) { return id === declaration.id ? declaration : null; } },
+    });
+    const ensured = await cloneStore.ensure(
+      declaration,
+      { operationId: 'op-1' as never, declarationId: declaration.id, tool: 'fixture_tool' as never, heldSince: systemClock.now() },
+      new AbortController().signal,
+    );
+    assert.equal(ensured.ok, true);
+
+    await withServer({ cloneStore }, async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+      assert.equal(response.status, 200);
+      const body = (await response.json()) as { volume: { byConsumer: { clones: number } } };
+      assert.ok(body.volume.byConsumer.clones > 0, 'the clone consumer carries the bytes the clone actually occupies');
+    });
+  });
+});
+
+test('S48.4 — a clone store that cannot read volume usage makes /health a 503, not a fabricated zero', async () => {
+  const failing: CloneStore = {
+    ...createStubCloneStore(),
+    async readVolumeUsage() {
+      return err({ code: 'store-failed' } as never);
+    },
+  };
+  await withServer({ cloneStore: failing }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    assert.equal(response.status, 503);
+  });
+});
+
+test('S48.5 — /health reports the count of outbox rows held pending for want of a transport, apart from failed rows', async () => {
+  await withServer({ heldPendingOutboxRows: 3, failedOutboxRows: 1 }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    const body = (await response.json()) as { heldPendingOutboxRows: number; failedOutboxRows: number };
+    assert.equal(body.heldPendingOutboxRows, 3);
+    assert.equal(body.failedOutboxRows, 1);
+  });
+  await withServer({}, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    const body = (await response.json()) as { heldPendingOutboxRows: number };
+    assert.equal(body.heldPendingOutboxRows, 0, 'no notifier wired is an honest zero');
   });
 });
 

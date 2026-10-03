@@ -14,7 +14,7 @@ import type { ObservedGitState, PreState } from '../clone/types.ts';
 import type { OperationJournalEntry } from '../journal/types.ts';
 import type { NotifierError } from '../notifier/errors.ts';
 import type { OutboxRow } from '../notifier/types.ts';
-import { NO_VOLUME_USAGE, type VolumeUsage } from '../store/volume-usage.ts';
+import type { VolumeUsage } from '../store/volume-usage.ts';
 import { csrfOk, requireSession, handleConsoleAuthRoute, type ConsoleAuthDependencies } from './console-auth-routes.ts';
 import { handleDeclarationRoute, type DeclarationRoutesDependencies } from './declaration-routes.ts';
 import { handleToolRoute, type ToolRoutesDependencies } from './tool-routes.ts';
@@ -52,11 +52,10 @@ export const NO_CONSOLE_FINGERPRINT: Sha256Hex = (() => {
 
 /**
  * `20-contract.md` § L5 surfaces. Authenticated, unlike `/healthz`.
- * `auditChain` is real as of S3, `failingCredentialRefs` as of S9,
- * `parkedOperations` as of S8, and `failedOutboxRows` as of S11; `volume` is
- * genuinely zero until S17's volume accounting exists — not a placeholder
- * standing in for unmeasured data, but a true statement that nothing has
- * happened yet in a subsystem that does not run.
+ * `volume` is `CloneStore.readVolumeUsage`'s real reading; a store that
+ * cannot produce one makes the route a 503 rather than a zero.
+ * `heldPendingOutboxRows` counts rows left `pending` because no transport is
+ * configured, apart from `failedOutboxRows` — held rows are not failures.
  */
 export interface HealthReport {
   readonly ready: boolean;
@@ -64,6 +63,7 @@ export interface HealthReport {
   readonly version: VersionReport;
   readonly auditChain: AuditChainState;
   readonly failedOutboxRows: number;
+  readonly heldPendingOutboxRows: number;
   readonly failingCredentialRefs: readonly CredentialFailureMark[];
   readonly parkedOperations: number;
   readonly volume: VolumeUsage;
@@ -73,7 +73,7 @@ export interface SurfacesDependencies
   extends ConsoleAuthDependencies,
     AuthorizationRoutesDependencies,
     AuditRoutesDependencies,
-    Pick<DeclarationRoutesDependencies, 'declarations' | 'cloneStore' | 'declarationsAwaitingRecovery'>,
+    Pick<DeclarationRoutesDependencies, 'declarations' | 'cloneStore' | 'declarationsAwaitingRecovery' | 'ceiling'>,
     Pick<ToolRoutesDependencies, 'dispatchPipeline' | 'contractCapabilitySet'>,
     Pick<McpRoutesDependencies, 'mcpState' | 'origin'> {
   readonly commitSha: GitSha;
@@ -133,6 +133,12 @@ export interface SurfacesDependencies
    * failing to construct — the same shape as `failingCredentialRefs` above.
    */
   readonly failedOutboxRows?: () => Promise<number>;
+  /**
+   * The count behind `heldPendingOutboxRows` (S48.5): rows left `pending`
+   * because no transport is configured. Optional on the same terms as
+   * `failedOutboxRows`.
+   */
+  readonly heldPendingOutboxRows?: () => Promise<number>;
   /**
    * The rows themselves, for the health view's outbox list (S34.1) — a count
    * names no row to act on. Optional for the same reason `failedOutboxRows`
@@ -451,15 +457,23 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
     if (!(await requireBearerOrCookieSession(deps, req, res, 'repo.read'))) return;
     const auditChain = await deps.auditChain();
     const parked = deps.parkedOperations ? await deps.parkedOperations() : [];
+    // A store that cannot answer is a 503, not a fabricated zero — the same
+    // rule the bearer routes apply to the credential store.
+    const usage = await deps.cloneStore.readVolumeUsage();
+    if (!usage.ok) {
+      sendJson(res, 503, { error: usage.error.code, summary: usage.error.summary });
+      return;
+    }
     const report: HealthReport = {
       ready: deps.ready(),
       provisioningPending: await deps.provisioningPending(),
       version: { commitSha: deps.commitSha, contractFingerprint: deps.contractFingerprint, consoleFingerprint: deps.consoleFingerprint },
       auditChain,
       failedOutboxRows: deps.failedOutboxRows ? await deps.failedOutboxRows() : 0,
+      heldPendingOutboxRows: deps.heldPendingOutboxRows ? await deps.heldPendingOutboxRows() : 0,
       failingCredentialRefs: deps.failingCredentialRefs ? await deps.failingCredentialRefs() : [],
       parkedOperations: parked.length,
-      volume: NO_VOLUME_USAGE,
+      volume: usage.value,
     };
     sendJson(res, 200, report);
     return;

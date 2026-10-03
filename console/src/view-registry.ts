@@ -24,19 +24,15 @@ export interface ConsoleViewRegistration {
  * only carries the capabilities it needs; the caller supplies the grant to
  * check them against.
  *
- * `capabilityGrant` is the declaration's own grant, not the operator
- * session's effective grant (`effectiveGrant` in
- * `src/dispatch/dispatch-pipeline.ts`, which additionally narrows by
- * contract, ceiling and session). The two agree today only because operator
- * sessions currently hold the full grant (`design/90-decisions.md`,
- * 2026-08-08); once S13 gives sessions their own narrower, durable grant,
- * this can offer a view the operator's actual session can't use. See
- * `design/90-decisions.md`'s `## Open` for this gap, tracked against S13.
+ * The grant passed in is the declaration's `effectiveGrant` as the server
+ * computed it (A12) — the contract, ceiling, session and declaration
+ * intersection — never the declaration's raw `capabilityGrant` and never
+ * recomputed client-side.
  */
 export function eligibleViews(
   views: readonly ConsoleViewRegistration[],
-  capabilityGrant: readonly string[],
+  effectiveGrant: readonly string[],
 ): readonly ConsoleViewRegistration[] {
-  const grant = new Set(capabilityGrant);
+  const grant = new Set(effectiveGrant);
   return views.filter((view) => view.capabilities.every((c) => grant.has(c)));
 }

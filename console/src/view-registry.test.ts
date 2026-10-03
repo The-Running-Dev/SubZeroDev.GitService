@@ -27,6 +27,20 @@ test('S19.4 — a view with no declared capabilities is always eligible', () => 
   assert.deepEqual(eligibleViews([v], []), [v]);
 });
 
+test('S48.2 — a view whose capability is in the declared grant but excluded by the ceiling is not offered', () => {
+  // The shape `GET /declarations` returns: the declared grant still carries
+  // `attention.resolve`, the server-computed effective grant has lost it.
+  const declaration = { capabilityGrant: ['audit.read', 'attention.resolve'], effectiveGrant: ['audit.read'] };
+  const offered = view('audit-only', ['audit.read']);
+  const excluded = view('resolve-view', ['attention.resolve']);
+  assert.deepEqual(eligibleViews([offered, excluded], declaration.effectiveGrant), [offered]);
+  assert.deepEqual(
+    eligibleViews([offered, excluded], declaration.capabilityGrant),
+    [offered, excluded],
+    'the raw declared grant would have offered it — the reason the landing screen reads effectiveGrant',
+  );
+});
+
 test('eligibleViews filters independently per view, preserving registration order', () => {
   const allowed = view('allowed', ['audit.read']);
   const denied = view('denied', ['auth.manage']);
