@@ -918,3 +918,64 @@ test('S49: pr_enable_auto_merge input requires expectedHeadSha (nullable) and re
   assert.equal(validateAgainstSchema(declaration.inputSchema, { number: 7, expectedHeadSha: HEAD }).length, 0);
   assert.equal(validateAgainstSchema(declaration.inputSchema, { number: 7, expectedHeadSha: 5 }).length > 0, true);
 });
+
+// --- S45.4: a host rejection marks the credential failing, as the git path does ---
+
+function operationsMarkingFailures(gh: ReturnType<typeof stubGh>, marks: { ref: string; declarationId: string; reason: string }[]) {
+  const bindings = new Map<OperationId, never>();
+  const adapter = createGitHubAdapter({
+    clock: systemClock,
+    exec: gh.exec,
+    sleep: async () => {},
+    baseBranchFor: async () => 'main' as never,
+    credentialFor: (ctx) => bindings.get(ctx.operationId) ?? null,
+  });
+  return createHostOperations({
+    clock: systemClock,
+    adapter,
+    journal: recordingJournal().journal,
+    headShaFor: async () => HEAD,
+    pollIntervalSeconds: 0,
+    sleep: async () => {},
+    prepareCredential: (async () => ({ ok: true, value: { ref: 'token', declarationId: DECLARATION, variableName: 'V', username: null } })) as never,
+    credentialBindings: bindings as never,
+    credentials: {
+      async markFailing(ref: string, declarationId: string, reason: string) {
+        marks.push({ ref, declarationId, reason });
+      },
+    } as never,
+  });
+}
+
+test('S45.4: an auth-rejected host result marks the credential failing for this declaration', async () => {
+  const marks: { ref: string; declarationId: string; reason: string }[] = [];
+  const gh = stubGh([{ when: () => true, reply: () => ghFailure('gh: Bad credentials (HTTP 401)') }]);
+
+  const result = await operationsMarkingFailures(gh, marks).readPullRequest(context(), { number: 7 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.kind, 'upstream', 'the result kind is unchanged by the mark');
+  assert.equal(marks.length, 1);
+  assert.equal(marks[0]!.ref, 'token');
+  assert.equal(marks[0]!.declarationId, DECLARATION);
+  assert.match(marks[0]!.reason, /refused/);
+});
+
+test('S45.4: a mutation rejected by the host marks the credential failing too', async () => {
+  const marks: { ref: string; declarationId: string; reason: string }[] = [];
+  const gh = stubGh([{ when: () => true, reply: () => ghFailure('gh: Bad credentials (HTTP 401)') }]);
+
+  const result = await operationsMarkingFailures(gh, marks).createPullRequest(context(), { title: 't', body: 'b', headBranch: null, draft: false });
+
+  assert.equal(result.ok, false);
+  assert.equal(marks.length, 1);
+});
+
+test('S45.4: a rate limit and a successful read mark nothing', async () => {
+  const marks: { ref: string; declarationId: string; reason: string }[] = [];
+  const limited = stubGh([{ when: () => true, reply: () => ghFailure('gh: API rate limit exceeded (HTTP 403)\nretry-after: 42') }]);
+  assert.equal((await operationsMarkingFailures(limited, marks).readPullRequest(context(), { number: 7 })).ok, false);
+  const fine = stubGh([{ when: () => true, reply: () => stdout(PR_JSON) }]);
+  assert.equal((await operationsMarkingFailures(fine, marks).readPullRequest(context(), { number: 7 })).ok, true);
+  assert.deepEqual(marks, []);
+});

@@ -123,7 +123,7 @@ async function withComposites<T>(
   clonePath: string,
   declaration: Declaration,
   hostOperations: Pick<HostOperations, 'readPullRequest'>,
-  fn: (deps: { readonly composites: ReturnType<typeof createComposites>; readonly ctx: CallContext; readonly journal: ReturnType<typeof createJournal> }) => Promise<T>,
+  fn: (deps: { readonly composites: ReturnType<typeof createComposites>; readonly ctx: CallContext; readonly journal: ReturnType<typeof createJournal>; readonly gitOperations: ReturnType<typeof createGitOperations> }) => Promise<T>,
 ): Promise<T> {
   const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
   await store.open();
@@ -167,7 +167,7 @@ async function withComposites<T>(
   assert.equal(begun.ok, true, begun.ok ? '' : begun.error.summary);
 
   try {
-    return await fn({ composites, ctx, journal });
+    return await fn({ composites, ctx, journal, gitOperations });
   } finally {
     rmSync(mountRoot, { recursive: true, force: true });
   }
@@ -403,12 +403,13 @@ test('prepareBranch: refuses to touch a branch already pushed to origin — neve
 
 // --- reconcileAfterMerge ---
 
-test('reconcileAfterMerge: fast-forwards the base to the merge commit and deletes the local feature branch', async () => {
+test('S45.1 — reconcileAfterMerge: fast-forwards the base to the merge commit and deletes the local feature branch when its tip is the merged head', async () => {
   await withVolumeAsync(async (volume) => {
     const f = fixture();
     try {
       git(['checkout', '-b', 'feature-merged'], f.clonePath);
       git(['checkout', 'main'], f.clonePath);
+      const featureTip = git(['rev-parse', 'feature-merged'], f.clonePath).trim() as GitSha;
 
       // Simulate the merge landing on origin's main, as a squash merge would.
       writeFileSync(path.join(f.remoteWorkDir, 'merged.md'), 'x\n', 'utf8');
@@ -428,7 +429,7 @@ test('reconcileAfterMerge: fast-forwards the base to the merge commit and delete
                 status: {
                   ref: { number: 42, url: 'https://example.test/pr/42' as never, branch: 'feature-merged' as BranchName },
                   state: 'merged',
-                  headSha: 'a'.repeat(40) as GitSha,
+                  headSha: featureTip,
                   baseSha: 'b'.repeat(40) as GitSha,
                   mergeCommitSha,
                   mergeable: null,
@@ -449,6 +450,119 @@ test('reconcileAfterMerge: fast-forwards the base to the merge commit and delete
         assert.equal(git(['rev-parse', 'refs/heads/main'], f.clonePath).trim(), mergeCommitSha);
         const branchList = git(['branch'], f.clonePath);
         assert.doesNotMatch(branchList, /feature-merged/);
+      });
+    } finally {
+      f.cleanup();
+    }
+  });
+});
+
+function mergedPr(number: number, branch: string, headSha: string, mergeCommitSha: GitSha): ReadonlyMap<number, ToolResult<PrStatusData>> {
+  return new Map([
+    [
+      number,
+      success(
+        'merged',
+        {
+          status: {
+            ref: { number, url: `https://example.test/pr/${number}` as never, branch: branch as BranchName },
+            state: 'merged',
+            headSha: headSha as GitSha,
+            baseSha: 'b'.repeat(40) as GitSha,
+            mergeCommitSha,
+            mergeable: null,
+            autoMergeEnabled: true,
+          },
+        },
+        { operationId: null, declarationId: null, generation: null, durationMs: 0 },
+      ),
+    ],
+  ]);
+}
+
+test('S45.2 — reconcileAfterMerge: a local commit past the merged head keeps the branch and the commit, and the result says why', async () => {
+  await withVolumeAsync(async (volume) => {
+    const f = fixture();
+    try {
+      git(['checkout', '-b', 'feature-ahead'], f.clonePath);
+      const mergedHead = git(['rev-parse', 'HEAD'], f.clonePath).trim();
+      writeFileSync(path.join(f.clonePath, 'late.md'), 'written after the merge head\n', 'utf8');
+      git(['add', 'late.md'], f.clonePath);
+      git(['commit', '-m', 'local commit past the merged head'], f.clonePath);
+      const lateTip = git(['rev-parse', 'HEAD'], f.clonePath).trim();
+      git(['checkout', 'main'], f.clonePath);
+
+      advanceRemoteMain(f.remoteWorkDir, 'merged.md');
+      const mergeCommitSha = git(['rev-parse', 'origin/main'], f.remoteWorkDir).trim() as GitSha;
+
+      const declaration = declarationFor('repo-a' as DeclarationId, f.bareDir);
+      const hostOperations = stubHostOperations(mergedPr(42, 'feature-ahead', mergedHead, mergeCommitSha));
+      await withComposites(volume, f.clonePath, declaration, hostOperations, async ({ composites, ctx }) => {
+        const result = await composites.reconcileAfterMerge(ctx, { pullRequestNumber: 42, expectedHeadSha: null });
+        assert.equal(result.ok, true, result.ok ? '' : result.summary);
+        if (!result.ok || !result.data) return;
+        assert.equal(result.data.deletedBranch, null);
+        assert.match(result.summary, /no branch was deleted/);
+        assert.equal(git(['rev-parse', 'refs/heads/feature-ahead'], f.clonePath).trim(), lateTip);
+        assert.equal(git(['rev-parse', 'refs/heads/main'], f.clonePath).trim(), mergeCommitSha);
+      });
+    } finally {
+      f.cleanup();
+    }
+  });
+});
+
+test('S45.1 — reconcileAfterMerge: a branch at the merged head is deleted without force, and its branch settings go with it', async () => {
+  await withVolumeAsync(async (volume) => {
+    const f = fixture();
+    try {
+      git(['checkout', '-b', 'feature-cfg'], f.clonePath);
+      git(['config', 'branch.feature-cfg.description', 'scratch'], f.clonePath);
+      const head = git(['rev-parse', 'HEAD'], f.clonePath).trim();
+      git(['checkout', 'main'], f.clonePath);
+      advanceRemoteMain(f.remoteWorkDir, 'merged.md');
+      const mergeCommitSha = git(['rev-parse', 'origin/main'], f.remoteWorkDir).trim() as GitSha;
+
+      const declaration = declarationFor('repo-a' as DeclarationId, f.bareDir);
+      await withComposites(volume, f.clonePath, declaration, stubHostOperations(mergedPr(9, 'feature-cfg', head, mergeCommitSha)), async ({ composites, ctx }) => {
+        const result = await composites.reconcileAfterMerge(ctx, { pullRequestNumber: 9, expectedHeadSha: null });
+        assert.equal(result.ok, true, result.ok ? '' : result.summary);
+        if (!result.ok || !result.data) return;
+        assert.equal(result.data.deletedBranch, 'feature-cfg');
+        assert.doesNotMatch(result.summary, /no branch was deleted/);
+        assert.doesNotMatch(git(['config', '--local', '--list'], f.clonePath), /branch\.feature-cfg/);
+      });
+    } finally {
+      f.cleanup();
+    }
+  });
+});
+
+// --- S45.3 — an unparseable repository config is the repository's problem, not the service's ---
+
+test('S45.3 — both composites return precondition with the findings the direct git tools return for an unparseable repository config', async () => {
+  await withVolumeAsync(async (volume) => {
+    const f = fixture();
+    try {
+      mkdirSync(path.join(f.clonePath, '.config'), { recursive: true });
+      writeFileSync(path.join(f.clonePath, '.config', 'subzerodev-git.json'), '{bad', 'utf8');
+      const declaration = declarationFor('repo-a' as DeclarationId, f.bareDir);
+      const merged = mergedPr(5, 'topic', 'a'.repeat(40), 'c'.repeat(40) as GitSha);
+      await withComposites(volume, f.clonePath, declaration, stubHostOperations(merged), async ({ composites, ctx, gitOperations }) => {
+        const direct = await gitOperations.syncBase(ctx, {});
+        assert.equal(direct.ok, false);
+        assert.equal(direct.kind, 'precondition');
+        assert.ok((direct.findings ?? []).length > 0, 'the direct tool reports findings');
+
+        const prepared = await composites.prepareBranch(ctx, { branch: 'feature-a' as BranchName });
+        assert.equal(prepared.ok, false);
+        assert.equal(prepared.kind, 'precondition');
+        assert.deepEqual(prepared.findings, direct.findings);
+
+        const reconciled = await composites.reconcileAfterMerge(ctx, { pullRequestNumber: 5, expectedHeadSha: null });
+        assert.equal(reconciled.ok, false);
+        assert.equal(reconciled.kind, 'precondition');
+        assert.deepEqual(reconciled.findings, direct.findings);
       });
     } finally {
       f.cleanup();

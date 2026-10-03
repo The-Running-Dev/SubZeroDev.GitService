@@ -4,6 +4,7 @@ import type { GitSha, OperationId, RegistryToolName } from '../shared/brands.ts'
 import type { Journal } from '../journal/journal.ts';
 import type { TerminalState } from '../journal/types.ts';
 import type { CredentialBinding, Exec } from '../exec/exec.ts';
+import type { CredentialResolver } from '../credentials/credentials.ts';
 import { success, validation, authorization, precondition, timeout as timeoutResult, upstream, infrastructure, type ToolResult } from '../result/envelope.ts';
 import { diagnosticsFor } from '../shared/diagnostics.ts';
 import type { Outcome } from '../shared/outcome.ts';
@@ -90,6 +91,13 @@ export interface HostOperationsDependencies {
    * running out — and by nothing else. Absent, nothing is reported.
    */
   readonly terminalSink?: Map<OperationId, TerminalState>;
+  /**
+   * Where an `auth-rejected` result is remembered, so the host path marks the
+   * credential failing for that declaration exactly as the git path does
+   * (`20-contract.md` § Error semantics › Host adapter). Absent, nothing is
+   * marked — a rejection still reads as `upstream`.
+   */
+  readonly credentials?: Pick<CredentialResolver, 'markFailing'>;
   readonly exec?: Pick<Exec, 'runGit'>;
   readonly pollIntervalSeconds?: number;
   /** Injectable so a wait test does not spend real seconds. */
@@ -170,8 +178,23 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
   const pollIntervalSeconds = deps.pollIntervalSeconds ?? POLL_INTERVAL_SECONDS_DEFAULT;
   const requiredChecksFor = deps.requiredChecksFor ?? (async () => []);
 
+  /**
+   * An `auth-rejected` observed during a call, by `operationId`. `failWith` is
+   * synchronous and sits on every adapter failure path, so it only notes the
+   * rejection; `withCredential` awaits the mark once the call has returned.
+   */
+  const rejections = new Map<OperationId, Extract<HostError, { code: 'auth-rejected' }>>();
+
+  async function markRejection(ctx: CallContext): Promise<void> {
+    const rejection = rejections.get(ctx.operationId);
+    if (rejection === undefined) return;
+    rejections.delete(ctx.operationId);
+    await deps.credentials?.markFailing(rejection.ref, rejection.declarationId, `the host refused this credential: ${rejection.summary.slice(0, 200)}`);
+  }
+
   /** Records the terminal state a host error names, when it names one, then maps it as ever. */
   function failWith(ctx: CallContext, error: HostError): ToolResult<never> {
+    if (error.code === 'auth-rejected') rejections.set(ctx.operationId, error);
     if (error.code === 'merge-conflict') {
       deps.terminalSink?.set(ctx.operationId, { kind: 'merge-conflict', branch: error.pullRequest.branch, headSha: error.headSha, baseSha: error.baseSha });
     } else if (error.code === 'head-moved') {
@@ -314,6 +337,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
       return await call();
     } finally {
       deps.credentialBindings.delete(ctx.operationId);
+      await markRejection(ctx);
     }
   }
 

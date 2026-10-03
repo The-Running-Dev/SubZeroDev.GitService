@@ -31,8 +31,8 @@ import { success, validation, authorization, infrastructure, precondition, upstr
 import { diagnosticsFor } from '../shared/diagnostics.ts';
 import type { ModuleErrorBase } from '../shared/result-kind.ts';
 import { REPOSITORY_CONFIG_DEFAULTS, type RepositoryConfig } from '../declarations/types.ts';
-import { gitOperationsError, type GitOperationsError } from './errors.ts';
-import { currentBranch as sharedCurrentBranch } from '../exec/primitives.ts';
+import { gitOperationsError, gitOperationsErrorToToolResult as toToolResultError, type GitOperationsError } from './errors.ts';
+import { currentBranch as sharedCurrentBranch, isAncestor as sharedIsAncestor, revParse as sharedRevParse } from './primitives.ts';
 import type {
   BranchSummary,
   BranchesData,
@@ -147,11 +147,6 @@ function readStampFor(ctx: CallContext, locks: Pick<Locks, 'currentMutationHolde
     lastSettledOperationId: null,
     mutationInFlight: holder !== null && ctx.declarationId !== null && holder.declarationId === ctx.declarationId,
   };
-}
-
-function toToolResultError(error: GitOperationsError): ToolResult<never> {
-  if (error.resultKind === 'precondition') return precondition(error.summary, 'findings' in error ? error.findings : []);
-  return infrastructure(error.summary);
 }
 
 /** Maps any `ModuleErrorBase`-shaped error into the envelope by its own `resultKind` — the four `CredentialError` variants each carry theirs. */
@@ -1049,8 +1044,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       }
       const upstreamSha = upstreamResult.value.stdout.trim() as GitSha;
 
-      const localResult = await git(cwd, ['rev-parse', '--verify', `refs/heads/${baseBranch}`], signal);
-      const localSha = localResult.ok ? (localResult.value.stdout.trim() as GitSha) : null;
+      const localSha = await sharedRevParse(exec, cwd, `refs/heads/${baseBranch}`, GIT_COMMAND_TIMEOUT_SECONDS, signal);
 
       if (localSha === upstreamSha) {
         const data: SyncBaseData = { baseBranch, headSha: upstreamSha, upstreamSha, fastForwarded: false };
@@ -1062,8 +1056,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       // there is no reset, rebase or force path out of it on this interface —
       // the operator resolves it.
       if (localSha !== null) {
-        const ancestry = await git(cwd, ['merge-base', '--is-ancestor', localSha, upstreamSha], signal);
-        if (!ancestry.ok) {
+        if (!(await sharedIsAncestor(exec, cwd, localSha, upstreamSha, GIT_COMMAND_TIMEOUT_SECONDS, signal))) {
           return precondition(
             `'${baseBranch}' has diverged from origin and will not be rewritten: local ${localSha} is not an ancestor of ${upstreamSha}`,
             [{ path: 'baseBranch', rule: 'fast-forwardable', message: baseBranch }],

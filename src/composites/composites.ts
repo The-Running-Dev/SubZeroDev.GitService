@@ -9,7 +9,8 @@ import type { GitOperations } from '../git/git-operations.ts';
 import type { HostOperations } from '../host/host-operations.ts';
 import { success, precondition, infrastructure, type ToolResult } from '../result/envelope.ts';
 import { diagnosticsFor } from '../shared/diagnostics.ts';
-import { currentBranch as sharedCurrentBranch } from '../exec/primitives.ts';
+import { gitOperationsErrorToToolResult } from '../git/errors.ts';
+import { currentBranch as sharedCurrentBranch, isAncestor as sharedIsAncestor, revParse as sharedRevParse } from '../git/primitives.ts';
 import type { PrepareBranchData, PrepareBranchInput, ReconcileAfterMergeData, ReconcileAfterMergeInput } from './types.ts';
 
 /**
@@ -71,8 +72,7 @@ export function createComposites(deps: CompositesDependencies): Composites {
   }
 
   async function revParse(cwd: ClonePath, ref: string, signal: AbortSignal): Promise<GitSha | null> {
-    const result = await git(cwd, ['rev-parse', '--verify', ref], signal);
-    return result.ok ? (result.value.stdout.trim() as GitSha) : null;
+    return sharedRevParse(exec, cwd, ref, LOCAL_COMMAND_TIMEOUT_SECONDS, signal);
   }
 
   async function refExists(cwd: ClonePath, ref: string, signal: AbortSignal): Promise<boolean> {
@@ -81,8 +81,38 @@ export function createComposites(deps: CompositesDependencies): Composites {
   }
 
   async function isAncestor(cwd: ClonePath, ancestor: GitSha, descendant: GitSha, signal: AbortSignal): Promise<boolean> {
-    const result = await git(cwd, ['merge-base', '--is-ancestor', ancestor, descendant], signal);
-    return result.ok;
+    return sharedIsAncestor(exec, cwd, ancestor, descendant, LOCAL_COMMAND_TIMEOUT_SECONDS, signal);
+  }
+
+  /**
+   * Deletes the merged pull request's local branch only when it still points
+   * at the commit the host merged — anything past that head is work the merge
+   * never saw. The delete is `update-ref -d` guarded by that sha, not
+   * `branch -D`: no force flag exists on this path, and the guard is checked
+   * by git at the moment of deletion, so a commit landing between the read and
+   * the delete makes it refuse rather than lose the commit.
+   *
+   * `kept` says why nothing was deleted, for the result summary; it is `null`
+   * when a branch was deleted or there was none to delete.
+   */
+  async function deleteMergedBranch(
+    cwd: ClonePath,
+    branch: BranchName,
+    baseBranch: BranchName,
+    mergedHeadSha: GitSha,
+    signal: AbortSignal,
+  ): Promise<{ readonly deletedBranch: BranchName | null; readonly kept: string | null }> {
+    if (branch === baseBranch) return { deletedBranch: null, kept: null };
+    const tip = await revParse(cwd, `refs/heads/${branch}`, signal);
+    if (tip === null) return { deletedBranch: null, kept: null };
+    if (tip !== mergedHeadSha) {
+      return { deletedBranch: null, kept: `'${branch}' is at ${tip}, not the merged head ${mergedHeadSha}, so it holds commits the merge did not include` };
+    }
+    const deleted = await git(cwd, ['update-ref', '-d', `refs/heads/${branch}`, mergedHeadSha], signal);
+    if (!deleted.ok) return { deletedBranch: null, kept: `'${branch}' could not be deleted: ${deleted.error.summary}` };
+    // `update-ref` leaves any `branch.<name>.*` settings behind; they are the branch's own and go with it.
+    await git(cwd, ['config', '--remove-section', `branch.${branch}`], signal);
+    return { deletedBranch: branch, kept: null };
   }
 
   /** Working tree, index and untracked files must all be clean — protected-base invariant 5. */
@@ -158,7 +188,7 @@ export function createComposites(deps: CompositesDependencies): Composites {
       const signal = ctx.signal;
 
       const configResult = await gitOperations.loadRepositoryConfig(ctx);
-      if (!configResult.ok) return infrastructure(configResult.error.summary);
+      if (!configResult.ok) return gitOperationsErrorToToolResult(configResult.error);
       const baseBranch = configResult.value.baseBranch as BranchName;
 
       // Self-heal ahead of the clean-tree check: an in-progress rebase from a
@@ -302,7 +332,7 @@ export function createComposites(deps: CompositesDependencies): Composites {
       const signal = ctx.signal;
 
       const configResult = await gitOperations.loadRepositoryConfig(ctx);
-      if (!configResult.ok) return infrastructure(configResult.error.summary);
+      if (!configResult.ok) return gitOperationsErrorToToolResult(configResult.error);
       const baseBranch = configResult.value.baseBranch as BranchName;
 
       const stepConfirm = await step(ctx, RECONCILE_AFTER_MERGE_STEPS.confirmMerged);
@@ -365,18 +395,10 @@ export function createComposites(deps: CompositesDependencies): Composites {
 
       const stepDelete = await step(ctx, RECONCILE_AFTER_MERGE_STEPS.deleteBranch);
       if (stepDelete) return stepDelete;
-      let deletedBranch: BranchName | null = null;
-      if (status.ref.branch !== baseBranch && (await refExists(cwd, `refs/heads/${status.ref.branch}`, signal))) {
-        // `-D`, not `-d`: the host, not `merge-base`, is the source of truth
-        // that this branch merged — a squash merge rewrites ancestry, so a
-        // safety-checked delete would refuse a branch GitHub has already
-        // confirmed is fully represented in the merge.
-        const deleted = await git(cwd, ['branch', '-D', status.ref.branch], signal);
-        if (deleted.ok) deletedBranch = status.ref.branch;
-      }
+      const { deletedBranch, kept } = await deleteMergedBranch(cwd, status.ref.branch, baseBranch, status.headSha, signal);
 
       const data: ReconcileAfterMergeData = { baseBranch, baseSha, mergeCommitSha: status.mergeCommitSha, deletedBranch };
-      return success(`reconciled '${baseBranch}' onto merge commit ${status.mergeCommitSha}`, data, diagnosticsFor(ctx, startedAtMs, clock));
+      return success(`reconciled '${baseBranch}' onto merge commit ${status.mergeCommitSha}${kept === null ? '' : `; no branch was deleted: ${kept}`}`, data, diagnosticsFor(ctx, startedAtMs, clock));
     },
   };
 }
