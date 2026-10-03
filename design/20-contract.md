@@ -598,15 +598,10 @@ A tamper halting delivery is paged through the outbox, not the audit trail. Two 
 watched file to attach an audit record to — the pre-claim gate and a tampered `processing/` at
 startup — so they enqueue the `TerminalState` variant below at `attention` and write no audit record,
 as D17's two skips write none: no action was taken to record. A refusal that does involve a file keeps
-that file's ordinary `file-watcher` audit record and `file-watcher-failed` notification. Scaffold,
-until the slice implementing D18 adds it to `TerminalState` in `src/journal/types.ts`:
-
-```ts
-  | { readonly kind: 'watcher-state-directory-tampered'; readonly directory: 'processing' | 'processed' | 'failed' }
-```
-
-The union is written out rather than derived from `WatchedFileStage` because `src/journal/` is L1 and
-may not import the watcher.
+that file's ordinary `file-watcher` audit record and `file-watcher-failed` notification. The
+`watcher-state-directory-tampered` variant is declared in `TerminalState`, `src/journal/types.ts`.
+Its `directory` union is written out rather than derived from `WatchedFileStage` because `src/journal/`
+is L1 and may not import the watcher.
 
 **A pending pull-request record pins the commit the watcher pushed — D20.** `PendingPullRequest`
 gains the head SHA `git_push` returned for that file's branch, declared in
@@ -2036,12 +2031,8 @@ consumer naming conventions of its own.
 **A third gate condition, checked first: none of the declaration's three state directories is
 tampered (D18).** It runs before D17's two, so a dirty or parked clone cannot mask a tamper for as long
 as it stays dirty or parked, and it runs whether or not the inbox holds a candidate. A tick it refuses
-is reported `state-directory-tampered` in `WatchTickReport.skipped`, which gains that value — scaffold,
-until the implementing slice adds it in `src/watcher/types.ts`:
-
-```ts
-readonly skipped: 'clone-not-clean' | 'clone-needs-attention' | 'state-directory-tampered' | null;
-```
+is reported `state-directory-tampered` in `WatchTickReport.skipped`, declared in
+`src/watcher/types.ts`.
 
 The gate is what makes the terminal-move refusal below rare rather than routine. Without it, a
 tampered `processed/` would let every tick claim a file, run the whole protocol, open a pull request,

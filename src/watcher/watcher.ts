@@ -94,8 +94,13 @@ function mismatchReason(observation: 'after-apply' | 'after-stage', declared: re
   ].join('\n');
 }
 
+type StateDirectory = 'processing' | 'processed' | 'failed';
+
+/** A terminal move's result: refusing a tampered directory is data, never a throw (D18). */
+type MoveResult = { readonly moved: true } | { readonly moved: false; readonly refused: StateDirectory };
+
 /**
- * `20-contract.md` § L2 — watcher, W08.3: `processing/`, `processed/`, and
+ * `20-contract.md` § L2 — watcher, D18: `processing/`, `processed/`, and
  * `failed/` are names the untrusted drop mount can also write, ahead of the
  * watcher itself. A link-preserving `lstatSync` — never `existsSync` or
  * `statSync`, both of which follow a symlink — is checked before any of the
@@ -383,6 +388,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     context: OperationContextKind,
     file: string,
     outcome: WatchedFileOutcome,
+    refused: StateDirectory | null = null,
   ): Promise<void> {
     await audit.append({
       at: clock.now(),
@@ -397,8 +403,11 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
       outcome,
     });
 
-    if (outcome.kind === 'succeeded') return;
-    const reason = outcome.kind === 'rejected' ? `step '${outcome.step}' returned ${outcome.result}: ${outcome.reason}` : outcome.reason;
+    // D18: a refused terminal move keeps the protocol's own audit outcome above and adds a page naming the directory.
+    if (outcome.kind === 'succeeded' && refused === null) return;
+    const outcomeReason =
+      outcome.kind === 'succeeded' ? `pull request #${outcome.pullRequest.number} was opened` : outcome.kind === 'rejected' ? `step '${outcome.step}' returned ${outcome.result}: ${outcome.reason}` : outcome.reason;
+    const reason = refused === null ? outcomeReason : `${outcomeReason}; '${refused}/' is not a real directory, so the file stays in 'processing/' (D18)`;
     const notified = await store.transaction(async (tx: StoreTransaction) => {
       notifier.enqueue(
         {
@@ -451,18 +460,55 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     return `${candidatePrefix}-${file}`;
   }
 
-  function moveToFailed(declarationId: DeclarationId, sourcePath: string, file: string, reasonText: string): void {
+  /** The first of the declaration's three state directories that is tampered (D18), or null. */
+  function tamperedStateDirectory(declarationId: DeclarationId): StateDirectory | null {
+    if (isTamperedStateDir(processingDirFor(declarationId))) return 'processing';
+    if (isTamperedStateDir(processedDirFor(declarationId))) return 'processed';
+    if (isTamperedStateDir(failedDirFor(declarationId))) return 'failed';
+    return null;
+  }
+
+  /**
+   * D18's latch: declarations already paged for a tamper in this process. Paging
+   * only — every refusing tick still reports its skip. In-memory by design, so a
+   * restart re-pages a tamper that is still present.
+   */
+  const tamperPaged = new Set<DeclarationId>();
+
+  async function pageTamperOnce(declarationId: DeclarationId, directory: StateDirectory): Promise<void> {
+    if (tamperPaged.has(declarationId)) return;
+    tamperPaged.add(declarationId);
+    const notified = await store.transaction(async (tx: StoreTransaction) => {
+      notifier.enqueue(
+        {
+          severity: 'attention',
+          declarationId,
+          subject: { kind: 'watcher-state-directory-tampered', directory },
+          summary: `the watcher's '${directory}/' directory for declaration '${declarationId}' is not a real directory; delivery for it is stopped until it is replaced or removed`,
+        },
+        tx,
+      );
+    });
+    if (!notified.ok) {
+      // A page that was never enqueued must not count as given: release the latch so the next refusal tries again.
+      tamperPaged.delete(declarationId);
+      console.error(`watcher: failed to enqueue state-directory-tampered notification for declaration '${declarationId}': ${notified.error.summary}`);
+    }
+  }
+
+  function moveToFailed(declarationId: DeclarationId, sourcePath: string, file: string, reasonText: string): MoveResult {
     const failedDir = failedDirFor(declarationId);
-    if (isTamperedStateDir(failedDir)) throw new Error(`watcher: '${failedDir}' is not a real directory — refusing to use it as failed/ (W08.3)`);
+    if (isTamperedStateDir(failedDir)) return { moved: false, refused: 'failed' };
     mkdirSync(failedDir, { recursive: true, mode: PROTECTED_DIR_MODE });
     const failedName = uniqueTerminalName(failedDir, timestampPrefix(clock.now()), file);
     renameSync(sourcePath, path.join(failedDir, failedName));
     writeFileSync(path.join(failedDir, `${failedName}.error.txt`), reasonText, 'utf8');
+    return { moved: true };
   }
 
-  function moveToProcessed(declarationId: DeclarationId, sourcePath: string, file: string): void {
+  function moveToProcessed(declarationId: DeclarationId, sourcePath: string, file: string): MoveResult {
     const processedDir = processedDirFor(declarationId);
-    if (isTamperedStateDir(processedDir)) throw new Error(`watcher: '${processedDir}' is not a real directory — refusing to use it as processed/ (W08.3)`);
+    if (isTamperedStateDir(processedDir)) return { moved: false, refused: 'processed' };
     mkdirSync(processedDir, { recursive: true, mode: PROTECTED_DIR_MODE });
     const target = path.join(processedDir, uniqueTerminalName(processedDir, timestampPrefix(clock.now()), file));
     renameSync(sourcePath, target);
@@ -473,6 +519,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     // after landing here.
     const deliveredAt = new Date(clock.now());
     utimesSync(target, deliveredAt, deliveredAt);
+    return { moved: true };
   }
 
   /** The candidate the next claim should try, or null when the inbox holds no eligible file — a symlink (S17.4) or a subdirectory never qualifies. */
@@ -498,15 +545,16 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     return null;
   }
 
-  function claim(declarationId: DeclarationId, file: string): boolean {
+  /** `tampered` is D18's condition caught after the gate passed; `failed` is a rename that failed, which is `claim-failed`. */
+  function claim(declarationId: DeclarationId, file: string): 'claimed' | 'tampered' | 'failed' {
     const processingDir = processingDirFor(declarationId);
-    if (isTamperedStateDir(processingDir)) return false;
+    if (isTamperedStateDir(processingDir)) return 'tampered';
     mkdirSync(processingDir, { recursive: true, mode: PROTECTED_DIR_MODE });
     try {
       renameSync(path.join(inboxRootFor(declarationId), file), path.join(processingDir, file));
-      return true;
+      return 'claimed';
     } catch {
-      return false;
+      return 'failed';
     }
   }
 
@@ -589,6 +637,16 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
 
   async function tickOneDeclaration(declaration: Declaration): Promise<WatchTickReport> {
     const session = watcherSessionFor(declaration);
+
+    // D18's gate comes first: it makes no dispatch, Git or host call, so a dirty or
+    // parked clone cannot mask a tamper, and reconciliation waits with everything else.
+    const tampered = tamperedStateDirectory(declaration.id);
+    if (tampered !== null) {
+      await pageTamperOnce(declaration.id, tampered);
+      return emptyReport(declaration.id, 'state-directory-tampered', [], readPendingPullRequests(volumeRoot, declaration.id).entries);
+    }
+    tamperPaged.delete(declaration.id);
+
     const { reconciled, stillPending } = await reconcilePendingPullRequests(declaration, session);
 
     const described = await cloneStore.describe(declaration.id);
@@ -613,7 +671,12 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     const candidate = pickCandidate(declaration.id);
     if (candidate === null) return emptyReport(declaration.id, null, reconciled, stillPending);
 
-    if (!claim(declaration.id, candidate)) {
+    const claimed = claim(declaration.id, candidate);
+    if (claimed === 'tampered') {
+      await pageTamperOnce(declaration.id, 'processing');
+      return emptyReport(declaration.id, 'state-directory-tampered', reconciled, stillPending);
+    }
+    if (claimed === 'failed') {
       // `20-contract.md` § Watcher, `claim-failed`: "every outcome above is
       // audited, and every failure notifies at attention" — the file stays
       // in the inbox (nothing is moved) and is retried on the next tick.
@@ -632,8 +695,10 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
       outcome = await runProtocol(declaration, session, candidate, read.value, pushed);
     }
 
+    let refused: StateDirectory | null = null;
     if (outcome.kind === 'succeeded') {
-      moveToProcessed(declaration.id, processingPath, candidate);
+      // D19: the pull request is recorded before the terminal move is attempted, so a
+      // refused or failed move can never leave an open pull request nobody follows.
       const pending = readPendingPullRequests(volumeRoot, declaration.id);
       const entry: PendingPullRequest = {
         declarationId: declaration.id,
@@ -644,12 +709,15 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
         headSha: pushed.headSha as GitSha, // runProtocol only succeeds after recording it (D20)
       };
       writePendingPullRequests(volumeRoot, declaration.id, { entries: [...pending.entries, entry] });
+      const moved = moveToProcessed(declaration.id, processingPath, candidate);
+      if (!moved.moved) refused = moved.refused;
     } else {
       const reasonText = outcome.kind === 'rejected' ? `step '${outcome.step}' returned ${outcome.result}: ${outcome.reason}` : outcome.reason;
-      moveToFailed(declaration.id, processingPath, candidate, reasonText);
+      const moved = moveToFailed(declaration.id, processingPath, candidate, reasonText);
+      if (!moved.moved) refused = moved.refused;
     }
 
-    await auditAndNotify(declaration.id, declaration.generation, session.actorRef, 'normal', candidate, outcome);
+    await auditAndNotify(declaration.id, declaration.generation, session.actorRef, 'normal', candidate, outcome, refused);
 
     return { declarationId: declaration.id, skipped: null, claimed: candidate as never, outcome, reconciled, stillPending };
   }
@@ -718,11 +786,15 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
       for (const entry of readdirSync(root)) {
         const declarationId = entry as DeclarationId;
         const processingDir = processingDirFor(declarationId);
-        if (!existsSync(processingDir)) continue;
-        // W08.3: a drop mount can plant `processing/` itself as a symlink or
+        // D18: a drop mount can plant `processing/` itself as a symlink or
         // reparse point ahead of restart — refuse it exactly as `claim` does,
-        // rather than following it into `readdirSync` below.
-        if (isTamperedStateDir(processingDir)) continue;
+        // rather than following it into `readdirSync` below. Checked before
+        // `existsSync`, which follows a link and would hide a dangling one.
+        if (isTamperedStateDir(processingDir)) {
+          await pageTamperOnce(declarationId, 'processing');
+          continue;
+        }
+        if (!existsSync(processingDir)) continue;
 
         for (const fileEntry of readdirSync(processingDir)) {
           const full = path.join(processingDir, fileEntry);
@@ -737,8 +809,8 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
           const reason =
             "found in 'processing/' at startup — a prior run was interrupted mid-delivery and this file may already have an open pull request; it is never reprocessed";
           const outcome: WatchedFileOutcome = { kind: 'interrupted-claim', reason };
-          moveToFailed(declarationId, full, fileEntry, reason);
-          await auditAndNotify(declarationId, null, RECOVERY_ACTOR_REF, 'recovery', fileEntry, outcome);
+          const moved = moveToFailed(declarationId, full, fileEntry, reason);
+          await auditAndNotify(declarationId, null, RECOVERY_ACTOR_REF, 'recovery', fileEntry, outcome, moved.moved ? null : moved.refused);
           reports.push({ declarationId, skipped: null, claimed: fileEntry as never, outcome, reconciled: [], stillPending: [] });
         }
       }
@@ -773,15 +845,16 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
         if (!existsSync(root)) return { module: 'watcher', deletedRows, freedBytes, skipped };
         for (const declarationDir of readdirSync(root)) {
           const processed = path.join(root, declarationDir, 'processed');
-          if (!existsSync(processed)) continue;
-          // W08.3: `processed/` itself can be a symlink/reparse point planted by
+          // D18: `processed/` itself can be a symlink/reparse point planted by
           // the drop mount — `unlinkAndCountBytes` below has no cross-device
           // constraint, so following one here would let a tampered mount delete
-          // arbitrary files anywhere on the host.
+          // arbitrary files anywhere on the host. Checked before `existsSync`,
+          // which follows a link.
           if (isTamperedStateDir(processed)) {
             skipped.push(`refused tampered 'processed/' for declaration '${declarationDir}'`);
             continue;
           }
+          if (!existsSync(processed)) continue;
           for (const name of readdirSync(processed)) {
             const file = path.join(processed, name);
             const stat = lstatSync(file);
