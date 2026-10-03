@@ -56,9 +56,6 @@
 | 274 | #274 | Two boot steps can race, leaving a job unrevalidated | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 275 | #275 | Anyone can register unlimited OAuth clients against this service | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 276 | #276 | Using a TOTP recovery code doesn't actually force re-enrolment | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
-| 277 | #277 | The operator health view always shows zero volume usage | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
-| 278 | #278 | Notifications stuck behind a missing delivery transport don't show up anywhere | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
-| 279 | #279 | A module tool's declared timeout is never actually enforced | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 280 | #280 | The HTTP adapter's timeout doesn't cover reading the response body | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 281 | #281 | Database access has no retry or timeout when the database is busy | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 284 | #284 | Several error results are labelled for conditions that don't match what actually happened | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
@@ -69,9 +66,6 @@
 | 291 | #291 | Revoking an OAuth token can grow the audit trail without real authorization, and misattributes it | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 292 | #292 | There's no record of which operator approved a given MCP access grant | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 301 | #301 | Add a doc-citation checker to CI | — | `082d1df8f15bae3125e78e06155fe1c59fe3cafc` |
-| 314 | #314 | S46 — Every error names what actually happened | S46.1, S46.2, S46.3, S46.4, S46.5, S46.6, S46.7, S46.8, S46.9 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
-| 315 | #315 | S47 — Nothing waits forever, and a busy store is retried | S47.1, S47.2, S47.3, S47.4 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
-| 316 | #316 | S48 — The console and the health view show what is real | S48.1, S48.2, S48.3, S48.4, S48.5 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 318 | #318 | S50 — Every watcher outcome is audited, and every failure is told | S50.1, S50.2, S50.3, S50.4, S50.5, S50.6, S50.7 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 319 | #319 | S51 — A watched repository clones itself on first use | S51.1, S51.2, S51.3 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 320 | #320 | S52 — The watcher is proven against a real repository | S52.1, S52.2, S52.3, S52.4, S52.5, S52.6 | `70413caf7ace545ab150ddd8dcfeb76c1756fd69` |
@@ -86,7 +80,6 @@
 | milestone/5 | #135 | Decide how the lease guard's blind spot on non-locking filesystems gets resolved | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/5 | #136 | Decide whether a stale MCP client tool catalogue needs a refresh mechanism | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/5 | #140 | Decide whether GrantView.liveSessions needs a real count or should be dropped | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
-| milestone/4 | #144 | eligibleViews filters on raw capabilityGrant, not the operator's effective grant | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/6 | #150 | Generate the registry entry tables in the contract instead of hand-maintaining them | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/6 | #180 | Update-WorkMirror.ps1 mangles em dashes into mojibake when it writes WorkRef titles | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
 | milestone/5 | #216 | Decide whether DispatchPipelineDependencies.journal should be required | — | `ccee7fce3f7187ebbc76b5af73f2d489a5f0364a` |
