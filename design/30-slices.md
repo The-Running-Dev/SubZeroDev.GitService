@@ -304,8 +304,8 @@ rest of the watcher work names in its notices. S50 finishes the audit and notifi
 S51 fixes a first-use gap on the same tick protocol. S52 is the evidence harness, and it can only
 prove the corrected outcomes once all four have landed.
 
-S40 and S41 have landed, so the next slice that is not gated is S42. S42 needs only S41's park
-notification, which is on `main`.
+S40 to S43 and S49 have landed, so the next slice that is not gated is S44. S44 to S48 depend on
+nothing outstanding.
 
 ## Contract gates
 
@@ -314,14 +314,11 @@ committed separately and before the handler work depending on it. **No slice may
 signature absent from the contract** — where a slice needs tools, amending the contract is its
 first acceptance criterion, not an implementation detail.
 
-**One gate is live, and one closed on 2026-09-28.** S41's gate, `S41.7`, was met by the amendment that
-PR #328 merged (**R12**), and S41 has landed. The live gate is **S49, raised by this document on 2026-09-25.** The watcher has to pin an auto-merge
-to the commit it pushed (#77), and `pr_enable_auto_merge`'s input carries no expected head today. Adding
-one changes a registered MCP tool's public input, so it is a contract amendment and not an
-implementation detail. `S49.1` is that amendment, committed by `/contract` (opus, high) separately
-and before the rest of S49. `/slice` refuses S49 until `S49.1` is met. The amendment decides the
-field's name, whether it is optional for callers other than the watcher, and what the persisted
-pending record carries. This section only names the gate.
+**No gate is live.** Two closed on and after 2026-09-28. S41's gate, `S41.7`, was met by the amendment
+that PR #328 merged (**R12**), and S41 has landed. **S49's gate, raised by this document on
+2026-09-25,** was `S49.1`: the watcher has to pin an auto-merge to the commit it pushed (#77), and
+`pr_enable_auto_merge`'s input carried no expected head, so adding one changed a registered MCP tool's
+public input. That amendment was committed separately and before the rest of S49, and S49 has landed.
 
 **No U-item is live.** `20-contract.md` § Unresolved records every U-item from U1 to U10 resolved, the
 last two on 2026-08-19 by S18 and S19; that section is the authority for which slice closed which
@@ -374,62 +371,8 @@ carries the reasoning.
 
 ## Outstanding
 
-Twelve slices: S42 to S52, appended 2026-09-25, and S53, appended 2026-09-28. The first forty-one are
-landed and indexed below.
-
-## S42 — Recovery never strands a clone, and never waits for a caller
-
-Delivers: An operator whose service crashed mid-operation gets every interrupted operation either
-finished or parked where they can resolve it. That happens without anyone having to touch the affected
-repository first, and without a clone left flagged in a state nothing can clear.
-Touches: `src/lifecycle/recovery.ts`, `src/composition-root/compose.ts` (the post-boot sweep),
-`src/journal/journal.ts`, `design/20-contract.md` (§ *L1 — lifecycle*).
-Depends on: S41 (the park notification)
-Closes: #265, #267, #289
-Acceptance:
-  - S42.1 Recovery marks a clone `needs-attention` only after `journal.park` has succeeded. When the
-    park write fails, the clone stays `recovery-pending`, no attention mark is written, and the failure
-    is returned as `infrastructure`. A test injects the park failure and asserts all three.
-  - S42.2 When recovery's `unsettled()` read fails, the clone stays `recovery-pending` and the call
-    returns `infrastructure`. It is not marked `needs-attention`. A test injects the read failure and
-    asserts both.
-  - S42.3 Every clone recovery marks `needs-attention` has a parked journal entry that
-    `resolveParkedOperation` accepts. A test resolves one and asserts the clone leaves
-    `needs-attention`.
-  - S42.4 A resume step that dispatches successfully is followed by a re-classification of the entry. The
-    entry is settled only when that verdict is `completed`; any other verdict parks it. A test whose
-    resume succeeds but leaves the operation incomplete asserts it is parked, not settled.
-  - S42.5 Once boot reports ready, one background pass recovers every declaration left
-    `recovery-pending`. It recovers them one at a time, under the same lock rules first use follows. It
-    does not hold the process open (unref'd), and it runs once per boot.
-  - S42.6 A test races the sweep against an ordinary first use of the same declaration and asserts first
-    use wins: that declaration is recovered exactly once, by first use, and the sweep skips it.
-  - S42.7 The "specified, not yet held" note on `20-contract.md` § *L1 — lifecycle* is removed in the
-    same change.
-Out of scope: making the journal a required pipeline dependency (#216, a decision). Changing what a
-resume step is, or which operations have one.
-
-## S43 — Boot keeps its evidence, and its steps in order
-
-Delivers: An operator investigating an outage can trust that a lease takeover is on record even when
-the boot that took over then failed. They can also trust that every held job is re-checked against
-current authority on every boot, rather than some slipping through a race.
-Touches: `src/lifecycle/boot.ts`, `src/lifecycle/lease.ts`, `src/scheduler/scheduler.ts`.
-Depends on: none
-Closes: #273, #274
-Acceptance:
-  - S43.1 Suppose a boot took over the lease and then failed at a step before its takeover was audited,
-    including every pre-migration failure path. The next boot then audits a takeover whose previous
-    holder is the instance the failed boot took over from. A test drives each such failure path and
-    asserts the record.
-  - S43.2 A boot that took over nothing, and fails, leaves no lease file behind. An orderly release's
-    existing behaviour is unchanged.
-  - S43.3 Boot step 7's revalidation starts only after step 6 has finished writing every job it returns
-    to `pending`. A test holds step 6's journal read open and asserts that a job step 6 then returns to
-    `pending` is revalidated in the same boot.
-  - S43.4 The code comment claiming the two steps are independent is removed.
-Out of scope: the lease self-test's blind spot on non-locking filesystems (#135, a decision). Making the
-audit chain writable before migration.
+Nine slices: S44 to S48 and S50 to S52, appended 2026-09-25, and S53, appended 2026-09-28. The other
+forty-four are landed and indexed below.
 
 ## S44 — A clone on disk is exactly what it claims to be
 
@@ -611,33 +554,6 @@ Out of scope: checking or correcting the mode or ownership of an existing direct
 file-less refusals in the hash chain. Both were rejected on 2026-09-25. Auditing terminal-move failures
 that are not tamper, and exceptions escaping a tick, are S50's. The pushed SHA is S49's.
 
-## S49 — A watcher's auto-merge only merges the commit it pushed
-
-Delivers: An operator can trust that a pull request the file watcher opened is only ever merged at the
-exact commit the watcher pushed. If anyone moves the branch after that, the merge refuses instead of
-carrying their change in under the watcher's name.
-Touches: `design/20-contract.md` (the amendment), `src/watcher/watcher.ts`,
-`src/watcher/pending-pull-requests.ts`, `src/watcher/types.ts`, `src/host/types.ts`,
-`src/host/github-adapter.ts`.
-Depends on: none. **Contract-gated** — see § *Contract gates*.
-Closes: #77
-Acceptance:
-  - S49.1 **The contract amendment is committed first**, by `/contract`. It fixes the expected-head
-    input on `pr_enable_auto_merge` and the head SHA carried by the watcher's persisted pending record.
-    `/slice` does not start the rest of S49 until this is met.
-  - S49.2 A pending watcher PR record includes the validated head SHA that `git_push` returned. A record
-    whose SHA is missing or malformed fails closed and invokes no host operation.
-  - S49.3 `pr_enable_auto_merge` passes the expected head to the GitHub CLI as its match-head-commit
-    guard. A test asserts the flag and value on the constructed invocation.
-  - S49.4 Every reconciliation poll supplies the persisted SHA rather than the SHA from the latest
-    status read.
-  - S49.5 A test moves the PR head after the push and asserts that neither auto-merge nor reconciliation
-    treats the new head as the watcher's commit.
-  - S49.6 The watcher gains no direct-merge or rebase path. Auto-merge through the host stays its only
-    merge route.
-Out of scope: the audit and notification of a failed auto-merge (S50). Any other caller of
-`pr_enable_auto_merge`.
-
 ## S50 — Every watcher outcome is audited, and every failure is told
 
 Delivers: An operator learns about every file the watcher failed to deliver and every pull request it
@@ -762,6 +678,9 @@ Bodies retired; the closed issue is the record. Criteria are not re-derived from
 | **S22** | The deployment is verifiable, reversible and documented | [#36](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/36) |
 | **S40** | Only the operator's own console can clear what needs attention | [#308](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/308) |
 | **S41** | Terminal outcomes and parked work reach the operator | [#309](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/309) |
+| **S42** | Recovery never strands a clone, and never waits for a caller | [#310](../../issues/310), closed | S42.1–S42.7 | `8a89cf0` |
+| **S43** | Boot keeps its evidence, and its steps in order | [#311](../../issues/311), closed | S43.1–S43.4 | `8a89cf0` |
+| **S49** | A watcher's auto-merge only merges the commit it pushed | [#317](../../issues/317), closed | S49.1–S49.6 | `8a89cf0` |
 
 Three rows carry a name this document changed after the issue was opened: #31 is titled "A dropped
 file becomes a pull request…" and #92 "A consumer can declare a safe content-drop protocol", both

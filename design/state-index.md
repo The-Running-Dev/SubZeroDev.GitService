@@ -76,7 +76,6 @@
 | 291 | #291 | Revoking an OAuth token can grow the audit trail without real authorization, and misattributes it | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 292 | #292 | There's no record of which operator approved a given MCP access grant | — | `618b0bed2296f4757d465b372b79920ef8d38764` |
 | 301 | #301 | Add a doc-citation checker to CI | — | `082d1df8f15bae3125e78e06155fe1c59fe3cafc` |
-| 310 | #310 | S42 — Recovery never strands a clone, and never waits for a caller | S42.1, S42.2, S42.3, S42.4, S42.5, S42.6, S42.7 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 312 | #312 | S44 — A clone on disk is exactly what it claims to be | S44.1, S44.2, S44.3, S44.4, S44.5 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 313 | #313 | S45 — Composites keep what they did not merge | S45.1, S45.2, S45.3, S45.4, S45.5 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
 | 314 | #314 | S46 — Every error names what actually happened | S46.1, S46.2, S46.3, S46.4, S46.5, S46.6, S46.7, S46.8, S46.9 | `9c4bb73b69a9fcdcb51211853bbceb10aa741266` |
