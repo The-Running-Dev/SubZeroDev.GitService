@@ -1,4 +1,5 @@
 import type { CallContext } from '../shared/call-context.ts';
+import { observeChild } from '../shared/park-sink.ts';
 import type { BranchName, ClonePath, CredentialRef, GitSha, HttpsUrl, IsoUtcTimestamp } from '../shared/brands.ts';
 import type { HostKind } from '../contract/capabilities.ts';
 import type { Clock } from '../clock/clock.ts';
@@ -314,13 +315,13 @@ export function createGitHubAdapter(deps: GitHubAdapterDependencies): HostAdapte
       attempts += 1;
       chargeBudget(credential);
 
-      const result = await deps.exec.runGh({
+      const result = observeChild(await deps.exec.runGh({
         argv,
         cwd,
         timeoutSeconds,
         credential: credential,
         signal: ctx.signal,
-      });
+      }));
 
       if (result.ok) return ok(result.value);
 
@@ -329,6 +330,12 @@ export function createGitHubAdapter(deps: GitHubAdapterDependencies): HostAdapte
       }
       if (result.error.code === 'cancelled') {
         return err(hostError({ code: 'unreachable' }, 'the host call was cancelled'));
+      }
+      // Raised before any stderr classification: a killed child's stderr is a
+      // fragment, and reading it as `unreachable` would let a mutation settle as
+      // though the host had refused it. Never retried, even on a read.
+      if (result.error.code === 'signalled') {
+        return err(hostError({ code: 'signalled', signal: result.error.signal }, result.error.summary));
       }
 
       const text = stderrOf(result.error);

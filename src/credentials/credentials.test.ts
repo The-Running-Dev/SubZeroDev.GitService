@@ -9,6 +9,7 @@ import { withVolumeAsync } from '../store/volume-fixture.ts';
 import type { CredentialRef, DeclarationId, EnvVarName, RemoteHost, Subject } from '../shared/brands.ts';
 import type { ActorRef } from '../shared/actor.ts';
 import { createCredentialResolver, envVarNameFor } from './credentials.ts';
+import { resolveDeclarationCredential } from './declaration-credential.ts';
 
 const REF = 'github-token' as CredentialRef;
 const OTHER_REF = 'other-token' as CredentialRef;
@@ -361,6 +362,9 @@ test('a mark store that cannot be read fails closed: resolution refuses rather t
       assert.equal(resolved.ok, false);
       if (resolved.ok) return;
       assert.equal(resolved.error.resultKind, 'infrastructure');
+      // S46.3 — the fault is in the data volume, not in the reference's own files.
+      assert.equal(resolved.error.code, 'store-failed');
+      assert.notEqual(resolved.error.code, 'reference-unreadable');
       assert.match(resolved.error.summary, /not known whether/);
       assert.equal(resolved.error.summary.includes(SECRET), false);
     } finally {
@@ -390,6 +394,63 @@ test('the allowed-host constraint is per reference, and a reference absent from 
       if (absent.ok) assert.deepEqual(absent.value, []);
     } finally {
       secrets.cleanup();
+    }
+  });
+});
+
+test('S46.3: an unparseable or unreadable _allowed-hosts.json is allowed-hosts-unreadable, not reference-unreadable', async () => {
+  await withVolumeAsync(async (volumeRoot) => {
+    await migratedVolume(volumeRoot);
+    const unparseable = mount({ [REF]: SECRET, '_allowed-hosts.json': '{ this is not json' });
+    const unreadable = mount({ [REF]: SECRET });
+    try {
+      // A directory where the manifest should be is unreadable on every platform, unlike a permission change.
+      mkdirSync(path.join(unreadable.root, '_allowed-hosts.json'));
+      for (const secrets of [unparseable, unreadable]) {
+        const resolver = createCredentialResolver({ credentialMountRoot: secrets.root, volumeRoot, clock: systemClock });
+        const allowed = await resolver.allowedHosts(REF);
+        assert.equal(allowed.ok, false);
+        if (allowed.ok) return;
+        assert.equal(allowed.error.code, 'allowed-hosts-unreadable');
+        assert.equal(allowed.error.resultKind, 'infrastructure');
+        assert.equal('ref' in allowed.error, false, 'the fault is mount-wide, so no reference is named');
+        assert.equal(allowed.error.summary.includes(SECRET), false);
+      }
+    } finally {
+      unparseable.cleanup();
+      unreadable.cleanup();
+    }
+  });
+});
+
+test('S46.3/S46.4: a refused allowlist read and a host outside the list both refuse the credential, each with its own variant', async () => {
+  await withVolumeAsync(async (volumeRoot) => {
+    await migratedVolume(volumeRoot);
+    const bad = mount({ [REF]: SECRET, '_allowed-hosts.json': '[[[' });
+    const good = mount({ [REF]: SECRET, '_allowed-hosts.json': JSON.stringify({ [REF]: ['github.com'] }) });
+    try {
+      const declaration = { id: REPO_A, cloneUrl: 'https://evil.example.invalid/x/y.git' as never, credentialRef: REF };
+
+      const badResolver = createCredentialResolver({ credentialMountRoot: bad.root, volumeRoot, clock: systemClock });
+      const refusedUnreadable = await resolveDeclarationCredential({ credentials: badResolver, credentialEnv: new Map() }, declaration);
+      assert.equal(refusedUnreadable.ok, false);
+      if (refusedUnreadable.ok) return;
+      assert.equal((refusedUnreadable.error as { code?: string }).code, 'allowed-hosts-unreadable');
+
+      const env = new Map();
+      const goodResolver = createCredentialResolver({ credentialMountRoot: good.root, volumeRoot, clock: systemClock });
+      const refusedHost = await resolveDeclarationCredential({ credentials: goodResolver, credentialEnv: env }, declaration);
+      assert.equal(refusedHost.ok, false);
+      if (refusedHost.ok) return;
+      const error = refusedHost.error as { code?: string; resultKind: string; ref?: string; host?: string };
+      assert.equal(error.code, 'host-not-permitted', 'S46.4 — a typed variant, not an untyped authorization error');
+      assert.equal(error.resultKind, 'authorization');
+      assert.equal(error.ref, REF);
+      assert.equal(error.host, 'evil.example.invalid');
+      assert.equal(env.size, 0, 'the secret was never resolved into the env');
+    } finally {
+      bad.cleanup();
+      good.cleanup();
     }
   });
 });

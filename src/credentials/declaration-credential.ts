@@ -1,4 +1,4 @@
-import { cloneUrlHost, type CredentialRef } from '../shared/brands.ts';
+import { cloneUrlHost, type CredentialRef, type RemoteHost } from '../shared/brands.ts';
 import { ok, err, type Outcome } from '../shared/outcome.ts';
 import type { CallContext } from '../shared/call-context.ts';
 import type { CredentialBinding, MutableEnv } from '../exec/exec.ts';
@@ -6,6 +6,7 @@ import type { Declarations } from '../declarations/declarations.ts';
 import type { Declaration } from '../declarations/types.ts';
 import type { ModuleErrorBase } from '../shared/result-kind.ts';
 import type { CredentialResolver } from './credentials.ts';
+import { credentialError } from './errors.ts';
 
 export interface PreparedCredential {
   readonly credential: CredentialBinding | null;
@@ -55,7 +56,7 @@ export async function resolveDeclarationCredential(
     const allowed = await deps.credentials.allowedHosts(ref);
     if (!allowed.ok) return err(allowed.error);
     if (!allowed.value.some((permitted) => (permitted as string).toLowerCase() === host)) {
-      return err(moduleError('authorization', `credential reference '${ref}' is not permitted to reach '${host}'`));
+      return err(credentialError({ code: 'host-not-permitted', ref, host: host as RemoteHost }, `credential reference '${ref}' is not permitted to reach '${host}'`));
     }
   }
 

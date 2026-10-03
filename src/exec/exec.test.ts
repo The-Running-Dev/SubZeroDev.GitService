@@ -44,3 +44,79 @@ test("issue #334: a real git invocation succeeds under the neutralised environme
     }
   });
 });
+
+const NODE = process.execPath;
+
+/**
+ * A POSIX child that kills itself with a signal exec did not send. On Windows
+ * a self-sent signal is `TerminateProcess` and reaches the parent as exit code
+ * 1, never as a signal, so the case cannot be produced there; the mapping
+ * itself is platform-independent and runs on the Linux CI.
+ */
+test('S46.2: a started child killed by a signal exec did not send is signalled, carrying the signal name — not spawn-failed', { skip: process.platform === 'win32' }, async () => {
+  await withVolumeAsync(async (volumeRoot) => {
+    const exec = createExec({ volumeRoot, credentialEnv: new Map(), gitExecutable: NODE });
+    const result = await exec.runGit({
+      argv: ['-e', "process.kill(process.pid, 'SIGTERM')"],
+      cwd: volumeRoot as ClonePath,
+      timeoutSeconds: 30,
+      credential: null,
+      signal: new AbortController().signal,
+    });
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.error.code, 'signalled');
+    assert.equal(result.error.code === 'signalled' && result.error.signal, 'SIGTERM');
+    assert.equal(result.error.resultKind, 'infrastructure');
+    assert.equal(result.error.retryable, false);
+  });
+});
+
+test('S46.2: a cap or an abort exec itself sent is still timed-out / cancelled, not signalled', async () => {
+  await withVolumeAsync(async (volumeRoot) => {
+    const exec = createExec({ volumeRoot, credentialEnv: new Map(), gitExecutable: NODE });
+    const capped = await exec.runGit({
+      argv: ['-e', 'setInterval(() => {}, 1000)'],
+      cwd: volumeRoot as ClonePath,
+      timeoutSeconds: 0.2,
+      credential: null,
+      signal: new AbortController().signal,
+    });
+    assert.equal(capped.ok, false);
+    if (!capped.ok) assert.equal(capped.error.code, 'timed-out');
+
+    const controller = new AbortController();
+    const pending = exec.runGit({ argv: ['-e', 'setInterval(() => {}, 1000)'], cwd: volumeRoot as ClonePath, timeoutSeconds: 30, credential: null, signal: controller.signal });
+    setTimeout(() => controller.abort(), 200);
+    const aborted = await pending;
+    assert.equal(aborted.ok, false);
+    if (!aborted.ok) assert.equal(aborted.error.code, 'cancelled');
+  });
+});
+
+test('S46.2: spawn-failed is returned only for a child that never started', async () => {
+  await withVolumeAsync(async (volumeRoot) => {
+    const exec = createExec({ volumeRoot, credentialEnv: new Map(), gitExecutable: path.join(volumeRoot, 'no-such-executable') });
+    const result = await exec.runGit({ argv: ['status'], cwd: volumeRoot as ClonePath, timeoutSeconds: 30, credential: null, signal: new AbortController().signal });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.error.code, 'spawn-failed');
+  });
+});
+
+test('S46.6: durationMs survives a wall clock stepped backwards while the child runs', async () => {
+  await withVolumeAsync(async (volumeRoot) => {
+    const exec = createExec({ volumeRoot, credentialEnv: new Map(), gitExecutable: NODE });
+    const realNow = Date.now;
+    let calls = 0;
+    // Every reading after the first is an hour earlier than the one before it.
+    Date.now = () => realNow() - 3_600_000 * calls++;
+    try {
+      const result = await exec.runGit({ argv: ['-e', '0'], cwd: volumeRoot as ClonePath, timeoutSeconds: 30, credential: null, signal: new AbortController().signal });
+      assert.equal(result.ok, true);
+      if (!result.ok) return;
+      assert.ok(result.value.durationMs >= 0 && result.value.durationMs < 30_000, `durationMs was ${result.value.durationMs}`);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+});

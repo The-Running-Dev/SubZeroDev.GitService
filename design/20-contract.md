@@ -2251,16 +2251,13 @@ envelope that call returns is `infrastructure`, a kind the pipeline must not par
 found it. So the envelope cannot carry the request, and the handler that saw the signal says so on a
 channel of its own:
 
-```ts
-type ParkCause = { readonly kind: 'signalled'; readonly signal: string | null };
-type ParkSink = Map<OperationId, ParkCause>;
-```
-
-Declared beside `TerminalSink` in `src/dispatch/dispatch-pipeline.ts` once S46 lands; until then this
-block is the scaffold. Owned by the composition root, which hands the one map to `GitOperations`,
-`Composites`, `HostOperations` and the pipeline, keyed on `operationId` for the reason
-`TerminalSink` is. `DispatchPipelineDependencies` gains `parkSink`, optional on the same terms as
-`terminalSink`.
+`ParkCause` and `ParkSink` are declared in `src/shared/park-sink.ts` and re-exported from
+`src/dispatch/dispatch-pipeline.ts` beside `TerminalSink`; L2 may not import L4, so the declaration
+lives below both. The same file holds the scope a mutating handler runs inside, which is how a
+child's signal reaches the map. Owned by the composition root, which hands the one map to
+`GitOperations`, `Composites`, `HostOperations` and the pipeline, keyed on `operationId` for the
+reason `TerminalSink` is. `DispatchPipelineDependencies` gains `parkSink`, optional on the same terms
+as `terminalSink`.
 
 What the declarations cannot say:
 
@@ -2924,8 +2921,7 @@ type HostError = ModuleErrorBase & (
 );
 ```
 
-`head-moved` is declared in `src/host/errors.ts` with the other variants. `signalled` is added there
-by S46, and this block is its scaffold until then.
+Every variant, `signalled` included, is declared in `src/host/errors.ts`.
 
 | Variant | Raised when | Retryable | Caller does |
 |---|---|---|---|
@@ -3238,7 +3234,7 @@ responsible for maintaining it.
 | R10 | A `running` job is never simply fired again at boot. | Scheduler |
 | R11 | A `TerminalState` is written to the sink by the call that observed the terminal condition, and is read and removed by the settle for that same `operationId`. A monitoring wait never settles, so its entry is read and removed by the dispatch pipeline's take on the wait's exit instead (**R12**). Exactly one producer exists; `Journal.classify` is not one, per **R3**. No sink entry survives the operation that wrote it. | Dispatch pipeline, Host adapter |
 | R12 | For every `monitoring-wait` operation, the dispatch pipeline takes the sink entry for its `operationId` exactly once, on every exit after the handler is invoked. If the take finds an entry, exactly one outbox row at `attention` naming that `TerminalState` is enqueued in its own store transaction before `dispatch` resolves. If it finds none, no row is enqueued. No monitoring wait begins a journal entry. | Dispatch pipeline |
-| R13 | A park-sink entry is written only by a mutating handler, `git_raw` excepted, during a call in which a child it started ended `signalled`, and that call's envelope is `infrastructure`. The dispatch pipeline takes it exactly once, on every exit of the mutating branch after the handler is invoked. A call whose take finds an entry is parked and never settled, and its audit record is appended before the park. No read or monitoring wait writes an entry, and no entry survives the operation that wrote it. *Specified, not yet held: S46 implements it.* | Dispatch pipeline, Git operations, Composites, Host adapter |
+| R13 | A park-sink entry is written only by a mutating handler, `git_raw` excepted, during a call in which a child it started ended `signalled`, and that call's envelope is `infrastructure`. The dispatch pipeline takes it exactly once, on every exit of the mutating branch after the handler is invoked. A call whose take finds an entry is parked and never settled, and its audit record is appended before the park. No read or monitoring wait writes an entry, and no entry survives the operation that wrote it. | Dispatch pipeline, Git operations, Composites, Host adapter |
 
 ### Concurrency
 

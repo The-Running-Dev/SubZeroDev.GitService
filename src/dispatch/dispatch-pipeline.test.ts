@@ -25,12 +25,13 @@ import { createModuleAdapter, toModuleHandler } from '../module-adapter/module-a
 import { createGitOperations } from '../git/git-operations.ts';
 import { createCredentialResolver } from '../credentials/credentials.ts';
 import type { EnvVarName } from '../shared/brands.ts';
-import { authorization, success, timeout as timeoutResult, validation } from '../result/envelope.ts';
+import { authorization, infrastructure, success, timeout as timeoutResult, validation } from '../result/envelope.ts';
 import { err, ok, type Outcome } from '../shared/outcome.ts';
 import type { Session } from '../shared/session.ts';
 import { createRecoveryCatalogue } from '../recovery/catalogue.ts';
 import { recoverDeclaration } from '../lifecycle/recovery.ts';
-import { createDispatchPipeline } from './dispatch-pipeline.ts';
+import { createDispatchPipeline, type ParkSink } from './dispatch-pipeline.ts';
+import { execError } from '../exec/errors.ts';
 import type { HttpAdapter } from '../http/http-adapter.ts';
 
 const CAPABILITY_SET = new Set(['repo.read']) as unknown as DeploymentCeiling;
@@ -2258,6 +2259,124 @@ test('S15.7 (generalized) — any mutating tool that times out parks its journal
     assert.equal(parked[0]?.tool, 'git_slow_mutation');
     const clone = await cloneStore.describe('repo-a' as never);
     assert.equal(clone.ok && clone.value.state, 'needs-attention');
+  });
+});
+
+// S46.11–S46.13 (**R13**). An exec double whose matching children end
+// `signalled` — the real kill is platform-specific, so these tests state it.
+function signalledExec(real: ReturnType<typeof createExec>, signalledArgv: (argv: readonly string[]) => boolean): ReturnType<typeof createExec> {
+  return {
+    ...real,
+    async runGit(request) {
+      if (signalledArgv(request.argv)) return { ok: false, error: execError({ code: 'signalled', signal: 'SIGKILL' }, `git ${request.argv[0]} was killed by SIGKILL`) } as never;
+      return real.runGit(request);
+    },
+  };
+}
+
+test('S46.11 — a mutating git call whose child ends signalled returns infrastructure, parks, marks the clone, and audits before the park', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec, locks, fixture, volume }) => {
+    grantWrite(fixture, ['README.md']);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const realJournal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const order: string[] = [];
+    const journal = { ...realJournal, park: async (...args: Parameters<typeof realJournal.park>) => { order.push('park'); return realJournal.park(...args); } } as typeof realJournal;
+    const recordingAudit = { ...audit, append: async (input: Parameters<typeof audit.append>[0]) => { order.push(`audit:${input.form}`); return audit.append(input); } } as typeof audit;
+    const parkSink: ParkSink = new Map();
+    const killed = signalledExec(exec, (argv) => argv[0] === 'add');
+    const gitOperations = createGitOperations({ clock: systemClock, exec: killed, locks, audit: recordingAudit, journal, parkSink });
+    const moduleAdapter = createModuleAdapter();
+    moduleAdapter.register('git.stage' as never, toModuleHandler(gitOperations.stage));
+    const pipeline = createDispatchPipeline({
+      exec: killed, registry: mutatingRegistryOf([STAGE_ENTRY]), ceiling: MUTATION_CAPABILITY_SET, moduleAdapter, declarations, cloneStore, locks, audit: recordingAudit, journal, clock: systemClock, parkSink,
+    });
+    const declaration = (await declarations.get('repo-a' as never))!;
+    const holder = { operationId: 'setup' as never, declarationId: declaration.id, tool: 'setup' as never, heldSince: systemClock.now() };
+    const ensured = await cloneStore.ensure(declaration, holder, new AbortController().signal);
+    assert.equal(ensured.ok, true);
+    if (!ensured.ok) return;
+    writeFileSync(path.join(ensured.value.clone.path, 'README.md'), 'fixture\nchanged\n', 'utf8');
+    ensured.value.materialisationLock.release();
+    ensured.value.activePin.release();
+    order.length = 0;
+
+    const result = await pipeline.dispatch({
+      toolName: 'git_stage' as never, input: { paths: ['README.md'] }, session: sessionWith(['repo.read', 'git.local.write']), declarationId: 'repo-a' as never,
+      scheduledJobId: null, context: 'normal', signal: new AbortController().signal,
+    });
+
+    assert.equal(result.kind, 'infrastructure');
+    assert.match(result.summary, /SIGKILL/);
+    const parked = read(await realJournal.parked());
+    assert.equal(parked.length, 1);
+    assert.equal(parked[0]?.tool, 'git_stage');
+    const clone = await cloneStore.describe('repo-a' as never);
+    assert.equal(clone.ok && clone.value.state, 'needs-attention');
+    // The audit record is written before the park, and the entry is taken exactly once.
+    assert.ok(order.indexOf('audit:call') !== -1 && order.indexOf('audit:call') < order.indexOf('park'), `audit before park, got ${order.join(',')}`);
+    assert.equal(parkSink.size, 0);
+  });
+});
+
+test('S46.11 — the pipeline parks by the sink entry, not the envelope kind: an infrastructure result with no entry settles, and an entry parks whatever the envelope says', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec, locks, fixture, volume }) => {
+    fixture.current = fixtureDeclaration('repo-a', fixture.current!.cloneUrl, ['git.local.write']);
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const parkSink: ParkSink = new Map();
+    const moduleAdapter = createModuleAdapter();
+    moduleAdapter.register('git.plain-infra' as never, async () => infrastructure('an ordinary infrastructure refusal'));
+    moduleAdapter.register('git.signalled-success' as never, async (ctx) => {
+      parkSink.set(ctx.operationId, { kind: 'signalled', signal: 'SIGTERM' });
+      return success('looked fine', {}, { operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation, durationMs: 0 });
+    });
+    const tool = (name: string, target: string) => fixtureTool({ name, capabilities: ['git.local.write'], scopes: ['write'], executionClass: 'mutating', target: { kind: 'module', target: target as never } });
+    const pipeline = createDispatchPipeline({
+      registry: mutatingRegistryOf([tool('git_plain_infra', 'git.plain-infra'), tool('git_signalled_success', 'git.signalled-success')]),
+      ceiling: MUTATION_CAPABILITY_SET, moduleAdapter, declarations, cloneStore, locks, audit, journal, exec, clock: systemClock, parkSink,
+    });
+    const call = (toolName: string) => pipeline.dispatch({
+      toolName: toolName as never, input: {}, session: sessionWith(['git.local.write']), declarationId: 'repo-a' as never,
+      scheduledJobId: null, context: 'normal', signal: new AbortController().signal,
+    });
+
+    const plain = await call('git_plain_infra');
+    assert.equal(plain.kind, 'infrastructure');
+    assert.equal(read(await journal.parked()).length, 0);
+
+    const signalled = await call('git_signalled_success');
+    assert.equal(signalled.kind, 'success');
+    const parked = read(await journal.parked());
+    assert.equal(parked.length, 1);
+    assert.equal(parked[0]?.tool, 'git_signalled_success');
+    assert.equal(parkSink.size, 0);
+  });
+});
+
+test('S46.13 — a read whose child ends signalled returns infrastructure, parks nothing, and leaves the clone as it was', async () => {
+  await withDeclaredRepo(async ({ declarations, cloneStore, exec, locks, volume }) => {
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const journal = createJournal({ volumeRoot: volume, clock: systemClock });
+    const parkSink: ParkSink = new Map();
+    const killed = signalledExec(exec, (argv) => argv[0] === 'status');
+    const gitOperations = createGitOperations({ clock: systemClock, exec: killed, locks, audit, journal, parkSink });
+    const moduleAdapter = createModuleAdapter();
+    moduleAdapter.register('git.status' as never, toModuleHandler(gitOperations.status));
+    const entry = fixtureTool({ name: 'repo_status', capabilities: ['repo.read'], scopes: ['read'], executionClass: 'read', target: { kind: 'module', target: 'git.status' as never } });
+    const pipeline = createDispatchPipeline({
+      exec: killed, registry: registryOf([entry]), ceiling: CAPABILITY_SET, moduleAdapter, declarations, cloneStore, locks, audit, journal, clock: systemClock, parkSink,
+    });
+
+    const result = await pipeline.dispatch({
+      toolName: 'repo_status' as never, input: {}, session: sessionWith(['repo.read']), declarationId: 'repo-a' as never,
+      scheduledJobId: null, context: 'normal', signal: new AbortController().signal,
+    });
+
+    assert.equal(result.kind, 'infrastructure');
+    assert.equal(read(await journal.parked()).length, 0);
+    assert.equal(parkSink.size, 0);
+    const clone = await cloneStore.describe('repo-a' as never);
+    assert.notEqual(clone.ok && clone.value.state, 'needs-attention');
   });
 });
 

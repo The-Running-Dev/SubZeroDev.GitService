@@ -71,7 +71,7 @@ export function createHttpAdapter(deps: HttpAdapterDependencies): HttpAdapter {
   const declared = new Set<HttpOperationName>([VERIFY_PUBLISHED_URL_OPERATION]);
 
   async function verifyPublishedUrl(ctx: CallContext, input: JsonValue, limits: ToolLimits): Promise<ToolResult<JsonValue>> {
-    const startedAtMs = Date.now();
+    const startedAtMs = clock.monotonicMs();
     if (!isVerifyPublishedUrlInput(input)) {
       return infrastructure(`'${VERIFY_PUBLISHED_URL_OPERATION}' received an input its own schema should have rejected`);
     }

@@ -15,7 +15,7 @@ import type { McpScope } from '../contract/capabilities.ts';
 import type { Authorization } from '../authorization/authorization.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import type { DispatchPipeline } from '../dispatch/dispatch-pipeline.ts';
-import { authorization as authorizationResult } from '../result/envelope.ts';
+import { authorization as authorizationResult, isError } from '../result/envelope.ts';
 import { requireSession, csrfOk, type ConsoleAuthDependencies } from './console-auth-routes.ts';
 
 const SUPPORTED_SCOPES: readonly McpScope[] = ['read', 'write', 'raw', 'schedule'];
@@ -628,7 +628,7 @@ async function handleMcpTransport(deps: McpRoutesDependencies, req: IncomingMess
   // they are just being pointed at a resource neither was established for.
   if (session.repositoryBinding !== declarationIdValue) {
     const result = authorizationResult(`this session is bound to '${session.repositoryBinding}', not '${declarationIdValue}'`, []);
-    sendJson(res, 403, jsonRpcResult(rpcId, { content: [{ type: 'text', text: JSON.stringify(result) }], isError: true }));
+    sendJson(res, 403, jsonRpcResult(rpcId, { content: [{ type: 'text', text: JSON.stringify(result) }], isError: isError(result.kind) }));
     return;
   }
 
@@ -672,7 +672,10 @@ async function handleMcpTransport(deps: McpRoutesDependencies, req: IncomingMess
       toolResultStatus(result.kind),
       jsonRpcResult(rpcId, {
         content: [{ type: 'text', text: JSON.stringify(result) }],
-        isError: !result.ok,
+        // Invariant E2: a refusal the caller can correct (validation,
+        // precondition, conflict, authorization) is an answer, not a tool
+        // fault, so `!result.ok` over-reports it to every MCP client.
+        isError: isError(result.kind),
       }),
     );
     return;

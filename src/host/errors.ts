@@ -14,6 +14,7 @@ export type HostError = ModuleErrorBase &
     | { readonly code: 'required-check-failed'; readonly check: string; readonly pullRequest: PullRequestRef }
     | { readonly code: 'not-found'; readonly resource: string }
     | { readonly code: 'timed-out'; readonly limitSeconds: number }
+    | { readonly code: 'signalled'; readonly signal: string | null }
   );
 
 /**
@@ -39,6 +40,7 @@ const RESULT_KIND: Readonly<Record<HostError['code'], ModuleErrorBase['resultKin
   'required-check-failed': 'precondition',
   'not-found': 'precondition',
   'timed-out': 'timeout',
+  signalled: 'infrastructure',
 };
 
 const RETRYABLE: Readonly<Record<HostError['code'], boolean>> = {
@@ -51,6 +53,7 @@ const RETRYABLE: Readonly<Record<HostError['code'], boolean>> = {
   'required-check-failed': false,
   'not-found': false,
   'timed-out': false,
+  signalled: false,
 };
 
 export function hostError<T extends { readonly code: HostError['code'] }>(variant: T, summary: string): HostError {

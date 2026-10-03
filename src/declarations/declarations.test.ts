@@ -4,7 +4,9 @@ import path from 'node:path';
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { systemClock } from '../clock/clock.ts';
-import { ok } from '../shared/outcome.ts';
+import { ok, err } from '../shared/outcome.ts';
+import { storeError } from '../store/errors.ts';
+import { journalError } from '../journal/errors.ts';
 import { createStructuredStore } from '../store/structured-store.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
 import type { OperationJournalEntry } from '../journal/types.ts';
@@ -499,6 +501,46 @@ test('orphan() reports no retained journal entries when the journal read finds n
     const orphanedUnwired = await unwired.orphan('repo-19' as DeclareInput['id'], OPERATOR);
     assert.equal(orphanedUnwired.ok, true);
     if (orphanedUnwired.ok) assert.deepEqual(orphanedUnwired.value.retainedJournalEntries, []);
+  });
+});
+
+test('S46.8/S46.9 — orphan() whose journal read fails returns store-failed and leaves the declaration active', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declarations = declarationsFor(volume, {
+      journal: { unsettled: async () => err(journalError({ code: 'read-failed', cause: storeError({ code: 'io-failed' }, 'disk gone') }, 'disk gone')) },
+    });
+    const declared = await declarations.declare(declareInputFor('repo-46-8'), OPERATOR);
+    assert.equal(declared.ok, true);
+    const before = await declarations.get('repo-46-8' as DeclareInput['id']);
+
+    const orphaned = await declarations.orphan('repo-46-8' as DeclareInput['id'], OPERATOR);
+    assert.equal(orphaned.ok, false);
+    if (!orphaned.ok) assert.equal(orphaned.error.code, 'store-failed');
+
+    const after = await declarations.get('repo-46-8' as DeclareInput['id']);
+    assert.equal(after?.state, 'active', 'a failed journal read must not have flipped the state');
+    assert.equal(after?.grantEpoch, before?.grantEpoch, 'nor bumped the grant epoch');
+  });
+});
+
+test('S46.1 — a constraint violation that is not a duplicate id is store-failed, not already-exists', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declarations = declarationsFor(volume);
+    // `host` is CHECK-constrained to 'github' | 'generic'; an id nobody holds
+    // violating it is a constraint failure with no duplicate behind it.
+    const violated = await declarations.declare(declareInputFor('repo-46-1', { host: 'not-a-host' as never }), OPERATOR);
+    assert.equal(violated.ok, false);
+    if (!violated.ok) {
+      assert.equal(violated.error.code, 'store-failed');
+      assert.equal(violated.error.resultKind, 'infrastructure');
+    }
+    assert.equal(await declarations.get('repo-46-1' as DeclareInput['id']), null);
+
+    const first = await declarations.declare(declareInputFor('repo-46-1b'), OPERATOR);
+    assert.equal(first.ok, true);
+    const duplicate = await declarations.declare(declareInputFor('repo-46-1b'), OPERATOR);
+    assert.equal(duplicate.ok, false);
+    if (!duplicate.ok) assert.equal(duplicate.error.code, 'already-exists');
   });
 });
 
