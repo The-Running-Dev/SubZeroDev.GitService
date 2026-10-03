@@ -89,31 +89,51 @@ export function createHttpAdapter(deps: HttpAdapterDependencies): HttpAdapter {
     ctx.signal.addEventListener('abort', onAbort);
     const timer = setTimeout(() => controller.abort(), limits.timeoutSeconds * 1000);
 
-    let response: Response;
-    try {
-      response = await fetchImpl(url as string, { method: 'GET', signal: controller.signal });
-    } catch (cause) {
+    // The timer and the caller's abort listener stay live until the body has
+    // been read: `fetch` resolves on headers, so a server that stalls after
+    // them would otherwise hold this call open indefinitely (S47.2).
+    const cleanup = () => {
       clearTimeout(timer);
       ctx.signal.removeEventListener('abort', onAbort);
-      if (controller.signal.aborted && !ctx.signal.aborted) {
+    };
+    const aborted = new Promise<never>((_resolve, reject) => {
+      controller.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+    });
+    aborted.catch(() => {});
+    const timedOut = () => controller.signal.aborted && !ctx.signal.aborted;
+
+    let response: Response;
+    try {
+      response = await Promise.race([fetchImpl(url as string, { method: 'GET', signal: controller.signal }), aborted]);
+    } catch (cause) {
+      cleanup();
+      if (timedOut()) {
         return timeoutResult(`GET ${url} did not respond within ${limits.timeoutSeconds}s`, limits.timeoutSeconds);
       }
       const message = cause instanceof Error ? cause.message : String(cause);
       return upstream(`${url} could not be reached: ${message}`, null);
     }
-    clearTimeout(timer);
-    ctx.signal.removeEventListener('abort', onAbort);
 
     if (response.status < 200 || response.status >= 300) {
+      cleanup();
+      void response.body?.cancel().catch(() => {});
       return upstream(`GET ${url} returned ${response.status}`, null);
     }
 
     let body: unknown;
     try {
-      body = await response.json();
+      body = await Promise.race([response.json(), aborted]);
     } catch {
+      cleanup();
+      if (timedOut()) {
+        return timeoutResult(`GET ${url} did not finish sending its response within ${limits.timeoutSeconds}s`, limits.timeoutSeconds);
+      }
+      if (ctx.signal.aborted) {
+        return infrastructure(`GET ${url} was cancelled while its response was being read`);
+      }
       return upstream(`${url} served a 200 with no readable commit information`, null);
     }
+    cleanup();
     const servedCommitSha =
       body !== null && typeof body === 'object' && typeof (body as Record<string, unknown>).commitSha === 'string'
         ? ((body as Record<string, unknown>).commitSha as string)

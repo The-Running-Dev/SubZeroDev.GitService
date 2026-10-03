@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { systemClock } from '../clock/clock.ts';
@@ -123,4 +125,56 @@ test('S12.7 — the http adapter carries no credential dependency, asserted by i
   const imports = [...source.matchAll(/^import\s+(?:type\s+)?.*?from\s+'([^']+)';/gm)].map((m) => m[1]!);
   const credentialShaped = imports.filter((spec) => /exec\/|credentials\//.test(spec));
   assert.deepEqual(credentialShaped, [], `http-adapter.ts imports from a credential-shaped module: ${credentialShaped.join(', ')}`);
+});
+
+test('S47.2 — a server that sends headers and then stalls the body is a timeout at the cap, not a hang', async () => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.write('{"ready":');
+    // never ends: the body stalls after the headers
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address() as AddressInfo;
+    const adapter = createHttpAdapter({ clock: systemClock });
+    const startedMs = Date.now();
+    const result = await adapter.invoke(
+      VERIFY_PUBLISHED_URL_OPERATION,
+      context(),
+      { url: `http://127.0.0.1:${port}/` as HttpsUrl, expectedCommitSha: EXPECTED },
+      { timeoutSeconds: 1, maxResultBytes: 4096 },
+    );
+    const elapsedMs = Date.now() - startedMs;
+    assert.equal(result.kind, 'timeout');
+    assert.ok(elapsedMs < 4000, `returned after ${elapsedMs} ms, expected about 1000`);
+    assert.equal(result.findings?.[0]?.message, '1');
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('S47.2 — a caller abort while the body is being read is not reported as a timeout', async () => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.write('{"ready":');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address() as AddressInfo;
+    const adapter = createHttpAdapter({ clock: systemClock });
+    const caller = new AbortController();
+    setTimeout(() => caller.abort(), 200);
+    const result = await adapter.invoke(
+      VERIFY_PUBLISHED_URL_OPERATION,
+      context(caller.signal),
+      { url: `http://127.0.0.1:${port}/` as HttpsUrl, expectedCommitSha: EXPECTED },
+      { timeoutSeconds: 30, maxResultBytes: 4096 },
+    );
+    assert.notEqual(result.kind, 'timeout');
+    assert.equal(result.ok, false);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });

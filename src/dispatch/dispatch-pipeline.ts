@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { repoRelativePath, type DeclarationId, type OperationId, type PathPrefix, type RegistryToolName, type RepoRelativePath, type ScheduledJobId } from '../shared/brands.ts';
+import { isoUtcTimestamp, repoRelativePath, type DeclarationId, type ModuleTargetName, type OperationId, type PathPrefix, type RegistryToolName, type RepoRelativePath, type ScheduledJobId } from '../shared/brands.ts';
 import type { ActorRef, OperationContextKind } from '../shared/actor.ts';
 import type { Session } from '../shared/session.ts';
 import type { CallContext } from '../shared/call-context.ts';
@@ -397,15 +397,51 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
       writablePathPrefixes,
       context: request.context,
       scheduledJobId: request.scheduledJobId,
-      deadline: clock.now(),
+      deadline: deadlineAfter(entry.limits.timeoutSeconds),
       signal: request.signal,
     };
+  }
+
+  /** `S47.1` — a call's context deadline is its start plus its declared `timeoutSeconds`. */
+  function deadlineAfter(timeoutSeconds: number): CallContext['deadline'] {
+    const now = clock.now();
+    const later = isoUtcTimestamp(new Date(Date.parse(now) + timeoutSeconds * 1000).toISOString());
+    return later.ok ? later.value : now;
+  }
+
+  /**
+   * `S47.1` — a module handler is cut off at its declared limit rather than
+   * trusted to honour it: the handler's signal is aborted when the limit
+   * elapses and the call returns `timeout` whether or not the handler ever
+   * settles. The http adapter enforces its own limit (it also bounds the body
+   * read), so this applies to module targets only.
+   */
+  async function invokeModuleWithinLimit(entry: ToolDeclaration, target: ModuleTargetName, ctx: CallContext, input: JsonValue): Promise<ToolResult<JsonValue>> {
+    const limitSeconds = entry.limits.timeoutSeconds;
+    const controller = new AbortController();
+    const onCallerAbort = () => controller.abort();
+    if (ctx.signal.aborted) controller.abort();
+    else ctx.signal.addEventListener('abort', onCallerAbort, { once: true });
+
+    let timer: NodeJS.Timeout | undefined;
+    const limit = new Promise<ToolResult<JsonValue>>((resolve) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        resolve(timeoutResult(`'${entry.name}' did not finish within its ${limitSeconds}s limit`, limitSeconds));
+      }, limitSeconds * 1000);
+    });
+    try {
+      return await Promise.race([moduleAdapter.invoke(target, { ...ctx, signal: controller.signal }, input), limit]);
+    } finally {
+      clearTimeout(timer);
+      ctx.signal.removeEventListener('abort', onCallerAbort);
+    }
   }
 
   async function invokeAndEnvelope(entry: ToolDeclaration, ctx: CallContext, input: JsonValue): Promise<ToolResult<JsonValue>> {
     let result: ToolResult<JsonValue>;
     if (entry.target.kind === 'module') {
-      result = await moduleAdapter.invoke(entry.target.target, ctx, input);
+      result = await invokeModuleWithinLimit(entry, entry.target.target, ctx, input);
     } else if (httpAdapter) {
       result = await httpAdapter.invoke(entry.target.operation, ctx, input, entry.limits);
     } else {

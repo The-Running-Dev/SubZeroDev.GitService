@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { applyStoreBusyTimeout } from '../shared/store-busy.ts';
 import { err, ok, type Outcome } from '../shared/outcome.ts';
 import type { CredentialRef, DeclarationId, EnvVarName, IsoUtcTimestamp, RemoteHost } from '../shared/brands.ts';
 import type { ActorRef } from '../shared/actor.ts';
@@ -71,6 +72,7 @@ function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): DbOutcome<T
   try {
     mkdirSync(volumeRoot, { recursive: true });
     db = new DatabaseSync(path.join(volumeRoot, 'store.sqlite'));
+    applyStoreBusyTimeout(db);
     db.exec('PRAGMA foreign_keys = ON;');
   } catch (cause) {
     return { ok: false, reason: cause instanceof Error ? cause.message : String(cause) };

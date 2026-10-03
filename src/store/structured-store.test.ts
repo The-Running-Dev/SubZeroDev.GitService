@@ -1,12 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync, statSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { systemClock } from '../clock/clock.ts';
 import { createHash } from 'node:crypto';
 import { createStructuredStore, MIGRATIONS, STORE_TABLE_NAMES } from './structured-store.ts';
 import { withVolumeAsync } from './volume-fixture.ts';
+import { STORE_BUSY_TIMEOUT_MS } from '../shared/store-busy.ts';
 
 const EXPECTED_INDEXES = [
   'declaration_active_id',
@@ -451,4 +454,111 @@ test('S25.6 — migrate() converts an already-schema\'d store (one migrated befo
       await store.close();
     }
   });
+});
+
+// --- S47: a busy store is retried ---
+
+/**
+ * SQLite's busy wait blocks the event loop, so a lock this process's own
+ * second connection must wait on has to be held by *another* process — a
+ * second connection here would never get the chance to release it.
+ */
+async function holdWriteLock(volume: string, holdMs: number): Promise<{ release: () => void }> {
+  const script = [
+    "const { DatabaseSync } = require('node:sqlite');",
+    `const db = new DatabaseSync(${JSON.stringify(path.join(volume, 'store.sqlite'))});`,
+    "db.exec('BEGIN IMMEDIATE');",
+    "process.stdout.write('locked');",
+    `setTimeout(() => { db.exec('ROLLBACK'); db.close(); process.exit(0); }, ${holdMs});`,
+  ].join(' ');
+  const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', '-e', script], { stdio: ['ignore', 'pipe', 'inherit'] });
+  await new Promise<void>((resolve, reject) => {
+    child.once('error', reject);
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (chunk.toString().includes('locked')) resolve();
+    });
+    child.once('exit', () => reject(new Error('lock holder exited before locking')));
+  });
+  return { release: () => child.kill() };
+}
+
+test('S47.3 — the store connection sets the shared, non-zero busy timeout', async () => {
+  assert.ok(STORE_BUSY_TIMEOUT_MS > 0);
+  await withVolumeAsync(async (volume) => {
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    assert.equal((await store.open()).ok, true);
+    assert.equal((await store.migrate()).ok, true);
+    // A second writer against a lock held for far less than the bound must not
+    // fail at once: the immediate-failure default would return `busy` here.
+    const holder = await holdWriteLock(volume, 300);
+    try {
+      const result = await store.transaction(async (tx) => tx.run('CREATE TABLE s47_probe (a INTEGER)'));
+      assert.equal(result.ok, true);
+    } finally {
+      holder.release();
+      await store.close();
+    }
+  });
+});
+
+test('S47.4 — a write lock held for less than the bound is waited out and the second writer succeeds', async () => {
+  await withVolumeAsync(async (volume) => {
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    assert.equal((await store.open()).ok, true);
+    assert.equal((await store.migrate()).ok, true);
+    const holder = await holdWriteLock(volume, 700);
+    try {
+      const startedMs = Date.now();
+      const result = await store.transaction(async (tx) => tx.run('CREATE TABLE s47_wait (a INTEGER)'));
+      assert.equal(result.ok, true, result.ok ? '' : result.error.summary);
+      assert.ok(Date.now() - startedMs >= 300, 'the writer actually waited for the holder');
+    } finally {
+      holder.release();
+      await store.close();
+    }
+  });
+});
+
+test('S47.4 — a write lock held past the bound returns infrastructure (busy, retryable) at about the bound', async () => {
+  await withVolumeAsync(async (volume) => {
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    assert.equal((await store.open()).ok, true);
+    assert.equal((await store.migrate()).ok, true);
+    const holder = await holdWriteLock(volume, STORE_BUSY_TIMEOUT_MS * 3);
+    try {
+      const startedMs = Date.now();
+      const result = await store.transaction(async (tx) => tx.run('CREATE TABLE s47_stuck (a INTEGER)'));
+      const elapsedMs = Date.now() - startedMs;
+      assert.equal(result.ok, false);
+      if (result.ok) return;
+      assert.equal(result.error.resultKind, 'infrastructure');
+      assert.equal(result.error.code, 'busy');
+      assert.equal(result.error.retryable, true);
+      assert.ok(elapsedMs >= STORE_BUSY_TIMEOUT_MS * 0.9 && elapsedMs < STORE_BUSY_TIMEOUT_MS * 2.5, `gave up after ${elapsedMs} ms, bound is ${STORE_BUSY_TIMEOUT_MS} ms`);
+    } finally {
+      holder.release();
+      await store.close();
+    }
+  });
+});
+
+test('S47.3 — every store connection outside the lease applies the shared busy timeout, and the lease still fails immediately', () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const sites = [
+    'audit/audit.ts',
+    'declarations/declarations.ts',
+    'credentials/credentials.ts',
+    'clone/clone-store.ts',
+    'authorization/authorization.ts',
+    'journal/journal.ts',
+    'notifier/notifier.ts',
+    'scheduler/scheduler.ts',
+    'store/structured-store.ts',
+    'operator-identity/operator-identity.ts',
+  ];
+  for (const site of sites) {
+    const source = readFileSync(path.join(root, site), 'utf8');
+    assert.match(source, /applyStoreBusyTimeout\(db\)/, `${site} sets the shared busy timeout on its connection`);
+  }
+  assert.match(readFileSync(path.join(root, 'lifecycle/lease.ts'), 'utf8'), /PRAGMA busy_timeout = 0/, 'the lease connection keeps its immediate failure');
 });

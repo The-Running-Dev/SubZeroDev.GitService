@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { applyStoreBusyTimeout } from '../shared/store-busy.ts';
 import { ok, err, type Outcome } from '../shared/outcome.ts';
 import {
   cloneUrl as validateCloneUrl,
@@ -252,6 +253,7 @@ function withDb<T>(volumeRoot: string, fn: (db: DatabaseSync) => T): Outcome<T, 
   let db: DatabaseSync;
   try {
     db = new DatabaseSync(dbPath);
+    applyStoreBusyTimeout(db);
     db.exec('PRAGMA foreign_keys = ON;');
   } catch {
     return err(storeError({ code: 'io-failed' }, 'could not open the structured store'));
