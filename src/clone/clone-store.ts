@@ -10,7 +10,7 @@ import type { Clock } from '../clock/clock.ts';
 import type { Exec, MutableEnv } from '../exec/exec.ts';
 import type { Locks } from '../locks/locks.ts';
 import type { LockHolder } from '../locks/types.ts';
-import type { Finding } from '../shared/result-kind.ts';
+import type { Finding, ModuleErrorBase } from '../shared/result-kind.ts';
 import { currentBranch } from '../exec/primitives.ts';
 import { directoryBytes, type MaintenanceReason, type RetentionReport } from '../shared/retention.ts';
 import { storeError, type StoreError } from '../store/errors.ts';
@@ -337,7 +337,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
     if (!rowsResult.ok) return result;
     for (const row of rowsResult.value) {
       const declarationId = row.declaration_id as DeclarationId;
-      const blockers = await computeBlockers(declarationId, row.generation as Generation, row.path, new AbortController().signal);
+      const blockers = await computeBlockers(declarationId, await generationsToCheck(declarationId, row.generation, false), row.path, new AbortController().signal);
       result.set(declarationId, blockers === 'corrupt' ? [{ kind: 'corrupt-tree' }] : blockers);
     }
     return result;
@@ -363,6 +363,32 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
       findings.push({ path: 'volume.evictionBlocked', rule: declarationId as string, message: blockers.map((b) => b.kind).join(', ') });
     }
     return findings;
+  }
+
+  /**
+   * The generations whose journal entries `isSafeToEvict` counts. The clone
+   * directory is shared across every generation of a declaration (adoption
+   * advances `generation` over the same tree), so the adoption check asks
+   * about all of them: `1..max(stored, current)`, generations being
+   * consecutive (`Declarations.declare` bumps by one). Eviction asks only
+   * about the stored row's generation.
+   */
+  async function generationsToCheck(declarationId: DeclarationId, rowGeneration: number, acrossAllGenerations: boolean): Promise<readonly Generation[]> {
+    if (!acrossAllGenerations) return [rowGeneration as Generation];
+    const current = (await declarations.get(declarationId))?.generation ?? 1;
+    const highest = Math.max(rowGeneration, current);
+    return Array.from({ length: highest }, (_unused, index) => (index + 1) as Generation);
+  }
+
+  /**
+   * Re-expresses an error from another module (a lock refusal, a credential
+   * resolution failure) as a `CloneStoreError` without changing what it
+   * means to a caller: `resultKind`, `retryable`, `summary` and `findings`
+   * are the source's own. `variant` is only the nearest existing code — the
+   * contract's variant list has none for these.
+   */
+  function carriedError(source: ModuleErrorBase, variant: { readonly code: 'store-failed'; readonly cause: StoreError }): CloneStoreError {
+    return { ...cloneStoreError(variant, source.summary, source.findings), resultKind: source.resultKind, retryable: source.retryable };
   }
 
   async function synthesizedAbsent(declarationId: DeclarationId): Promise<Clone> {
@@ -539,7 +565,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
    * against — the unpushed-work risk that check would catch is already
    * covered by the unreachable-commits check above it.
    */
-  async function computeBlockers(declarationId: DeclarationId, generation: Generation, clonePath: string, signal: AbortSignal): Promise<readonly EvictionBlocker[] | 'corrupt'> {
+  async function computeBlockers(declarationId: DeclarationId, generations: readonly Generation[], clonePath: string, signal: AbortSignal): Promise<readonly EvictionBlocker[] | 'corrupt'> {
     if (!(await gitDirReadable(clonePath, signal))) return 'corrupt';
 
     const blockers: EvictionBlocker[] = [];
@@ -633,9 +659,11 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
     // like every other probe above (this function's own doc comment): a
     // journal read that could not run is not evidence the entry is settled.
     if (deps.journal) {
-      const unsettled = await deps.journal.unsettled(declarationId, generation);
-      if (!unsettled.ok) return 'corrupt';
-      for (const entry of unsettled.value) blockers.push({ kind: 'open-journal-entry', operationId: entry.operationId });
+      for (const generation of generations) {
+        const unsettled = await deps.journal.unsettled(declarationId, generation);
+        if (!unsettled.ok) return 'corrupt';
+        for (const entry of unsettled.value) blockers.push({ kind: 'open-journal-entry', operationId: entry.operationId });
+      }
     }
 
     return blockers;
@@ -685,7 +713,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
     async ensure(declaration, holder, signal): Promise<Outcome<CloneHandle, CloneStoreError>> {
       const lockResult = await locks.acquireMaterialisation(declaration.id, holder, materialisationLockAcquireMs, signal);
       if (!lockResult.ok) {
-        return err(cloneStoreError({ code: 'store-failed', cause: storeError({ code: 'busy', attempts: 1 }, lockResult.error.summary) }, lockResult.error.summary));
+        return err(carriedError(lockResult.error, { code: 'store-failed', cause: storeError({ code: 'busy', attempts: 1 }, lockResult.error.summary, true) }));
       }
       const materialisationLock = lockResult.value;
 
@@ -737,6 +765,20 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
       }
 
       const clonePath = clonePathFor(declaration.id);
+
+      // S44.2: a `materialising` row means a previous `ensure` died between
+      // writing it and finishing the clone, and this call holds the
+      // materialisation lock, so nothing is still cloning. Whatever is on disk
+      // is a partial tree — never adopt it as `ready`.
+      if (current.value.state === 'materialising') {
+        removePartial(clonePath);
+        const reset = upsertRow({ declaration_id: declaration.id, generation: declaration.generation, state: 'absent', path: clonePath, size_bytes: 0, last_operation_at: null, observed_remote: null, attention_reason: null });
+        if (!reset.ok) {
+          materialisationLock.release();
+          return err(cloneStoreError({ code: 'store-failed', cause: reset.error }, reset.error.summary));
+        }
+      }
+
       // `declaration.generation` — the caller's authoritative value — never
       // the possibly-stale row's, per review finding #5.
       const declarationRecord = { id: declaration.id, generation: declaration.generation, cloneUrl: declaration.cloneUrl };
@@ -819,32 +861,26 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
       // Issue #178: this is the one clone-store call that reaches a remote
       // for the first time, so it is the one call that needs the
       // declaration's own credential — every later operation on this clone
-      // goes through `GitOperations`, which already resolves one. A
+      // goes through `GitOperations`, which already resolves one. S44.1: a
       // resolution failure (no resolver wired, the reference not permitted
-      // for this host, the secret itself unavailable) falls back to `null`
-      // rather than aborting the clone outright: that reproduces exactly the
-      // pre-fix behaviour for that narrower case, and lets git's own
-      // authentication failure surface through the existing `clone-failed`
-      // path instead of this needing a new `CloneStoreError` variant.
-      // Issue #178: this is the one clone-store call that reaches a remote
-      // for the first time, so it is the one call that needs the
-      // declaration's own credential — every later operation on this clone
-      // goes through `GitOperations`, which already resolves one. A
-      // resolution failure (no resolver wired, the reference not permitted
-      // for this host, the secret itself unavailable) falls back to `null`
-      // rather than aborting the clone outright: that reproduces exactly the
-      // pre-fix behaviour for that narrower case, and lets git's own
-      // authentication failure surface through the existing `clone-failed`
-      // path instead of this needing a new `CloneStoreError` variant.
+      // for this host, the secret itself unavailable) aborts the clone rather
+      // than falling back to an anonymous one — an explicit `credentialRef:
+      // null` is the only anonymous clone, and it never needs a resolver.
       const preparedCredential =
-        deps.credentials && deps.credentialEnv
-          ? await resolveDeclarationCredential({ credentials: deps.credentials, credentialEnv: deps.credentialEnv }, declaration)
-          : null;
+        declaration.credentialRef === null
+          ? ok({ credential: null, ref: null })
+          : await resolveDeclarationCredential({ ...(deps.credentials ? { credentials: deps.credentials } : {}), ...(deps.credentialEnv ? { credentialEnv: deps.credentialEnv } : {}) }, declaration);
+      if (!preparedCredential.ok) {
+        removePartial(clonePath);
+        upsertRow({ declaration_id: declaration.id, generation: declarationRecord.generation, state: 'absent', path: clonePath, size_bytes: 0, last_operation_at: null, observed_remote: null, attention_reason: null });
+        materialisationLock.release();
+        return err(carriedError(preparedCredential.error, { code: 'store-failed', cause: storeError({ code: 'io-failed' }, preparedCredential.error.summary) }));
+      }
       const cloneResult = await exec.runGit({
         argv: ['clone', '--', declaration.cloneUrl, clonePath],
         cwd: clonesRoot as ClonePath,
         timeoutSeconds: cloneSeconds,
-        credential: preparedCredential && preparedCredential.ok ? preparedCredential.value.credential : null,
+        credential: preparedCredential.value.credential,
         signal,
       });
 
@@ -918,6 +954,27 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
           derived.push({ ...toClone(row), state: missingState, sizeBytes: 0, observedRemote: null, attentionReason: null });
           continue;
         }
+        if (row.state === 'materialising') {
+          // S44.2: a directory under a `materialising` row is either a live
+          // clone in flight (its `ensure` holds the materialisation lock; this
+          // routine also runs mid-service) or the wreckage of one that died.
+          // Only a held lock tells them apart: take it with no wait, and leave
+          // a held one alone. A readable partial tree is still not a clone.
+          const holder: LockHolder = { operationId: randomUUID() as OperationId, declarationId: row.declaration_id as DeclarationId, tool: 'lifecycle.derive' as RegistryToolName, heldSince: clock.now() };
+          const lock = await locks.acquireMaterialisation(row.declaration_id as DeclarationId, holder, 0, new AbortController().signal);
+          if (!lock.ok) {
+            derived.push(toClone(row));
+            continue;
+          }
+          try {
+            removePartial(clonePath);
+            upsertRow({ ...row, state: 'absent', size_bytes: 0, observed_remote: null, attention_reason: null });
+            derived.push({ ...toClone(row), state: 'absent', sizeBytes: 0, observedRemote: null, attentionReason: null });
+          } finally {
+            lock.value.release();
+          }
+          continue;
+        }
         const readable = await gitDirReadable(clonePath, new AbortController().signal);
         if (!readable) {
           upsertRow({ ...row, state: 'needs-attention', attention_reason: 'git could not read this tree at boot' });
@@ -941,7 +998,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
       const row = getRow(declarationId);
       if (!row.ok) return err(cloneStoreError({ code: 'store-failed', cause: row.error }, row.error.summary));
       if (!row.value || row.value.state === 'absent') {
-        return err(cloneStoreError({ code: 'needs-attention', reason: 'no clone to observe' }, `'${declarationId}' has no clone to observe`));
+        return err(cloneStoreError({ code: 'corrupt-tree' }, `'${declarationId}' has no clone to observe`));
       }
       const observed = await observeInternal(declarationId, row.value.path, new AbortController().signal);
       if (!observed) return err(cloneStoreError({ code: 'corrupt-tree' }, `could not observe git state for '${declarationId}'`));
@@ -952,7 +1009,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
       const row = getRow(declarationId);
       if (!row.ok) return err(cloneStoreError({ code: 'store-failed', cause: row.error }, row.error.summary));
       if (!row.value || row.value.state === 'absent' || row.value.state === 'evicted') {
-        return err(cloneStoreError({ code: 'needs-attention', reason: 'no clone to check cleanliness' }, `'${declarationId}' has no clone to check cleanliness`));
+        return err(cloneStoreError({ code: 'corrupt-tree' }, `'${declarationId}' has no clone to check cleanliness`));
       }
       const signal = new AbortController().signal;
       if (!(await gitDirReadable(row.value.path, signal))) {
@@ -963,12 +1020,12 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
       return ok(verdict);
     },
 
-    async isSafeToEvict(declarationId, _acrossAllGenerations): Promise<Outcome<SafeToEvictVerdict, CloneStoreError>> {
+    async isSafeToEvict(declarationId, acrossAllGenerations): Promise<Outcome<SafeToEvictVerdict, CloneStoreError>> {
       const row = getRow(declarationId);
       if (!row.ok) return err(cloneStoreError({ code: 'store-failed', cause: row.error }, row.error.summary));
       if (!row.value || row.value.state === 'absent' || row.value.state === 'evicted') return ok({ safe: true });
 
-      const blockers = await computeBlockers(declarationId, row.value.generation as Generation, row.value.path, new AbortController().signal);
+      const blockers = await computeBlockers(declarationId, await generationsToCheck(declarationId, row.value.generation, acrossAllGenerations), row.value.path, new AbortController().signal);
       if (blockers === 'corrupt') return err(cloneStoreError({ code: 'corrupt-tree' }, `'${declarationId}' cannot be evaluated — git cannot read the tree`));
       return blockers.length === 0 ? ok({ safe: true }) : ok({ safe: false, blockers });
     },
@@ -1011,7 +1068,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
         return ok({ declarationId, evicted: false, freedBytes: 0, blockers: [{ kind: 'active-operations', count: recount }] });
       }
       try {
-        const blockers = await computeBlockers(declarationId, row.value.generation as Generation, row.value.path, new AbortController().signal);
+        const blockers = await computeBlockers(declarationId, await generationsToCheck(declarationId, row.value.generation, false), row.value.path, new AbortController().signal);
         if (blockers === 'corrupt' || blockers.length > 0) {
           return ok({ declarationId, evicted: false, freedBytes: 0, blockers: blockers === 'corrupt' ? [{ kind: 'corrupt-tree' }] : blockers });
         }
@@ -1054,8 +1111,8 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
         // A directory without a row (orphaned before `ensure()` ever wrote
         // one) has no stored generation to read — falls back to the
         // declaration's current one, or 1 if even that is gone.
-        const generation = (row.value?.generation ?? (await declarations.get(declarationId))?.generation ?? 1) as Generation;
-        const blockers = await computeBlockers(declarationId, generation, clonePath, signal);
+        const generation = row.value?.generation ?? (await declarations.get(declarationId))?.generation ?? 1;
+        const blockers = await computeBlockers(declarationId, await generationsToCheck(declarationId, generation, false), clonePath, signal);
         if (blockers === 'corrupt' || blockers.length > 0) {
           return err(cloneStoreError({ code: 'not-safe-to-remove', blockers: blockers === 'corrupt' ? [{ kind: 'corrupt-tree' }] : blockers }, `'${declarationId}' is not safe to remove`));
         }
@@ -1070,7 +1127,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
     async markAttention(declarationId, reason): Promise<Outcome<void, CloneStoreError>> {
       const row = getRow(declarationId);
       if (!row.ok) return err(cloneStoreError({ code: 'store-failed', cause: row.error }, row.error.summary));
-      if (!row.value) return err(cloneStoreError({ code: 'needs-attention', reason }, `no clone for '${declarationId}'`));
+      if (!row.value) return err(cloneStoreError({ code: 'corrupt-tree' }, `no clone for '${declarationId}'`));
       const updated = upsertRow({ ...row.value, state: 'needs-attention', attention_reason: reason });
       if (!updated.ok) return err(cloneStoreError({ code: 'store-failed', cause: updated.error }, updated.error.summary));
       return ok(undefined);
@@ -1079,7 +1136,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
     async clearAttention(declarationId, _actor): Promise<Outcome<void, CloneStoreError>> {
       const row = getRow(declarationId);
       if (!row.ok) return err(cloneStoreError({ code: 'store-failed', cause: row.error }, row.error.summary));
-      if (!row.value) return err(cloneStoreError({ code: 'needs-attention', reason: 'no such clone' }, `no clone for '${declarationId}'`));
+      if (!row.value) return err(cloneStoreError({ code: 'corrupt-tree' }, `no clone for '${declarationId}'`));
       const updated = upsertRow({ ...row.value, state: 'ready', attention_reason: null });
       if (!updated.ok) return err(cloneStoreError({ code: 'store-failed', cause: updated.error }, updated.error.summary));
       return ok(undefined);

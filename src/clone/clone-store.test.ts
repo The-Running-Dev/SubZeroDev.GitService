@@ -40,7 +40,8 @@ function fixtureDeclaration(id: string, cloneUrl: string): Declaration {
     generation: 1 as Declaration['generation'],
     cloneUrl: cloneUrl as Declaration['cloneUrl'],
     host: 'generic',
-    credentialRef: 'unused' as Declaration['credentialRef'],
+    // S44.1: a clone with no resolver wired is anonymous only for a null ref, which the type forbids and the clone path still honours.
+    credentialRef: null as unknown as Declaration['credentialRef'],
     capabilityGrant: new Set() as unknown as Declaration['capabilityGrant'],
     writablePathPrefixes: [],
     pinned: false,
@@ -152,7 +153,7 @@ test('ensure() clones on first use, and describe() then reports ready', async ()
 test('ensure() resolves and passes the declaration credential to the initial clone (issue #178)', async () => {
   await withMigratedVolume(async (volume) => {
     const remote = createBareGitRemote();
-    const declaration = fixtureDeclaration('repo-credentialed', remote);
+    const declaration = { ...fixtureDeclaration('repo-credentialed', remote), credentialRef: 'ref-178' as Declaration['credentialRef'] };
     const real = createExec({ volumeRoot: volume });
     let cloneCredential: CredentialBinding | null = null;
     const exec: Exec = {
@@ -394,7 +395,18 @@ test('orphaning marks the declaration orphaned and leaves the clone directory un
       ceiling: new Set() as unknown as DeploymentCeiling,
       cloneAdoptionCheck: () => ({ observedRemote: async () => ({ cloneExists: false }), isSafeToAdopt: async () => ({ safe: true }) }),
     });
-    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations });
+    // S44.1: the stored row carries a real credential reference, so a first clone needs a resolver that can honour it.
+    const binding: CredentialBinding = { ref: 'unused' as CredentialBinding['ref'], declarationId: declarationId as DeclarationId, variableName: 'SZG_CREDENTIAL_FIXTURE_ORPHAN' as EnvVarName, username: null };
+    const credentials: Pick<CredentialResolver, 'allowedHosts' | 'resolveInto'> = {
+      async allowedHosts() {
+        return ok([]);
+      },
+      async resolveInto(_ref, _declarationId, env) {
+        env.set(binding.variableName, 'secret-value');
+        return ok(binding);
+      },
+    };
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations, credentials, credentialEnv: new Map<EnvVarName, string>() });
 
     const declaration = await declarations.get(declarationId as DeclarationId);
     assert.ok(declaration);
@@ -765,7 +777,7 @@ test('#78 — isClean fails closed: a failed git status check reports an error, 
   });
 });
 
-test('#78 — isClean on a declaration with no materialised clone reports needs-attention, not clean:true', async () => {
+test('#78 — isClean on a declaration with no materialised clone reports an error, not clean:true (S44.5: and not needs-attention)', async () => {
   await withMigratedVolume(async (volume) => {
     const declaration = fixtureDeclaration('repo-isclean-absent', createBareGitRemote());
     const exec = createExec({ volumeRoot: volume });
@@ -774,7 +786,7 @@ test('#78 — isClean on a declaration with no materialised clone reports needs-
 
     const verdict = await cloneStore.isClean(declaration.id);
     assert.equal(verdict.ok, false);
-    if (!verdict.ok) assert.equal(verdict.error.code, 'needs-attention');
+    if (!verdict.ok) assert.notEqual(verdict.error.code, 'needs-attention');
   });
 });
 
@@ -1118,5 +1130,247 @@ test('requestMaintenance forwards the reason to onMaintenanceRequested without a
 
     cloneStore.requestMaintenance('watermark');
     assert.deepEqual(requested, ['watermark']);
+  });
+});
+
+/** Credentialed declaration for the S44.1 cases. */
+function credentialedDeclaration(id: string, cloneUrl: string): Declaration {
+  return { ...fixtureDeclaration(id, cloneUrl), credentialRef: 'ref-s44' as Declaration['credentialRef'] };
+}
+
+function cloneRowState(volume: string, declarationId: string): string | null {
+  const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+  try {
+    const row = db.prepare('SELECT state FROM clone WHERE declaration_id = ?').get(declarationId) as { state: string } | undefined;
+    return row?.state ?? null;
+  } finally {
+    db.close();
+  }
+}
+
+function setCloneRowState(volume: string, declarationId: string, state: string): void {
+  const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+  try {
+    db.prepare('UPDATE clone SET state = ? WHERE declaration_id = ?').run(state, declarationId);
+  } finally {
+    db.close();
+  }
+}
+
+test('S44.1 — a credential that cannot be resolved aborts the first clone under its own result kind and leaves no directory', async () => {
+  await withMigratedVolume(async (volume) => {
+    const real = createExec({ volumeRoot: volume });
+    const counting = countingExec(real);
+    const locks = createLocks();
+
+    // No resolver configured at all.
+    const noResolver = credentialedDeclaration('repo-s44-no-resolver', createBareGitRemote());
+    const storeWithoutResolver = createCloneStore({ volumeRoot: volume, clock: systemClock, exec: counting.exec, locks, declarations: declarationsStubFor(noResolver) });
+    const first = await storeWithoutResolver.ensure(noResolver, fixtureHolder(noResolver.id), noopSignal());
+    assert.equal(first.ok, false);
+    if (!first.ok) assert.equal(first.error.resultKind, 'infrastructure');
+    assert.equal(existsSync(path.join(volume, 'clones', noResolver.id)), false, 'no directory is left behind');
+    assert.equal(counting.cloneCount, 0, 'git was never invoked');
+
+    // A reference that is not permitted to reach the declared host.
+    const credentialEnv = new Map<EnvVarName, string>();
+    const notPermitted: Pick<CredentialResolver, 'allowedHosts' | 'resolveInto'> = {
+      async allowedHosts() {
+        return ok([]);
+      },
+      async resolveInto() {
+        throw new Error('must not resolve a secret for a host the reference is not permitted to reach');
+      },
+    };
+    const hostDeclaration = credentialedDeclaration('repo-s44-not-permitted', 'https://example.invalid/repo.git');
+    const permissionStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec: counting.exec, locks, declarations: declarationsStubFor(hostDeclaration), credentials: notPermitted, credentialEnv });
+    const second = await permissionStore.ensure(hostDeclaration, fixtureHolder(hostDeclaration.id), noopSignal());
+    assert.equal(second.ok, false);
+    if (!second.ok) assert.equal(second.error.resultKind, 'authorization');
+    assert.equal(existsSync(path.join(volume, 'clones', hostDeclaration.id)), false);
+    assert.equal(counting.cloneCount, 0, 'git was never invoked');
+
+    // A secret that is unavailable: the resolver's own error, kind and all.
+    const unavailable: Pick<CredentialResolver, 'allowedHosts' | 'resolveInto'> = {
+      async allowedHosts() {
+        return ok([]);
+      },
+      async resolveInto() {
+        return { ok: false, error: { resultKind: 'precondition', retryable: false, summary: 'secret unavailable' } } as never;
+      },
+    };
+    const secretDeclaration = credentialedDeclaration('repo-s44-unavailable', createBareGitRemote());
+    const secretStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec: counting.exec, locks, declarations: declarationsStubFor(secretDeclaration), credentials: unavailable, credentialEnv });
+    const third = await secretStore.ensure(secretDeclaration, fixtureHolder(secretDeclaration.id), noopSignal());
+    assert.equal(third.ok, false);
+    if (!third.ok) {
+      assert.equal(third.error.resultKind, 'precondition');
+      assert.equal(third.error.summary, 'secret unavailable');
+    }
+    assert.equal(existsSync(path.join(volume, 'clones', secretDeclaration.id)), false);
+    assert.equal(counting.cloneCount, 0, 'git was never invoked');
+
+    // Every abort released the lock, and an explicit null ref clones anonymously with no resolver.
+    const anonymous = fixtureDeclaration('repo-s44-anonymous', createBareGitRemote());
+    const anonymousStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec: counting.exec, locks, declarations: declarationsStubFor(anonymous) });
+    const cloned = await anonymousStore.ensure(anonymous, fixtureHolder(anonymous.id), noopSignal());
+    assert.equal(cloned.ok, true);
+    if (cloned.ok) cloned.value.materialisationLock.release();
+    const retried = await storeWithoutResolver.ensure(noResolver, fixtureHolder(noResolver.id), noopSignal());
+    assert.equal(retried.ok, false, 'a released lock is acquired again and refuses for the same reason, not for a stuck lock');
+    if (!retried.ok) assert.equal(retried.error.resultKind, 'infrastructure');
+  });
+});
+
+test('S44.2 — ensure() removes a directory left by a crash mid-clone instead of adopting it, and re-clones', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declaration = fixtureDeclaration('repo-s44-crash-ensure', createBareGitRemote());
+    const counting = countingExec(createExec({ volumeRoot: volume }));
+    const locks = createLocks();
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec: counting.exec, locks, declarations: declarationsStubFor(declaration) });
+
+    const first = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(first.ok, true);
+    if (!first.ok) return;
+    first.value.materialisationLock.release();
+    first.value.activePin.release();
+    const clonePath = first.value.clone.path;
+    assert.equal(counting.cloneCount, 1);
+
+    // What a process killed between writing `materialising` and finishing the clone leaves: a readable tree under a `materialising` row.
+    writeFileSync(path.join(clonePath, 'half-written.bin'), 'partial', 'utf8');
+    setCloneRowState(volume, declaration.id, 'materialising');
+
+    const second = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(second.ok, true);
+    if (!second.ok) return;
+    second.value.materialisationLock.release();
+    second.value.activePin.release();
+    assert.equal(counting.cloneCount, 2, 'the crash directory was not adopted, the clone was redone');
+    assert.equal(second.value.clone.state, 'ready');
+    assert.equal(existsSync(path.join(clonePath, 'half-written.bin')), false, 'the partial tree is gone');
+  });
+});
+
+test('S44.2 — boot re-derivation removes a crash-mid-clone directory, and the next ensure() re-clones', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declaration = fixtureDeclaration('repo-s44-crash-boot', createBareGitRemote());
+    const counting = countingExec(createExec({ volumeRoot: volume }));
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec: counting.exec, locks: createLocks(), declarations: declarationsStubFor(declaration) });
+
+    const first = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(first.ok, true);
+    if (!first.ok) return;
+    first.value.materialisationLock.release();
+    first.value.activePin.release();
+    const clonePath = first.value.clone.path;
+    setCloneRowState(volume, declaration.id, 'materialising');
+
+    // "Restart": a fresh store over the same volume and a fresh lock table.
+    const restarted = createCloneStore({ volumeRoot: volume, clock: systemClock, exec: counting.exec, locks: createLocks(), declarations: declarationsStubFor(declaration) });
+    const derived = await restarted.deriveAllStatesFromDisk();
+    assert.equal(derived.find((clone) => clone.declarationId === declaration.id)?.state, 'absent');
+    assert.equal(existsSync(clonePath), false, 'the crash directory was removed, not adopted as ready');
+    assert.equal(cloneRowState(volume, declaration.id), 'absent');
+
+    const again = await restarted.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(again.ok, true);
+    if (again.ok) again.value.materialisationLock.release();
+    assert.equal(counting.cloneCount, 2, 'the next ensure re-cloned');
+  });
+});
+
+test('S44.2 — boot re-derivation leaves a materialising directory alone while its ensure still holds the lock', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declaration = fixtureDeclaration('repo-s44-in-flight', createBareGitRemote());
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec: createExec({ volumeRoot: volume }), locks: createLocks(), declarations: declarationsStubFor(declaration) });
+
+    const first = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(first.ok, true);
+    if (!first.ok) return;
+    setCloneRowState(volume, declaration.id, 'materialising');
+
+    // `first` still holds the materialisation lock: a clone in flight, not wreckage.
+    await cloneStore.deriveAllStatesFromDisk();
+    assert.equal(existsSync(first.value.clone.path), true);
+    assert.equal(cloneRowState(volume, declaration.id), 'materialising');
+    first.value.materialisationLock.release();
+    first.value.activePin.release();
+  });
+});
+
+test('S44.3 — a lock refusal inside ensure() is a conflict', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declaration = fixtureDeclaration('repo-s44-busy', createBareGitRemote());
+    const cloneStore = createCloneStore({
+      volumeRoot: volume,
+      clock: systemClock,
+      exec: createExec({ volumeRoot: volume }),
+      locks: createLocks(),
+      declarations: declarationsStubFor(declaration),
+      materialisationLockAcquireMs: 20,
+    });
+
+    const holding = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(holding.ok, true);
+    if (!holding.ok) return;
+
+    const refused = await cloneStore.ensure(declaration, { ...fixtureHolder(declaration.id), operationId: 'op-2' as never }, noopSignal());
+    assert.equal(refused.ok, false);
+    if (!refused.ok) {
+      assert.equal(refused.error.resultKind, 'conflict');
+    }
+    holding.value.materialisationLock.release();
+    holding.value.activePin.release();
+  });
+});
+
+test('S44.4 — isSafeToEvict counts unsettled entries from every generation only when asked to', async () => {
+  await withMigratedVolume(async (volume) => {
+    const generationTwo: Declaration = { ...fixtureDeclaration('repo-s44-generations', createBareGitRemote()), generation: 2 as Declaration['generation'] };
+    const earlierEntry = { operationId: 'op-earlier-generation' as OperationId } as OperationJournalEntry;
+    const journal: Pick<Journal, 'unsettled'> = {
+      async unsettled(_id, generation) {
+        return ok(generation === 1 ? [earlierEntry] : []);
+      },
+    };
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec: createExec({ volumeRoot: volume }), locks: createLocks(), declarations: declarationsStubFor(generationTwo), journal });
+
+    const ensured = await cloneStore.ensure(generationTwo, fixtureHolder(generationTwo.id), noopSignal());
+    assert.equal(ensured.ok, true);
+    if (!ensured.ok) return;
+    ensured.value.materialisationLock.release();
+    ensured.value.activePin.release();
+    assert.equal(ensured.value.clone.generation, 2);
+
+    const acrossAll = await cloneStore.isSafeToEvict(generationTwo.id, true);
+    assert.equal(acrossAll.ok, true);
+    if (acrossAll.ok) {
+      assert.equal(acrossAll.value.safe, false);
+      if (!acrossAll.value.safe) assert.deepEqual(acrossAll.value.blockers, [{ kind: 'open-journal-entry', operationId: earlierEntry.operationId }]);
+    }
+
+    const storedOnly = await cloneStore.isSafeToEvict(generationTwo.id, false);
+    assert.equal(storedOnly.ok, true);
+    if (storedOnly.ok) assert.equal(storedOnly.value.safe, true);
+  });
+});
+
+test('S44.5 — no path reports needs-attention for a clone with no row and no directory', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declaration = fixtureDeclaration('repo-s44-nothing', createBareGitRemote());
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec: createExec({ volumeRoot: volume }), locks: createLocks(), declarations: declarationsStubFor(declaration) });
+
+    const results = [
+      await cloneStore.observeGitState(declaration.id),
+      await cloneStore.isClean(declaration.id),
+      await cloneStore.markAttention(declaration.id, 'nothing to mark'),
+      await cloneStore.clearAttention(declaration.id, OPERATOR),
+    ];
+    for (const result of results) {
+      assert.equal(result.ok, false);
+      if (!result.ok) assert.notEqual(result.error.code, 'needs-attention');
+    }
+    assert.equal(cloneRowState(volume, declaration.id), null, 'refusing wrote no row');
   });
 });
