@@ -1421,7 +1421,9 @@ supply the file. After the one trailing newline is removed, a username must be n
 no CR, LF or NUL; otherwise resolution returns `reference-unreadable`. **A reference absent from the
 manifest permits no host**, and `allowedHosts` returns the empty list rather than every host: the
 design calls this a second guard independent of the deployment's `remoteHostAllowlist`, and a guard
-that defaults open is not one.
+that defaults open is not one. A manifest that exists but cannot be read or parsed returns
+`allowed-hosts-unreadable`, not the empty list. Both refuse every host, but only the error tells an
+operator the mount is broken.
 
 `EnvVarName` for a resolved binding is derived from the reference, uppercased with every character
 outside `[A-Z0-9]` replaced by `_`, under a fixed `SZG_CREDENTIAL_` prefix. It is an internal
@@ -2581,6 +2583,7 @@ type ExecError = ModuleErrorBase & (
   | { readonly code: 'spawn-failed' }
   | { readonly code: 'nonzero-exit'; readonly exitCode: number; readonly stdout: string; readonly stderr: string }
   | { readonly code: 'timed-out'; readonly limitSeconds: number }
+  | { readonly code: 'signalled'; readonly signal: string | null }
   | { readonly code: 'argv-rejected'; readonly rule: string }
   | { readonly code: 'cancelled' }
 );
@@ -2588,9 +2591,10 @@ type ExecError = ModuleErrorBase & (
 
 | Variant | Raised when | Retryable | Caller does |
 |---|---|---|---|
-| `spawn-failed` | The fixed executable could not be started | no | `infrastructure` — the environment is wrong, not the request |
+| `spawn-failed` | The fixed executable could not be started. Never raised for a child that started — whatever happened after that, the child may have acted | no | `infrastructure` — the environment is wrong, not the request |
 | `nonzero-exit` | The child exited non-zero; `stdout` and `stderr` are already scrubbed | no | Classify by domain: auth rejection to `upstream`, a refused push to `precondition`; informational commands retain both streams for diagnosis |
 | `timed-out` | The declared cap elapsed and the child was killed | no | `timeout`, and park the journal entry — what the command achieved is not knowable |
+| `signalled` | The child started and ended without an exit code, killed by a signal exec did not send for the cap or the caller's abort. `signal` is the signal's name, `null` only if the platform reported neither a code nor a signal | no | `infrastructure`, and on a mutating call park the journal entry, as for `timed-out` and for the same reason. The envelope kind differs because there is no limit to report and raising one would not help; the park does not, because the tree is exactly as unaccounted for. A read reports `infrastructure` and parks nothing |
 | `argv-rejected` | Declared, never raised by exec itself — the rule is judged in § L2 — git operations before `git_raw` reaches exec, and returned there as `validation` directly. The rule: the vector selects an executable, injects or writes configuration, carries credentials or a foreign or opaque remote operand, names a remote-helper transport (`<transport>::<address>`), or persists a remote | no | `validation`; no authority could ever permit it |
 | `cancelled` | The caller's signal aborted | no | `conflict`, releasing locks in reverse acquisition order |
 
@@ -2655,6 +2659,8 @@ type CredentialError = ModuleErrorBase & (
   | { readonly code: 'reference-unreadable'; readonly ref: CredentialRef }
   | { readonly code: 'host-not-permitted'; readonly ref: CredentialRef; readonly host: RemoteHost }
   | { readonly code: 'marked-failing'; readonly mark: CredentialFailureMark }
+  | { readonly code: 'allowed-hosts-unreadable' }
+  | { readonly code: 'store-failed'; readonly cause: StoreError }
 );
 ```
 
@@ -2664,6 +2670,12 @@ type CredentialError = ModuleErrorBase & (
 | `reference-unreadable` | A secret or username file exists and cannot be read, or the username is empty or contains CR, LF or NUL | no | `infrastructure` |
 | `host-not-permitted` | The reference's own allowed-host constraint excludes the remote | no | `authorization` |
 | `marked-failing` | The reference is marked failing for this declaration | no | `upstream`. The mark clears when the resolver observes a changed secret, or by hand from the health view |
+| `allowed-hosts-unreadable` | `_allowed-hosts.json` exists and cannot be read or parsed as JSON. It names no reference: the manifest is mount-wide, and the fault is no one reference's | no | `infrastructure`, pointing at the credential mount. Fails closed — no host is permitted while the manifest cannot be read |
+| `store-failed` | The failure-mark store could not be read, so whether this reference is marked failing is unknown | only if the cause is | `infrastructure`, pointing at the data volume. Fails closed — an unknown mark is never read as no mark |
+
+`reference-unreadable` is about the reference's own files and nothing else. A fault in the manifest or
+the mark store is reported as one of the two variants above, so the error names the place an
+operator has to look.
 
 Nothing here ever retries with a different credential.
 
@@ -2789,6 +2801,7 @@ type NotifierError = ModuleErrorBase & (
   | { readonly code: 'delivery-failed'; readonly status: number | null; readonly attempts: number }
   | { readonly code: 'retries-exhausted'; readonly rowId: OutboxRowId }
   | { readonly code: 'row-not-found'; readonly rowId: OutboxRowId }
+  | { readonly code: 'store-failed'; readonly cause: StoreError }
 );
 ```
 
@@ -2798,6 +2811,7 @@ type NotifierError = ModuleErrorBase & (
 | `delivery-failed` | Non-2xx or transport error | yes, bounded, with backoff | Nothing. Delivery never blocks the operation it describes |
 | `retries-exhausted` | The bound was reached | no | Mark the row `failed` and surface it. Never drop it |
 | `row-not-found` | The operator cleared a row that is already gone | no | `precondition` |
+| `store-failed` | The outbox could not be read or written: selecting rows, claiming them, sweeping stale claims, writing back an outcome, or clearing a row | only if the cause is | `infrastructure`. No row is attempted after a failed read, claim or sweep. `delivery-failed` is never used for it — that variant means the webhook was reached for, and a store fault says nothing about the webhook |
 
 ### Git operations
 
