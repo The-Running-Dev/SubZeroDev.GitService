@@ -1924,6 +1924,127 @@ test('S50.2 — an exception while following a pending pull request is audited a
   });
 });
 
+function tickFailedPages(notifications: readonly NotificationRequest[]): NotificationRequest[] {
+  return notifications.filter((n) => n.subject.kind === 'watcher-tick-failed');
+}
+
+test('S50.2 — an exception in one declaration work is audited as watcher-tick-failed, paged once, and never stops a sibling declaration', async () => {
+  await withVolumeAsync(async (volume) => {
+    const rootB = inboxRoot(volume, 'repo-b');
+    mkdirSync(rootB, { recursive: true });
+    writeFileSync(path.join(rootB, 'post.md'), 'content', 'utf8');
+    const stub = stubCloneStore({ current: 'ready' });
+    const cloneStore: typeof stub = {
+      ...stub,
+      async describe(declarationId) {
+        if (declarationId === ('repo-a' as never)) throw new Error('simulated describe crash');
+        return stub.describe(declarationId);
+      },
+    };
+    const { deps, auditLog, notifications } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration(), fixtureDeclaration({ id: 'repo-b' as Declaration['id'] })] }),
+      dispatch: scriptedDispatch([], successfulHandlers()),
+      cloneStore,
+    });
+    const watcher = createWatcher(deps);
+    for (let i = 0; i < 3; i += 1) {
+      const reports = await watcher.tick();
+      assert.equal(reports[0]!.skipped, 'tick-failed');
+      assert.equal(reports[0]!.claimed, null);
+      assert.equal(reports[0]!.outcome, null);
+      assert.deepEqual(reports[0]!.reconciled, []);
+      assert.deepEqual(reports[0]!.stillPending, []);
+    }
+    const failed = auditLog.filter((r) => r.form === 'watcher-tick-failed');
+    assert.equal(failed.length, 3, 'every occurrence is audited');
+    assert.equal(failed[0]!.declarationId, 'repo-a');
+    assert.equal(failed[0]!.operationId, null);
+    assert.equal(failed[0]!.tool, null);
+    assert.equal(failed[0]!.context, 'normal');
+    assert.match((failed[0] as { reason: string }).reason, /simulated describe crash/);
+    const pages = tickFailedPages(notifications);
+    assert.equal(pages.length, 1, 'the page is latched per declaration');
+    assert.equal(pages[0]!.severity, 'attention');
+    assert.equal(pages[0]!.declarationId, 'repo-a');
+    assert.equal(existsSync(path.join(rootB, 'processed')), true, 'the sibling declaration still delivered its file');
+  });
+});
+
+test('S50.2 — the declaration latch re-arms after a tick that completes its work without an exception', async () => {
+  await withVolumeAsync(async (volume) => {
+    let throwing = true;
+    const stub = stubCloneStore({ current: 'ready' });
+    const cloneStore: typeof stub = {
+      ...stub,
+      async describe(declarationId) {
+        if (throwing) throw new Error('simulated describe crash');
+        return stub.describe(declarationId);
+      },
+    };
+    const { deps, notifications } = baseDeps(volume, { declarations: stubDeclarations({ current: [fixtureDeclaration()] }), cloneStore });
+    const watcher = createWatcher(deps);
+    await watcher.tick();
+    await watcher.tick();
+    assert.equal(tickFailedPages(notifications).length, 1);
+    throwing = false;
+    assert.equal((await watcher.tick())[0]!.skipped, null);
+    throwing = true;
+    await watcher.tick();
+    assert.equal(tickFailedPages(notifications).length, 2, 'a failure after a clean tick pages again');
+  });
+});
+
+test('S50.2 — an exception resolving the active declarations is audited with no declaration, paged once on the tick-level key, and the tick returns no reports', async () => {
+  await withVolumeAsync(async (volume) => {
+    let throwing = true;
+    const active = { current: [fixtureDeclaration()] };
+    const inner = stubDeclarations(active);
+    const { deps, auditLog, notifications } = baseDeps(volume, {
+      declarations: {
+        async list(filter) {
+          if (throwing) throw new Error('simulated list crash');
+          return inner.list(filter);
+        },
+      },
+    });
+    const watcher = createWatcher(deps);
+    for (let i = 0; i < 3; i += 1) assert.deepEqual(await watcher.tick(), []);
+    const failed = auditLog.filter((r) => r.form === 'watcher-tick-failed');
+    assert.equal(failed.length, 3);
+    assert.equal(failed[0]!.declarationId, null);
+    assert.equal(failed[0]!.generation, null);
+    assert.equal(failed[0]!.actorRef.kind, 'watcher');
+    const pages = tickFailedPages(notifications);
+    assert.equal(pages.length, 1);
+    assert.equal(pages[0]!.declarationId, null);
+    throwing = false;
+    await watcher.tick();
+    throwing = true;
+    await watcher.tick();
+    assert.equal(tickFailedPages(notifications).length, 2, 'resolving the declarations again re-armed the tick-level key');
+  });
+});
+
+test('S50.2 — a throw while following a pending pull request audits every occurrence against its file but pages once per declaration', async () => {
+  await withVolumeAsync(async (volume) => {
+    writePendingPullRequests(volume, 'repo-a' as never, { entries: [pendingEntry({ number: 11 })] });
+    const { deps, auditLog, notifications } = baseDeps(volume, {
+      declarations: stubDeclarations({ current: [fixtureDeclaration()] }),
+      dispatch: scriptedDispatch([], {
+        repo_status: () => repoStatus(false),
+        pr_status: () => {
+          throw new Error('simulated crash mid-tick');
+        },
+      }),
+    });
+    const watcher = createWatcher(deps);
+    for (let i = 0; i < 3; i += 1) await watcher.tick();
+    assert.deepEqual(watcherOutcomeKinds(auditLog), ['rejected', 'rejected', 'rejected']);
+    assert.equal(failurePages(notifications).length, 1);
+    assert.equal(readPendingPullRequests(volume, 'repo-a' as never).entries.length, 1);
+  });
+});
+
 test('S50.3 — a failed pr_enable_auto_merge after pr_open leaves the file in processed/, audits and notifies at attention naming the open pull request', async () => {
   for (const mode of ['error-result', 'throws'] as const) {
     await withVolumeAsync(async (volume) => {

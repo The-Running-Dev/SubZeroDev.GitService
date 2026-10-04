@@ -475,14 +475,8 @@ may not parse it. `limit` has no null form because an unbounded audit query is n
 
 **`watcher-tick-failed` is the one audit form that names no file and no call** (S50.2). It records
 an exception a watcher tick caught where the tick held no file to attribute it to — *L2 — watcher*,
-*Exceptions in a tick*, says when. A scaffold until S50 lands, then declared in `src/audit/types.ts`,
-where `AUDIT_RECORD_FORMS` gains the same name:
-
-```ts
-type AuditRecordBody =
-  // …the existing variants, as declared in src/audit/types.ts
-  | { readonly form: 'watcher-tick-failed'; readonly reason: string };
-```
+*Exceptions in a tick*, says when. The variant is declared in `src/audit/types.ts`, and
+`AUDIT_RECORD_FORMS` carries the same name.
 
 `operationId` and `tool` are null and `context` is `normal`. `actorRef` is a `watcher` actor: the
 declaration's own where one was being worked, otherwise one whose subject names no declaration.
@@ -624,14 +618,7 @@ is L1 and may not import the watcher.
 
 **An exception with no file is both audited and paged** (S50.2), unlike a tamper: what it
 interrupted is unknown, so the trail has to hold it. The audit form is `watcher-tick-failed` under
-*Audit*, and the page is a `TerminalState` variant of the same name, a scaffold until S50 lands and
-then declared in `src/journal/types.ts`:
-
-```ts
-type TerminalState =
-  // …the existing variants, as declared in src/journal/types.ts
-  | { readonly kind: 'watcher-tick-failed'; readonly reason: string };
-```
+*Audit*, and the page is a `TerminalState` variant of the same name, declared in `src/journal/types.ts`.
 
 Its `NotificationRequest.declarationId` is null exactly when the audit record's is. When it pages,
 and the latch that limits it, are under *L2 — watcher*, *Exceptions in a tick*.
@@ -2098,8 +2085,7 @@ reaching the watcher is a defect or an environment fault, and it is never only w
 console. Two boundaries catch it, and neither lets it out of `tick`:
 
 - **One declaration's work.** An exception escaping a declaration's work is caught there. That
-  declaration's `WatchTickReport.skipped` is `tick-failed`, declared in `src/watcher/types.ts` once
-  S50 lands, with `claimed` and `outcome` null and `reconciled` and `stillPending` empty — which here
+  declaration's `WatchTickReport.skipped` is `tick-failed`, declared in `src/watcher/types.ts`, with `claimed` and `outcome` null and `reconciled` and `stillPending` empty — which here
   means not established, not nothing pending. Every other declaration in the tick still runs.
 - **The tick itself.** An exception before any declaration is selected, resolving the active
   declarations included, is caught at the tick, which then returns no reports.
@@ -3372,7 +3358,7 @@ responsible for maintaining it.
 | D18 | No watcher code path reads, writes, renames into, lists or deletes through a state directory — `processing/`, `processed/`, `failed/` — that is tampered: present, and not reported as a directory by a link-preserving stat. A tick claims no file and makes no dispatch, Git or host call for a declaration while any of its three is tampered. A refusal is returned as data at every site and never thrown, and never stops work for another declaration or fails `start`. | Watcher |
 | D19 | A pull request the watcher opened is in its declaration's pending pull-request list before that file's terminal move is attempted. | Watcher |
 | D20 | Every pending pull-request entry the watcher acts on carries a valid `headSha` equal to the `headSha` its file's `git_push` returned. Every `pr_enable_auto_merge` and `reconcile_after_merge` the watcher dispatches carries that SHA as `expectedHeadSha`: never null, and never a value read from the host. An entry that fails validation reaches no dispatch, is removed by the tick that reads it, and is paged as `watcher-pending-record-discarded`. | Watcher |
-| D21 | No exception escapes `Watcher.tick`, and none escaping one declaration's work stops another declaration's work in the same tick. Each caught exception writes exactly one audit record: the claimed or followed file's `file-watcher` record where the tick holds one, otherwise `watcher-tick-failed`. A page for a file-less exception, or for a throw while following a pending pull request, is enqueued at most once per latch key between re-arms. *Specified, not yet held: S50 implements it.* | Watcher |
+| D21 | No exception escapes `Watcher.tick`, and none escaping one declaration's work stops another declaration's work in the same tick. Each caught exception writes exactly one audit record: the claimed or followed file's `file-watcher` record where the tick holds one, otherwise `watcher-tick-failed`. A page for a file-less exception, or for a throw while following a pending pull request, is enqueued at most once per latch key between re-arms. | Watcher |
 
 ---
 
