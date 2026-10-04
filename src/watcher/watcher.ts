@@ -97,6 +97,14 @@ function mismatchReason(observation: 'after-apply' | 'after-stage', declared: re
 
 type StateDirectory = 'processing' | 'processed' | 'failed';
 
+/** A declaration's id, or the one tick-level key (S50.2). */
+type ExceptionLatchKey = string;
+
+/** Whether anything in one declaration's work caught an exception; the declaration's page latch re-arms only when nothing did. */
+interface WorkState {
+  caught: boolean;
+}
+
 /**
  * A terminal move's result: refusing a tampered directory is data, never a throw (D18),
  * and a filesystem error during the move is data too (S50.1), so neither escapes the tick unrecorded.
@@ -422,6 +430,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     file: WatchedFileName,
     outcome: WatchedFileOutcome,
     moveFailure: MoveFailure | null = null,
+    latchKey: ExceptionLatchKey | null = null,
   ): Promise<void> {
     await audit.append({
       at: clock.now(),
@@ -441,6 +450,11 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     const outcomeReason =
       outcome.kind === 'succeeded' ? `pull request #${outcome.pullRequest.number} was opened` : outcome.kind === 'rejected' ? `step '${outcome.step}' returned ${outcome.result}: ${outcome.reason}` : outcome.reason;
     const reason = moveFailure === null ? outcomeReason : `${outcomeReason}; ${describeMoveFailure(moveFailure)}`;
+    // S50.2: the audit record above is written every time; only the page is latched.
+    if (latchKey !== null) {
+      if (exceptionPaged.has(latchKey)) return;
+      exceptionPaged.add(latchKey);
+    }
     const notified = await store.transaction(async (tx: StoreTransaction) => {
       notifier.enqueue(
         {
@@ -453,7 +467,51 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
       );
     });
     if (!notified.ok) {
+      if (latchKey !== null) exceptionPaged.delete(latchKey);
       console.error(`watcher: failed to enqueue attention notification for '${file}' (declaration '${declarationId}'): ${notified.error.summary}`);
+    }
+  }
+
+  /**
+   * S50.2's latch (`20-contract.md` § L2 — watcher, *Exceptions in a tick*): one page per key per
+   * process, for a file-less exception or a throw while following a pending pull request. The key is
+   * the declaration, or one tick-level key. In-memory by design, and separate from `tamperPaged`.
+   */
+  const exceptionPaged = new Set<ExceptionLatchKey>();
+  const TICK_LATCH_KEY: ExceptionLatchKey = '<tick>';
+  const TICK_ACTOR_REF: ActorRef = { kind: 'watcher', subject: 'watcher:tick' as Subject, clientId: null, grantId: null };
+
+  /** A file-less exception: audited every time as `watcher-tick-failed`, paged once per latch key. */
+  async function reportTickFailure(declaration: Declaration | null, error: unknown): Promise<void> {
+    const reason = errorMessage(error);
+    const key: ExceptionLatchKey = declaration === null ? TICK_LATCH_KEY : declaration.id;
+    await audit.append({
+      at: clock.now(),
+      operationId: null,
+      declarationId: declaration === null ? null : declaration.id,
+      generation: declaration === null ? null : declaration.generation,
+      tool: null,
+      actorRef: declaration === null ? TICK_ACTOR_REF : watcherSessionFor(declaration).actorRef,
+      context: 'normal',
+      form: 'watcher-tick-failed',
+      reason,
+    });
+    if (exceptionPaged.has(key)) return;
+    exceptionPaged.add(key);
+    const notified = await store.transaction(async (tx: StoreTransaction) => {
+      notifier.enqueue(
+        {
+          severity: 'attention',
+          declarationId: declaration === null ? null : declaration.id,
+          subject: { kind: 'watcher-tick-failed', reason },
+          summary: `a watcher tick${declaration === null ? '' : ` for declaration '${declaration.id}'`} failed with an exception, and what it interrupted is unknown: ${reason}`,
+        },
+        tx,
+      );
+    });
+    if (!notified.ok) {
+      exceptionPaged.delete(key);
+      console.error(`watcher: failed to enqueue tick-failed notification: ${notified.error.summary}`);
     }
   }
 
@@ -650,7 +708,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
    * write reflects every decision made so far plus the entries not yet
    * reached this tick.
    */
-  async function reconcilePendingPullRequests(declaration: Declaration, session: Session): Promise<{ reconciled: readonly PendingPullRequest[]; stillPending: readonly PendingPullRequest[] }> {
+  async function reconcilePendingPullRequests(declaration: Declaration, session: Session, work: WorkState): Promise<{ reconciled: readonly PendingPullRequest[]; stillPending: readonly PendingPullRequest[] }> {
     const list = readPendingPullRequestsWithDiscards(volumeRoot, declaration.id);
     if (list.entries.length === 0 && list.discarded.length === 0) return { reconciled: [], stillPending: [] };
 
@@ -671,8 +729,9 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
         statusResult = await callTool('pr_status', { number: entry.number }, declaration, session);
       } catch (error) {
         // S50.2: an exception while following a pull request is attributed to the file that opened it; the entry stays pending.
+        work.caught = true;
         const reason = `pull request #${entry.number} on branch '${entry.branch}' could not be followed: ${errorMessage(error)}`;
-        await auditAndNotify(declaration.id, declaration.generation, session.actorRef, 'normal', entry.sourceFile, rejectedOutcome('pr_status', 'infrastructure', reason));
+        await auditAndNotify(declaration.id, declaration.generation, session.actorRef, 'normal', entry.sourceFile, rejectedOutcome('pr_status', 'infrastructure', reason), null, declaration.id);
         stillPending.push(entry);
         writePendingPullRequests(volumeRoot, declaration.id, { entries: [...stillPending, ...list.entries.slice(index + 1)] });
         continue;
@@ -724,7 +783,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     return ok(undefined);
   }
 
-  async function tickOneDeclaration(declaration: Declaration): Promise<WatchTickReport> {
+  async function tickOneDeclaration(declaration: Declaration, work: WorkState): Promise<WatchTickReport> {
     const session = watcherSessionFor(declaration);
 
     // D18's gate comes first: it makes no dispatch, Git or host call, so a dirty or
@@ -736,7 +795,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     }
     tamperPaged.delete(declaration.id);
 
-    const { reconciled, stillPending } = await reconcilePendingPullRequests(declaration, session);
+    const { reconciled, stillPending } = await reconcilePendingPullRequests(declaration, session, work);
 
     const described = await cloneStore.describe(declaration.id);
     const cloneState = described.ok ? described.value.state : null;
@@ -826,6 +885,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
         if (!moved.moved) moveFailure = moved.failure;
       }
     } catch (error) {
+      work.caught = true;
       // S50.2: an exception after the claim is recorded against the claimed file. The file stays in
       // 'processing/' — what the protocol did before throwing is unknown — and D8 moves it at the next start.
       outcome = rejectedOutcome('tick', 'infrastructure', `the tick threw while delivering the file, which stays in 'processing/': ${errorMessage(error)}`);
@@ -849,6 +909,19 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     }
 
     return { declarationId: declaration.id, skipped: null, claimed: candidate, outcome, reconciled, stillPending };
+  }
+
+  /** S50.2's first boundary: nothing escaping one declaration's work stops another's. */
+  async function tickGuarded(declaration: Declaration): Promise<WatchTickReport> {
+    const work: WorkState = { caught: false };
+    try {
+      const report = await tickOneDeclaration(declaration, work);
+      if (!work.caught) exceptionPaged.delete(declaration.id);
+      return report;
+    } catch (error) {
+      await reportTickFailure(declaration, error);
+      return emptyReport(declaration.id, 'tick-failed');
+    }
   }
 
   return {
@@ -962,10 +1035,18 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
      * of that declaration's clone-readiness gate for claiming a new file.
      */
     async tick(): Promise<readonly WatchTickReport[]> {
-      const active = await declarations.list({ state: 'active', hasFileWatcher: true });
+      let active: readonly Declaration[];
+      try {
+        active = await declarations.list({ state: 'active', hasFileWatcher: true });
+      } catch (error) {
+        // S50.2's second boundary: a failure before any declaration is selected.
+        await reportTickFailure(null, error);
+        return [];
+      }
+      exceptionPaged.delete(TICK_LATCH_KEY);
       const reports: WatchTickReport[] = [];
       for (const declaration of active) {
-        reports.push(await tickOneDeclaration(declaration));
+        reports.push(await tickGuarded(declaration));
       }
       return reports;
     },
