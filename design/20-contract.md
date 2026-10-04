@@ -473,6 +473,25 @@ an operator must be able to read the trail that reveals the break.
 `AuditQuery.cursor` is an opaque string; a caller may compare it for equality and pass it back, and
 may not parse it. `limit` has no null form because an unbounded audit query is not offered.
 
+**`watcher-tick-failed` is the one audit form that names no file and no call** (S50.2). It records
+an exception a watcher tick caught where the tick held no file to attribute it to — *L2 — watcher*,
+*Exceptions in a tick*, says when. A scaffold until S50 lands, then declared in `src/audit/types.ts`,
+where `AUDIT_RECORD_FORMS` gains the same name:
+
+```ts
+type AuditRecordBody =
+  // …the existing variants, as declared in src/audit/types.ts
+  | { readonly form: 'watcher-tick-failed'; readonly reason: string };
+```
+
+`operationId` and `tool` are null and `context` is `normal`. `actorRef` is a `watcher` actor: the
+declaration's own where one was being worked, otherwise one whose subject names no declaration.
+`declarationId` and `generation` are null exactly when the exception came before any declaration was
+selected. `reason` is free text for a person and may not be parsed. A reader may not take the record
+as saying nothing happened: an exception interrupts work whose effects are unknown, which is why it
+is audited where a D17 or D18 skip is not. A failure that can be attributed to a file is never
+recorded in this form, and this form is never written for anything but a caught exception.
+
 **Canonical serialisation (resolves U9).** `hash` is `SHA256_hex(canonical(record))`, where
 `record` is the full flattened `AuditRecord` — `AuditRecordBase` merged with whichever
 `AuditRecordBody` variant applies, exactly as the type appears — with its own `hash` field omitted
@@ -602,6 +621,20 @@ that file's ordinary `file-watcher` audit record and `file-watcher-failed` notif
 `watcher-state-directory-tampered` variant is declared in `TerminalState`, `src/journal/types.ts`.
 Its `directory` union is written out rather than derived from `WatchedFileStage` because `src/journal/`
 is L1 and may not import the watcher.
+
+**An exception with no file is both audited and paged** (S50.2), unlike a tamper: what it
+interrupted is unknown, so the trail has to hold it. The audit form is `watcher-tick-failed` under
+*Audit*, and the page is a `TerminalState` variant of the same name, a scaffold until S50 lands and
+then declared in `src/journal/types.ts`:
+
+```ts
+type TerminalState =
+  // …the existing variants, as declared in src/journal/types.ts
+  | { readonly kind: 'watcher-tick-failed'; readonly reason: string };
+```
+
+Its `NotificationRequest.declarationId` is null exactly when the audit record's is. When it pages,
+and the latch that limits it, are under *L2 — watcher*, *Exceptions in a tick*.
 
 **A pending pull-request record pins the commit the watcher pushed — D20.** `PendingPullRequest`
 gains the head SHA `git_push` returned for that file's branch, declared in
@@ -1301,6 +1334,10 @@ structured store is unreadable. That is what makes the log outlive the store's c
 the reason it is a separate storage kind rather than another table. A segment is rotated **before**
 a record that would exceed `auditSegmentBytes` is written, so a segment only exceeds the cap when a
 single record does.
+
+**`watcher-tick-failed` (S50.2) changes no schema and has no migration.** It is a new line shape in an
+audit segment and a new payload in `notification_outbox.payload`, whose `declaration_id` is already
+nullable. Segments and rows written before it hold none, and a verifier reads them unchanged.
 
 ---
 
@@ -2055,6 +2092,35 @@ on the first gate or recovery refusal for that declaration, and again only after
 three directories sound and re-armed it. Every refusing tick still reports its skip; the latch governs
 paging only. It is in-memory by design — a restart re-pages a tamper still present, which is the
 moment an operator would want to hear about it again.
+
+**Exceptions in a tick — S50.2.** Nothing in this contract throws as control flow, so an exception
+reaching the watcher is a defect or an environment fault, and it is never only written to the
+console. Two boundaries catch it, and neither lets it out of `tick`:
+
+- **One declaration's work.** An exception escaping a declaration's work is caught there. That
+  declaration's `WatchTickReport.skipped` is `tick-failed`, declared in `src/watcher/types.ts` once
+  S50 lands, with `claimed` and `outcome` null and `reconciled` and `stillPending` empty — which here
+  means not established, not nothing pending. Every other declaration in the tick still runs.
+- **The tick itself.** An exception before any declaration is selected, resolving the active
+  declarations included, is caught at the tick, which then returns no reports.
+
+Where the tick holds a file when it catches the exception, the record is that file's, in the
+`file-watcher` form. A claimed file's outcome is `rejected` at step `tick`, and the file stays in
+`processing/` for D8, because what the protocol did before the throw is unknown. A throw while
+following a pending pull request is attributed to that entry's `sourceFile`, and the entry stays
+pending. Every other caught exception writes one `watcher-tick-failed` audit record, with the
+declaration whose work threw, or none at the tick boundary.
+
+**Every occurrence is audited; the page is latched.** The audit record is written every time,
+latched or not. A page for a file-less exception, or for a throw while following a pending pull
+request, is enqueued at most once per key per process. The key is the declaration, shared by both
+kinds, or one tick-level key for the tick boundary — so an exception recurring every poll pages
+once, whichever boundary caught it. A declaration's key re-arms when a tick completes that
+declaration's work with no exception caught anywhere in it. The tick-level key re-arms when a tick
+resolves the active declarations without throwing. A page that fails to enqueue releases its key,
+as the tamper latch does. The latch is in-memory, so a restart re-pages. It is separate from the
+tamper latch, and neither one suppresses the other. A claimed file's exception is **not** latched:
+each one strands a different file in `processing/`, and each is its own page.
 
 **The pushed head is carried, never re-read — D20** (S49). What the watcher may rely on and what it
 must never do:
@@ -2984,7 +3050,9 @@ type WatcherError = ModuleErrorBase & (
 | `state-directory-tampered` | A site in D18's refusal table finds its state directory tampered: an entry at the name that a link-preserving stat does not report as a directory | not by the watcher; the next tick re-checks, and it clears once an operator replaces the entry with a real directory or removes it | Refuse exactly as that table's row says — never follow the entry, never throw. It is never a `claim-failed` and never a `step-failed`: nothing was attempted that could fail |
 
 There is no caller to return an envelope to. Every outcome above is audited, and every failure
-notifies at `attention`.
+notifies at `attention`. An exception caught in a tick is none of these variants, because it is not
+an outcome anything chose. It is recorded and paged as *L2 — watcher*, *Exceptions in a tick*,
+says: never retried by the watcher, never thrown out of `tick`.
 
 ### Module adapter and http adapter
 
@@ -3251,7 +3319,7 @@ responsible for maintaining it.
 | S5 | No secret value appears in a return type, a persisted row, a log line, an audit record, a `ToolResult`, or a process argument vector. A credential reaches only a child process's environment, by name. | Credentials, Exec |
 | S6 | `Token` rows hold `verifierHash` and never a token value. `IssuedToken` is the only value-bearing type and is returned once. | Authorization |
 | S7 | Revocation writes a timestamp. No revocation deletes a row, and no cascade is written as a batch — `grantIsLive` walks upward at check time. | Authorization |
-| S8 | Every mutating call, every authorization rejection, every `git.raw` intent and outcome, every watched-file outcome, every identity event and every lease takeover produces an audit record. | Dispatch pipeline, Watcher, Operator identity, Lifecycle |
+| S8 | Every mutating call, every authorization rejection, every `git.raw` intent and outcome, every watched-file outcome, every exception a watcher tick catches, every identity event and every lease takeover produces an audit record. | Dispatch pipeline, Watcher, Operator identity, Lifecycle |
 | S9 | `git.raw` appends its intent line, carrying the argument vector, before the vector is judged — and therefore before any child process starts. Every call that gets past that append writes an intent/outcome pair, a refused vector included; a failed intent append is the one case that writes neither, because it refuses the call (**S3**). | Git operations |
 
 ### Envelope and surfaces
@@ -3304,6 +3372,7 @@ responsible for maintaining it.
 | D18 | No watcher code path reads, writes, renames into, lists or deletes through a state directory — `processing/`, `processed/`, `failed/` — that is tampered: present, and not reported as a directory by a link-preserving stat. A tick claims no file and makes no dispatch, Git or host call for a declaration while any of its three is tampered. A refusal is returned as data at every site and never thrown, and never stops work for another declaration or fails `start`. | Watcher |
 | D19 | A pull request the watcher opened is in its declaration's pending pull-request list before that file's terminal move is attempted. | Watcher |
 | D20 | Every pending pull-request entry the watcher acts on carries a valid `headSha` equal to the `headSha` its file's `git_push` returned. Every `pr_enable_auto_merge` and `reconcile_after_merge` the watcher dispatches carries that SHA as `expectedHeadSha`: never null, and never a value read from the host. An entry that fails validation reaches no dispatch, is removed by the tick that reads it, and is paged as `watcher-pending-record-discarded`. | Watcher |
+| D21 | No exception escapes `Watcher.tick`, and none escaping one declaration's work stops another declaration's work in the same tick. Each caught exception writes exactly one audit record: the claimed or followed file's `file-watcher` record where the tick holds one, otherwise `watcher-tick-failed`. A page for a file-less exception, or for a throw while following a pending pull request, is enqueued at most once per latch key between re-arms. *Specified, not yet held: S50 implements it.* | Watcher |
 
 ---
 
