@@ -36,8 +36,11 @@ without a natural bound and each gets a stated policy, since the disk-pressure m
 knows how to evict clones and would otherwise name innocent declarations as the blockers for
 growth that is not theirs.
 
-This list is not the same list as the **five consumers of the volume** the disk-full path reports
-— clones, the audit log, the structured store, backups and snapshots, and watcher inboxes.
+This list is not the same list as the **six consumers of the volume** the disk-full path reports
+— clones, the audit log, the structured store, backups and snapshots, watcher inboxes, and
+quarantined clones. The last has no retention window and is not one of the windows below: an entry
+holds what a corrupt tree may still hold, so it stays until an operator deletes it from the health
+view.
 Retention windows are about unbounded growth; the consumer list is about which *files* hold the
 bytes. Most windows live inside one consumer: journal entries, outbox rows, tokens, grants,
 operator sessions and terminal jobs are all rows in the structured store, so the store is reported
@@ -125,7 +128,7 @@ the alternative and is rejected: it must be chosen before any data exists and it
 amplification on every transaction for the life of the service, to solve a problem that occurs on
 a scheduled pass.
 
-The disk-full path reports which of the **five consumers of the volume** is taking the space, with
+The disk-full path reports which of the **six consumers of the volume** is taking the space, with
 the store broken down by table. The store was missing from that list entirely in an earlier draft,
 which is precisely the case where eviction frees nothing and the refusal blames innocent
 declarations.
@@ -208,10 +211,17 @@ Removing an orphaned declaration and removing its clone are two operations, both
 `declaration.manage`, both console-only, both audited:
 
 - **`clone.remove`** deletes the directory. It refuses unless the clone is safe to release, by the
-  same predicate. An explicitly flagged override permits a **corrupt** tree — one where
-  `rev-parse --git-dir` fails, so the predicate cannot be computed at all — and still refuses when
-  the tree holds commits unreachable from `origin/<base>`. Without the override a corrupt clone is
-  unevictable, unremovable and permanently blocking, with no exit short of host access.
+  same predicate. An explicitly flagged override admits a **corrupt** tree — one where
+  `rev-parse --git-dir` fails, so the predicate cannot be computed at all — and on a tree Git can
+  read it changes nothing, so unreachable commits still refuse. Without the override a corrupt clone
+  is unevictable, unremovable and permanently blocking, with no exit short of host access.
+
+  **The override quarantines; it never deletes.** A partly corrupt `.git` can still hold objects a
+  person can recover, and "the predicate cannot be computed" is not evidence that nothing is there.
+  The directory is moved whole to a named entry under the volume's quarantine directory, the clone
+  row is cleared, and the original path is free for a fresh clone. The entry counts as a consumer of
+  the volume and is listed in the health view with its size; deleting it is an audited operator
+  action from that view and from nothing else.
 
   **It never becomes a way to discard unpushed work**, which is why orphaned declarations stay
   operable above. The refusal and the remedy would otherwise share one predicate: work too
@@ -1130,7 +1140,8 @@ operation.
    use, and revokes any of them under `auth.manage`. An audit view reads the trail under
    `audit.read`, filtered by declaration, tool, actor and window, with the chain-verification
    state shown inline. A health view surfaces failed notification-outbox rows and failing
-   credential references, both of which are otherwise only visible in logs. And a
+   credential references, both of which are otherwise only visible in logs, and quarantined clones
+   with their sizes, which are otherwise only visible on the volume. And a
    parked-operations view shows every journal entry in `attention` with its `preState`, the
    observed current state and the diff between them.
 7. **The parked-operations view has to offer a way out, not only a way to record one.** Its
@@ -1379,7 +1390,7 @@ its lifecycle is part of the security design rather than a framework default.
 | | 5xx or transport error | Exit code | Up to three retries with backoff, **read operations only** | `upstream` after exhaustion | Unchanged |
 | | Merge conflict | PR state | **Terminal.** No rebase tool exists and by design never will | `precondition` naming the branch and both heads | Branch and commits intact; notifier fires |
 | | Required check failed | Check status | Terminal for the operation | `precondition` | PR open, nothing merged; notifier fires |
-| **Filesystem / volume** | Disk full | Watermark check before clone and after each mutation | Requests a maintenance pass — **never evicts inline**, which would take a materialisation lock after a mutation lock. The pass applies each module's retention and evicts safe clones; if nothing is safe to release, the operation that needed the space is refused | `precondition` naming which of the five consumers is taking the volume, with the store broken down by table, and, when clones are the cause, the declarations blocking eviction | Nothing deleted beyond retention. **The service never deletes repository work to make room.** |
+| **Filesystem / volume** | Disk full | Watermark check before clone and after each mutation | Requests a maintenance pass — **never evicts inline**, which would take a materialisation lock after a mutation lock. The pass applies each module's retention and evicts safe clones; if nothing is safe to release, the operation that needed the space is refused | `precondition` naming which of the six consumers is taking the volume, with the store broken down by table, and, when clones are the cause, the declarations blocking eviction | Nothing deleted beyond retention. **The service never deletes repository work to make room.** |
 | | Corrupt clone | `rev-parse --git-dir` fails at materialisation | Refuses; does not clone over it | `precondition` naming `clone.remove` with its override as the exit, since the safe-to-evict predicate cannot be computed on a tree git will not read, and without an exit the declaration is blocked and the disk unreclaimable for the life of the instance | Directory untouched |
 | | Permission denied | Syscall error | Fatal at boot; `infrastructure` at runtime | `infrastructure` | Unchanged |
 | **Structured store** | Locked or busy | SQLite busy | Bounded retry with backoff | `infrastructure` after exhaustion | Transaction rolled back |
