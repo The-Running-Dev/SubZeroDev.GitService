@@ -2,6 +2,12 @@
 
 Append-only. Newest at the top. The rejected alternatives are the point — without them, every future session relitigates the same choice.
 
+### 2026-10-08 — `declare` numbers inside one `BEGIN IMMEDIATE` transaction, and a race found there answers `already-exists` (S57, #288)
+Context: Before S57 two racing declares of one id computed the same generation and the second hit the `(id, generation)` primary key, which `declare` already reported as `already-exists`. Numbering from a mark that only ever rises removes that collision: the loser would compute the next generation up and insert a second active row.
+Chosen: The row and the mark are written in one `BEGIN IMMEDIATE` transaction that also reads the newest row and the mark. A newest row that is already `active` inside the transaction rolls back and answers `already-exists`. The next generation is one above the larger of the mark and the newest row, so a store whose mark is somehow behind its rows still never reissues.
+Rejected: **Number before the transaction, as before** — the two writes could then interleave with a racer's and the primary key would no longer catch it. **Add a partial unique index on active rows** — a schema change to `declaration`, which migration 0001's frozen text owns, for a guarantee the transaction already gives. **Number from the mark alone** — correct after the backfill, but trusts one table to agree with another where taking the larger costs nothing.
+Reversibility: cheap
+
 ### 2026-10-08 — An MCP grant's issuance is audited as the approving operator, and grants issued before S56 keep the client id as subject (S56, #292)
 Context: The token exchange is the only moment a grant is written, but it is an unauthenticated client request; the operator acted earlier, on the consent `POST`. S56 had to decide whose action the `token-issued` record describes, and what to do with grants already stored with the client id in `subject`.
 Chosen: The consent `POST` stamps its cookie session's subject onto the authorization code; the exchange writes that subject into the grant and audits issuance as `kind: 'operator'` with the same subject and the requesting client's `clientId`. The agent's own calls stay `kind: 'mcp'`. Stored grants are left as they are, and every reader takes `subject` as stored.

@@ -7,7 +7,7 @@ import { systemClock } from '../clock/clock.ts';
 import { ok, err } from '../shared/outcome.ts';
 import { storeError } from '../store/errors.ts';
 import { journalError } from '../journal/errors.ts';
-import { createStructuredStore } from '../store/structured-store.ts';
+import { createStructuredStore, MIGRATIONS } from '../store/structured-store.ts';
 import { withVolumeAsync } from '../store/volume-fixture.ts';
 import type { OperationJournalEntry } from '../journal/types.ts';
 import type { RemoteHost } from '../shared/brands.ts';
@@ -760,5 +760,132 @@ test('bumpGrantEpoch writes inside the caller transaction: a rolled-back one lea
     assert.equal(result.ok, false, 'the transaction faulted, as the test intends');
 
     assert.equal(grantEpochOnDisk(volume, 'repo-e2'), before, 'the epoch rolled back with the caller');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S57 — a generation number is never issued twice.
+// ---------------------------------------------------------------------------
+
+function generationsOf(volume: string, id: string): number[] {
+  const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+  try {
+    return (db.prepare('SELECT generation FROM declaration WHERE id = ? ORDER BY generation').all(id) as { generation: number }[]).map((r) => r.generation);
+  } finally {
+    db.close();
+  }
+}
+
+function markOf(volume: string, id: string): number | null {
+  const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+  try {
+    const row = db.prepare('SELECT high_water FROM declaration_generation_mark WHERE id = ?').get(id) as { high_water: number } | undefined;
+    return row?.high_water ?? null;
+  } finally {
+    db.close();
+  }
+}
+
+async function declareOrphanRemove(declarations: ReturnType<typeof declarationsFor>, id: string): Promise<number> {
+  const declared = await declarations.declare(declareInputFor(id), OPERATOR);
+  assert.ok(declared.ok);
+  assert.ok((await declarations.orphan(id as DeclareInput['id'], OPERATOR)).ok);
+  assert.ok((await declarations.remove(id as DeclareInput['id'], OPERATOR)).ok);
+  return declared.value.generation;
+}
+
+test('S57.2 — declare, remove, declare again: the new generation is above every generation the id ever had', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declarations = declarationsFor(volume);
+
+    // The only row is removed: nothing remains to number from.
+    const first = await declareOrphanRemove(declarations, 'repo-s57');
+    assert.deepEqual(generationsOf(volume, 'repo-s57'), []);
+    const again = await declarations.declare(declareInputFor('repo-s57'), OPERATOR);
+    assert.ok(again.ok);
+    assert.ok(again.value.generation > first, `generation ${again.value.generation} reissued after ${first} was removed`);
+
+    // The newest of two rows is removed: an older row remains below it.
+    const one = await declarations.declare(declareInputFor('repo-s57b'), OPERATOR);
+    assert.ok(one.ok);
+    assert.ok((await declarations.orphan('repo-s57b' as DeclareInput['id'], OPERATOR)).ok);
+    const two = await declareOrphanRemove(declarations, 'repo-s57b');
+    assert.deepEqual(generationsOf(volume, 'repo-s57b'), [one.value.generation]);
+    const three = await declarations.declare(declareInputFor('repo-s57b'), OPERATOR);
+    assert.ok(three.ok);
+    assert.ok(three.value.generation > two, `generation ${three.value.generation} reissued after ${two} was removed`);
+    assert.equal(markOf(volume, 'repo-s57b'), three.value.generation);
+  });
+});
+
+test('S57.3 — migration 0003 runs against a store from before it and backfills the mark per id from the highest generation on file', async () => {
+  await withVolumeAsync(async (volume) => {
+    const before = MIGRATIONS.filter((m) => m.version < 3);
+    assert.equal(before.length, MIGRATIONS.length - 1, 'migration 0003 is the newest');
+    const old = createStructuredStore({ volumeRoot: volume, clock: systemClock, migrations: before });
+    assert.ok((await old.open()).ok);
+    assert.ok((await old.migrate()).ok);
+    await old.close();
+
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    try {
+      const insert = db.prepare(
+        `INSERT INTO declaration (id, generation, clone_url, host, credential_ref, capability_grant, writable_path_prefixes, pinned,
+           git_user_name, git_user_email, state, grant_epoch, created_at, updated_at)
+         VALUES (?, ?, 'https://github.com/example/x.git', 'generic', 'unused', '["repo.read"]', '[]', 0, 'f', 'f@example.com', ?, 0, '2026-10-08T00:00:00.000Z', '2026-10-08T00:00:00.000Z')`,
+      );
+      insert.run('two-eras', 1, 'orphaned');
+      insert.run('two-eras', 4, 'orphaned');
+      insert.run('one-era', 2, 'active');
+    } finally {
+      db.close();
+    }
+
+    const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
+    assert.ok((await store.open()).ok);
+    const migrated = await store.migrate();
+    assert.ok(migrated.ok);
+    assert.equal(migrated.value, 1, 'only migration 0003 was pending');
+    await store.close();
+
+    assert.equal(markOf(volume, 'two-eras'), 4);
+    assert.equal(markOf(volume, 'one-era'), 2);
+    assert.equal(markOf(volume, 'never-declared'), null);
+
+    // The backfilled mark is what the next declare numbers from.
+    const declarations = declarationsFor(volume);
+    assert.ok((await declarations.remove('two-eras' as DeclareInput['id'], OPERATOR)).ok);
+    const next = await declarations.declare(declareInputFor('two-eras'), OPERATOR);
+    assert.ok(next.ok);
+    assert.equal(next.value.generation, 5);
+  });
+});
+
+test('S57.4 — the declaration row and the raised mark are one transaction: a failure writing the mark leaves neither', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declarations = declarationsFor(volume);
+    const first = await declarations.declare(declareInputFor('repo-s57c'), OPERATOR);
+    assert.ok(first.ok);
+    assert.ok((await declarations.orphan('repo-s57c' as DeclareInput['id'], OPERATOR)).ok);
+
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    try {
+      db.exec(`CREATE TRIGGER s57_fail_mark_insert BEFORE INSERT ON declaration_generation_mark BEGIN SELECT RAISE(ABORT, 's57 forced'); END;
+               CREATE TRIGGER s57_fail_mark_update BEFORE UPDATE ON declaration_generation_mark BEGIN SELECT RAISE(ABORT, 's57 forced'); END;`);
+    } finally {
+      db.close();
+    }
+
+    const redeclared = await declarations.declare(declareInputFor('repo-s57c'), OPERATOR);
+    assert.equal(redeclared.ok, false);
+    if (!redeclared.ok) assert.equal(redeclared.error.code, 'store-failed');
+    const fresh = await declarations.declare(declareInputFor('repo-s57d'), OPERATOR);
+    assert.equal(fresh.ok, false);
+
+    assert.deepEqual(generationsOf(volume, 'repo-s57c'), [first.value.generation], 'no new row without the mark');
+    assert.equal(markOf(volume, 'repo-s57c'), first.value.generation, 'mark unchanged');
+    assert.deepEqual(generationsOf(volume, 'repo-s57d'), []);
+    assert.equal(markOf(volume, 'repo-s57d'), null);
+    assert.equal((await declarations.get('repo-s57c' as DeclareInput['id']))?.state, 'orphaned');
   });
 });
