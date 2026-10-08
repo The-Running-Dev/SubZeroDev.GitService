@@ -534,7 +534,7 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
   }
 
   /**
-* `20-contract.md` § L2 — watcher: two terminal moves landing on the same
+   * `20-contract.md` § L2 — watcher: two terminal moves landing on the same
    * timestamp-prefixed name (the same original filename delivered again
    * within the same clock tick) must never let the later one overwrite the
    * earlier — `renameSync` would otherwise silently clobber it. The prefix
