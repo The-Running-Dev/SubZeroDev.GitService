@@ -213,8 +213,8 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
   }
 
   /** A wait that ran out. `checks_await` is the registry's only `monitoring-wait`. */
-  function waitTimedOut(ctx: CallContext, summary: string, limitSeconds: number, startedAtMs: number): ToolResult<never> {
-    const waitedSeconds = Math.max(0, Math.round((Date.parse(clock.now()) - startedAtMs) / 1000));
+  function waitTimedOut(ctx: CallContext, summary: string, limitSeconds: number, startedMonotonicMs: number): ToolResult<never> {
+    const waitedSeconds = Math.max(0, Math.round((clock.monotonicMs() - startedMonotonicMs) / 1000));
     deps.terminalSink?.set(ctx.operationId, { kind: 'wait-timeout', waitedSeconds, tool: 'checks_await' as RegistryToolName });
     return timeoutResult(summary, limitSeconds);
   }
@@ -427,12 +427,13 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
      * re-deriving it. Clamping in two places is how the two drift apart.
      */
     async awaitChecks(ctx, input): Promise<ToolResult<ChecksAwaitData>> {
-      const startedAtMs = Date.parse(clock.now());
+      // Every duration here is monotonic (S59): a host clock stepped mid-wait
+      // must neither end the wait early nor stretch it past its limit.
       const startedMonotonicMs = clock.monotonicMs();
       const ref = await resolveRef(ctx, input.ref);
       if (ref === null) return precondition('no commit to wait on: the clone has no resolvable head', []);
 
-      const deadlineMs = startedAtMs + Math.max(0, input.timeoutSeconds) * 1000;
+      const deadlineMs = startedMonotonicMs + Math.max(0, input.timeoutSeconds) * 1000;
       let lastChecks: readonly ChecksAwaitData['checks'][number][] = [];
 
       return withCredential(ctx, async () => {
@@ -449,7 +450,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
           // is the bounded-wait guarantee broken by the one path that looks
           // like it is honouring it.
           if (checks.error.code === 'rate-limited') {
-            const remainingMs = deadlineMs - Date.parse(clock.now());
+            const remainingMs = deadlineMs - clock.monotonicMs();
             const backoffMs = checks.error.retryAfterSeconds * 1000 + Math.floor(Math.random() * 1000);
             if (remainingMs > 0 && backoffMs < remainingMs) {
               await sleep(backoffMs);
@@ -459,7 +460,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
               ctx,
               `checks at ${ref} were still rate-limited when the ${input.timeoutSeconds}s wait ran out`,
               input.timeoutSeconds,
-              startedAtMs,
+              startedMonotonicMs,
             );
           }
           return failWith(ctx, checks.error);
@@ -475,7 +476,7 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
 
         const pending = lastChecks.filter((check) => check.conclusion === 'pending');
         if (pending.length === 0) {
-          const waitedSeconds = Math.round((Date.parse(clock.now()) - startedAtMs) / 1000);
+          const waitedSeconds = Math.round((clock.monotonicMs() - startedMonotonicMs) / 1000);
           return success(
             `every check at ${ref} concluded after ${waitedSeconds}s`,
             { ref, checks: lastChecks, concluded: true, waitedSeconds },
@@ -488,12 +489,12 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
           // reports nothing to the operator.
           return timeoutResult(`the wait on ${ref} was cancelled`, input.timeoutSeconds);
         }
-        if (Date.parse(clock.now()) + pollIntervalSeconds * 1000 >= deadlineMs) {
+        if (clock.monotonicMs() + pollIntervalSeconds * 1000 >= deadlineMs) {
           return waitTimedOut(
             ctx,
             `checks at ${ref} had not concluded within ${input.timeoutSeconds}s (${pending.length} still pending)`,
             input.timeoutSeconds,
-            startedAtMs,
+            startedMonotonicMs,
           );
         }
         await sleep(pollIntervalSeconds * 1000);

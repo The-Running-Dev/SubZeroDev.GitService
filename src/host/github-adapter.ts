@@ -108,10 +108,20 @@ export interface GitHubAdapterDependencies {
   readonly requestBudget?: number;
 }
 
+/**
+ * Window arithmetic is on the monotonic clock (S59), so a stepped host clock
+ * neither refills a budget early nor holds it spent for an extra hour.
+ * `resetsAt` is only the instant reported by `remainingBudget`.
+ */
 interface BudgetState {
   remaining: number;
-  windowStartedMs: number;
+  windowStartedMonotonicMs: number;
+  resetsAtMonotonicMs: number | null;
   resetsAt: IsoUtcTimestamp | null;
+}
+
+function instantAfter(at: IsoUtcTimestamp, seconds: number): IsoUtcTimestamp {
+  return new Date(Date.parse(at) + seconds * 1000).toISOString() as IsoUtcTimestamp;
 }
 
 function realSleep(ms: number): Promise<void> {
@@ -239,10 +249,10 @@ export function createGitHubAdapter(deps: GitHubAdapterDependencies): HostAdapte
   const budgets = new Map<CredentialRef, BudgetState>();
 
   function budgetFor(ref: CredentialRef): BudgetState {
-    const nowMs = Date.parse(deps.clock.now());
+    const nowMs = deps.clock.monotonicMs();
     const existing = budgets.get(ref);
-    if (existing && nowMs - existing.windowStartedMs < BUDGET_WINDOW_SECONDS * 1000) return existing;
-    const fresh: BudgetState = { remaining: budgetSize, windowStartedMs: nowMs, resetsAt: null };
+    if (existing && nowMs - existing.windowStartedMonotonicMs < BUDGET_WINDOW_SECONDS * 1000) return existing;
+    const fresh: BudgetState = { remaining: budgetSize, windowStartedMonotonicMs: nowMs, resetsAtMonotonicMs: null, resetsAt: null };
     budgets.set(ref, fresh);
     return fresh;
   }
@@ -258,16 +268,16 @@ export function createGitHubAdapter(deps: GitHubAdapterDependencies): HostAdapte
     if (credential === null) return null;
     const state = budgetFor(credential.ref);
     if (state.remaining > 0) return null;
-    const nowMs = Date.parse(deps.clock.now());
-    const resetsAtMs = state.resetsAt !== null ? Date.parse(state.resetsAt) : state.windowStartedMs + BUDGET_WINDOW_SECONDS * 1000;
-    return Math.max(1, Math.ceil((resetsAtMs - nowMs) / 1000));
+    const resetsAtMs = state.resetsAtMonotonicMs ?? state.windowStartedMonotonicMs + BUDGET_WINDOW_SECONDS * 1000;
+    return Math.max(1, Math.ceil((resetsAtMs - deps.clock.monotonicMs()) / 1000));
   }
 
   function exhaustBudget(credential: CredentialBinding | null, retryAfterSeconds: number): void {
     if (credential === null) return;
     const state = budgetFor(credential.ref);
     state.remaining = 0;
-    state.resetsAt = new Date(Date.parse(deps.clock.now()) + retryAfterSeconds * 1000).toISOString() as IsoUtcTimestamp;
+    state.resetsAtMonotonicMs = deps.clock.monotonicMs() + retryAfterSeconds * 1000;
+    state.resetsAt = instantAfter(deps.clock.now(), retryAfterSeconds);
   }
 
   function credentialFor(ctx: CallContext): CredentialBinding | null {
@@ -339,10 +349,10 @@ export function createGitHubAdapter(deps: GitHubAdapterDependencies): HostAdapte
       }
 
       const text = stderrOf(result.error);
-      const nowMs = Date.parse(deps.clock.now());
+      const wallNowMs = Date.parse(deps.clock.now()); // compared only with x-ratelimit-reset, an instant the host supplies
 
       if (looksRateLimited(text)) {
-        const retryAfterSeconds = retryAfterSecondsIn(text, nowMs);
+        const retryAfterSeconds = retryAfterSecondsIn(text, wallNowMs);
         exhaustBudget(credential, retryAfterSeconds);
         return err(
           hostError(
