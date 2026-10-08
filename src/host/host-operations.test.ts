@@ -1015,3 +1015,109 @@ test('S45.4: a rate limit and a successful read mark nothing', async () => {
   assert.equal((await operationsMarkingFailures(fine, marks).readPullRequest(context(), { number: 7 })).ok, true);
   assert.deepEqual(marks, []);
 });
+
+// --- S59 — a check wait measures time with a clock that cannot jump ---
+
+/**
+ * A clock whose wall time and monotonic time both advance by whatever is
+ * slept, and whose wall time alone is stepped by `stepMs` after the first
+ * sleep — a host clock corrected mid-wait.
+ */
+function steppedClock(stepMs: number) {
+  let wallMs = Date.parse('2026-10-08T12:00:00.000Z');
+  let monoMs = 1_000;
+  let sleeps = 0;
+  return {
+    clock: {
+      now: () => new Date(wallMs).toISOString() as never,
+      monotonicMs: () => monoMs,
+    },
+    sleep: async (ms: number) => {
+      wallMs += ms;
+      monoMs += ms;
+      sleeps += 1;
+      if (sleeps === 1) wallMs += stepMs;
+    },
+    elapsedMs: () => monoMs - 1_000,
+    sleeps: () => sleeps,
+  };
+}
+
+function steppedOperations(gh: ReturnType<typeof stubGh>, stepped: ReturnType<typeof steppedClock>, terminalSink: Map<OperationId, unknown>) {
+  const adapter = createGitHubAdapter({ clock: stepped.clock, exec: gh.exec, sleep: stepped.sleep, baseBranchFor: async () => 'main' as never });
+  return createHostOperations({
+    clock: stepped.clock,
+    adapter,
+    journal: recordingJournal().journal,
+    headShaFor: async () => HEAD,
+    pollIntervalSeconds: 10,
+    sleep: stepped.sleep,
+    terminalSink: terminalSink as never,
+  });
+}
+
+const ALWAYS_PENDING = JSON.stringify({ check_runs: [{ name: 'build', status: 'in_progress', conclusion: null, details_url: null }] });
+
+for (const [label, stepMs] of [
+  ['forward', 3_600_000],
+  ['back', -3_600_000],
+] as const) {
+  test(`S59.2 — with the wall clock stepped ${label} an hour mid-wait, checks_await still ends at its limit and reports monotonic time`, async () => {
+    const gh = stubGh([{ when: () => true, reply: () => stdout(ALWAYS_PENDING) }]);
+    const stepped = steppedClock(stepMs);
+    const sink = new Map<OperationId, unknown>();
+    const ops = steppedOperations(gh, stepped, sink);
+
+    const result = await ops.awaitChecks(context(), { ref: null, timeoutSeconds: 60 });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.kind, 'timeout');
+    // Polls at 0, 10, 20, 30, 40 and 50 seconds; a seventh at 60 would pass the limit.
+    assert.equal(stepped.sleeps(), 5, 'neither ended early nor ran past its limit');
+    assert.equal(stepped.elapsedMs(), 50_000);
+    assert.deepEqual(sink.get('op-1' as OperationId), { kind: 'wait-timeout', waitedSeconds: 50, tool: 'checks_await' });
+  });
+}
+
+test('S59.2 — a wait that concludes after a forward step reports the monotonic time waited, not the hour the clock jumped', async () => {
+  let poll = 0;
+  const gh = stubGh([
+    {
+      when: () => true,
+      reply: () => {
+        poll += 1;
+        return stdout(JSON.stringify({ check_runs: [{ name: 'build', status: poll < 3 ? 'in_progress' : 'completed', conclusion: poll < 3 ? null : 'success', details_url: null }] }));
+      },
+    },
+  ]);
+  const stepped = steppedClock(3_600_000);
+  const ops = steppedOperations(gh, stepped, new Map());
+
+  const result = await ops.awaitChecks(context(), { ref: null, timeoutSeconds: 60 });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.data?.waitedSeconds, 20);
+});
+
+test('S59.1 — no duration in src/host/ is measured between two wall-clock readings', async () => {
+  const { readdirSync, readFileSync } = await import('node:fs');
+  const path = await import('node:path');
+  const dir = import.meta.dirname;
+  const parsedNow = /Date\.parse\((?:deps\.)?clock\.now\(\)\)/;
+  const offenders: string[] = [];
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith('.ts') || name.endsWith('.test.ts')) continue;
+    readFileSync(path.join(dir, name), 'utf8')
+      .split('\n')
+      .forEach((line, i) => {
+        if (parsedNow.test(line)) offenders.push(`${name}:${i + 1}: ${line.trim()}`);
+      });
+  }
+  // One wall reading survives, and it is compared with a host-supplied instant
+  // (`x-ratelimit-reset`), never with another reading.
+  assert.deepEqual(
+    offenders.map((o) => o.replace(/:\d+:/, ':')),
+    ['github-adapter.ts: const wallNowMs = Date.parse(deps.clock.now()); // compared only with x-ratelimit-reset, an instant the host supplies'],
+    offenders.join('\n'),
+  );
+});

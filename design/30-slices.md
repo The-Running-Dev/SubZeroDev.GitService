@@ -522,7 +522,7 @@ Delivers: An operator waiting on pull-request checks gets a wait that ends at it
 time that is true, even if the host clock is stepped mid-wait.
 Touches: `src/host/host-operations.ts`.
 Depends on: none
-Status: todo
+Status: done
 Closes: #365
 Acceptance:
   - S59.1 `checks_await`'s deadline and its reported `waitedSeconds` are measured from
