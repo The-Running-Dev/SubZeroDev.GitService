@@ -11,6 +11,7 @@ import { base32Decode, currentTotpCode } from '../src/operator-identity/totp.ts'
 import { createAuthorization } from '../src/authorization/authorization.ts';
 import { createDeclarations, type Declarations } from '../src/declarations/declarations.ts';
 import { createDispatchPipeline } from '../src/dispatch/dispatch-pipeline.ts';
+import { inertJournal } from '../src/journal/testing/inert-journal.ts';
 import { createModuleAdapter } from '../src/module-adapter/module-adapter.ts';
 import { fixtureTool, httpTarget } from '../src/contract/fixtures.ts';
 import { success } from '../src/result/envelope.ts';
@@ -97,6 +98,7 @@ async function withServer<T>(volume: string, commitSha: GitSha, fn: (handle: Ser
     audit: createAudit({ volumeRoot: volume, clock: systemClock }),
   });
   const dispatchPipeline = createDispatchPipeline({
+    journal: inertJournal(),
     exec: NO_SECRETS_TO_SCRUB,
     registry: { fingerprint: 'a'.repeat(64) as never, compiledAt: systemClock.now(), entries: [READ_TOOL], contractCapabilitySet: CEILING as unknown as never },
     ceiling: CEILING as unknown as DeploymentCeiling,

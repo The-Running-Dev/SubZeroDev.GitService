@@ -81,8 +81,11 @@ export interface DispatchPipelineDependencies {
   /** `20-contract.md` § Deployment configuration. Only `maintenanceAtPercent` governs the post-mutation watermark check below — `refuseAtPercent` is `CloneStore.ensure`'s own threshold. */
   readonly watermarks?: DiskWatermarks;
   readonly audit: Pick<Audit, 'append'>;
-  /** Required only once a `mutating` registry entry exists (S7); every S6-only registry never reaches the branch that calls it. */
-  readonly journal?: Pick<Journal, 'begin' | 'markApplied' | 'settle'> & Partial<Pick<Journal, 'park'>>;
+  /**
+   * Required (S61): a pipeline composed without one could not record intent
+   * before a mutation, and the only safe answer to that is not to compose it.
+   */
+  readonly journal: Pick<Journal, 'begin' | 'markApplied' | 'settle' | 'park'>;
   /**
    * `scrubJson` only — `JournalBeginInput.input` must be scrubbed before it is
    * persisted (`20-contract.md` § Operation journal). **Required**, not
@@ -611,10 +614,6 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
   }
 
   async function dispatchMutating(request: DispatchRequest, entry: ToolDeclaration, declaration: Declaration, operationId: OperationId, actorRef: ActorRef, precomputedWritablePathPrefixes: readonly PathPrefix[] | null = null): Promise<ToolResult<JsonValue>> {
-    if (!journal) {
-      return infrastructure(`mutating tool '${entry.name}' has no journal configured`);
-    }
-
     // The lazy recovery pass, ahead of **both** locks. Ahead of the mutation
     // lock because the contract requires the resume to take that lock in its
     // own right; ahead of the materialisation lock because a resume step
@@ -828,10 +827,10 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
           resultKind: result.kind,
           changedPaths: [],
         });
-        const parked = await journal.park?.(operationId, result.summary);
-        if (!parked?.ok) {
+        const parked = await journal.park(operationId, result.summary);
+        if (!parked.ok) {
           const ended = parkCause !== null ? 'ended on a signal' : 'timed out';
-          return infrastructure(`'${entry.name}' ${ended}, but its journal entry could not be parked: ${parked?.error.summary ?? 'journal park is unavailable'}`);
+          return infrastructure(`'${entry.name}' ${ended}, but its journal entry could not be parked: ${parked.error.summary}`);
         }
         await cloneStore.markAttention?.(declaration.id, result.summary);
         return result;

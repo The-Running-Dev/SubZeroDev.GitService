@@ -6,6 +6,7 @@ import { captureToolParity } from '../src/contract/tool-parity.ts';
 import { PRODUCTION_TOOL_DECLARATIONS } from '../src/composition-root/production-declarations.ts';
 import { createModuleAdapter, toModuleHandler } from '../src/module-adapter/module-adapter.ts';
 import { createDispatchPipeline } from '../src/dispatch/dispatch-pipeline.ts';
+import { inertJournal } from '../src/journal/testing/inert-journal.ts';
 import { createDeclarations, type Declarations } from '../src/declarations/declarations.ts';
 import { createCloneStore, type CloneStore } from '../src/clone/clone-store.ts';
 import { createBareGitRemote } from '../src/clone/testing/git-fixture.ts';
@@ -147,6 +148,7 @@ test('S35.5 — example_note_echo is visible only once the declaration grants co
     moduleAdapter.register(EXAMPLE_NOTE_ECHO_TARGET, toModuleHandler(EXAMPLE_NOTE_ECHO_HANDLER));
 
     const pipeline = createDispatchPipeline({
+      journal: inertJournal(),
       registry,
       ceiling: CEILING,
       moduleAdapter,

@@ -550,7 +550,7 @@ Delivers: A maintainer can no longer compose a dispatch pipeline that silently s
 intent, because the journal is a required dependency rather than an optional one.
 Touches: `src/dispatch/dispatch-pipeline.ts`; its callers and tests.
 Depends on: none
-Status: todo
+Status: done
 Closes: #216
 Acceptance:
   - S61.1 `DispatchPipelineDependencies.journal` is required; the expired "required only once S7

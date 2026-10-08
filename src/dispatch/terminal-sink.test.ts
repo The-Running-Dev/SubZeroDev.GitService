@@ -24,6 +24,7 @@ import { err } from '../shared/outcome.ts';
 import type { OperationId, RegistryToolName } from '../shared/brands.ts';
 import type { Session } from '../shared/session.ts';
 import { createDispatchPipeline } from './dispatch-pipeline.ts';
+import { inertJournal } from '../journal/testing/inert-journal.ts';
 
 const CEILING = new Set(['repo.read', 'git.local.write']) as unknown as DeploymentCeiling;
 
@@ -285,6 +286,7 @@ async function dispatchWait(h: Harness, handler: (ctx: { operationId: OperationI
   moduleAdapter.register('checks_await' as never, handler as never);
   const notifier = createNotifier({ volumeRoot: h.volume, clock: systemClock, webhookUrl: null });
   const pipeline = createDispatchPipeline({
+    journal: inertJournal(),
     registry: registryOf([waitTool('checks_await')]), ceiling: CEILING, moduleAdapter, declarations: h.declarations, cloneStore: h.cloneStore, locks: h.locks,
     audit: createAudit({ volumeRoot: h.volume, clock: systemClock }), exec: h.exec, clock: systemClock, terminalSink: h.sink,
     ...(wiring.notifier === false ? {} : { notifier }),
