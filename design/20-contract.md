@@ -486,6 +486,16 @@ as saying nothing happened: an exception interrupts work whose effects are unkno
 is audited where a D17 or D18 skip is not. A failure that can be attributed to a file is never
 recorded in this form, and this form is never written for anything but a caught exception.
 
+**`totp-reenrol-refusal` records one request the re-enrolment gate refused** (S54; the gate is stated
+beneath the authentication rows of *The HTTP API route table*). `actorRef` is the operator whose
+session was refused; `operationId`, `declarationId`, `generation` and `tool` are null, because the
+request was refused before any of them was resolved; `context` is `normal`. `route` is the request's
+method and path, without its query string, as the client sent it, so a refused request to a route
+with a path parameter records the concrete path rather than the table's template. It is its own form
+rather than an `identity-event`, because an `identity-event` carries no field naming what was
+attempted, and a record that says only "refused" cannot tell an operator whether a stolen code was
+used to try to mint a token or merely to read the landing view.
+
 **Canonical serialisation (resolves U9).** `hash` is `SHA256_hex(canonical(record))`, where
 `record` is the full flattened `AuditRecord` — `AuditRecordBase` merged with whichever
 `AuditRecordBody` variant applies, exactly as the type appears — with its own `hash` field omitted
@@ -1325,6 +1335,7 @@ single record does.
 **`watcher-tick-failed` (S50.2) changes no schema and has no migration.** It is a new line shape in an
 audit segment and a new payload in `notification_outbox.payload`, whose `declaration_id` is already
 nullable. Segments and rows written before it hold none, and a verifier reads them unchanged.
+`totp-reenrol-refusal` (S54) is the same: a new line shape in a segment, no table, no migration.
 
 ---
 
@@ -2502,6 +2513,24 @@ call against whichever declaration a later request names, not at sign-in.
 | `/auth/session` | `GET` | cookie |
 | `/auth/logout` | `POST` | cookie |
 
+**"Forces TOTP re-enrolment" is a server-side session gate, not a console screen (S54).** While the
+credential's `totp_reenrol_required` is set, a session reaches exactly four cookie routes:
+`/auth/totp-reenrol/begin`, `/auth/totp-reenrol/complete`, `/auth/logout`, and `GET /auth/session`,
+which the console needs to learn that it must show the re-enrolment screen. Every other route that
+accepts a cookie — every `cookie` and `bearer or cookie` row in these tables, and the cookie-carrying
+`POST /oauth/authorize` below — refuses a cookie-authenticated request with `403` and the
+`OperatorIdentityError` `totp-reenrol-required`, before it reads a body or touches anything but the
+session's own idle timer. A bearer request to a `bearer or cookie` row is not affected: the gate is on
+the operator session, and a bearer token was never issued through a recovery code.
+
+The gate lives in the one function every cookie route authenticates through, rather than in each
+route, because a route added later must inherit it without anyone remembering to; the route-walking
+test in S54.2 is what fails if one is added that does not. `403` rather than `401` because the
+session is alive and must stay so: a `401` tells the console its session is gone, which would send the
+operator back to a login that burns another recovery code. Each refused request appends one
+`totp-reenrol-refusal` audit record (§ *Audit*). `completeTotpReenrol` clearing the flag lifts the gate
+for every live session on the credential at once, with no second sign-in.
+
 **Declarations (`declaration-routes.ts`, and `tool-routes.ts` for the two `/tools` rows)** — the landing view's feed and declaration management.
 Listing and creating a declaration carry no repository dimension (there is nothing yet to bind to,
 or the call spans every declaration); every route naming an existing declaration's id does.
@@ -3130,6 +3159,7 @@ type OperatorIdentityError = ModuleErrorBase & (
   | { readonly code: 'session-unknown' }
   | { readonly code: 'session-expired' }
   | { readonly code: 'session-revoked' }
+  | { readonly code: 'totp-reenrol-required' }
   | { readonly code: 'store-failed'; readonly cause: StoreError }
 );
 ```
@@ -3140,11 +3170,12 @@ type OperatorIdentityError = ModuleErrorBase & (
 | `already-provisioned`, `provisioning-secret-invalid` | Enrolment after the file was burned, or with the wrong secret | no | `401`. The file's presence authorises nothing |
 | `credentials-invalid`, `totp-invalid` | Local login | no | `401` with a reason. TOTP is enforced, not offered |
 | `totp-key-unavailable` | The sealing key is absent or unreadable, so no TOTP code can be verified | by the operator, after restoring the key | `401` naming the missing key. **Never fatal at boot** — break-glass is the way back in, and it needs the service running |
-| `recovery-code-invalid`, `recovery-code-used` | Recovery-code login | no | `401`. A successful use burns the code, audits, and forces TOTP re-enrolment |
+| `recovery-code-invalid`, `recovery-code-used` | Recovery-code login | no | `401`. A successful use burns the code, audits, and forces TOTP re-enrolment: the session it returns is gated (§ *The HTTP API route table*, beneath the authentication rows) |
 | `break-glass-invalid` | The token is absent, stale or already consumed | no | `401`. Consumption is audited |
 | `oidc-unavailable` | Discovery, JWKS, signature or validity-window failure | by the operator, later | `401` with a reason. **Local password plus TOTP still works** |
 | `subject-not-allowlisted` | Federated login returned an unlisted subject | no | `401`, audited as `identity-event` `'oidc-subject-rejected'` (S31.2) |
 | `session-unknown`, `session-expired`, `session-revoked` | A cookie presented against the persisted row | no | `401`. Invalidation is server-side, not a cleared cookie |
+| `totp-reenrol-required` | A live session reaches a cookie route outside the re-enrolment gate's four while the credential's `totp_reenrol_required` is set | by the operator, after re-enrolling | `403`, never `401`: the session is alive. Audited once per request as `totp-reenrol-refusal` (S54) |
 
 ### Compiler
 
