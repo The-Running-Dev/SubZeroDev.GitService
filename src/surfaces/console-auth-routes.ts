@@ -4,6 +4,7 @@ import type { SessionId, Subject } from '../shared/brands.ts';
 import { timingSafeStringEqual } from '../shared/timing-safe.ts';
 import type { OperatorIdentity, OperatorSession } from '../operator-identity/operator-identity.ts';
 import type { OperatorIdentityError } from '../operator-identity/errors.ts';
+import { readJsonBody, sendJson } from './http-json.ts';
 
 export interface ConsoleAuthDependencies {
   readonly identity: OperatorIdentity;
@@ -14,16 +15,6 @@ const SESSION_COOKIE = 'szg_session';
 const CSRF_COOKIE = 'szg_csrf';
 const MAX_BODY_BYTES = 16_384;
 
-function sendJson(res: ServerResponse, status: number, body: unknown, extraHeaders?: Record<string, string | string[]>): void {
-  const payload = JSON.stringify(body);
-  res.writeHead(status, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Content-Length': Buffer.byteLength(payload),
-    ...extraHeaders,
-  });
-  res.end(payload);
-}
-
 function errorStatus(error: OperatorIdentityError): number {
   if (error.code === 'store-failed') return 503;
   return error.code === 'totp-reenrol-required' ? 403 : 401;
@@ -31,24 +22,6 @@ function errorStatus(error: OperatorIdentityError): number {
 
 function sendError(res: ServerResponse, error: OperatorIdentityError): void {
   sendJson(res, errorStatus(error), { error: error.code });
-}
-
-async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown> | null> {
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  for await (const chunk of req) {
-    const buf = chunk as Buffer;
-    bytes += buf.length;
-    if (bytes > MAX_BODY_BYTES) return null;
-    chunks.push(buf);
-  }
-  if (chunks.length === 0) return {};
-  try {
-    const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
 }
 
 function stringField(body: Record<string, unknown>, key: string): string {
@@ -220,7 +193,7 @@ export async function handleConsoleAuthRoute(
       sendJson(res, 403, { error: 'csrf-check-failed' });
       return true;
     }
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, MAX_BODY_BYTES);
     if (!body) {
       sendJson(res, 400, { error: 'bad-request' });
       return true;
@@ -243,7 +216,7 @@ export async function handleConsoleAuthRoute(
       sendJson(res, 403, { error: 'csrf-check-failed' });
       return true;
     }
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, MAX_BODY_BYTES);
     if (!body) {
       sendJson(res, 400, { error: 'bad-request' });
       return true;
@@ -268,7 +241,7 @@ export async function handleConsoleAuthRoute(
       sendJson(res, 403, { error: 'csrf-check-failed' });
       return true;
     }
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, MAX_BODY_BYTES);
     if (!body) {
       sendJson(res, 400, { error: 'bad-request' });
       return true;
@@ -293,7 +266,7 @@ export async function handleConsoleAuthRoute(
       sendJson(res, 403, { error: 'csrf-check-failed' });
       return true;
     }
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, MAX_BODY_BYTES);
     if (!body) {
       sendJson(res, 400, { error: 'bad-request' });
       return true;
@@ -365,7 +338,7 @@ export async function handleConsoleAuthRoute(
       sendJson(res, 403, { error: 'csrf-check-failed' });
       return true;
     }
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, MAX_BODY_BYTES);
     if (!body) {
       sendJson(res, 400, { error: 'bad-request' });
       return true;

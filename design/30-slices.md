@@ -598,7 +598,7 @@ Delivers: A maintainer changing how the service reads a request body or writes a
 in one place, with each route's size limit still stated where the route is.
 Touches: `src/surfaces/` (every file defining `sendJson` or `readJsonBody`); a shared helper.
 Depends on: S54, S55, S56
-Status: todo
+Status: done
 Closes: #65
 Acceptance:
   - S64.1 One shared helper owns JSON response writing and request-body parsing; no file under

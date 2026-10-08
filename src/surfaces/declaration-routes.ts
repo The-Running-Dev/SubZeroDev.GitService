@@ -11,6 +11,7 @@ import type { CloneStoreError } from '../clone/errors.ts';
 import type { Clone } from '../clone/types.ts';
 import type { OperatorSession } from '../operator-identity/operator-identity.ts';
 import { csrfOk, requireSession, type ConsoleAuthDependencies } from './console-auth-routes.ts';
+import { readJsonBody, sendJson } from './http-json.ts';
 
 export interface DeclarationRoutesDependencies extends ConsoleAuthDependencies {
   readonly declarations: Declarations;
@@ -74,6 +75,8 @@ async function landingViewFields(cloneStore: DeclarationRoutesDependencies['clon
  */
 const LANDING_VIEW_CONCURRENCY = 8;
 
+const MAX_BODY_BYTES = 65_536;
+
 async function mapWithConcurrencyLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let next = 0;
@@ -93,12 +96,6 @@ function requireCsrf(req: IncomingMessage, res: ServerResponse): boolean {
   res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify({ error: 'csrf-check-failed' }));
   return false;
-}
-
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body);
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(payload) });
-  res.end(payload);
 }
 
 /**
@@ -139,24 +136,6 @@ function cloneStoreErrorStatus(error: CloneStoreError): number {
 
 function sendCloneStoreError(res: ServerResponse, error: CloneStoreError): void {
   sendJson(res, cloneStoreErrorStatus(error), { error: error.code, ...error });
-}
-
-async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown> | null> {
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  for await (const chunk of req) {
-    const buf = chunk as Buffer;
-    bytes += buf.length;
-    if (bytes > 65_536) return null;
-    chunks.push(buf);
-  }
-  if (chunks.length === 0) return {};
-  try {
-    const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
 }
 
 function actorFor(session: OperatorSession): ActorRef {
@@ -322,7 +301,7 @@ export async function handleDeclarationRoute(
 
   if (req.method === 'POST' && segments.length === 1) {
     if (!requireCsrf(req, res)) return true;
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, MAX_BODY_BYTES);
     if (!body) {
       sendJson(res, 400, { error: 'bad-request' });
       return true;
@@ -366,7 +345,7 @@ export async function handleDeclarationRoute(
 
   if (req.method === 'PATCH' && segments.length === 2) {
     if (!requireCsrf(req, res)) return true;
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, MAX_BODY_BYTES);
     if (!body) {
       sendJson(res, 400, { error: 'bad-request' });
       return true;
@@ -409,7 +388,7 @@ export async function handleDeclarationRoute(
 
   if (req.method === 'DELETE' && segments.length === 3 && segments[2] === 'clone') {
     if (!requireCsrf(req, res)) return true;
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, MAX_BODY_BYTES);
     const permitCorruptTree = body !== null && body.permitCorruptTree === true;
     const result = await deps.cloneStore.remove(id, { permitCorruptTree }, actorFor(session));
     if (!result.ok) {
