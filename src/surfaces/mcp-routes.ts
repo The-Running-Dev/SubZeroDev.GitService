@@ -26,8 +26,8 @@ const AUTHORIZATION_CODE_TTL_MS = 5 * 60 * 1000;
  * `/oauth/authorize` (`GET`) are unauthenticated by transport (registration
  * and starting a login flow have no token yet), so without a cap a remote
  * caller could grow this process-local `Map` without bound. `oauth_client`
- * and `grant` rows are bounded by disk instead, since `registerClient` and
- * `issueMcpGrant` write durably rather than holding an in-memory `Map`.
+ * rows have their own cap (below); `grant` rows are bounded by disk, since
+ * only an approved consent — an authenticated operator action — writes one.
  */
 const MAX_PENDING_AUTHORIZATIONS = 500;
 /**
@@ -80,6 +80,8 @@ interface PendingAuthorization {
 
 interface IssuedCode {
   readonly clientId: ClientId;
+  /** The operator whose consent `POST` minted this code — the grant's subject. */
+  readonly approvedBy: Subject;
   readonly redirectUri: string;
   readonly scopes: readonly McpScope[];
   readonly codeChallenge: string;
@@ -579,6 +581,7 @@ async function handleAuthorize(deps: McpRoutesDependencies, req: IncomingMessage
   const code = randomOpaqueToken();
   deps.mcpState.issuedCodes.set(code, {
     clientId: pending.clientId,
+    approvedBy: operatorSession.subject,
     redirectUri: pending.redirectUri,
     scopes: pending.scopes,
     codeChallenge: pending.codeChallenge,
@@ -632,13 +635,13 @@ async function handleToken(deps: McpRoutesDependencies, req: IncomingMessage, re
     const issued = await deps.authorization.issueMcpGrant(
       {
         clientId: record.clientId,
-        subject: record.clientId as unknown as Subject,
+        subject: record.approvedBy,
         resource: record.resource,
         declarationId: record.declarationId,
         generation: declaration.generation,
         scopes: record.scopes,
       },
-      { kind: 'mcp', subject: record.clientId as unknown as Subject, clientId: record.clientId, grantId: null },
+      { kind: 'operator', subject: record.approvedBy, clientId: record.clientId, grantId: null },
     );
     if (!issued.ok) {
       sendJson(res, issued.error.code === 'store-failed' ? 503 : 400, { error: 'invalid_grant', summary: issued.error.summary });
