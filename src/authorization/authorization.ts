@@ -329,7 +329,7 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
     },
 
     /**
-     * `20-contract.md` § control flow step 2: issuer, signature (the
+     * `10-design.md` § Agent completes a change, step 2: issuer, signature (the
      * lookup itself, since a hash match *is* the signature check for an
      * opaque token), expiry, audience against the exact resource URI, and —
      * once the token checks out — that the declaration it names still

@@ -873,7 +873,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
       // S27.2: the refuse watermark. Checked only here — a fresh clone is
       // the one case in `ensure()` that actually consumes new volume space;
       // adoption and the already-`ready`/`needs-attention` fast paths above
-      // need none. `10-design.md` § disk pressure: "at 95 % operations
+      // need none. `10-design.md` § Storage kinds: "at 95 % operations
       // needing space are refused", not evicted inline — this refuses
       // outright rather than attempting an eviction under the materialisation
       // lock this call already holds, which invariant C4/rule 3 forbid.

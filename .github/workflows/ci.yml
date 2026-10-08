@@ -6,10 +6,10 @@
 # silently running every gate on a different runtime.
 #
 # `npm run build` chains typecheck, the registry build and every `check:*`
-# gate (`check:layering`, `check:migration`, `check:layer-direction`) — the
-# same chain the Dockerfile's `builder` stage runs, so this is the one place
-# that ordering is stated. Out of scope: any deployment step — this is the
-# repository's own CI, not the service's execution mechanism. S35's derived
+# gate `package.json` names — the same chain the Dockerfile's `builder`
+# stage runs, so `package.json` is the one place that ordering is stated.
+# Out of scope: any deployment step — this is the repository's own CI, not
+# the service's execution mechanism. S35's derived
 # example-consumer image gets its own build-and-boot step below, alongside
 # the base's own container gate — the ordering S35.7 asks for.
 #

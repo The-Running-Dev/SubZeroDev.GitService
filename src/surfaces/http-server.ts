@@ -108,14 +108,14 @@ export interface SurfacesDependencies
   readonly parkedOperations?: () => Promise<readonly OperationJournalEntry[]>;
   /**
    * The observed current state of a declaration's clone, for the parked view's
-   * `preState` / observed / diff comparison (`10-design.md` § operator-only
-   * views, item 6). `null` when it cannot be observed — a corrupt or absent
+   * `preState` / observed / diff comparison (`10-design.md` § Operator drives
+   * the console, item 6). `null` when it cannot be observed — a corrupt or absent
    * tree is exactly the case a parked entry is most likely to be sitting on,
    * and the view has to render it rather than fail.
    */
   readonly observeGitState?: (declarationId: DeclarationId) => Promise<ObservedGitState | null>;
   /**
-   * The parked view's way out (`10-design.md` § operator-only views, item 7).
+   * The parked view's way out (`10-design.md` § Operator drives the console, item 7).
    * Settles the entry and returns the clone to `ready`; the alternative
    * resolution, keeping it parked, is simply not calling this.
    */

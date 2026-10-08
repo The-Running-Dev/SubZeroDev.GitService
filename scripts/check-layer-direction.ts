@@ -9,7 +9,7 @@ import ts from 'typescript';
  * / `L0 Contract`) fixes which top-level `src/` directory is which layer.
  * This walks the real module graph and fails on any edge either rule forbids.
  *
- * **B1, the product rule** (`20-contract.md` § Boundaries): nothing in L0,
+ * **B1, the product rule** (`20-contract.md` § Build and layering): nothing in L0,
  * L3, L4 or L5 imports anything from L2. The runtime is generic and the git
  * domain is a consumer of it; that seam stops being cuttable the first time
  * the dispatch pipeline knows what a branch is.

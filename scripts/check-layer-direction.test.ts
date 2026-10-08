@@ -6,7 +6,7 @@ import path from 'node:path';
 import { ALLOWED_UPWARD_TYPE_EDGES, EXEMPT_PATHS, checkLayerDirection } from './check-layer-direction.ts';
 
 /**
- * Invariant B1 (`20-contract.md` § Boundaries), counted per `agent.md` §
+ * Invariant B1 (`20-contract.md` § Build and layering), counted per `agent.md` §
  * Verification — "a validator that has never failed is not known to
  * constrain anything." Each fixture builds a throwaway `src/`-shaped tree
  * under a temp directory rather than mutating the real one.

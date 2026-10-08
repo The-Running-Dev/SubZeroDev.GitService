@@ -583,7 +583,7 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
    * repair.
    *
    * Deliberately a predicate on `executionClass`, not a list of tool names.
-   * `10-design.md` § the parked-operations view puts it as "the existing
+   * `10-design.md` § Operator drives the console, item 7, puts it as "the existing
    * typed write tools — stage, restore-paths, commit, branch ... No new
    * mutation surface appears: these are the same operations, **under the same
    * path allowlist**, that the declaration already permits when healthy."
@@ -597,9 +597,10 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
    * - **Local writes only.** `executionClass: 'mutating'` alone is too wide:
    *   `git_push` (S9) is a mutating entry too, and admitting a push to a
    *   parked declaration is new authority the design never granted. The
-   *   design's own capability table (`10-design.md` § capabilities) maps
-   *   `git.local.write` to exactly "branch preparation, stage, commit,
-   *   restore-paths" — the four the repair session names. Requiring that
+   *   design's own capability table (`10-design.md` § `CapabilityProfile`
+   *   and the lattice) maps `git.local.write` to exactly "branch
+   *   preparation, stage, commit, restore-paths" — the four the repair
+   *   session names. Requiring that
    *   capability *is* the design's list, expressed as a predicate.
    *
    * The tool's own declared capabilities are still checked, upstream in

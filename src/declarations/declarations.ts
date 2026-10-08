@@ -81,8 +81,8 @@ export type ObservedRemoteCheck = { readonly cloneExists: false } | { readonly c
  * The one piece of clone-directory knowledge `declare()` needs (adoption
  * safety, remote cross-check) and cannot compute itself — that is entirely
  * `CloneStore`'s domain, which the design's own module table lists as
- * depending on Declarations for the reverse lookup (`10-design.md` § module
- * table: Clone store's collaborators include "declarations"). The two
+ * depending on Declarations for the reverse lookup (`10-design.md` § Module
+ * boundaries: Clone store's collaborators include "declarations"). The two
  * modules are mutually dependent for different reasons, so the composition
  * root wires this in *after* constructing both — see `server.ts`. Narrower
  * than injecting the whole `CloneStore`, so this module's own dependency
