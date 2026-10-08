@@ -607,6 +607,20 @@ Acceptance:
     shows a body at the limit accepted and one byte over refused.
 Out of scope: changing any limit, route payload or status code.
 
+## S65 — Host operations always have their journal
+Delivers: A maintainer can no longer compose host operations that open a pull request with no journal
+step behind it, because the journal is a required dependency rather than one checked at run time.
+Touches: `src/host/host-operations.ts`; its callers and tests.
+Depends on: S61
+Status: done
+Closes: #375
+Acceptance:
+  - S65.1 `HostOperationsDependencies.journal` is required, and the type check fails on a caller that
+    omits it.
+  - S65.2 The run-time absent-journal guard in `hostMutation` is removed, and the full test suite
+    passes.
+Out of scope: changing what the journal records, or when the step is written.
+
 ---
 
 ## Landed

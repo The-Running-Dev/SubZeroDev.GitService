@@ -45,11 +45,11 @@ export interface HostOperationsDependencies {
   readonly clock: Clock;
   readonly adapter: HostAdapter;
   /**
-   * Required for the two mutating host tools. Every host mutation writes an
-   * `applied` journal step **before** the network call — see `hostMutation`
-   * below for why that ordering is the whole point.
+   * Every host mutation writes an `applied` journal step **before** the
+   * network call — see `hostMutation` below for why that ordering is the
+   * whole point.
    */
-  readonly journal?: Pick<Journal, 'appendStep'>;
+  readonly journal: Pick<Journal, 'appendStep'>;
   /** Reads the clone's current head, for the two check tools' null `ref`. */
   readonly headShaFor: (ctx: CallContext) => Promise<GitSha | null>;
   /**
@@ -308,9 +308,6 @@ export function createHostOperations(deps: HostOperationsDependencies): HostOper
    * the host can.
    */
   async function hostMutation<TData>(ctx: CallContext, step: string, call: () => Promise<ToolResult<TData>>): Promise<ToolResult<TData>> {
-    if (!deps.journal) {
-      return infrastructure(`host mutation '${step}' has no journal configured, and will not reach a host without one`);
-    }
     const appended = await deps.journal.appendStep(ctx.operationId, step);
     if (!appended.ok) {
       // The step could not be written, so the crash window would be
