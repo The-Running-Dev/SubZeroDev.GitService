@@ -28,8 +28,9 @@
 # there is nothing here for `npm test`/`npm run build`/the container gates to
 # check. `design/20-contract.md` is deliberately absent from this list: it is
 # the one design document actually read by the build, at
-# `scripts/check-migration-matches-contract.ts` (`check:migration`, chained
-# into `npm run build` below) — a change there must still run every gate. If
+# `scripts/check-migration-matches-contract.ts` (`check:migration`) and
+# `scripts/check-contract-registry-tables.ts` (`check:registry-tables`), both
+# chained into `npm run build` below — a change there must still run every gate. If
 # a change touches any file outside this list too, the workflow still runs,
 # same as any other `paths-ignore`.
 

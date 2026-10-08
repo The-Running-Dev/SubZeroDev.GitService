@@ -22,7 +22,8 @@
     "check:migration": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/check-migration-matches-contract.ts",
     "check:layer-direction": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/check-layer-direction.ts",
     "check:parity": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/check-tool-parity.ts",
-    "build": "npm run typecheck && npm run typecheck:console && npm run typecheck:e2e && npm run build:registry && npm run build:console && npm run check:layering && npm run check:migration && npm run check:layer-direction && npm run check:parity",
+    "check:registry-tables": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/check-contract-registry-tables.ts",
+    "build": "npm run typecheck && npm run typecheck:console && npm run typecheck:e2e && npm run build:registry && npm run build:console && npm run check:layering && npm run check:migration && npm run check:layer-direction && npm run check:parity && npm run check:registry-tables",
     "start": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON src/server.ts",
     "verify:container-lease": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/lifecycle/lease-self-test-container.ts",
     "verify:split-brain-lease": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/lifecycle/lease-self-test-split-brain.ts"
