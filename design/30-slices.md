@@ -582,7 +582,7 @@ generator and checked by the build, instead of having to remember to edit it by 
 Touches: `scripts/` (a generator and an integrity check, after `generate-migration-0001.ts`);
 `design/20-contract.md` registry tables; the build script.
 Depends on: none
-Status: todo
+Status: done
 Closes: #150
 Acceptance:
   - S63.1 A generator produces the contract's registry tables from the tree's `ToolDeclaration` values.

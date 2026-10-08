@@ -1001,8 +1001,8 @@ declares.
 Three storage kinds, per the design. Only the structured store has a schema; the audit log is JSONL
 holding one `AuditRecord` per line, and the working clones are directories.
 
-**This section is source, not description, and is the one place in this document where shape stays
-deliberately.** `scripts/generate-migration-0001.ts` reads the markdown between the
+**This section is source, not description, and is the one place in this document where shape is
+written by hand deliberately.** `scripts/generate-migration-0001.ts` reads the markdown between the
 *Persisted schemas* and *Public signatures* headings, extracts the `sql` blocks below in order,
 and renders `src/store/migration-0001.ts` from them; `npm run check:migration` verifies in CI that
 the committed migration still matches this text verbatim. The heading names, the block count and the
@@ -1373,6 +1373,14 @@ the same way.
 ## Public signatures
 
 Grouped by module, in the layer order the design fixes. Internal helpers are out of scope.
+
+**The registry tables below are generated, not written.** Every cell is a `ToolDeclaration` value in
+`src/composition-root/production-declarations.ts`; `scripts/generate-contract-registry-tables.ts`
+renders each table between its `registry-table` comment markers, and `npm run check:registry-tables`
+fails the build when a table differs from the declarations or a declared tool appears in no table.
+Change the declaration and rerun the generator rather than editing a table. The markers are the one
+part a person writes: which tools a section discusses, and in what order. See `design/90-decisions.md`,
+2026-08-20 and 2026-10-08 (S63).
 
 ### L1 — clock
 
@@ -1751,6 +1759,7 @@ this tool.
 The five registry entries S6 ships, naming the tools by the brief's own convention (`git_commit`,
 `repo_declare`):
 
+<!-- registry-table: repo_status git_log git_branches repo_health git_diff -->
 | `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
 |---|---|---|---|---|---|---|
 | `repo_status` | `{ kind: 'module', target: 'git.status' }` | `['repo.read']` | `['read']` | `read` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 65536 }` |
@@ -1758,6 +1767,7 @@ The five registry entries S6 ships, naming the tools by the brief's own conventi
 | `git_branches` | `{ kind: 'module', target: 'git.branches' }` | `['repo.read']` | `['read']` | `read` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 262144 }` |
 | `repo_health` | `{ kind: 'module', target: 'git.health' }` | `['repo.read']` | `['read']` | `read` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 65536 }` |
 | `git_diff` | `{ kind: 'module', target: 'git.diff' }` | `['repo.read']` | `['read']` | `read` | `{ schedulable: false, fileWatcher: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 4194304 }` |
+<!-- /registry-table -->
 
 Every entry has `capabilityScope: 'declaration'`. `git_log` and `git_diff` carry
 `untrustedOutput: true`: commit subjects and diff bodies are written by repository contributors,
@@ -1782,11 +1792,13 @@ path. `git_commit` takes no path and needs no such check; it commits whatever is
 
 The three registry entries S7 ships:
 
+<!-- registry-table: git_stage git_commit git_restore_paths -->
 | `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
 |---|---|---|---|---|---|---|
 | `git_stage` | `{ kind: 'module', target: 'git.stage' }` | `['git.local.write']` | `['write']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 65536 }` |
 | `git_commit` | `{ kind: 'module', target: 'git.commit' }` | `['git.local.write']` | `['write']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 65536 }` |
 | `git_restore_paths` | `{ kind: 'module', target: 'git.restorePaths' }` | `['git.local.write']` | `['write']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 65536 }` |
+<!-- /registry-table -->
 
 Every entry carries `capabilityScope: 'declaration'`, the same as every S6 entry. None is
 `schedulable` — a scheduled job naming a bare local mutation with no commit message or path input
@@ -1816,11 +1828,13 @@ mutation, not a consumer of the signal `mutationInFlight` reports.
 
 The three registry entries S9 ships:
 
+<!-- registry-table: git_push git_fetch sync_base -->
 | `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
 |---|---|---|---|---|---|---|
 | `git_push` | `{ kind: 'module', target: 'git.push' }` | `['git.remote.write']` | `['write']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 300, maxResultBytes: 65536 }` |
 | `git_fetch` | `{ kind: 'module', target: 'git.fetch' }` | `['git.remote.write']` | `['write']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 300, maxResultBytes: 65536 }` |
 | `sync_base` | `{ kind: 'module', target: 'git.syncBase' }` | `['git.remote.write']` | `['write']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 300, maxResultBytes: 65536 }` |
+<!-- /registry-table -->
 
 Every entry carries `capabilityScope: 'declaration'`. All three are `mutating` rather than `read`,
 `git_fetch` included: it moves remote-tracking refs, and the global mutation lock is what keeps a
@@ -1851,9 +1865,11 @@ to the park sink (`### L4 — dispatch pipeline`).
 
 The registry entry S15 ships:
 
+<!-- registry-table: git_raw -->
 | `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
 |---|---|---|---|---|---|---|
 | `git_raw` | `{ kind: 'module', target: 'git.raw' }` | `['git.raw']` | `['raw']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: true }` | `{ timeoutSeconds: 60, maxResultBytes: 4194304 }` |
+<!-- /registry-table -->
 
 It carries `capabilityScope: 'declaration'`. It is neither schedulable nor a file-watcher target:
 the hatch is deliberately invoked, never an unattended execution surface. Its output is untrusted
@@ -1898,10 +1914,12 @@ it is `SubZeroDev.Blog/tools/blog-mcp/TODO-NEXT.md`, load-bearing prior art per 
 
 The two registry entries S12 ships:
 
+<!-- registry-table: prepare_branch reconcile_after_merge -->
 | `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
 |---|---|---|---|---|---|---|
 | `prepare_branch` | `{ kind: 'module', target: 'composites.prepareBranch' }` | `['git.local.write', 'git.remote.write']` | `['write']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 300, maxResultBytes: 65536 }` |
 | `reconcile_after_merge` | `{ kind: 'module', target: 'composites.reconcileAfterMerge' }` | `['git.local.write', 'git.remote.write', 'host.pr.read']` | `['write']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 300, maxResultBytes: 65536 }` |
+<!-- /registry-table -->
 
 Both carry `capabilityScope: 'declaration'`, matching every other L2 tool.
 
@@ -1986,6 +2004,7 @@ number input schema the read tools use. What the declaration cannot say:
 
 The seven registry entries S10 ships:
 
+<!-- registry-table: pr_open pr_status pr_list pr_comments pr_enable_auto_merge checks_status checks_await -->
 | `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
 |---|---|---|---|---|---|---|
 | `pr_open` | `{ kind: 'module', target: 'host.createPullRequest' }` | `['host.pr.write']` | `['write']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 120, maxResultBytes: 65536 }` |
@@ -1995,6 +2014,7 @@ The seven registry entries S10 ships:
 | `pr_enable_auto_merge` | `{ kind: 'module', target: 'host.enableAutoMerge' }` | `['host.pr.write']` | `['write']` | `mutating` | `{ schedulable: true, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 120, maxResultBytes: 65536 }` |
 | `checks_status` | `{ kind: 'module', target: 'host.readChecks' }` | `['host.checks.read']` | `['read']` | `read` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 60, maxResultBytes: 65536 }` |
 | `checks_await` | `{ kind: 'module', target: 'host.awaitChecks' }` | `['host.checks.read']` | `['read']` | `monitoring-wait` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 1800, maxResultBytes: 65536 }` |
+<!-- /registry-table -->
 
 Every entry carries `capabilityScope: 'declaration'`. `pr_comments` is annotated `untrustedOutput`
 for the reason `git_log` and `git_diff` already are: `HostComment.body` is author-controlled text,
@@ -2050,11 +2070,13 @@ classifies from the journal alone and runs no resume step and no git or host I/O
 
 **S16 resolves U1 for the three scheduler tools.** Their registry entries are:
 
+<!-- registry-table: scheduled_job_create scheduled_job_list scheduled_job_cancel -->
 | `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
 |---|---|---|---|---|---|---|
 | `scheduled_job_create` | `{ kind: 'module', target: 'scheduler.create' }` | `['scheduler.manage']` | `['schedule']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 4194304 }` |
 | `scheduled_job_list` | `{ kind: 'module', target: 'scheduler.list' }` | `['scheduler.read']` | `['schedule']` | `read` | `{ schedulable: false, fileWatcher: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 4194304 }` |
 | `scheduled_job_cancel` | `{ kind: 'module', target: 'scheduler.cancel' }` | `['scheduler.manage']` | `['schedule']` | `mutating` | `{ schedulable: false, fileWatcher: false, untrustedOutput: true }` | `{ timeoutSeconds: 30, maxResultBytes: 4194304 }` |
+<!-- /registry-table -->
 
 Every entry carries `capabilityScope: 'declaration'`. `SchedulerOperations` supplies the current
 declaration id from `CallContext` to `Scheduler.create` and `Scheduler.list`; a caller cannot create,
@@ -2215,9 +2237,11 @@ in `90-decisions.md` alongside the other slices' own U1 lower-bound choices.
 
 `verify_published_url`'s registry entry:
 
+<!-- registry-table: verify_published_url -->
 | `name` | `target` | `capabilities` | `scopes` | `executionClass` | `annotations` | `limits` |
 |---|---|---|---|---|---|---|
 | `verify_published_url` | `{ kind: 'http', operation: 'verify-published-url' }` | `['host.checks.read']` | `['read']` | `read` | `{ schedulable: false, fileWatcher: false, untrustedOutput: false }` | `{ timeoutSeconds: 30, maxResultBytes: 4096 }` |
+<!-- /registry-table -->
 
 `host.checks.read` is the capability `10-design.md`'s own capability table already maps to "check
 status, bounded waits, deploy status, **published-URL verification**" — no new capability was needed.
