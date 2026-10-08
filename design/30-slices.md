@@ -99,8 +99,8 @@ closed. S30 is a landed row.
 decide what S30 checks; it could not decide whether boot should be able to see a cross-session lock
 failure at all, because that means telling boot what kind of mount it is on — new surface in
 `lease.ts` and a claim in `10-design.md` that would have to change. That is `/design`'s, and it is
-now issue [#135](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/135) rather than a
-staged item in `90-decisions.md` § Open, which is empty.
+became issue [#135](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/135), settled on
+2026-10-08 by accepting the blindness and declaring a network share unsupported storage (S62).
 
 **S18 is split the same way S17 was, and six of its criteria are retired rather than moved.** S18
 asked one session to stand up a user interface from nothing, ship five views on top of it, federate
@@ -564,7 +564,7 @@ storage, and why, instead of reading a design that claims protection the boot ch
 Touches: `design/10-design.md` (the two-instances failure mode and boot step 1);
 `docs/operator-guide.md`.
 Depends on: none
-Status: todo
+Status: done
 Closes: #135
 Acceptance:
   - S62.1 `10-design.md`'s claim about two instances against one volume states what boot's self-test

@@ -1195,6 +1195,14 @@ operation.
    container-managed named volume for that reason, and the child-process test is what turns a
    volume that does not honour the lock into a refusal instead of silent dual ownership.
 
+   **What the self-test proves stops at one kernel.** The child runs beside its parent, so it
+   proves exclusion between processes on the same kernel and the same mount. It cannot see a lock
+   lost between independent clients of a network share: S30 ran two containers against one CIFS
+   share mounted `nobrl`, both booted, both reported ready, and the self-test passed on both sides,
+   because each child shared its parent's client session. A network share is therefore unsupported
+   storage rather than a configuration boot refuses — see `90-decisions.md`, 2026-08-19 (S30.1 and
+   S30.3) and 2026-10-08 (#135).
+
    **A held lock can also be lost while the process is alive and healthy**, which is a second way
    to reach dual ownership and is not a variant of the case above. The lock lives in the OS, but
    it survives only as long as the handle holding it stays open — and a handle the language runtime
@@ -1428,7 +1436,8 @@ its lifecycle is part of the security design rather than a framework default.
 | **Output validation** | Handler returns something the schema does not admit | Rejects before any structured content reaches the client | `infrastructure` | Side effects already happened; the journal records them |
 | **Instance lease** | Second instance, live holder | Refuses to start, naming the holder | No service | Untouched |
 | | Lease file present, OS lock free | Takes over, audits the takeover, runs recovery | No service until ready | Recovered per the boot path |
-| | Filesystem grants the lock to a second process | Child-process self-test at boot | **Fatal**, naming the volume configuration — this is the bind-mount case, and the alternative is two instances silently sharing one store, journal and set of clones | No service | Untouched |
+| | Filesystem grants the lock to a second process | Child-process self-test at boot: **fatal**, naming the volume configuration — this is the bind-mount case, and the alternative is two instances silently sharing one store, journal and set of clones | No service | Untouched |
+| | Network share loses the lock between its clients | **Not detected.** The self-test runs inside one client session and passes (S30); this is why a network share is unsupported storage rather than a refusal | Both instances start and report healthy | Two writers on one store, journal and set of clones |
 
 ### Partial failure and retry
 
@@ -1626,7 +1635,8 @@ What must not, and what enforces it:
 - **Two clones of the same declaration.** The materialisation mutex.
 - **A fetch concurrent with a mutation on the same repository.** Fetch takes the global mutex;
   only the initial clone is exempt, and only because nothing can observe the repository yet.
-- **Two instances against one storage volume.** The exclusive advisory OS lock on the lease file.
+- **Two instances against one storage volume.** The exclusive advisory OS lock on the lease file,
+  on a local or container-managed volume; a network share is outside this, per the limits below.
 - **A stdio process racing the always-on container.** Structurally impossible: stdio processes
   own no storage and proxy over HTTP.
 
@@ -1672,7 +1682,9 @@ Honest limits, stated rather than left to be discovered:
   definition-of-done item 9 otherwise fails silently in the configuration a Windows operator is
   most likely to choose. A same-process re-acquire would not test this: whether it succeeds
   depends on the locking call rather than on the filesystem, so it can pass on the broken volume
-  and fail on the sound one.
+  and fail on the sound one. The child-process test is itself bounded by one kernel: it cannot see
+  a network share losing the lock between two client sessions, which is why such a share is
+  unsupported storage — see boot step 1.
 - **Node is single-threaded**, so the mutation mutex only has to serialise await points, not real
   parallel execution. A promise-chain queue is sufficient, as it is in the prior art.
 
