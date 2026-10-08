@@ -49,6 +49,24 @@ const MAX_PENDING_AUTHORIZATIONS = 500;
  */
 const MAX_SESSIONS = 1000;
 
+/**
+ * `20-contract.md` § OAuth endpoints and the MCP transport: open `GET`
+ * streams under one grant. Over it, a new stream is refused rather than an
+ * old one evicted — eviction would let any holder of the grant silence
+ * every other.
+ */
+export const MAX_STREAMS_PER_GRANT = 8;
+
+/**
+ * How often, while any stream is open, each streamed session is re-checked
+ * against the store. A narrowing or a revocation is a store write that may
+ * come from a connection this surface does not share, so there is no
+ * in-process event to wait on; this bounds how late a notification is.
+ */
+export const MCP_STREAM_SWEEP_INTERVAL_MS = 500;
+
+const LIST_CHANGED_EVENT = `event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' })}\n\n`;
+
 interface PendingAuthorization {
   readonly clientId: ClientId;
   readonly redirectUri: string;
@@ -80,10 +98,42 @@ export interface McpRoutesState {
   readonly sessions: Map<string, Session>;
   readonly pendingAuthorizations: Map<string, PendingAuthorization>;
   readonly issuedCodes: Map<string, IssuedCode>;
+  /** Open server-to-client `GET` streams, keyed by the session id each is bound to. */
+  readonly streams: Map<string, Set<ServerResponse>>;
+  /** The store sweep, armed only while `streams` is non-empty. */
+  readonly sweep: { timer: ReturnType<typeof setInterval> | null; running: boolean };
 }
 
 export function createMcpRoutesState(): McpRoutesState {
-  return { sessions: new Map(), pendingAuthorizations: new Map(), issuedCodes: new Map() };
+  return { sessions: new Map(), pendingAuthorizations: new Map(), issuedCodes: new Map(), streams: new Map(), sweep: { timer: null, running: false } };
+}
+
+/**
+ * Ends every open stream and disarms the sweep. Shutdown calls this before
+ * `server.close()`, which would otherwise wait on the streams for ever.
+ */
+export function closeMcpStreams(state: McpRoutesState): void {
+  for (const sessionId of [...state.streams.keys()]) endStreams(state, sessionId);
+}
+
+function endStreams(state: McpRoutesState, sessionId: string): void {
+  const open = state.streams.get(sessionId);
+  state.streams.delete(sessionId);
+  for (const res of open ?? []) res.end();
+  if (state.streams.size === 0 && state.sweep.timer !== null) {
+    clearInterval(state.sweep.timer);
+    state.sweep.timer = null;
+  }
+}
+
+/** A closed session takes its streams with it; nothing reopens them, since a reconnect finds no session. */
+function closeSession(state: McpRoutesState, sessionId: string): void {
+  state.sessions.delete(sessionId);
+  endStreams(state, sessionId);
+}
+
+function notifyListChanged(state: McpRoutesState, sessionId: string): void {
+  for (const res of state.streams.get(sessionId) ?? []) res.write(LIST_CHANGED_EVENT);
 }
 
 export interface McpRoutesDependencies extends ConsoleAuthDependencies {
@@ -189,49 +239,156 @@ function bearerFrom(req: IncomingMessage): BearerToken | null {
   return header.slice('Bearer '.length) as BearerToken;
 }
 
+type SessionCheck = { readonly ok: true; readonly session: Session; readonly moved: boolean } | { readonly ok: false; readonly summary: string };
+
 /**
- * Resolves the caller's live, current `Session` from the `Mcp-Session-Id`
- * header — `20-contract.md` § control flow step 5: re-intersect the
- * declaration's `grantEpoch` against the one the session froze at, and
- * check the grant itself is still live. Both conditions close the session
- * (removed from `deps.mcpState.sessions`) rather than just refusing this
- * one call — a revoked or orphaned resource does not get re-checked next
- * time, it is gone.
+ * `20-contract.md` § control flow step 5: re-intersect the declaration's
+ * `grantEpoch` against the one the session froze at, and check the grant
+ * itself is still live. A failure closes the session (and its streams)
+ * rather than refusing one call — a revoked or orphaned resource does not
+ * get re-checked next time, it is gone. A moved epoch notifies the
+ * session's open streams from here, the one recomputation a `POST` and the
+ * stream sweep share, so neither can consume a move the other then misses.
  */
+async function checkSession(deps: McpRoutesDependencies, sessionId: string, session: Session): Promise<SessionCheck> {
+  if (session.actorRef.grantId && !(await deps.authorization.grantIsLive(session.actorRef.grantId))) {
+    closeSession(deps.mcpState, sessionId);
+    return { ok: false, summary: 'the grant behind this session was revoked' };
+  }
+  const declaration = session.repositoryBinding ? await deps.declarations.get(session.repositoryBinding) : null;
+  if (!declaration || declaration.state === 'orphaned') {
+    closeSession(deps.mcpState, sessionId);
+    return { ok: false, summary: 'the declaration behind this session is gone or orphaned' };
+  }
+  if (session.frozenAtEpoch === declaration.grantEpoch) return { ok: true, session, moved: false };
+
+  const recomputed = deps.authorization.recomputeSessionGrant(session, declaration);
+  if (!recomputed.ok) {
+    closeSession(deps.mcpState, sessionId);
+    return { ok: false, summary: recomputed.error.summary };
+  }
+  // A session closed while this check awaited the store stays closed.
+  if (!deps.mcpState.sessions.has(sessionId)) return { ok: false, summary: 'no such MCP session — reconnect and re-initialize' };
+  deps.mcpState.sessions.set(sessionId, recomputed.value);
+  notifyListChanged(deps.mcpState, sessionId);
+  return { ok: true, session: recomputed.value, moved: true };
+}
+
+/** Resolves the caller's live, current `Session` from the `Mcp-Session-Id` header, answering the `401` itself on failure. */
 async function resolveLiveSession(
   deps: McpRoutesDependencies,
   req: IncomingMessage,
   res: ServerResponse,
   declarationIdValue: string,
 ): Promise<Session | null> {
-  const header = req.headers['mcp-session-id'];
-  const sessionId = Array.isArray(header) ? header[0] : header;
+  const sessionId = sessionIdFrom(req);
   const session = sessionId ? deps.mcpState.sessions.get(sessionId) : undefined;
   if (!sessionId || !session) {
     unauthorized(res, deps.origin, declarationIdValue, 'no such MCP session — reconnect and re-initialize');
     return null;
   }
-  if (session.actorRef.grantId && !(await deps.authorization.grantIsLive(session.actorRef.grantId))) {
-    deps.mcpState.sessions.delete(sessionId);
-    unauthorized(res, deps.origin, declarationIdValue, 'the grant behind this session was revoked');
+  const checked = await checkSession(deps, sessionId, session);
+  if (!checked.ok) {
+    unauthorized(res, deps.origin, declarationIdValue, checked.summary);
     return null;
   }
-  const declaration = session.repositoryBinding ? await deps.declarations.get(session.repositoryBinding) : null;
-  if (!declaration || declaration.state === 'orphaned') {
-    deps.mcpState.sessions.delete(sessionId);
-    unauthorized(res, deps.origin, declarationIdValue, 'the declaration behind this session is gone or orphaned');
-    return null;
-  }
-  if (session.frozenAtEpoch === declaration.grantEpoch) return session;
+  return checked.session;
+}
 
-  const recomputed = deps.authorization.recomputeSessionGrant(session, declaration);
-  if (!recomputed.ok) {
-    deps.mcpState.sessions.delete(sessionId);
-    unauthorized(res, deps.origin, declarationIdValue, recomputed.error.summary);
-    return null;
+function sessionIdFrom(req: IncomingMessage): string | undefined {
+  const header = req.headers['mcp-session-id'];
+  return Array.isArray(header) ? header[0] : header;
+}
+
+/** One pass over every streamed session. Never overlaps itself, and never rejects — it runs outside any request. */
+async function sweepStreams(deps: McpRoutesDependencies): Promise<void> {
+  const { sweep } = deps.mcpState;
+  if (sweep.running) return;
+  sweep.running = true;
+  try {
+    for (const sessionId of [...deps.mcpState.streams.keys()]) {
+      const session = deps.mcpState.sessions.get(sessionId);
+      if (!session) {
+        endStreams(deps.mcpState, sessionId);
+        continue;
+      }
+      await checkSession(deps, sessionId, session).catch(() => undefined);
+    }
+  } finally {
+    sweep.running = false;
   }
-  deps.mcpState.sessions.set(sessionId, recomputed.value);
-  return recomputed.value;
+}
+
+function openStreamsUnderGrant(state: McpRoutesState, grantId: string | null): number {
+  let count = 0;
+  for (const [sessionId, open] of state.streams) {
+    if (state.sessions.get(sessionId)?.actorRef.grantId === grantId) count += open.size;
+  }
+  return count;
+}
+
+/**
+ * The Streamable HTTP server-to-client stream — `20-contract.md` § OAuth
+ * endpoints and the MCP transport. Authenticated as `initialize` is (the
+ * bearer, audience-checked against this resource) and bound to a live
+ * session minted under that bearer's grant; every refusal opens nothing.
+ */
+async function handleMcpStream(deps: McpRoutesDependencies, req: IncomingMessage, res: ServerResponse, declarationIdValue: DeclarationId, resource: McpResourceUri): Promise<void> {
+  if (!(req.headers.accept ?? '').includes('text/event-stream')) {
+    sendJson(res, 405, { error: 'method_not_allowed' });
+    return;
+  }
+  const bearer = bearerFrom(req);
+  if (!bearer) {
+    unauthorized(res, deps.origin, declarationIdValue, 'no bearer token presented');
+    return;
+  }
+  const sessionId = sessionIdFrom(req);
+  const session = sessionId ? deps.mcpState.sessions.get(sessionId) : undefined;
+  if (!sessionId || !session) {
+    unauthorized(res, deps.origin, declarationIdValue, 'no such MCP session — reconnect and re-initialize');
+    return;
+  }
+  const established = await deps.authorization.establishMcpSession(bearer, resource);
+  if (!established.ok) {
+    unauthorized(res, deps.origin, declarationIdValue, established.error.summary);
+    return;
+  }
+  if (established.value.actorRef.grantId !== session.actorRef.grantId) {
+    unauthorized(res, deps.origin, declarationIdValue, 'this MCP session was not minted under the presented bearer token');
+    return;
+  }
+  const checked = await checkSession(deps, sessionId, session);
+  if (!checked.ok) {
+    unauthorized(res, deps.origin, declarationIdValue, checked.summary);
+    return;
+  }
+  // No await from here to the stream being registered, so two concurrent
+  // opens cannot both pass the cap.
+  if (openStreamsUnderGrant(deps.mcpState, session.actorRef.grantId) >= MAX_STREAMS_PER_GRANT) {
+    sendJson(res, 429, { error: 'too_many_streams' });
+    return;
+  }
+
+  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
+  res.flushHeaders();
+  const open = deps.mcpState.streams.get(sessionId) ?? new Set<ServerResponse>();
+  deps.mcpState.streams.set(sessionId, open);
+  open.add(res);
+  res.on('close', () => {
+    const current = deps.mcpState.streams.get(sessionId);
+    if (!current) return;
+    current.delete(res);
+    if (current.size === 0) endStreams(deps.mcpState, sessionId);
+  });
+  // The check above recomputed a move made before this stream existed; it is
+  // this stream's news too.
+  if (checked.moved) res.write(LIST_CHANGED_EVENT);
+
+  if (deps.mcpState.sweep.timer === null) {
+    deps.mcpState.sweep.timer = setInterval(() => void sweepStreams(deps), MCP_STREAM_SWEEP_INTERVAL_MS);
+    deps.mcpState.sweep.timer.unref();
+  }
 }
 
 function toolResultStatus(kind: string): number {
@@ -549,7 +706,7 @@ function jsonRpcResult(id: unknown, result: unknown): Record<string, unknown> {
 }
 
 async function handleMcpTransport(deps: McpRoutesDependencies, req: IncomingMessage, res: ServerResponse, declarationIdRaw: string): Promise<void> {
-  if (req.method !== 'POST') {
+  if (req.method !== 'POST' && req.method !== 'GET') {
     sendJson(res, 405, { error: 'method_not_allowed' });
     return;
   }
@@ -560,6 +717,10 @@ async function handleMcpTransport(deps: McpRoutesDependencies, req: IncomingMess
   }
   const declarationIdValue = idResult.value;
   const resource = `/mcp/${declarationIdValue}` as McpResourceUri;
+  if (req.method === 'GET') {
+    await handleMcpStream(deps, req, res, declarationIdValue, resource);
+    return;
+  }
 
   const body = await readJsonBody(req);
   if (!body || typeof body.method !== 'string') {
@@ -600,7 +761,7 @@ async function handleMcpTransport(deps: McpRoutesDependencies, req: IncomingMess
     }
     if (deps.mcpState.sessions.size >= MAX_SESSIONS) {
       const oldest = deps.mcpState.sessions.keys().next().value;
-      if (oldest !== undefined) deps.mcpState.sessions.delete(oldest);
+      if (oldest !== undefined) closeSession(deps.mcpState, oldest);
     }
     const sessionId = randomUUID();
     deps.mcpState.sessions.set(sessionId, established.value);
@@ -609,7 +770,7 @@ async function handleMcpTransport(deps: McpRoutesDependencies, req: IncomingMess
       200,
       jsonRpcResult(rpcId, {
         protocolVersion: '2025-06-18',
-        capabilities: { tools: {} },
+        capabilities: { tools: { listChanged: true } },
         serverInfo: { name: 'subzerodev-git', version: '1' },
       }),
       { 'Mcp-Session-Id': sessionId },

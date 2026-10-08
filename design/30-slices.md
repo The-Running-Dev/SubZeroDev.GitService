@@ -331,10 +331,10 @@ committed separately and before the handler work depending on it. **No slice may
 signature absent from the contract** — where a slice needs tools, amending the contract is its
 first acceptance criterion, not an implementation detail.
 
-**Four gates are live, all raised by this document on 2026-10-08:** `S55.1`, `S56.1`, `S57.1` and
-`S58.1`. Each is a contract amendment (and for S55 and S58 a design amendment too), committed before
-the code in its slice that depends on it. A fifth, `S54.1`, was raised the same day and met by its own
-slice: the re-enrolment gate in § *The HTTP API route table*.
+**Three gates are live, all raised by this document on 2026-10-08:** `S56.1`, `S57.1` and `S58.1`.
+Each is a contract amendment (and for S58 a design amendment too), committed before the code in its
+slice that depends on it. Two more were raised the same day and met by their own slices: `S54.1`, the
+re-enrolment gate in § *The HTTP API route table*, and `S55.1`, the MCP route's `GET` stream.
 
 Before these, the last gate was `S46.10`, raised by this document on 2026-10-03. The amendment
 of that date (**#343**) gave `ExecError` a `signalled` variant and made a signalled mutating call park
@@ -432,7 +432,7 @@ honours.
 Touches: `design/10-design.md` and `design/20-contract.md` § MCP transport; `src/surfaces/mcp-routes.ts`;
 `src/authorization/` (grant narrowing and epoch); `src/mcp-proxy/proxy.ts`.
 Depends on: none
-Status: todo
+Status: done
 Closes: #136
 Acceptance:
   - S55.1 The design and contract are amended before any code: the MCP route serves the Streamable
