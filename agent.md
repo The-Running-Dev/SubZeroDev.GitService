@@ -93,7 +93,7 @@ and preferences belong in `AGENTS.md`.
   nothing failed, because no test made the handler throw. It would have shipped a remote
   process-crash reachable by an authenticated health check — on the exact failure the design
   says must never be fatal. The `void fn()` call site is the checkable tell: it throws the
-  promise away, so every rejection inside must already be handled. Found by `/reconcile`,
+  promise away, so every rejection inside must already be handled. Found by a reconciliation pass,
   not by the tests that were passing.
 - **Do not verify long-lived servers by backgrounding them from Git Bash on this host.**
   `kill %1` and `$!` do not reliably reach the grandchild, so servers outlive the script.

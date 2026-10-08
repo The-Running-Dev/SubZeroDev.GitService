@@ -286,7 +286,7 @@ knowingly rather than mitigated quietly.
 Nothing here grants authority. The invariant that makes this safe is stated once, here, and is
 checkable: **any field a caller could set that widens what the service will do lives in the
 `Declaration`, not in `RepositoryConfig`.** The brief records the same rule and the condition
-under which it must be revisited; `/contract` verifies no permission-shaped field has drifted
+under which it must be revisited; `/design` verifies no permission-shaped field has drifted
 into the repository-side format.
 
 A missing config file is not an error — every field defaults, and a declaration with no config
@@ -1975,5 +1975,5 @@ The fourth `/redteam` pass raised twenty-nine findings and the fifth raised twen
 fourth's repair; every one is resolved in the text above rather than deferred here. Two
 resolutions add scope the earlier drafts did not carry — a file-watcher watcher, generalised from
 `blog-mcp`'s running one, and published-URL verification moving onto the http adapter — and both
-need sizing when `/slices` runs, rather than being assumed free because they arrived as review
+need sizing when `/plan` runs, rather than being assumed free because they arrived as review
 outcomes.
