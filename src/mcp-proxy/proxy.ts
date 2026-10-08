@@ -13,7 +13,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, ListToolsRequestSchema, ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 
 export interface ProxyOptions {
   /** This service's origin, e.g. `https://git.example.com`. No trailing slash. */
@@ -43,7 +43,11 @@ export function createProxyServer(options: ProxyOptions, remoteClient?: Client):
     remoteClient ??
     new Client({ name: 'subzerodev-git-proxy', version: '1' });
 
-  const server = new Server({ name: 'subzerodev-git-proxy', version: '1' }, { capabilities: { tools: {} } });
+  const server = new Server({ name: 'subzerodev-git-proxy', version: '1' }, { capabilities: { tools: { listChanged: true } } });
+
+  // The route's `GET` stream tells the remote half its list changed; the
+  // local client only hears it if this relays it.
+  remote.setNotificationHandler(ToolListChangedNotificationSchema, () => server.sendToolListChanged());
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const result = await remote.listTools();

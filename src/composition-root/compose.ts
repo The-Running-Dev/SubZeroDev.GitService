@@ -16,7 +16,7 @@ import type { AdmissionLimits } from '../locks/types.ts';
 import { createDeclarations } from '../declarations/declarations.ts';
 import { createCloneStore, type CloneStore } from '../clone/clone-store.ts';
 import { createSurfacesServer } from '../surfaces/http-server.ts';
-import { createMcpRoutesState } from '../surfaces/mcp-routes.ts';
+import { closeMcpStreams, createMcpRoutesState } from '../surfaces/mcp-routes.ts';
 import { createGitOperations, type GitOperations } from '../git/git-operations.ts';
 import { createJournal } from '../journal/journal.ts';
 import { createNotifier } from '../notifier/notifier.ts';
@@ -994,6 +994,7 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
     console.log(`server: watcher not started (${watcherStarted.error.summary})`);
   }
 
+  const mcpState = createMcpRoutesState();
   const server = createSurfacesServer({
     commitSha,
     contractFingerprint: booted.value.registryFingerprint,
@@ -1086,7 +1087,7 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
     dispatchPipeline,
     contractCapabilitySet,
     origin,
-    mcpState: createMcpRoutesState(),
+    mcpState,
     consoleDir,
   });
 
@@ -1159,6 +1160,9 @@ export async function composeAndStart(options: ComposeOptions = {}): Promise<voi
     // store/audit transactions), so it is awaited alongside `deliveryInFlight`
     // below rather than fired-and-forgotten.
     const watcherStopped = watcher.stop();
+    // An open MCP `GET` stream never ends on its own, so `server.close()`
+    // would wait on it for ever.
+    closeMcpStreams(mcpState);
     server.close(() => {
       // A delivery pass holds its own connections to `store.sqlite`, so
       // releasing the lease while one is still running would let this

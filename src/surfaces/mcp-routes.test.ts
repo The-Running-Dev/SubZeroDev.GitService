@@ -18,12 +18,17 @@ import { fixtureTool, httpTarget } from '../contract/fixtures.ts';
 import { isError, success, type ResultKind, type ToolResult } from '../result/envelope.ts';
 import { createStubCloneStore } from '../clone/testing/stub-clone-store.ts';
 import { createSurfacesServer, NO_CONSOLE_FINGERPRINT } from './http-server.ts';
-import { createMcpRoutesState } from './mcp-routes.ts';
+import { closeMcpStreams, createMcpRoutesState, MAX_STREAMS_PER_GRANT, type McpRoutesState } from './mcp-routes.ts';
 import { pkce, registerClient, exchangeCodeForTokens } from './testing/oauth-test-flow.ts';
 import type { GitSha, RemoteHost, Sha256Hex } from '../shared/brands.ts';
 import type { ContractCapabilitySet, DeploymentCeiling } from '../contract/capabilities.ts';
 import type { HttpAdapter } from '../http/http-adapter.ts';
 import type { JsonValue } from '../contract/json.ts';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { createProxyServer } from '../mcp-proxy/proxy.ts';
 
 /**
  * `scrubJson` is a required `DispatchPipelineDependencies` member (post-S36
@@ -56,6 +61,7 @@ const STUB_HTTP_ADAPTER: Pick<HttpAdapter, 'invoke'> = {
 interface ServerHandle {
   readonly baseUrl: string;
   readonly declarations: Declarations;
+  readonly mcpState: McpRoutesState;
 }
 
 async function buildIdentity(volume: string): Promise<OperatorIdentity> {
@@ -104,6 +110,7 @@ async function withServer<T>(volume: string, fn: (handle: ServerHandle) => Promi
     clock: systemClock,
   });
 
+  const mcpState = createMcpRoutesState();
   const server = createSurfacesServer({
     commitSha: COMMIT_SHA,
     contractFingerprint: CONTRACT_FINGERPRINT,
@@ -121,13 +128,14 @@ async function withServer<T>(volume: string, fn: (handle: ServerHandle) => Promi
     contractCapabilitySet: CEILING,
     ceiling: CEILING as never,
     origin: 'http://localhost',
-    mcpState: createMcpRoutesState(),
+    mcpState,
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address() as AddressInfo;
   try {
-    return await fn({ baseUrl: `http://127.0.0.1:${address.port}`, declarations });
+    return await fn({ baseUrl: `http://127.0.0.1:${address.port}`, declarations, mcpState });
   } finally {
+    closeMcpStreams(mcpState);
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 }
@@ -175,6 +183,7 @@ async function obtainAuthorizationCode(
   declarationId: string,
   scopes: readonly string[],
   redirectUri: string = CLIENT_REDIRECT_URI,
+  operatorSession?: string,
 ): Promise<{ code: string | null; verifier: string; getStatus: number; getBody: string; approveStatus?: number }> {
   const { verifier, challenge } = pkce();
   const authorizeUrl = new URL(`${baseUrl}/oauth/authorize`);
@@ -186,7 +195,7 @@ async function obtainAuthorizationCode(
   authorizeUrl.searchParams.set('resource', `/mcp/${declarationId}`);
   authorizeUrl.searchParams.set('scope', scopes.join(' '));
 
-  const cookie = await operatorCookie(baseUrl);
+  const cookie = operatorSession ?? (await operatorCookie(baseUrl));
   const csrfToken = /szg_csrf=([^;]+)/.exec(cookie)?.[1];
   assert.ok(csrfToken, 'operatorCookie must carry the double-submit CSRF cookie');
   const getResponse = await fetch(authorizeUrl, { headers: { Cookie: cookie } });
@@ -216,9 +225,9 @@ async function obtainAuthorizationCode(
  * real MCP client would end up holding. Every mechanical step an actual
  * client performs, over real HTTP, against the real routes.
  */
-async function fullOAuthFlow(baseUrl: string, declarationId: string, scopes: readonly string[]): Promise<{ accessToken: string; refreshToken: string }> {
+async function fullOAuthFlow(baseUrl: string, declarationId: string, scopes: readonly string[], operatorSession?: string): Promise<{ accessToken: string; refreshToken: string }> {
   const client = await registerClient(baseUrl);
-  const { code, verifier } = await obtainAuthorizationCode(baseUrl, client.client_id, declarationId, scopes);
+  const { code, verifier } = await obtainAuthorizationCode(baseUrl, client.client_id, declarationId, scopes, CLIENT_REDIRECT_URI, operatorSession);
   assert.ok(code, 'the redirect must carry an authorization code');
   const { status, body } = await exchangeCodeForTokens(baseUrl, client.client_id, code!, verifier);
   assert.equal(status, 200, body);
@@ -587,6 +596,230 @@ test('S46.7 — the cross-repository refusal is an authorization result, so it i
       const result = crossed.body.result as { isError: boolean; content: { text: string }[] };
       assert.equal((JSON.parse(result.content[0]!.text) as { kind: string }).kind, 'authorization');
       assert.equal(result.isError, false);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S55 — a connected agent hears when its tools change.
+// ---------------------------------------------------------------------------
+
+const OPERATOR_ACTOR = { kind: 'operator', subject: 'ben' as never, clientId: null, grantId: null } as const;
+
+/** Resolves on the first `notifications/tools/list_changed` the client receives, or rejects after `ms`. */
+function nextListChanged(client: Client, ms: number): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`no notifications/tools/list_changed within ${ms} ms`)), ms);
+    client.setNotificationHandler(ToolListChangedNotificationSchema, () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+/** A real SDK client over the real route — the transport an agent actually uses, bearer and all. */
+async function connectSdkClient(baseUrl: string, declarationId: string, accessToken: string): Promise<Client> {
+  const client = new Client({ name: 's55-agent', version: '1' });
+  const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp/${declarationId}`), {
+    requestInit: { headers: { Authorization: `Bearer ${accessToken}` } },
+  });
+  await client.connect(transport as unknown as Parameters<typeof client.connect>[0]);
+  return client;
+}
+
+test('S55.2 — a real SDK client hears notifications/tools/list_changed within 2 s of its grant narrowing, and its next list omits the removed tool', async () => {
+  await withVolumeAsync(async (volume) => {
+    await withServer(volume, async ({ baseUrl, declarations }) => {
+      await declareRepo(declarations, 'repo-s55', ['repo.read', 'git.raw']);
+      const { accessToken } = await fullOAuthFlow(baseUrl, 'repo-s55', ['read', 'raw']);
+      const client = await connectSdkClient(baseUrl, 'repo-s55', accessToken);
+      try {
+        assert.equal(client.getServerCapabilities()?.tools?.listChanged, true, 'initialize advertises tools.listChanged');
+        const before = (await client.listTools()).tools.map((t) => t.name);
+        assert.ok(before.includes('git_raw'));
+
+        const heard = nextListChanged(client, 2000);
+        const narrowed = await declarations.amend('repo-s55' as never, { cloneUrl: null, credentialRef: null, capabilityGrant: ['repo.read'], writablePathPrefixes: null, pinned: null, fileWatcher: undefined, identity: null }, OPERATOR_ACTOR);
+        assert.equal(narrowed.ok, true);
+        await heard;
+
+        const after = (await client.listTools()).tools.map((t) => t.name);
+        assert.ok(after.includes('repo_status'));
+        assert.ok(!after.includes('git_raw'), 'the narrowed-away tool is gone from the next list');
+      } finally {
+        await client.close();
+      }
+    });
+  });
+});
+
+interface OpenedStream {
+  readonly status: number;
+  readonly wwwAuthenticate: string | null;
+  readonly body: string | null;
+  readonly response: Response;
+  readonly abort: AbortController;
+}
+
+/** A raw `GET` on the route, as the SDK client sends it; a `200` is left open for the caller. */
+async function openStream(baseUrl: string, declarationId: string, headers: Record<string, string>): Promise<OpenedStream> {
+  const abort = new AbortController();
+  const response = await fetch(`${baseUrl}/mcp/${declarationId}`, { method: 'GET', headers: { Accept: 'text/event-stream', ...headers }, signal: abort.signal });
+  const body = response.status === 200 ? null : await response.text();
+  return { status: response.status, wwwAuthenticate: response.headers.get('WWW-Authenticate'), body, response, abort };
+}
+
+/** Resolves when the server ends the stream, or rejects after `ms`. */
+async function streamEnds(stream: OpenedStream, ms: number): Promise<void> {
+  const reader = stream.response.body!.getReader();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`the stream was still open after ${ms} ms`)), ms);
+  });
+  try {
+    await Promise.race([
+      (async () => {
+        while (!(await reader.read()).done) {
+          // Drain until the server ends it.
+        }
+      })(),
+      timeout,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+test('S55.3 — a GET without the bearer, without a live session, or under another grant is refused 401 and opens nothing; one not asking for an event stream is 405', async () => {
+  await withVolumeAsync(async (volume) => {
+    await withServer(volume, async ({ baseUrl, declarations, mcpState }) => {
+      await declareRepo(declarations, 'repo-s55a', ['repo.read']);
+      // Two clients the operator approved separately: two grants on the one resource.
+      const operator = await operatorCookie(baseUrl);
+      const own = await fullOAuthFlow(baseUrl, 'repo-s55a', ['read'], operator);
+      const other = await fullOAuthFlow(baseUrl, 'repo-s55a', ['read'], operator);
+      const init = await mcpInitialize(baseUrl, 'repo-s55a', own.accessToken);
+      assert.equal(init.status, 200);
+      const sessionId = init.sessionId!;
+
+      const refusals: Array<[string, Record<string, string>]> = [
+        ['no bearer', { 'Mcp-Session-Id': sessionId }],
+        ['no session id', { Authorization: `Bearer ${own.accessToken}` }],
+        ['an unknown session id', { Authorization: `Bearer ${own.accessToken}`, 'Mcp-Session-Id': 'not-a-session' }],
+        ["another grant's bearer", { Authorization: `Bearer ${other.accessToken}`, 'Mcp-Session-Id': sessionId }],
+        ['a garbage bearer', { Authorization: 'Bearer not-a-token', 'Mcp-Session-Id': sessionId }],
+      ];
+      for (const [label, headers] of refusals) {
+        const stream = await openStream(baseUrl, 'repo-s55a', headers);
+        assert.equal(stream.status, 401, label);
+        assert.match(stream.wwwAuthenticate ?? '', /resource_metadata=/, `${label} carries the challenge`);
+        assert.equal(mcpState.streams.size, 0, `${label} opened nothing`);
+      }
+
+      const plain = await fetch(`${baseUrl}/mcp/repo-s55a`, { method: 'GET', headers: { Authorization: `Bearer ${own.accessToken}`, 'Mcp-Session-Id': sessionId } });
+      assert.equal(plain.status, 405);
+      assert.equal(mcpState.streams.size, 0);
+
+      // The refusals cost the session nothing: the owner's own stream opens.
+      const ok = await openStream(baseUrl, 'repo-s55a', { Authorization: `Bearer ${own.accessToken}`, 'Mcp-Session-Id': sessionId });
+      assert.equal(ok.status, 200);
+      assert.equal(ok.response.headers.get('Content-Type'), 'text/event-stream');
+      assert.equal(mcpState.streams.size, 1);
+      ok.abort.abort();
+    });
+  });
+});
+
+test('S55.4 — revoking the grant ends every stream under it within 2 s, and a reconnect with the same session is refused 401', async () => {
+  await withVolumeAsync(async (volume) => {
+    await withServer(volume, async ({ baseUrl, declarations, mcpState }) => {
+      await declareRepo(declarations, 'repo-s55b', ['repo.read']);
+      const { accessToken } = await fullOAuthFlow(baseUrl, 'repo-s55b', ['read']);
+      const first = await mcpInitialize(baseUrl, 'repo-s55b', accessToken);
+      const second = await mcpInitialize(baseUrl, 'repo-s55b', accessToken);
+      const streams = [
+        await openStream(baseUrl, 'repo-s55b', { Authorization: `Bearer ${accessToken}`, 'Mcp-Session-Id': first.sessionId! }),
+        await openStream(baseUrl, 'repo-s55b', { Authorization: `Bearer ${accessToken}`, 'Mcp-Session-Id': second.sessionId! }),
+      ];
+      assert.deepEqual(streams.map((st) => st.status), [200, 200]);
+      assert.equal(mcpState.streams.size, 2);
+
+      // Revoked through a separate instance over the same store, as the console does — no in-process event reaches the route.
+      const authorization = createAuthorization({
+        volumeRoot: volume,
+        clock: systemClock,
+        contractCapabilitySet: CEILING,
+        ceiling: CEILING as unknown as DeploymentCeiling,
+        declarations,
+        audit: createAudit({ volumeRoot: volume, clock: systemClock }),
+      });
+      const grant = (await authorization.listGrants('mcp')).find((g) => g.grant.declarationId === 'repo-s55b');
+      assert.ok(grant);
+      await authorization.revokeGrant(grant!.grant.grantId, OPERATOR_ACTOR);
+
+      await Promise.all(streams.map((st) => streamEnds(st, 2000)));
+      assert.equal(mcpState.streams.size, 0);
+
+      const reconnect = await openStream(baseUrl, 'repo-s55b', { Authorization: `Bearer ${accessToken}`, 'Mcp-Session-Id': first.sessionId! });
+      assert.equal(reconnect.status, 401);
+      assert.equal(mcpState.streams.size, 0);
+    });
+  });
+});
+
+test('S55.6 — past MAX_STREAMS_PER_GRANT open streams the next is refused 429 too_many_streams, and none of the open ones is evicted', async () => {
+  await withVolumeAsync(async (volume) => {
+    await withServer(volume, async ({ baseUrl, declarations, mcpState }) => {
+      await declareRepo(declarations, 'repo-s55c', ['repo.read']);
+      const { accessToken } = await fullOAuthFlow(baseUrl, 'repo-s55c', ['read']);
+      const init = await mcpInitialize(baseUrl, 'repo-s55c', accessToken);
+      const headers = { Authorization: `Bearer ${accessToken}`, 'Mcp-Session-Id': init.sessionId! };
+
+      const open: OpenedStream[] = [];
+      for (let i = 0; i < MAX_STREAMS_PER_GRANT; i++) open.push(await openStream(baseUrl, 'repo-s55c', headers));
+      assert.ok(open.every((st) => st.status === 200));
+
+      const over = await openStream(baseUrl, 'repo-s55c', headers);
+      assert.equal(over.status, 429);
+      assert.deepEqual(JSON.parse(over.body!), { error: 'too_many_streams' });
+      assert.equal(mcpState.streams.get(init.sessionId!)?.size, MAX_STREAMS_PER_GRANT, 'every open stream is still open');
+
+      // A closed stream frees its slot.
+      open[0]!.abort.abort();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const again = await openStream(baseUrl, 'repo-s55c', headers);
+      assert.equal(again.status, 200);
+      for (const st of [...open.slice(1), again]) st.abort.abort();
+    });
+  });
+});
+
+test('S55.5 — the stdio proxy forwards notifications/tools/list_changed from the remote route to its local client', async () => {
+  await withVolumeAsync(async (volume) => {
+    await withServer(volume, async ({ baseUrl, declarations }) => {
+      await declareRepo(declarations, 'repo-s55d', ['repo.read', 'git.raw']);
+      const { accessToken } = await fullOAuthFlow(baseUrl, 'repo-s55d', ['read', 'raw']);
+      // The remote half is a real SDK client on the real route, as `runProxy` builds it; only stdio is swapped for an in-memory pair.
+      const remote = await connectSdkClient(baseUrl, 'repo-s55d', accessToken);
+      const { server } = createProxyServer({ origin: baseUrl, declarationId: 'repo-s55d', bearerToken: accessToken }, remote);
+      const [localSide, proxySide] = InMemoryTransport.createLinkedPair();
+      const local = new Client({ name: 's55-local-agent', version: '1' });
+      try {
+        await server.connect(proxySide);
+        await local.connect(localSide);
+        assert.equal(local.getServerCapabilities()?.tools?.listChanged, true, 'the proxy advertises tools.listChanged to its local client');
+        assert.ok((await local.listTools()).tools.some((t) => t.name === 'git_raw'));
+
+        const heard = nextListChanged(local, 2000);
+        const narrowed = await declarations.amend('repo-s55d' as never, { cloneUrl: null, credentialRef: null, capabilityGrant: ['repo.read'], writablePathPrefixes: null, pinned: null, fileWatcher: undefined, identity: null }, OPERATOR_ACTOR);
+        assert.equal(narrowed.ok, true);
+        await heard;
+        assert.ok(!(await local.listTools()).tools.some((t) => t.name === 'git_raw'));
+      } finally {
+        await local.close();
+        await server.close();
+        await remote.close();
+      }
     });
   });
 });
