@@ -10,7 +10,7 @@ import path from 'node:path';
  * here, not a silent gap discovered later in CI or in the image build.
  */
 
-test('npm run build chains typecheck and every check:* gate, including check:layer-direction', () => {
+test('npm run build chains typecheck and every check:* gate, including doc citations', () => {
   const packageJsonPath = path.resolve(import.meta.dirname, '..', 'package.json');
   const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
   const buildScript: string = pkg.scripts.build;
@@ -20,5 +20,6 @@ test('npm run build chains typecheck and every check:* gate, including check:lay
   assert.ok(steps.includes('npm run check:layering'), `build script missing check:layering: ${buildScript}`);
   assert.ok(steps.includes('npm run check:migration'), `build script missing check:migration: ${buildScript}`);
   assert.ok(steps.includes('npm run check:layer-direction'), `build script missing check:layer-direction: ${buildScript}`);
+  assert.ok(steps.includes('npm run check:doc-citations'), `build script missing check:doc-citations: ${buildScript}`);
   assert.ok(steps.includes('npm run check:parity'), `build script missing check:parity: ${buildScript}`);
 });
