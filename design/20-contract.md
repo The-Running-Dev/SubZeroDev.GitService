@@ -399,7 +399,8 @@ operation progressed — this is U3's resolution, and `resume` predicates read `
 enforced for the journal: no secret value reaches a persisted row.
 
 `unsettled` selects on `(declarationId, generation)`, so an entry from a previous era is never a
-recovery candidate — **R4**. That is why `generation` is on the entry at all.
+recovery candidate — **R4**. That is why `generation` is on the entry at all, and why a generation is
+never issued twice for one id, removal included (*Migration 0003*, under *Persisted schemas*).
 
 ### Recovery
 
@@ -1163,6 +1164,23 @@ accounts table" enforceable rather than asserted.
 once released, per `scripts/generate-migration-0001.ts`) adds `totp_pending_secret_sealed TEXT` to
 `operator_credential`: the not-yet-committed secret `beginTotpReenrol` (S31.1) seals, read back and
 committed by `completeTotpReenrol` on a correct code. `NULL` whenever no re-enrolment is in progress.
+
+**Migration 0003** (`src/store/migration-0003.ts`, hand-written for S57) adds
+`declaration_generation_mark`: one row per declaration id ever declared, holding the highest
+generation that id has ever been issued. It exists because `declaration` rows do not survive
+`declaration.remove`, and a generation numbered from whatever rows remain can be issued twice — an
+earlier era's journal entries and audit records would then match the new one, which is the collision
+**R4** forbids. Three rules, each load-bearing:
+
+- **The mark is never lowered and never deleted.** Nothing removes a row from this table, including
+  `declaration.remove`; that is the whole of its purpose.
+- **`declare` numbers the new generation one above the mark**, whether the id is new, orphaned or
+  removed, and writes the declaration row and the raised mark in **one transaction**. A failure
+  between the two leaves neither, so a generation is never in use without the mark covering it.
+- **The migration backfills** the mark per id from the highest `declaration.generation` on file, so
+  a store migrated with history keeps numbering above it. A removed id's history from before the
+  migration is not recoverable from the store, and is not reconstructed from the journal or the
+  audit log — see `design/90-decisions.md`, 2026-09-13.
 
 **`password_hash` is a one-way hash; `totp_secret_sealed` is not, and cannot be.** Verifying a
 password compares hashes, but verifying a TOTP code recomputes `HMAC-SHA1(secret, timeStep)` on
