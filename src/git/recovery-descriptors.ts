@@ -69,8 +69,8 @@ export const LOCAL_MUTATION_RECOVERY_DESCRIPTORS: readonly RecoveryDescriptor[] 
  * would have to re-enter the dispatch pipeline, which the composition root
  * does not wire into recovery until S12 brings descriptors that need it; until
  * then an operation whose post-state does not hold parks for the operator
- * rather than being retried blind. `10-design.md` § retries is explicit that
- * nothing mutating a repository is retried automatically.
+ * rather than being retried blind. `10-design.md` § Partial failure and retry
+ * is explicit that nothing mutating a repository is retried automatically.
  */
 export const GIT_PUSH_RECOVERY: RecoveryDescriptor = {
   tool: 'git_push' as never,
@@ -109,8 +109,8 @@ export const SYNC_BASE_RECOVERY: RecoveryDescriptor = {
    * returns true the moment the *fetch* lands — reporting a half-finished sync
    * as complete, and settling a journal entry whose second effect never ran.
    * Parking is the honest verdict for a window that cannot be observed, and
-   * `10-design.md` § retries is explicit that nothing mutating a repository is
-   * retried automatically. Deciding it properly needs a journal step naming
+   * `10-design.md` § Partial failure and retry is explicit that nothing
+   * mutating a repository is retried automatically. Deciding it properly needs a journal step naming
    * the base ref and a post-state that can read it — a contract question, not
    * a predicate this file can be clever about.
    */

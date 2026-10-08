@@ -621,6 +621,25 @@ Acceptance:
     passes.
 Out of scope: changing what the journal records, or when the step is written.
 
+## S66 — Every design citation in the source resolves
+Delivers: A reviewer can trust that a source comment's `§` citation of a design document leads to a
+section that exists, because the build fails on the pull request that cites one that does not.
+Touches: `scripts/` (a citation checker and its build gate); the build script; source comments whose
+citations named sections the documents do not have.
+Depends on: none
+Status: done
+Closes: #301
+Acceptance:
+  - S66.1 Every `§` citation of a design document in the tree's TypeScript resolves against the
+    committed documents, and `npm run build` runs the check.
+  - S66.2 A citation of a section, sub-section id or document that does not exist is reported with its
+    file and line, and fails the build; shown on the `§ L2 — watcher, W08.3` citation #298 introduced.
+  - S66.3 A formatting variant of a real heading (dash style, case, a label without its title) and an
+    anchor that is not a heading (an invariant or criterion id, a bold lead, a quoted phrase) resolve
+    rather than reading as missing.
+Out of scope: a `§` with no document named; citations of documents outside `design/`; citations
+inside `design/` itself; whether a citation that resolves cites the right rule.
+
 ---
 
 ## Landed

@@ -534,12 +534,13 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
   }
 
   /**
-   * `20-contract.md` § Watcher, W05.2: two terminal moves landing on the same
-   * timestamp-prefixed name (the same original filename delivered again
-   * within the same clock tick) must never let the later one overwrite the
-   * earlier — `renameSync` would otherwise silently clobber it. The prefix
-   * gets a deterministic `-2`, `-3`, … counter suffix ahead of the preserved
-   * original filename, so the target always still ends in `-${file}`.
+   * `20-contract.md` § Storage, D6 — a watched file is never deleted: two
+   * terminal moves landing on the same timestamp-prefixed name (the same
+   * original filename delivered again within the same clock tick) must never
+   * let the later one overwrite the earlier — `renameSync` would otherwise
+   * silently clobber it. The prefix gets a deterministic `-2`, `-3`, … counter
+   * suffix ahead of the preserved original filename, so the target always
+   * still ends in `-${file}`.
    */
   function uniqueTerminalName(dir: string, prefix: string, file: string): string {
     let candidatePrefix = prefix;
@@ -812,8 +813,8 @@ export function createWatcher(deps: WatcherDependencies): Watcher {
     let candidate: WatchedFileName | null = null;
     if (cloneState !== 'ready') {
       // `absent`, `evicted`, `materialising`: servable on first use (`10-design.md` § Servability of an
-      // unmaterialised declaration, D15). First use is a dropped file, so a poll over an empty inbox
-      // clones nothing.
+      // unmaterialised declaration; `20-contract.md` § Storage, D15). First use is a dropped file, so a
+      // poll over an empty inbox clones nothing.
       candidate = pickCandidate(declaration.id);
       if (candidate === null) return emptyReport(declaration.id, null, reconciled, stillPending);
       const materialised = await materialiseClone(declaration);

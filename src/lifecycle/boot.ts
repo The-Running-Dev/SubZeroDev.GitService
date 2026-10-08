@@ -117,7 +117,7 @@ export interface Lifecycle {
    * summary — never one notification per module or per row. S27 adds
    * eviction: once every owner above has run, if usage is still at or above
    * `watermarks.maintenanceAtPercent`, the least-recently-used materialised
-   * clones are evicted (`10-design.md` § disk pressure: "evicts safe clones
+   * clones are evicted (`10-design.md` § Storage kinds: "evicts safe clones
    * only if that was not enough") until usage drops back below it or no more
    * candidates remain — never under the global mutation lock (rule 3), and
    * only through `CloneStore.evictIfSafe`, which takes the declaration's own
@@ -663,7 +663,7 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       // S27.1: every retention owner above has already run, with no
       // mutation lock held anywhere in this method — the pass evicts only
       // once that is done, and only if usage is still at or above the
-      // maintenance watermark (`10-design.md` § disk pressure: "evicts safe
+      // maintenance watermark (`10-design.md` § Storage kinds: "evicts safe
       // clones only if that was not enough"). Least-recently-used first
       // (`clone_eviction_order`'s own key, a null `lastOperationAt` sorting
       // as oldest), stopping once usage recomputed locally from each
@@ -701,7 +701,7 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       const usageAfter = evictions.some((e) => e.evicted) ? await computeUsage() : usageAfterRetention;
 
       // One `info` summary for the whole pass, never one per module or per
-      // row (`10-design.md` § Notification). Summed across every module's
+      // row (`10-design.md` § Storage kinds). Summed across every module's
       // own `freedBytes` plus every eviction's `freedBytes` (the vacuum's
       // bytes are already folded into the structured-store entry above)
       // rather than just `vacuumBytes`: before S26 every non-vacuum owner

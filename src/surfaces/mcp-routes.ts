@@ -224,7 +224,7 @@ function bearerFrom(req: IncomingMessage): BearerToken | null {
 type SessionCheck = { readonly ok: true; readonly session: Session; readonly moved: boolean } | { readonly ok: false; readonly summary: string };
 
 /**
- * `20-contract.md` § control flow step 5: re-intersect the declaration's
+ * `10-design.md` § Agent completes a change, step 5: re-intersect the declaration's
  * `grantEpoch` against the one the session froze at, and check the grant
  * itself is still live. A failure closes the session (and its streams)
  * rather than refusing one call — a revoked or orphaned resource does not

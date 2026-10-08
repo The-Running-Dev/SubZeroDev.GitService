@@ -440,7 +440,7 @@ test('S8 — /health counts parked operations for real, rather than reporting a 
 });
 
 test('S8.9 — the parked view carries preState, the observed current state and the diff between them', async () => {
-  // `10-design.md` § operator-only views, item 6 names all three. Without the
+  // `10-design.md` § Operator drives the console, item 6, names all three. Without the
   // diff an operator is comparing two 64-character digests by eye, which is
   // how a repair gets done against the wrong repository.
   const observed = {
