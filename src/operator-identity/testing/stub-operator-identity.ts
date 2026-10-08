@@ -41,6 +41,9 @@ export function createStubOperatorIdentity(): OperatorIdentity {
     async touch() {
       return err(operatorIdentityError({ code: 'session-unknown' }, 'stub: no session ever exists'));
     },
+    async refuseUntilReenrolled() {
+      return operatorIdentityError({ code: 'totp-reenrol-required' }, 'stub: no session ever exists');
+    },
     async logout() {
       return err(operatorIdentityError({ code: 'session-unknown' }, 'stub: no session ever exists'));
     },

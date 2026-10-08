@@ -25,7 +25,8 @@ function sendJson(res: ServerResponse, status: number, body: unknown, extraHeade
 }
 
 function errorStatus(error: OperatorIdentityError): number {
-  return error.code === 'store-failed' ? 503 : 401;
+  if (error.code === 'store-failed') return 503;
+  return error.code === 'totp-reenrol-required' ? 403 : 401;
 }
 
 function sendError(res: ServerResponse, error: OperatorIdentityError): void {
@@ -114,8 +115,24 @@ function loginCookies(session: OperatorSession, sessionAbsoluteSeconds: number):
  * with the response already sent to `401` on any failure — the pipeline
  * invariant E8 wants covered by every route this module owns, not just the
  * ones with acceptance tests naming it.
+ *
+ * Also the re-enrolment gate (S54, `20-contract.md` § The HTTP API route
+ * table): a session whose credential must re-enrol TOTP is refused here with
+ * `403`, audited, before any route reads its body. Every cookie route
+ * authenticates through this function, which is what lets a route added later
+ * inherit the gate; the four routes the gate leaves open use
+ * `requireSessionDuringReenrol` or `sessionIdFromCookie` instead.
  */
 export async function requireSession(deps: ConsoleAuthDependencies, req: IncomingMessage, res: ServerResponse): Promise<OperatorSession | null> {
+  const session = await requireSessionDuringReenrol(deps, req, res);
+  if (!session || !session.totpReenrolRequired) return session;
+  const route = `${req.method ?? ''} ${new URL(req.url ?? '/', 'http://unused').pathname}`;
+  sendError(res, await deps.identity.refuseUntilReenrolled(session, route));
+  return null;
+}
+
+/** `requireSession` without the re-enrolment gate — only for `GET /auth/session` and `POST /auth/logout`. */
+async function requireSessionDuringReenrol(deps: ConsoleAuthDependencies, req: IncomingMessage, res: ServerResponse): Promise<OperatorSession | null> {
   const cookies = parseCookies(req.headers.cookie);
   const raw = cookies[SESSION_COOKIE];
   if (!raw) {
@@ -363,14 +380,14 @@ export async function handleConsoleAuthRoute(
   }
 
   if (req.method === 'GET' && url.pathname === '/auth/session') {
-    const session = await requireSession(deps, req, res);
+    const session = await requireSessionDuringReenrol(deps, req, res);
     if (!session) return true;
     sendJson(res, 200, sessionEnvelope(session));
     return true;
   }
 
   if (req.method === 'POST' && url.pathname === '/auth/logout') {
-    const session = await requireSession(deps, req, res);
+    const session = await requireSessionDuringReenrol(deps, req, res);
     if (!session) return true;
     if (!csrfOk(req)) {
       sendJson(res, 403, { error: 'csrf-check-failed' });

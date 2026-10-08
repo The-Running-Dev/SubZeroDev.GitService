@@ -2,6 +2,12 @@
 
 Append-only. Newest at the top. The rejected alternatives are the point — without them, every future session relitigates the same choice.
 
+### 2026-10-08 — The re-enrolment gate refuses with `403` and records each refusal in a form of its own (S54, #276)
+Context: S54.1 had to name the refusal a gated session receives and how S54.4's per-route audit record is shaped. Every other `OperatorIdentityError` is a `401`, and the existing `identity-event` form carries no field that could name a route.
+Chosen: A new `totp-reenrol-required` variant answered `403`, raised from `requireSession` so every cookie route inherits it, and a new `totp-reenrol-refusal` audit form carrying `route` (method and path, no query string). The four open routes reach the session through an ungated twin of `requireSession`, or through the cookie id alone as the re-enrolment routes already did.
+Rejected: **`401`** — the console reads a `401` as a dead session and sends the operator to the login screen, where the only way back in for someone without their authenticator is another recovery code. **An `identity-event` with an optional `route`** — an optional member on a hashed record form makes two shapes of one form, and an event name alone cannot say what a stolen code was used to attempt. **A gate in each route** — a route added later would have to remember it; the route-walking test would catch the omission, but only after someone wrote it.
+Reversibility: cheap
+
 ### 2026-10-08 — Network-share storage is unsupported; the single-instance claim is narrowed to what boot proves (#135)
 Context: `10-design.md`'s two-instances failure mode claimed boot's lock self-test keeps a second instance off a volume. The self-test (S30) proves exclusion between processes on one kernel; on a CIFS/SMB or NFS share, locks can be lost across hosts without either process seeing it, so two instances both start and both report healthy.
 Chosen: Narrow the design's claim to what the self-test proves, and state in `docs/operator-guide.md` that `VOLUME_ROOT` must be a local or container-managed volume and network shares are unsupported. The residual risk on a share is accepted. Sliced as S62.

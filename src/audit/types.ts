@@ -63,7 +63,7 @@ export const UNVERIFIED_AUDIT_CHAIN: AuditChainState = {
   chainBreak: null,
 };
 
-export const AUDIT_RECORD_FORMS = ['call', 'authorization-rejection', 'hatch-intent', 'hatch-outcome', 'file-watcher', 'identity-event', 'lease-takeover', 'watcher-tick-failed'] as const;
+export const AUDIT_RECORD_FORMS = ['call', 'authorization-rejection', 'hatch-intent', 'hatch-outcome', 'file-watcher', 'identity-event', 'lease-takeover', 'watcher-tick-failed', 'totp-reenrol-refusal'] as const;
 
 export type AuditRecordForm = (typeof AUDIT_RECORD_FORMS)[number];
 
@@ -108,7 +108,8 @@ export type AuditRecordBody =
   | { readonly form: 'file-watcher'; readonly file: WatchedFileName; readonly outcome: WatchedFileOutcome }
   | { readonly form: 'identity-event'; readonly event: IdentityEvent }
   | { readonly form: 'lease-takeover'; readonly previousHolder: InstanceLease }
-  | { readonly form: 'watcher-tick-failed'; readonly reason: string };
+  | { readonly form: 'watcher-tick-failed'; readonly reason: string }
+  | { readonly form: 'totp-reenrol-refusal'; readonly route: string };
 
 export type AuditRecord = AuditRecordBase & AuditRecordBody;
 export type AuditAppendInput = Omit<AuditRecordBase, 'sequence' | 'previousHash' | 'hash'> & AuditRecordBody;
