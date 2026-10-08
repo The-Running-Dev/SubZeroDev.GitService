@@ -17,10 +17,15 @@ import type { Declarations } from '../declarations/declarations.ts';
 import type { DispatchPipeline } from '../dispatch/dispatch-pipeline.ts';
 import { authorization as authorizationResult, isError } from '../result/envelope.ts';
 import { requireSession, csrfOk, type ConsoleAuthDependencies } from './console-auth-routes.ts';
+import { readBoundedBody, readJsonBody, sendJson } from './http-json.ts';
 
 const SUPPORTED_SCOPES: readonly McpScope[] = ['read', 'write', 'raw', 'schedule'];
 const AUTHORIZATION_REQUEST_TTL_MS = 10 * 60 * 1000;
 const AUTHORIZATION_CODE_TTL_MS = 5 * 60 * 1000;
+/** Client registration and JSON-RPC bodies. */
+const MAX_JSON_BODY_BYTES = 65_536;
+/** The form-encoded consent, token and revocation bodies. */
+const MAX_FORM_BODY_BYTES = 16_384;
 /**
  * The one truly unbounded-memory risk in this file: `/oauth/register` and
  * `/oauth/authorize` (`GET`) are unauthenticated by transport (registration
@@ -153,10 +158,9 @@ function pruneExpired<T extends { readonly expiresAt: number }>(items: Map<strin
   }
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
-  const payload = JSON.stringify(body);
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(payload), 'Cache-Control': 'no-store', ...headers });
-  res.end(payload);
+/** Every OAuth and MCP response here is `no-store`: it carries tokens, codes or session state. */
+function sendNoStoreJson(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
+  sendJson(res, status, body, { 'Cache-Control': 'no-store', ...headers });
 }
 
 function sendAccepted(res: ServerResponse): void {
@@ -182,38 +186,14 @@ function sendHtml(res: ServerResponse, status: number, body: string): void {
  */
 function unauthorized(res: ServerResponse, origin: string, declarationIdValue: string, summary: string): void {
   const metadataUrl = `${origin}/.well-known/oauth-protected-resource/mcp/${declarationIdValue}`;
-  sendJson(res, 401, { error: 'invalid_token', error_description: summary }, { 'WWW-Authenticate': `Bearer realm="subzerodev-git", resource_metadata="${metadataUrl}"` });
+  sendNoStoreJson(res, 401, { error: 'invalid_token', error_description: summary }, { 'WWW-Authenticate': `Bearer realm="subzerodev-git", resource_metadata="${metadataUrl}"` });
 }
 
-async function readJsonBody(req: IncomingMessage, maxBytes = 65_536): Promise<Record<string, unknown> | null> {
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  for await (const chunk of req) {
-    const buf = chunk as Buffer;
-    bytes += buf.length;
-    if (bytes > maxBytes) return null;
-    chunks.push(buf);
-  }
-  if (chunks.length === 0) return {};
+async function readFormBody(req: IncomingMessage): Promise<URLSearchParams | null> {
+  const raw = await readBoundedBody(req, MAX_FORM_BODY_BYTES);
+  if (raw === null) return null;
   try {
-    const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
-}
-
-async function readFormBody(req: IncomingMessage, maxBytes = 16_384): Promise<URLSearchParams | null> {
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  for await (const chunk of req) {
-    const buf = chunk as Buffer;
-    bytes += buf.length;
-    if (bytes > maxBytes) return null;
-    chunks.push(buf);
-  }
-  try {
-    return new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
+    return new URLSearchParams(raw.toString('utf8'));
   } catch {
     return null;
   }
@@ -337,7 +317,7 @@ function openStreamsUnderGrant(state: McpRoutesState, grantId: string | null): n
  */
 async function handleMcpStream(deps: McpRoutesDependencies, req: IncomingMessage, res: ServerResponse, declarationIdValue: DeclarationId, resource: McpResourceUri): Promise<void> {
   if (!(req.headers.accept ?? '').includes('text/event-stream')) {
-    sendJson(res, 405, { error: 'method_not_allowed' });
+    sendNoStoreJson(res, 405, { error: 'method_not_allowed' });
     return;
   }
   const bearer = bearerFrom(req);
@@ -368,7 +348,7 @@ async function handleMcpStream(deps: McpRoutesDependencies, req: IncomingMessage
   // No await from here to the stream being registered, so two concurrent
   // opens cannot both pass the cap.
   if (openStreamsUnderGrant(deps.mcpState, session.actorRef.grantId) >= MAX_STREAMS_PER_GRANT) {
-    sendJson(res, 429, { error: 'too_many_streams' });
+    sendNoStoreJson(res, 429, { error: 'too_many_streams' });
     return;
   }
 
@@ -407,15 +387,15 @@ async function handleWellKnown(deps: McpRoutesDependencies, req: IncomingMessage
   const resourceMatch = /^\/\.well-known\/oauth-protected-resource\/mcp\/([^/]+)$/.exec(url.pathname);
   if (resourceMatch) {
     if (req.method !== 'GET') {
-      sendJson(res, 405, { error: 'method_not_allowed' });
+      sendNoStoreJson(res, 405, { error: 'method_not_allowed' });
       return true;
     }
     const idResult = validateDeclarationId(decodeURIComponent(resourceMatch[1]!));
     if (!idResult.ok) {
-      sendJson(res, 404, { error: 'not_found' });
+      sendNoStoreJson(res, 404, { error: 'not_found' });
       return true;
     }
-    sendJson(res, 200, {
+    sendNoStoreJson(res, 200, {
       resource: `/mcp/${idResult.value}`,
       authorization_servers: [deps.origin],
       scopes_supported: SUPPORTED_SCOPES,
@@ -426,10 +406,10 @@ async function handleWellKnown(deps: McpRoutesDependencies, req: IncomingMessage
 
   if (url.pathname === '/.well-known/oauth-authorization-server') {
     if (req.method !== 'GET') {
-      sendJson(res, 405, { error: 'method_not_allowed' });
+      sendNoStoreJson(res, 405, { error: 'method_not_allowed' });
       return true;
     }
-    sendJson(res, 200, {
+    sendNoStoreJson(res, 200, {
       issuer: deps.origin,
       authorization_endpoint: `${deps.origin}/oauth/authorize`,
       token_endpoint: `${deps.origin}/oauth/token`,
@@ -449,26 +429,26 @@ async function handleWellKnown(deps: McpRoutesDependencies, req: IncomingMessage
 
 async function handleRegister(deps: McpRoutesDependencies, req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== 'POST') {
-    sendJson(res, 405, { error: 'method_not_allowed' });
+    sendNoStoreJson(res, 405, { error: 'method_not_allowed' });
     return;
   }
-  const body = await readJsonBody(req);
+  const body = await readJsonBody(req, MAX_JSON_BODY_BYTES);
   if (!body) {
-    sendJson(res, 400, { error: 'invalid_client_metadata' });
+    sendNoStoreJson(res, 400, { error: 'invalid_client_metadata' });
     return;
   }
   const redirectUris = body.redirect_uris;
   if (!Array.isArray(redirectUris) || redirectUris.some((uri) => typeof uri !== 'string')) {
-    sendJson(res, 400, { error: 'invalid_redirect_uri' });
+    sendNoStoreJson(res, 400, { error: 'invalid_redirect_uri' });
     return;
   }
   const clientName = typeof body.client_name === 'string' ? body.client_name : 'MCP client';
   const result = await deps.authorization.registerClient({ redirectUris: redirectUris as never, clientName });
   if (!result.ok) {
-    sendJson(res, result.error.code === 'store-failed' ? 503 : 400, { error: 'invalid_client_metadata', summary: result.error.summary });
+    sendNoStoreJson(res, result.error.code === 'store-failed' ? 503 : 400, { error: 'invalid_client_metadata', summary: result.error.summary });
     return;
   }
-  sendJson(res, 201, {
+  sendNoStoreJson(res, 201, {
     client_id: result.value.clientId,
     client_name: clientName,
     redirect_uris: result.value.redirectUris,
@@ -554,20 +534,20 @@ async function handleAuthorize(deps: McpRoutesDependencies, req: IncomingMessage
   }
 
   if (req.method !== 'POST') {
-    sendJson(res, 405, { error: 'method_not_allowed' });
+    sendNoStoreJson(res, 405, { error: 'method_not_allowed' });
     return;
   }
 
   const operatorSession = await requireSession(deps, req, res);
   if (!operatorSession) return;
   if (!csrfOk(req)) {
-    sendJson(res, 403, { error: 'csrf-check-failed' });
+    sendNoStoreJson(res, 403, { error: 'csrf-check-failed' });
     return;
   }
 
   const form = await readFormBody(req);
   if (!form) {
-    sendJson(res, 400, { error: 'invalid_request' });
+    sendNoStoreJson(res, 400, { error: 'invalid_request' });
     return;
   }
   const requestId = form.get('request_id') ?? '';
@@ -599,12 +579,12 @@ async function handleAuthorize(deps: McpRoutesDependencies, req: IncomingMessage
 
 async function handleToken(deps: McpRoutesDependencies, req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== 'POST') {
-    sendJson(res, 405, { error: 'method_not_allowed' });
+    sendNoStoreJson(res, 405, { error: 'method_not_allowed' });
     return;
   }
   const form = await readFormBody(req);
   if (!form) {
-    sendJson(res, 400, { error: 'invalid_request' });
+    sendNoStoreJson(res, 400, { error: 'invalid_request' });
     return;
   }
   const grantType = form.get('grant_type');
@@ -624,12 +604,12 @@ async function handleToken(deps: McpRoutesDependencies, req: IncomingMessage, re
       !isValidVerifier(verifier) ||
       pkceChallenge(verifier) !== record.codeChallenge
     ) {
-      sendJson(res, 400, { error: 'invalid_grant' });
+      sendNoStoreJson(res, 400, { error: 'invalid_grant' });
       return;
     }
     const declaration = await deps.declarations.get(record.declarationId);
     if (!declaration) {
-      sendJson(res, 400, { error: 'invalid_grant', summary: `declaration '${record.declarationId}' no longer exists` });
+      sendNoStoreJson(res, 400, { error: 'invalid_grant', summary: `declaration '${record.declarationId}' no longer exists` });
       return;
     }
     const issued = await deps.authorization.issueMcpGrant(
@@ -644,10 +624,10 @@ async function handleToken(deps: McpRoutesDependencies, req: IncomingMessage, re
       { kind: 'operator', subject: record.approvedBy, clientId: record.clientId, grantId: null },
     );
     if (!issued.ok) {
-      sendJson(res, issued.error.code === 'store-failed' ? 503 : 400, { error: 'invalid_grant', summary: issued.error.summary });
+      sendNoStoreJson(res, issued.error.code === 'store-failed' ? 503 : 400, { error: 'invalid_grant', summary: issued.error.summary });
       return;
     }
-    sendJson(res, 200, {
+    sendNoStoreJson(res, 200, {
       access_token: issued.value.access.value,
       token_type: 'Bearer',
       expires_in: Math.max(0, Math.round((new Date(issued.value.access.expiresAt).getTime() - Date.now()) / 1000)),
@@ -661,10 +641,10 @@ async function handleToken(deps: McpRoutesDependencies, req: IncomingMessage, re
     const refreshToken = (form.get('refresh_token') ?? '') as BearerToken;
     const refreshed = await deps.authorization.refresh(refreshToken);
     if (!refreshed.ok) {
-      sendJson(res, refreshed.error.code === 'store-failed' ? 503 : 400, { error: 'invalid_grant', summary: refreshed.error.summary });
+      sendNoStoreJson(res, refreshed.error.code === 'store-failed' ? 503 : 400, { error: 'invalid_grant', summary: refreshed.error.summary });
       return;
     }
-    sendJson(res, 200, {
+    sendNoStoreJson(res, 200, {
       access_token: refreshed.value.access.value,
       token_type: 'Bearer',
       expires_in: Math.max(0, Math.round((new Date(refreshed.value.access.expiresAt).getTime() - Date.now()) / 1000)),
@@ -673,18 +653,18 @@ async function handleToken(deps: McpRoutesDependencies, req: IncomingMessage, re
     return;
   }
 
-  sendJson(res, 400, { error: 'unsupported_grant_type' });
+  sendNoStoreJson(res, 400, { error: 'unsupported_grant_type' });
 }
 
 async function handleRevoke(deps: McpRoutesDependencies, req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== 'POST') {
-    sendJson(res, 405, { error: 'method_not_allowed' });
+    sendNoStoreJson(res, 405, { error: 'method_not_allowed' });
     return;
   }
   const form = await readFormBody(req);
   const token = form?.get('token');
   if (!token) {
-    sendJson(res, 400, { error: 'invalid_request' });
+    sendNoStoreJson(res, 400, { error: 'invalid_request' });
     return;
   }
   // The actor here is never audited — `revokeBearerToken` derives the real
@@ -693,7 +673,7 @@ async function handleRevoke(deps: McpRoutesDependencies, req: IncomingMessage, r
   await deps.authorization.revokeBearerToken(token as BearerToken, { kind: 'operator', subject: 'oauth-revoke' as Subject, clientId: null, grantId: null });
   // RFC 7009: the endpoint answers 200 whether or not the token was known,
   // so a client cannot use it to probe for valid tokens.
-  sendJson(res, 200, {});
+  sendNoStoreJson(res, 200, {});
 }
 
 const JSONRPC_PARSE_ERROR = -32700;
@@ -710,12 +690,12 @@ function jsonRpcResult(id: unknown, result: unknown): Record<string, unknown> {
 
 async function handleMcpTransport(deps: McpRoutesDependencies, req: IncomingMessage, res: ServerResponse, declarationIdRaw: string): Promise<void> {
   if (req.method !== 'POST' && req.method !== 'GET') {
-    sendJson(res, 405, { error: 'method_not_allowed' });
+    sendNoStoreJson(res, 405, { error: 'method_not_allowed' });
     return;
   }
   const idResult = validateDeclarationId(declarationIdRaw);
   if (!idResult.ok) {
-    sendJson(res, 404, { error: 'not_found' });
+    sendNoStoreJson(res, 404, { error: 'not_found' });
     return;
   }
   const declarationIdValue = idResult.value;
@@ -725,9 +705,9 @@ async function handleMcpTransport(deps: McpRoutesDependencies, req: IncomingMess
     return;
   }
 
-  const body = await readJsonBody(req);
+  const body = await readJsonBody(req, MAX_JSON_BODY_BYTES);
   if (!body || typeof body.method !== 'string') {
-    sendJson(res, 400, jsonRpcError(body?.id, JSONRPC_PARSE_ERROR, 'invalid JSON-RPC request'));
+    sendNoStoreJson(res, 400, jsonRpcError(body?.id, JSONRPC_PARSE_ERROR, 'invalid JSON-RPC request'));
     return;
   }
   const rpcId = body.id;
@@ -768,7 +748,7 @@ async function handleMcpTransport(deps: McpRoutesDependencies, req: IncomingMess
     }
     const sessionId = randomUUID();
     deps.mcpState.sessions.set(sessionId, established.value);
-    sendJson(
+    sendNoStoreJson(
       res,
       200,
       jsonRpcResult(rpcId, {
@@ -792,7 +772,7 @@ async function handleMcpTransport(deps: McpRoutesDependencies, req: IncomingMess
   // they are just being pointed at a resource neither was established for.
   if (session.repositoryBinding !== declarationIdValue) {
     const result = authorizationResult(`this session is bound to '${session.repositoryBinding}', not '${declarationIdValue}'`, []);
-    sendJson(res, 403, jsonRpcResult(rpcId, { content: [{ type: 'text', text: JSON.stringify(result) }], isError: isError(result.kind) }));
+    sendNoStoreJson(res, 403, jsonRpcResult(rpcId, { content: [{ type: 'text', text: JSON.stringify(result) }], isError: isError(result.kind) }));
     return;
   }
 
@@ -804,7 +784,7 @@ async function handleMcpTransport(deps: McpRoutesDependencies, req: IncomingMess
   if (method === 'tools/list') {
     const declaration = await deps.declarations.get(declarationIdValue);
     const tools = deps.dispatchPipeline.visibleTools(session, declaration);
-    sendJson(
+    sendNoStoreJson(
       res,
       200,
       jsonRpcResult(rpcId, {
@@ -818,7 +798,7 @@ async function handleMcpTransport(deps: McpRoutesDependencies, req: IncomingMess
     const params = body.params as Record<string, unknown> | undefined;
     const toolName = params?.name;
     if (typeof toolName !== 'string') {
-      sendJson(res, 400, jsonRpcError(rpcId, JSONRPC_INVALID_PARAMS, 'params.name is required'));
+      sendNoStoreJson(res, 400, jsonRpcError(rpcId, JSONRPC_INVALID_PARAMS, 'params.name is required'));
       return;
     }
     const controller = new AbortController();
@@ -831,7 +811,7 @@ async function handleMcpTransport(deps: McpRoutesDependencies, req: IncomingMess
       context: 'normal',
       signal: controller.signal,
     });
-    sendJson(
+    sendNoStoreJson(
       res,
       toolResultStatus(result.kind),
       jsonRpcResult(rpcId, {
@@ -845,7 +825,7 @@ async function handleMcpTransport(deps: McpRoutesDependencies, req: IncomingMess
     return;
   }
 
-  sendJson(res, 404, jsonRpcError(rpcId, JSONRPC_METHOD_NOT_FOUND, `unknown method '${method}'`));
+  sendNoStoreJson(res, 404, jsonRpcError(rpcId, JSONRPC_METHOD_NOT_FOUND, `unknown method '${method}'`));
 }
 
 /**

@@ -6,6 +6,7 @@ import type { GrantKind } from '../authorization/types.ts';
 import type { OperatorScope } from '../contract/capabilities.ts';
 import type { OperatorIdentity, OperatorSession } from '../operator-identity/operator-identity.ts';
 import { csrfOk, requireSession, type ConsoleAuthDependencies } from './console-auth-routes.ts';
+import { readJsonBody, sendJson } from './http-json.ts';
 
 export interface AuthorizationRoutesDependencies extends ConsoleAuthDependencies {
   readonly authorization: Authorization;
@@ -13,36 +14,13 @@ export interface AuthorizationRoutesDependencies extends ConsoleAuthDependencies
 }
 
 const KNOWN_SCOPES: readonly OperatorScope[] = ['read', 'write', 'raw', 'schedule'];
+const MAX_BODY_BYTES = 65_536;
 
 function requireCsrf(req: IncomingMessage, res: ServerResponse): boolean {
   if (csrfOk(req)) return true;
   res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify({ error: 'csrf-check-failed' }));
   return false;
-}
-
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body);
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(payload) });
-  res.end(payload);
-}
-
-async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown> | null> {
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  for await (const chunk of req) {
-    const buf = chunk as Buffer;
-    bytes += buf.length;
-    if (bytes > 65_536) return null;
-    chunks.push(buf);
-  }
-  if (chunks.length === 0) return {};
-  try {
-    const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -116,7 +94,7 @@ export async function handleAuthorizationRoute(deps: AuthorizationRoutesDependen
     const session = await requireSession(deps, req, res);
     if (!session) return true;
     if (!requireCsrf(req, res)) return true;
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, MAX_BODY_BYTES);
     const scopes = body ? parseScopes(body) : null;
     if (!scopes) {
       sendJson(res, 400, { error: 'bad-request', summary: `scopes must be a non-empty array drawn from ${KNOWN_SCOPES.join(', ')}` });

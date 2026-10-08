@@ -4,6 +4,7 @@ import type { AuditError } from '../audit/errors.ts';
 import { declarationId, isoUtcTimestamp, type RegistryToolName, type Subject } from '../shared/brands.ts';
 import { AUDIT_RECORD_FORMS, type AuditRecordForm } from '../audit/types.ts';
 import { requireSession, type ConsoleAuthDependencies } from './console-auth-routes.ts';
+import { sendJson } from './http-json.ts';
 
 export interface AuditRoutesDependencies extends ConsoleAuthDependencies {
   readonly audit: Audit;
@@ -15,12 +16,6 @@ const CURSOR_PATTERN = /^\d+$/;
 
 function auditErrorStatus(error: AuditError): number {
   return error.resultKind === 'validation' ? 400 : 503;
-}
-
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body);
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(payload) });
-  res.end(payload);
 }
 
 const DEFAULT_LIMIT = 200;

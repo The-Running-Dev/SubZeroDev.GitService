@@ -22,6 +22,7 @@ import { handleAuthorizationRoute, type AuthorizationRoutesDependencies } from '
 import { handleAuditRoute, type AuditRoutesDependencies } from './audit-routes.ts';
 import { handleMcpRoute, type McpRoutesDependencies } from './mcp-routes.ts';
 import { handleConsoleStaticRoute } from './console-static-routes.ts';
+import { sendJson } from './http-json.ts';
 
 /**
  * `LivenessReport` is the sole unauthenticated payload in the whole service
@@ -274,15 +275,6 @@ const RESERVED_API_PATHS: readonly RegExp[] = [
 
 function isReservedApiPath(pathname: string): boolean {
   return RESERVED_API_PATHS.some((pattern) => pattern.test(pathname));
-}
-
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body);
-  res.writeHead(status, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Content-Length': Buffer.byteLength(payload),
-  });
-  res.end(payload);
 }
 
 async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, res: ServerResponse): Promise<void> {

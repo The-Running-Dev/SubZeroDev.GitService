@@ -7,6 +7,7 @@ import type { DispatchPipeline } from '../dispatch/dispatch-pipeline.ts';
 import type { Declarations } from '../declarations/declarations.ts';
 import type { OperatorSession } from '../operator-identity/operator-identity.ts';
 import { csrfOk, requireSession, type ConsoleAuthDependencies } from './console-auth-routes.ts';
+import { readJsonBody, sendJson } from './http-json.ts';
 
 export interface ToolRoutesDependencies extends ConsoleAuthDependencies {
   readonly declarations: Pick<Declarations, 'get'>;
@@ -14,29 +15,7 @@ export interface ToolRoutesDependencies extends ConsoleAuthDependencies {
   readonly contractCapabilitySet: ContractCapabilitySet;
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body);
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(payload) });
-  res.end(payload);
-}
-
-async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown> | null> {
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  for await (const chunk of req) {
-    const buf = chunk as Buffer;
-    bytes += buf.length;
-    if (bytes > 1_048_576) return null;
-    chunks.push(buf);
-  }
-  if (chunks.length === 0) return {};
-  try {
-    const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
-}
+const MAX_BODY_BYTES = 1_048_576;
 
 /**
  * `20-contract.md` § Unresolved U4: the full HTTP route table is gated to
@@ -101,7 +80,7 @@ export async function handleToolRoute(deps: ToolRoutesDependencies, req: Incomin
       return true;
     }
     const toolName = segments[3];
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, MAX_BODY_BYTES);
     if (body === null) {
       sendJson(res, 400, { error: 'bad-request' });
       return true;
