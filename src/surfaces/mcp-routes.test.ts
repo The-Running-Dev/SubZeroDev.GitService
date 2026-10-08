@@ -225,14 +225,14 @@ async function obtainAuthorizationCode(
  * real MCP client would end up holding. Every mechanical step an actual
  * client performs, over real HTTP, against the real routes.
  */
-async function fullOAuthFlow(baseUrl: string, declarationId: string, scopes: readonly string[], operatorSession?: string): Promise<{ accessToken: string; refreshToken: string }> {
+async function fullOAuthFlow(baseUrl: string, declarationId: string, scopes: readonly string[], operatorSession?: string): Promise<{ accessToken: string; refreshToken: string; clientId: string }> {
   const client = await registerClient(baseUrl);
   const { code, verifier } = await obtainAuthorizationCode(baseUrl, client.client_id, declarationId, scopes, CLIENT_REDIRECT_URI, operatorSession);
   assert.ok(code, 'the redirect must carry an authorization code');
   const { status, body } = await exchangeCodeForTokens(baseUrl, client.client_id, code!, verifier);
   assert.equal(status, 200, body);
   const tokens = JSON.parse(body) as { access_token: string; refresh_token: string };
-  return { accessToken: tokens.access_token, refreshToken: tokens.refresh_token };
+  return { accessToken: tokens.access_token, refreshToken: tokens.refresh_token, clientId: client.client_id };
 }
 
 async function mcpInitialize(baseUrl: string, declarationId: string, accessToken: string): Promise<{ status: number; sessionId: string | null; wwwAuthenticate: string | null; body: Record<string, unknown> }> {
@@ -820,6 +820,105 @@ test('S55.5 — the stdio proxy forwards notifications/tools/list_changed from t
         await server.close();
         await remote.close();
       }
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S56 — every MCP grant names the operator who approved it.
+// ---------------------------------------------------------------------------
+
+function authorizationOver(volume: string, declarations: Declarations) {
+  return createAuthorization({
+    volumeRoot: volume,
+    clock: systemClock,
+    contractCapabilitySet: CEILING,
+    ceiling: CEILING as unknown as DeploymentCeiling,
+    declarations,
+    audit: createAudit({ volumeRoot: volume, clock: systemClock }),
+  });
+}
+
+async function identityEvents(volume: string, event: string) {
+  const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+  try {
+    const page = await audit.query({ declarationId: null, tool: null, actorSubject: null, form: 'identity-event', from: null, to: null, limit: 1000, cursor: null });
+    assert.ok(page.ok);
+    return page.value.records.filter((r) => (r as { event?: string }).event === event);
+  } finally {
+    await audit.close();
+  }
+}
+
+test('S56.2 — a grant approved through the consent POST names the approving operator as subject and the requesting client as clientId', async () => {
+  await withVolumeAsync(async (volume) => {
+    await withServer(volume, async ({ baseUrl, declarations }) => {
+      await declareRepo(declarations, 'repo-s56', ['repo.read']);
+      const { clientId } = await fullOAuthFlow(baseUrl, 'repo-s56', ['read']);
+      const grant = (await authorizationOver(volume, declarations).listGrants('mcp')).find((g) => g.grant.declarationId === 'repo-s56');
+      assert.ok(grant);
+      assert.equal(grant!.grant.subject, SUBJECT, 'the operator who approved, not the client');
+      assert.equal(grant!.grant.clientId, clientId);
+    });
+  });
+});
+
+test('S56.3 — issuance is audited once with the approving operator as actor and the client id in the record', async () => {
+  await withVolumeAsync(async (volume) => {
+    await withServer(volume, async ({ baseUrl, declarations }) => {
+      await declareRepo(declarations, 'repo-s56b', ['repo.read']);
+      const { clientId } = await fullOAuthFlow(baseUrl, 'repo-s56b', ['read']);
+      const issued = await identityEvents(volume, 'token-issued');
+      assert.equal(issued.length, 1);
+      assert.deepEqual(issued[0]!.actorRef, { kind: 'operator', subject: SUBJECT, clientId, grantId: null });
+    });
+  });
+});
+
+test('S56.4 — a grant issued before the change, with the client id as subject, still lists, verifies and revokes unchanged', async () => {
+  await withVolumeAsync(async (volume) => {
+    await withServer(volume, async ({ declarations }) => {
+      await declareRepo(declarations, 'repo-s56c', ['repo.read']);
+      const authorization = authorizationOver(volume, declarations);
+      const client = await authorization.registerClient({ redirectUris: ['https://client.invalid/callback'] as never, clientName: null } as never);
+      assert.ok(client.ok);
+      const clientId = client.value.clientId;
+      const declaration = await declarations.get('repo-s56c' as never);
+      // Exactly what the exchange wrote before S56: the client id in both places.
+      const legacy = await authorization.issueMcpGrant(
+        { clientId, subject: clientId as never, resource: '/mcp/repo-s56c' as never, declarationId: 'repo-s56c' as never, generation: declaration!.generation, scopes: ['read'] as never },
+        { kind: 'mcp', subject: clientId as never, clientId, grantId: null },
+      );
+      assert.ok(legacy.ok);
+
+      const listed = (await authorization.listGrants('mcp')).find((g) => g.grant.grantId === legacy.value.grant.grantId);
+      assert.equal(listed?.grant.subject, clientId as string);
+
+      const session = await authorization.establishMcpSession(legacy.value.access.value, '/mcp/repo-s56c' as never);
+      assert.ok(session.ok);
+      assert.equal(session.value.actorRef.subject, clientId as string);
+
+      await authorization.revokeGrant(legacy.value.grant.grantId, OPERATOR_ACTOR);
+      const afterRevoke = await authorization.establishMcpSession(legacy.value.access.value, '/mcp/repo-s56c' as never);
+      assert.equal(afterRevoke.ok, false);
+    });
+  });
+});
+
+test('S56.5 — /oauth/revoke answers 200 for an unknown token, a live one and an already-revoked one, and only the live one changes anything', async () => {
+  await withVolumeAsync(async (volume) => {
+    await withServer(volume, async ({ baseUrl, declarations }) => {
+      await declareRepo(declarations, 'repo-s56d', ['repo.read']);
+      const { accessToken } = await fullOAuthFlow(baseUrl, 'repo-s56d', ['read']);
+      const revoke = (token: string) =>
+        fetch(`${baseUrl}/oauth/revoke`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token }) });
+
+      assert.equal((await revoke('never-issued')).status, 200, 'unknown');
+      assert.equal((await mcpInitialize(baseUrl, 'repo-s56d', accessToken)).status, 200, 'still live after the unknown one');
+      assert.equal((await revoke(accessToken)).status, 200, 'live');
+      assert.equal((await mcpInitialize(baseUrl, 'repo-s56d', accessToken)).status, 401, 'the live one is now revoked');
+      assert.equal((await revoke(accessToken)).status, 200, 'already revoked');
+      assert.equal((await identityEvents(volume, 'token-revoked')).length, 1, 'only the one that changed a row is audited');
     });
   });
 });

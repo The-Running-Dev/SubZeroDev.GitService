@@ -331,10 +331,11 @@ committed separately and before the handler work depending on it. **No slice may
 signature absent from the contract** — where a slice needs tools, amending the contract is its
 first acceptance criterion, not an implementation detail.
 
-**Three gates are live, all raised by this document on 2026-10-08:** `S56.1`, `S57.1` and `S58.1`.
+**Two gates are live, both raised by this document on 2026-10-08:** `S57.1` and `S58.1`.
 Each is a contract amendment (and for S58 a design amendment too), committed before the code in its
-slice that depends on it. Two more were raised the same day and met by their own slices: `S54.1`, the
-re-enrolment gate in § *The HTTP API route table*, and `S55.1`, the MCP route's `GET` stream.
+slice that depends on it. Three more were raised the same day and met by their own slices: `S54.1`, the
+re-enrolment gate in § *The HTTP API route table*; `S55.1`, the MCP route's `GET` stream; and `S56.1`,
+the approving operator as an MCP grant's subject.
 
 Before these, the last gate was `S46.10`, raised by this document on 2026-10-03. The amendment
 of that date (**#343**) gave `ExecError` a `signalled` variant and made a signalled mutating call park
@@ -461,7 +462,7 @@ each agent, not only which client asked.
 Touches: `design/20-contract.md` § `Grant.subject`; `src/surfaces/mcp-routes.ts` (consent POST,
 authorization code record, token exchange); `src/authorization/`.
 Depends on: none
-Status: todo
+Status: done
 Closes: #292
 Acceptance:
   - S56.1 The contract states that a newly approved MCP grant's `subject` is the approving operator and

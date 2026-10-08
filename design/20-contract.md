@@ -2391,6 +2391,18 @@ after a container restart without re-authorising (S14.7). A grant is never re-is
 authorization code — the surface layer deletes the ephemeral code before calling this method, so a
 replay finds no code to exchange rather than reaching the store twice.
 
+**An `mcp` grant's `subject` is the operator who approved it; its `clientId` is the client that asked.**
+The consent `POST` is the only step that knows the operator — the token exchange that later reaches
+`issueMcpGrant` is unauthenticated by design — so the authorization code carries the subject of the
+consent `POST`'s cookie session from approval to exchange, the same way it already carries the
+client, scopes and PKCE challenge. Issuance is audited with the approving operator as the actor
+(`kind: 'operator'`, the operator's `subject`, the requesting client's `clientId`), because approval
+is the operator's act; the agent's own calls under the grant stay `kind: 'mcp'` and now name the
+admitting operator alongside the client. Grants issued before this rule keep the client id as their
+`subject`. Nothing backfills them: no record says who approved them, and a guessed operator is worse
+than a visibly different value. Listing, verification and revocation read `subject` as stored and
+never interpret it, so an old grant behaves exactly as it did.
+
 `expandScopes` is exported, and consumed beyond authorization — `src/contract/tool-parity.ts` calls it to
 compute the widest grant an `mcp` session can hold. It must stay exported for that reason: the parity
 harness measuring what a profile can see has to use the same expansion a real session is built with,
