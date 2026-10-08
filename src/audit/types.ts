@@ -63,7 +63,7 @@ export const UNVERIFIED_AUDIT_CHAIN: AuditChainState = {
   chainBreak: null,
 };
 
-export const AUDIT_RECORD_FORMS = ['call', 'authorization-rejection', 'hatch-intent', 'hatch-outcome', 'file-watcher', 'identity-event', 'lease-takeover', 'watcher-tick-failed', 'totp-reenrol-refusal'] as const;
+export const AUDIT_RECORD_FORMS = ['call', 'authorization-rejection', 'hatch-intent', 'hatch-outcome', 'file-watcher', 'identity-event', 'lease-takeover', 'watcher-tick-failed', 'totp-reenrol-refusal', 'quarantine-deleted'] as const;
 
 export type AuditRecordForm = (typeof AUDIT_RECORD_FORMS)[number];
 
@@ -109,7 +109,8 @@ export type AuditRecordBody =
   | { readonly form: 'identity-event'; readonly event: IdentityEvent }
   | { readonly form: 'lease-takeover'; readonly previousHolder: InstanceLease }
   | { readonly form: 'watcher-tick-failed'; readonly reason: string }
-  | { readonly form: 'totp-reenrol-refusal'; readonly route: string };
+  | { readonly form: 'totp-reenrol-refusal'; readonly route: string }
+  | { readonly form: 'quarantine-deleted'; readonly entry: string; readonly bytes: number };
 
 export type AuditRecord = AuditRecordBase & AuditRecordBody;
 export type AuditAppendInput = Omit<AuditRecordBase, 'sequence' | 'previousHash' | 'hash'> & AuditRecordBody;

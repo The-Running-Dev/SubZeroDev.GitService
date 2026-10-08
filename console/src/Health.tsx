@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ActionButton } from './ActionButton.tsx';
-import { api, loadResource, type FailedOutboxDto, type HealthReportDto, type OutboxRowDto } from './api.ts';
+import { api, loadResource, type FailedOutboxDto, type HealthReportDto, type OutboxRowDto, type QuarantinedCloneDto } from './api.ts';
 
 interface Props {
   readonly onSignedOut: () => void;
@@ -13,7 +13,8 @@ interface Props {
  * volume breakdown, parked count and audit chain state `/health` already
  * carries. Rows are listed rather than counted (S34.1) — a count names no
  * row to act on — so this view fetches `/health` for the summary and
- * `/notifier/failed` for the rows themselves.
+ * `/notifier/failed` for the rows themselves. S58 adds quarantined clones,
+ * each deletable from here and from nowhere else.
  */
 export function Health({ onSignedOut, onBack }: Props) {
   const [health, setHealth] = useState<HealthReportDto | null>(null);
@@ -81,6 +82,25 @@ export function Health({ onSignedOut, onBack }: Props) {
     }
   }
 
+  async function deleteQuarantined(item: QuarantinedCloneDto): Promise<void> {
+    const key = `quarantine-${item.entry}`;
+    setPending(key);
+    try {
+      const res = await api.delete(`/quarantine/${encodeURIComponent(item.entry)}`);
+      if (!res.ok) {
+        if (res.status === 401) {
+          onSignedOut();
+          return;
+        }
+        setError('could not delete the quarantined clone');
+        return;
+      }
+      await load();
+    } finally {
+      setPending(null);
+    }
+  }
+
   if (error) return <p role="alert">{error}</p>;
   if (health === null || outbox === null) return <p>Loading…</p>;
 
@@ -127,6 +147,41 @@ export function Health({ onSignedOut, onBack }: Props) {
               <tr key={consumer} data-testid={`health-volume-consumer-${consumer}`}>
                 <td>{consumer}</td>
                 <td>{bytes}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2>Quarantined clones</h2>
+        <table data-testid="quarantine-list">
+          <thead>
+            <tr>
+              <th>Entry</th>
+              <th>Repository</th>
+              <th>Quarantined</th>
+              <th>Bytes</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {health.quarantined.length === 0 && (
+              <tr>
+                <td colSpan={5} data-testid="quarantine-list-empty">
+                  No quarantined clones.
+                </td>
+              </tr>
+            )}
+            {health.quarantined.map((item) => (
+              <tr key={item.entry} data-testid={`quarantine-row-${item.entry}`}>
+                <td>{item.entry}</td>
+                <td>{item.declarationId}</td>
+                <td>{item.quarantinedAt}</td>
+                <td>{item.bytes}</td>
+                <td>
+                  <ActionButton testId={`delete-quarantine-${item.entry}`} disabled={pending === `quarantine-${item.entry}`} label="Delete" onAction={() => deleteQuarantined(item)} />
+                </td>
               </tr>
             ))}
           </tbody>

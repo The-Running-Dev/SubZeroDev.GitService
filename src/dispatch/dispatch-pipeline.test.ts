@@ -2550,7 +2550,7 @@ test('S27.1 — crossing the maintenance watermark after a mutation requests a p
         if (locks.currentMutationHolder() !== null) readVolumeUsageCalledWhileMutationLockHeld = true;
         await watermarkCheckGate;
         watermarkCheckSettled = true;
-        return ok({ totalBytes: 1000, usedBytes: 900, usedPercent: 90, byConsumer: { clones: 900, 'audit-log': 0, 'structured-store': 0, 'backups-and-snapshots': 0, 'watcher-files': 0 }, storeByTable: {} as never });
+        return ok({ totalBytes: 1000, usedBytes: 900, usedPercent: 90, byConsumer: { clones: 900, 'audit-log': 0, 'structured-store': 0, 'backups-and-snapshots': 0, 'watcher-files': 0, quarantine: 0 }, storeByTable: {} as never });
       },
       requestMaintenance(reason) {
         requested.push(reason);
@@ -2620,7 +2620,7 @@ test('2026-08-13 post-S27 reconciliation — the refuse watermark gates a mutati
       ...cloneStore,
       async readVolumeUsage() {
         readingsTaken += 1;
-        return ok({ totalBytes: 1000, usedBytes: 960, usedPercent: 96, byConsumer: { clones: 960, 'audit-log': 0, 'structured-store': 0, 'backups-and-snapshots': 0, 'watcher-files': 0 }, storeByTable: {} as never });
+        return ok({ totalBytes: 1000, usedBytes: 960, usedPercent: 96, byConsumer: { clones: 960, 'audit-log': 0, 'structured-store': 0, 'backups-and-snapshots': 0, 'watcher-files': 0, quarantine: 0 }, storeByTable: {} as never });
       },
       requestMaintenance() {
         // no-op

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, rmSync, statfsSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statfsSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { applyStoreBusyTimeout } from '../shared/store-busy.ts';
@@ -24,7 +24,7 @@ import type { Audit } from '../audit/audit.ts';
 import { resolveDeclarationCredential } from '../credentials/declaration-credential.ts';
 import type { CredentialResolver } from '../credentials/credentials.ts';
 import { cloneStoreError, type CloneStoreError } from './errors.ts';
-import type { CleanlinessBlocker, CleanlinessVerdict, Clone, CloneHandle, CloneState, CorruptTreeOverride, EvictionBlocker, EvictionOutcome, ObservedGitState, SafeToEvictVerdict } from './types.ts';
+import type { CleanlinessBlocker, CleanlinessVerdict, Clone, CloneHandle, CloneState, CorruptTreeOverride, EvictionBlocker, EvictionOutcome, ObservedGitState, QuarantinedClone, SafeToEvictVerdict } from './types.ts';
 
 export type { MaintenanceReason };
 
@@ -46,6 +46,13 @@ export interface CloneStore {
   isSafeToEvict(declarationId: DeclarationId, acrossAllGenerations: boolean): Promise<Outcome<SafeToEvictVerdict, CloneStoreError>>;
   evictIfSafe(declarationId: DeclarationId): Promise<Outcome<EvictionOutcome, CloneStoreError>>;
   remove(declarationId: DeclarationId, override: CorruptTreeOverride, actor: ActorRef): Promise<Outcome<void, CloneStoreError>>;
+  /** `20-contract.md` § L1 — clone store (S58): every quarantined tree on the volume, with its size. */
+  listQuarantined(): Promise<readonly QuarantinedClone[]>;
+  /**
+   * The only way a quarantined tree leaves the volume (S58). Its one caller is
+   * the cookie route `DELETE /quarantine/{entry}`; no tool reaches it.
+   */
+  deleteQuarantined(entry: string, actor: ActorRef): Promise<Outcome<QuarantinedClone, CloneStoreError>>;
   markAttention(declarationId: DeclarationId, reason: string): Promise<Outcome<void, CloneStoreError>>;
   clearAttention(declarationId: DeclarationId, actor: ActorRef): Promise<Outcome<void, CloneStoreError>>;
   readVolumeUsage(): Promise<Outcome<VolumeUsage, CloneStoreError>>;
@@ -149,9 +156,9 @@ export interface CloneStoreDependencies {
    * audit trail's own segment-directory byte total, folded in the same way
    * `store.usageByTable` is above. Optional so every pre-this-decision test
    * keeps compiling; without it, `audit-log` stays the honest zero it always
-   * was.
+   * was. `append` records each `quarantine-deleted` (S58).
    */
-  readonly audit?: Pick<Audit, 'usageBytes'>;
+  readonly audit?: Pick<Audit, 'usageBytes' | 'append'>;
   /**
    * `byConsumer['watcher-files']`. A plain callback rather than a typed
    * `Pick<Watcher, ...>` — `Watcher` is L2 and `CloneStore` is L1, so typing
@@ -165,6 +172,22 @@ export interface CloneStoreDependencies {
 }
 
 const CLONE_SECONDS_DEFAULT = 300;
+
+/**
+ * `<declarationId>.<compact UTC instant>` (S58). A declaration id cannot hold
+ * a `.`, so the name parses back unambiguously; a name that does not match is
+ * not an entry, and is checked before any path is built from it.
+ */
+const QUARANTINE_ENTRY = /^([a-z0-9][a-z0-9-]{0,62})\.(\d{8}T\d{9}Z)$/;
+
+function compactInstant(at: IsoUtcTimestamp): string {
+  return at.replace(/[-:.]/g, '');
+}
+
+function expandInstant(compact: string): IsoUtcTimestamp {
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(\d{3})Z$/.exec(compact)!;
+  return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}.${m[7]}Z` as IsoUtcTimestamp;
+}
 const MATERIALISATION_LOCK_ACQUIRE_MS_DEFAULT = 30_000;
 const GIT_COMMAND_TIMEOUT_SECONDS = 30;
 
@@ -218,6 +241,30 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
   const materialisationLockAcquireMs = deps.materialisationLockAcquireMs ?? MATERIALISATION_LOCK_ACQUIRE_MS_DEFAULT;
   const watermarks = deps.watermarks ?? DISK_WATERMARKS_DEFAULT;
   const clonesRoot = path.join(volumeRoot, 'clones');
+  const quarantineRoot = path.join(volumeRoot, 'quarantine');
+
+  function parseEntry(entry: string): { readonly declarationId: DeclarationId; readonly quarantinedAt: IsoUtcTimestamp } | null {
+    const m = QUARANTINE_ENTRY.exec(entry);
+    return m ? { declarationId: m[1] as DeclarationId, quarantinedAt: expandInstant(m[2]!) } : null;
+  }
+
+  async function readQuarantined(): Promise<QuarantinedClone[]> {
+    let names: string[];
+    try {
+      names = readdirSync(quarantineRoot, { withFileTypes: true })
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name);
+    } catch {
+      return [];
+    }
+    const entries: QuarantinedClone[] = [];
+    for (const entry of names.sort()) {
+      const parsed = parseEntry(entry);
+      if (!parsed) continue;
+      entries.push({ entry, ...parsed, bytes: await directoryBytes(path.join(quarantineRoot, entry)) });
+    }
+    return entries;
+  }
 
   function clonePathFor(declarationId: DeclarationId): ClonePath {
     return path.join(clonesRoot, declarationId) as ClonePath;
@@ -307,6 +354,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
     const backupsAndSnapshotsBytes = deps.store ? await deps.store.backupBytes() : 0;
     const auditLogBytes = deps.audit ? await deps.audit.usageBytes() : 0;
     const watcherFilesBytes = deps.watcherUsageBytes ? await deps.watcherUsageBytes() : 0;
+    const quarantineBytes = (await readQuarantined()).reduce((sum, e) => sum + e.bytes, 0);
 
     return {
       totalBytes,
@@ -319,6 +367,7 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
         'audit-log': auditLogBytes,
         'backups-and-snapshots': backupsAndSnapshotsBytes,
         'watcher-files': watcherFilesBytes,
+        quarantine: quarantineBytes,
       },
       storeByTable,
     };
@@ -1106,9 +1155,20 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
         if (!override.permitCorruptTree) {
           return err(cloneStoreError({ code: 'corrupt-tree' }, `'${declarationId}' is unreadable — pass permitCorruptTree to clone.remove to proceed`));
         }
-        // Corrupt: the safe-to-remove predicate cannot be computed, and the
-        // override exists exactly for this case (`20-contract.md` § Clone
-        // store: "permits only a tree git cannot read").
+        // Corrupt: the safe-to-remove predicate cannot be computed, so the
+        // override sets the tree aside whole rather than deleting what it
+        // could not inspect (S58). One rename on the same volume.
+        const entry = `${declarationId}.${compactInstant(clock.now())}`;
+        try {
+          mkdirSync(quarantineRoot, { recursive: true });
+          renameSync(clonePath, path.join(quarantineRoot, entry));
+        } catch (cause) {
+          const message = `'${declarationId}' could not be quarantined: ${cause instanceof Error ? cause.message : String(cause)}`;
+          return err(cloneStoreError({ code: 'store-failed', cause: storeError({ code: 'io-failed' }, message) }, message));
+        }
+        const deleted = deleteRow(declarationId);
+        if (!deleted.ok) return err(cloneStoreError({ code: 'store-failed', cause: deleted.error }, deleted.error.summary));
+        return ok(undefined);
       } else {
         // A directory without a row (orphaned before `ensure()` ever wrote
         // one) has no stored generation to read — falls back to the
@@ -1124,6 +1184,40 @@ export function createCloneStore(deps: CloneStoreDependencies): CloneStore {
       const deleted = deleteRow(declarationId);
       if (!deleted.ok) return err(cloneStoreError({ code: 'store-failed', cause: deleted.error }, deleted.error.summary));
       return ok(undefined);
+    },
+
+    async listQuarantined(): Promise<readonly QuarantinedClone[]> {
+      return readQuarantined();
+    },
+
+    async deleteQuarantined(entry, actor): Promise<Outcome<QuarantinedClone, CloneStoreError>> {
+      const unknown = () => err(cloneStoreError({ code: 'quarantine-unknown', entry }, `'${entry}' is not a quarantined clone on this volume`));
+      const parsed = parseEntry(entry);
+      if (!parsed) return unknown();
+      const entryPath = path.join(quarantineRoot, entry);
+      if (!existsSync(entryPath)) return unknown();
+      const bytes = await directoryBytes(entryPath);
+      try {
+        rmSync(entryPath, { recursive: true });
+      } catch (cause) {
+        const message = `'${entry}' could not be deleted: ${cause instanceof Error ? cause.message : String(cause)}`;
+        return err(cloneStoreError({ code: 'store-failed', cause: storeError({ code: 'io-failed' }, message) }, message));
+      }
+      // After the directory is gone, so the record never names an entry that
+      // still exists; an append failure does not undo the deletion (S3).
+      await deps.audit?.append({
+        at: clock.now(),
+        operationId: null,
+        declarationId: parsed.declarationId,
+        generation: null,
+        tool: null,
+        actorRef: actor,
+        context: 'normal',
+        form: 'quarantine-deleted',
+        entry,
+        bytes,
+      });
+      return ok({ entry, ...parsed, bytes });
     },
 
     async markAttention(declarationId, reason): Promise<Outcome<void, CloneStoreError>> {

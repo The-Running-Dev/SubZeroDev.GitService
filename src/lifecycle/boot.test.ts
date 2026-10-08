@@ -1334,7 +1334,7 @@ test('S27.1/S27.5 — runMaintenance evicts least-recently-used clones only once
       notifier,
       deriveCloneStatesFromDisk: async () => [newerClone, oldClone],
       evictIfSafe,
-      readVolumeUsage: async () => ({ totalBytes: 1000, usedBytes: 900, usedPercent: 90, byConsumer: { clones: 500, 'audit-log': 0, 'structured-store': 0, 'backups-and-snapshots': 0, 'watcher-files': 0 }, storeByTable: {} as never }),
+      readVolumeUsage: async () => ({ totalBytes: 1000, usedBytes: 900, usedPercent: 90, byConsumer: { clones: 500, 'audit-log': 0, 'structured-store': 0, 'backups-and-snapshots': 0, 'watcher-files': 0, quarantine: 0 }, storeByTable: {} as never }),
     });
 
     try {
@@ -1386,7 +1386,7 @@ test('S27.1 — runMaintenance never attempts eviction when usage stays below th
         return [];
       },
       evictIfSafe: async (declarationId) => ok({ declarationId, evicted: true, freedBytes: 1, blockers: [] }),
-      readVolumeUsage: async () => ({ totalBytes: 1000, usedBytes: 100, usedPercent: 10, byConsumer: { clones: 0, 'audit-log': 0, 'structured-store': 0, 'backups-and-snapshots': 0, 'watcher-files': 0 }, storeByTable: {} as never }),
+      readVolumeUsage: async () => ({ totalBytes: 1000, usedBytes: 100, usedPercent: 10, byConsumer: { clones: 0, 'audit-log': 0, 'structured-store': 0, 'backups-and-snapshots': 0, 'watcher-files': 0, quarantine: 0 }, storeByTable: {} as never }),
     });
 
     try {

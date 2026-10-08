@@ -59,6 +59,17 @@ export interface CloneHandle {
   readonly activePin: ActivePin;
 }
 
+/**
+ * One tree `remove` set aside under `permitCorruptTree` (S58). Read from the
+ * directory name and the bytes on disk; nothing else records it.
+ */
+export interface QuarantinedClone {
+  readonly entry: string;
+  readonly declarationId: DeclarationId;
+  readonly quarantinedAt: IsoUtcTimestamp;
+  readonly bytes: number;
+}
+
 export interface CorruptTreeOverride {
   readonly permitCorruptTree: boolean;
 }

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -924,10 +924,10 @@ test('S27.2 — at the refuse watermark, ensure() refuses a fresh materialisatio
 
     const findings = result.error.findings ?? [];
     const consumerFindings = findings.filter((f) => f.path === 'volume.byConsumer');
-    assert.equal(consumerFindings.length, 5, 'all five volume consumers are named');
+    assert.equal(consumerFindings.length, 6, 'all six volume consumers are named');
     assert.deepEqual(
       consumerFindings.map((f) => f.rule).sort(),
-      ['audit-log', 'backups-and-snapshots', 'clones', 'structured-store', 'watcher-files'].sort(),
+      ['audit-log', 'backups-and-snapshots', 'clones', 'quarantine', 'structured-store', 'watcher-files'].sort(),
     );
 
     const tableFindings = findings.filter((f) => f.path === 'volume.storeByTable');
@@ -1372,5 +1372,155 @@ test('S44.5 — no path reports needs-attention for a clone with no row and no d
       if (!result.ok) assert.notEqual(result.error.code, 'needs-attention');
     }
     assert.equal(cloneRowState(volume, declaration.id), null, 'refusing wrote no row');
+  });
+});
+
+/** Every regular file under `root`, keyed by its path relative to `root`, with its exact bytes. */
+function snapshotFiles(root: string): Map<string, Buffer> {
+  const files = new Map<string, Buffer>();
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else files.set(path.relative(root, full), readFileSync(full));
+    }
+  };
+  walk(root);
+  return files;
+}
+
+/**
+ * A clone directory Git will not read: a `.git` directory holding a loose
+ * object and a ref but no `HEAD`, beside ordinary working-tree files — the
+ * "partly corrupt" case S58 exists for, where something is still there to
+ * recover. Returns the snapshot of what was written.
+ */
+function writeCorruptClone(clonePath: string): Map<string, Buffer> {
+  mkdirSync(path.join(clonePath, '.git', 'objects', 'ab'), { recursive: true });
+  mkdirSync(path.join(clonePath, '.git', 'refs', 'heads'), { recursive: true });
+  mkdirSync(path.join(clonePath, 'src', 'nested'), { recursive: true });
+  writeFileSync(path.join(clonePath, '.git', 'objects', 'ab', 'cdef0123456789'), Buffer.from([0x78, 0x01, 0x00, 0xff, 0x10, 0x80]));
+  writeFileSync(path.join(clonePath, '.git', 'refs', 'heads', 'main'), 'abcdef0123456789abcdef0123456789abcdef01\n', 'utf8');
+  writeFileSync(path.join(clonePath, 'README.md'), '# unpushed notes\n', 'utf8');
+  writeFileSync(path.join(clonePath, 'src', 'nested', 'work.bin'), Buffer.from([0, 1, 2, 3, 254, 255]));
+  return snapshotFiles(clonePath);
+}
+
+function cloneRowCount(volume: string, declarationId: string): number {
+  const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+  try {
+    return (db.prepare('SELECT COUNT(*) AS n FROM clone WHERE declaration_id = ?').get(declarationId) as { n: number }).n;
+  } finally {
+    db.close();
+  }
+}
+
+test('S58.2 — the override moves an unreadable clone, byte for byte, to a quarantine entry and leaves no clone row', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declaration = fixtureDeclaration('repo-quarantine', createBareGitRemote());
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec: createExec({ volumeRoot: volume }), locks: createLocks(), declarations: declarationsStubFor(declaration) });
+
+    const clonePath = path.join(volume, 'clones', declaration.id);
+    const before = writeCorruptClone(clonePath);
+    const refused = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(refused.ok, false, 'the fixture really is a tree the store will not read');
+
+    const removed = await cloneStore.remove(declaration.id, { permitCorruptTree: true }, OPERATOR);
+    assert.equal(removed.ok, true);
+    assert.equal(existsSync(clonePath), false, 'the original path is free');
+    assert.equal(cloneRowCount(volume, declaration.id), 0, 'no row for the clone');
+
+    const entries = await cloneStore.listQuarantined();
+    assert.equal(entries.length, 1);
+    const entry = entries[0]!;
+    assert.equal(entry.declarationId, declaration.id);
+    assert.match(entry.entry, /^repo-quarantine\.\d{8}T\d{9}Z$/);
+    assert.ok(entry.bytes > 0);
+
+    const after = snapshotFiles(path.join(volume, 'quarantine', entry.entry));
+    assert.deepEqual([...after.keys()].sort(), [...before.keys()].sort(), 'every original file is present under the entry');
+    for (const [relative, bytes] of before) assert.ok(after.get(relative)!.equals(bytes), `${relative} is unchanged`);
+  });
+});
+
+test('S58.3 — disk accounting counts a quarantined entry as its own consumer, at its size', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declaration = fixtureDeclaration('repo-quarantine-usage', createBareGitRemote());
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec: createExec({ volumeRoot: volume }), locks: createLocks(), declarations: declarationsStubFor(declaration) });
+
+    const empty = await cloneStore.readVolumeUsage();
+    assert.equal(empty.ok, true);
+    if (!empty.ok) return;
+    assert.equal(empty.value.byConsumer.quarantine, 0, 'nothing quarantined, nothing counted');
+
+    writeCorruptClone(path.join(volume, 'clones', declaration.id));
+    assert.equal((await cloneStore.remove(declaration.id, { permitCorruptTree: true }, OPERATOR)).ok, true);
+
+    const [entry] = await cloneStore.listQuarantined();
+    const usage = await cloneStore.readVolumeUsage();
+    assert.equal(usage.ok, true);
+    if (!usage.ok) return;
+    assert.ok(entry);
+    assert.equal(usage.value.byConsumer.quarantine, entry.bytes);
+    assert.ok(usage.value.byConsumer.quarantine > 0);
+  });
+});
+
+test('S58.4 — deleting a quarantined entry removes it and audits the operator; an unknown or malformed name is quarantine-unknown', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declaration = fixtureDeclaration('repo-quarantine-delete', createBareGitRemote());
+    const audit = createAudit({ volumeRoot: volume, clock: systemClock });
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec: createExec({ volumeRoot: volume }), locks: createLocks(), declarations: declarationsStubFor(declaration), audit });
+
+    writeCorruptClone(path.join(volume, 'clones', declaration.id));
+    assert.equal((await cloneStore.remove(declaration.id, { permitCorruptTree: true }, OPERATOR)).ok, true);
+    const [entry] = await cloneStore.listQuarantined();
+    assert.ok(entry);
+
+    for (const bad of ['../clones/repo-quarantine-delete', 'repo-quarantine-delete', `${entry.entry}/..`, 'other.20260101T000000000Z']) {
+      const refused = await cloneStore.deleteQuarantined(bad, OPERATOR);
+      assert.equal(refused.ok, false, `'${bad}' is refused`);
+      if (!refused.ok) assert.equal(refused.error.code, 'quarantine-unknown');
+    }
+    assert.equal(existsSync(path.join(volume, 'quarantine', entry.entry)), true, 'a refused name deletes nothing');
+
+    const deleted = await cloneStore.deleteQuarantined(entry.entry, OPERATOR);
+    assert.equal(deleted.ok, true);
+    assert.equal(existsSync(path.join(volume, 'quarantine', entry.entry)), false);
+    assert.deepEqual(await cloneStore.listQuarantined(), []);
+
+    const again = await cloneStore.deleteQuarantined(entry.entry, OPERATOR);
+    assert.equal(again.ok, false, 'a second delete of the same entry is quarantine-unknown');
+
+    const page = await audit.query({ declarationId: null, tool: null, actorSubject: null, form: 'quarantine-deleted', from: null, to: null, limit: 10, cursor: null });
+    assert.equal(page.ok, true);
+    if (!page.ok) return;
+    assert.equal(page.value.records.length, 1, 'one record, for the one deletion that happened');
+    const record = page.value.records[0] as unknown as { entry: string; bytes: number; declarationId: string; actorRef: { subject: string } };
+    assert.equal(record.entry, entry.entry);
+    assert.equal(record.bytes, entry.bytes);
+    assert.equal(record.declarationId, declaration.id);
+    assert.equal(record.actorRef.subject, OPERATOR.subject);
+    await audit.close();
+  });
+});
+
+test('S58.5 — after quarantine, the clone materialises again at its original path and the entry stays', async () => {
+  await withMigratedVolume(async (volume) => {
+    const declaration = fixtureDeclaration('repo-quarantine-again', createBareGitRemote());
+    const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec: createExec({ volumeRoot: volume }), locks: createLocks(), declarations: declarationsStubFor(declaration) });
+
+    const clonePath = path.join(volume, 'clones', declaration.id);
+    writeCorruptClone(clonePath);
+    assert.equal((await cloneStore.remove(declaration.id, { permitCorruptTree: true }, OPERATOR)).ok, true);
+
+    const ensured = await cloneStore.ensure(declaration, fixtureHolder(declaration.id), noopSignal());
+    assert.equal(ensured.ok, true);
+    if (!ensured.ok) return;
+    ensured.value.materialisationLock.release();
+    ensured.value.activePin.release();
+    assert.equal(ensured.value.clone.path, clonePath);
+    assert.equal(ensured.value.clone.state, 'ready');
+    assert.equal((await cloneStore.listQuarantined()).length, 1, 're-materialising does not touch the quarantined entry');
   });
 });

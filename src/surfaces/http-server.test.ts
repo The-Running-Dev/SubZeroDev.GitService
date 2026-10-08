@@ -1,4 +1,6 @@
 import { test } from 'node:test';
+import { readdirSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import type { ObservedGitState } from '../clone/types.ts';
@@ -663,4 +665,69 @@ test('S34.1/S34.3 — /notifier/failed lists rows and clears one, over a cookie 
       assert.equal(clearedId, 'row-1');
     },
   );
+});
+
+const QUARANTINED = { entry: 'repo-q.20261008T120000123Z', declarationId: 'repo-q', quarantinedAt: '2026-10-08T12:00:00.123Z', bytes: 4096 };
+
+function quarantineCloneStore(deleted: unknown[][]): CloneStore {
+  return {
+    ...createStubCloneStore(),
+    async listQuarantined() {
+      return [QUARANTINED] as never;
+    },
+    async deleteQuarantined(entry, actor) {
+      if (entry !== QUARANTINED.entry) return err({ code: 'quarantine-unknown', entry, resultKind: 'precondition', retryable: false, summary: 'no such entry' } as never);
+      deleted.push([entry, actor]);
+      return ok(QUARANTINED as never);
+    },
+  };
+}
+
+test('S58.3 — /health lists every quarantined clone with its size', async () => {
+  await withServer({ cloneStore: quarantineCloneStore([]) }, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/health`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { quarantined: readonly unknown[] };
+    assert.deepEqual(body.quarantined, [QUARANTINED]);
+  });
+});
+
+test('S58.4 — deleting a quarantined clone refuses every bearer token, needs the double-submit token, and passes the operator as actor', async () => {
+  const deleted: unknown[][] = [];
+  await withServer({ identity: createCookieOperatorIdentity(), cloneStore: quarantineCloneStore(deleted) }, async (baseUrl) => {
+    const url = `${baseUrl}/quarantine/${QUARANTINED.entry}`;
+
+    const bearer = await fetch(url, { method: 'DELETE', headers: { Authorization: `Bearer ${TOKEN}` } });
+    assert.equal(bearer.status, 401, 'an operator-api token reaches no cookie route, whatever its scopes');
+
+    const noCsrf = await fetch(url, { method: 'DELETE', headers: cookieHeaders(baseUrl, false) });
+    assert.equal(noCsrf.status, 403);
+    assert.equal(deleted.length, 0, 'neither refused request reached the store');
+
+    const unknown = await fetch(`${baseUrl}/quarantine/repo-q.20200101T000000000Z`, { method: 'DELETE', headers: cookieHeaders(baseUrl, true) });
+    assert.equal(unknown.status, 404);
+
+    const done = await fetch(url, { method: 'DELETE', headers: cookieHeaders(baseUrl, true) });
+    assert.equal(done.status, 200);
+    assert.equal(deleted.length, 1);
+    assert.equal(deleted[0]![0], QUARANTINED.entry);
+    assert.equal((deleted[0]![1] as { kind: string; subject: string }).kind, 'operator');
+    assert.equal((deleted[0]![1] as { subject: string }).subject, COOKIE_SUBJECT);
+  });
+});
+
+test('S58.4 — no MCP tool and no other module reaches deleteQuarantined: the cookie route is its only caller', () => {
+  const srcRoot = path.join(import.meta.dirname, '..');
+  const callers: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts') && /\.deleteQuarantined\(/.test(readFileSync(full, 'utf8'))) {
+        callers.push(path.relative(srcRoot, full).split(path.sep).join('/'));
+      }
+    }
+  };
+  walk(srcRoot);
+  assert.deepEqual(callers, ['surfaces/http-server.ts']);
 });
