@@ -2,6 +2,36 @@
 
 Append-only. Newest at the top. The rejected alternatives are the point — without them, every future session relitigates the same choice.
 
+### 2026-10-08 — Network-share storage is unsupported; the single-instance claim is narrowed to what boot proves (#135)
+Context: `10-design.md`'s two-instances failure mode claimed boot's lock self-test keeps a second instance off a volume. The self-test (S30) proves exclusion between processes on one kernel; on a CIFS/SMB or NFS share, locks can be lost across hosts without either process seeing it, so two instances both start and both report healthy.
+Chosen: Narrow the design's claim to what the self-test proves, and state in `docs/operator-guide.md` that `VOLUME_ROOT` must be a local or container-managed volume and network shares are unsupported. The residual risk on a share is accepted. Sliced as S62.
+Rejected: **Harden the guard** (a lease heartbeat, or a fencing token checked on every write) — a large change to the lifecycle for a deployment shape no operator has asked for, and it still cannot detect every lock-loss mode a network filesystem has. **Accept as-is** — the design would keep claiming protection the code does not give.
+Reversibility: cheap
+
+### 2026-10-08 — The MCP route pushes `notifications/tools/list_changed` over the Streamable HTTP stream (#136)
+Context: A connected agent keeps the tool list from its last `tools/list`. When its grant is narrowed or a redeploy changes the contract fingerprint, the server refuses tools the agent still believes it has, and the agent learns only by failing. The route is POST-only JSON-RPC with no server-to-client channel.
+Chosen: Serve the Streamable HTTP `GET` stream bound to `Mcp-Session-Id`, advertise `tools.listChanged: true`, and send `notifications/tools/list_changed` on a narrowed grant, an advanced epoch, and a fingerprint change across boot. Sliced as S55, whose first test proves a real SDK client honours it before anything else is built.
+Rejected: **Accept as a limitation, documented** — agents degrade to trial and error after every redeploy, and the refusal they hit does not say the list changed.
+Reversibility: cheap
+
+### 2026-10-08 — `GrantView.liveSessions` counts live refresh tokens, computed at read time (#140)
+Context: `listGrants` returns `liveSessions: 0` for every grant; nothing tracks sessions. The figure is in the public `GrantView` type and shown on the grants screen.
+Chosen: The count of the grant's unrevoked, unexpired refresh tokens, computed in the same read as `activeTokens`. A refresh token is what lets a client continue, so it is the honest proxy for a live session. Sliced as S60.
+Rejected: **Drop the field** — a change to a public type to remove information an operator wants. **A session registry** — new persisted state and lifecycle for a figure the token table already answers.
+Reversibility: cheap
+
+### 2026-10-08 — The dispatch pipeline's journal is a required dependency (#216)
+Context: `DispatchPipelineDependencies.journal` is optional, with a comment that it becomes required once S7 ships. S7 shipped long ago; every production composition passes one, and a pipeline built without it skips recording intent silently.
+Chosen: Make it required and remove the absent-journal branches. Sliced as S61.
+Rejected: **Keep it optional with a recorded rationale** — the only rationale was S7's absence, and an optional journal makes the crash-recovery guarantee depend on every caller remembering to pass it.
+Reversibility: cheap
+
+### 2026-10-08 — The project keeps the `SubZeroDev.Git` name; the GitHub remote stays `SubZeroDev.GitService` (#54)
+Context: The repository folder, the code, the container image (`subzerodev-git`) and the MCP server name (`subzerodev-git`) say `SubZeroDev.Git`; the GitHub remote says `SubZeroDev.GitService`. Issue #54 asked for one name.
+Chosen: Keep both as they are. The local and runtime names are what operators and agents see; the remote name is only a URL, and GitHub redirects a rename, so nothing forces it now.
+Rejected: **Unify on `GitService`** — renames the image, the MCP server name every connected client has registered, and the folder, for no behavioural gain. **A new name (Gittify, GitFlows)** — both collide with existing projects.
+Reversibility: cheap
+
 ### 2026-10-08 — Install: `codex/PROFILES.md` refreshed from the kit; `story.md` keeps its own wording
 Context: Re-running `/agentkit:install` found two artifacts divergent from the kit. `codex/PROFILES.md` was an older kit copy with no local edits. `.github/ISSUE_TEMPLATE/story.md` line 24 says `run /brief` where the kit says `/interview`.
 Chosen: Refresh `codex/PROFILES.md` to the kit's current text. Leave `story.md` as it stands — the target's wording wins on a divergence.

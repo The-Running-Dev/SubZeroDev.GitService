@@ -1,6 +1,6 @@
 # Slices — SubZeroDev.Git
 
-Derived from `10-design.md` and `20-contract.md`. Fifty-three vertical slices. Each one ends
+Derived from `10-design.md` and `20-contract.md`. Sixty-four vertical slices. Each one ends
 runnable: it goes from an entry point to persistence and leaves nothing half-wired.
 
 ## How this document is kept
@@ -304,8 +304,25 @@ rest of the watcher work names in its notices. S50 finishes the audit and notifi
 S51 fixes a first-use gap on the same tick protocol. S52 is the evidence harness, and it can only
 prove the corrected outcomes once all four have landed.
 
-S40 to S51 and S53 have landed. No gate is live (§ *Contract gates*, below), so the next slice is
-S52.
+S40 to S53 have landed.
+
+**S54 to S64 were appended on 2026-10-08, because the plan read as finished while thirty issues were
+still open.** Thirteen were issues that S40 to S47 named in their `Closes:` lines and fixed, but that
+nobody closed; each was checked against the code at `e1b30f3` and closed with its evidence. Five more
+were obsolete or already done. What remained was real: four decided changes nobody had built (#276,
+#287, #288, #292), one defect found while verifying (#365), two tooling issues (#65, #150), and four
+decisions, settled the same day in `90-decisions.md` so they could be sliced (#135, #136, #140,
+#216). #54 closed as a decision with no slice.
+
+**S54 runs first because it is the one gap exploitable today**: a stolen recovery code buys a full
+session without a new factor. **S55 runs second because it carries the only untested assumption**,
+that a real MCP client opens the server-to-client stream and honours `list_changed`. Nothing in the
+tree serves that stream yet, and `S55.2` is written to fail fast if the assumption is false. **S56 to
+S58 are the decided contract changes**, ordered by how silently each fails: an approver that is never
+recorded, a generation number that collides without a trace, then a clone destroyed, but only on an
+explicit operator override. **S59 to S62 are small and independent.** **S63 and S64 are maintainer
+work**, last because neither changes behaviour; S64 follows S54 to S56 because those three edit the
+surface files it consolidates.
 
 ## Contract gates
 
@@ -314,7 +331,11 @@ committed separately and before the handler work depending on it. **No slice may
 signature absent from the contract** — where a slice needs tools, amending the contract is its
 first acceptance criterion, not an implementation detail.
 
-**No gate is live.** The last, `S46.10`, was raised by this document on 2026-10-03. The amendment
+**Five gates are live, all raised by this document on 2026-10-08:** `S54.1`, `S55.1`, `S56.1`,
+`S57.1` and `S58.1`. Each is a contract amendment (and for S55 and S58 a design amendment too),
+committed before the code in its slice that depends on it.
+
+Before these, the last gate was `S46.10`, raised by this document on 2026-10-03. The amendment
 of that date (**#343**) gave `ExecError` a `signalled` variant and made a signalled mutating call park
 its journal entry, as a `timed-out` one does, but fixed only *that* the entry parks and not *how* the
 park is reached. The amendment that PR #345 merged closed the gap: a signalled mutating call parks
@@ -377,35 +398,213 @@ carries the reasoning.
 
 ## Outstanding
 
-One slice: S52, appended 2026-09-25. The other
-fifty-two are landed and indexed below.
+Eleven slices, S54 to S64, appended 2026-10-08 from the open-issue backlog. The other fifty-three
+are landed and indexed below.
 
-## S52 — The watcher is proven against a real repository
-
-Delivers: A maintainer can see the watcher's corrected behaviour demonstrated end to end, against a
-real repository and remote. Today it is asserted against mocks that never stage, commit, lock or
-rename anything, which cannot show parity with the blog's watcher that this one replaces.
-Touches: `src/watcher/` tests and a test fixture (scratch clone, bare remote, constrained GitHub CLI
-shim).
-Depends on: S49, S50, S51, S53
-Status: done
-Closes: #87
+## S54 — A recovery code forces re-enrolment before anything else
+Delivers: An operator who signs in with a recovery code must set up a new authenticator before the
+console or API will do anything else for them. Today only the console's own screen asks; every other
+route keeps serving the session, so a stolen recovery code buys a full session with no new factor.
+Touches: `design/20-contract.md` § cookie routes and the recovery-code error row;
+`src/surfaces/console-auth-routes.ts` (`requireSession`); `src/operator-identity/`.
+Depends on: none
+Status: todo
+Closes: #276
 Acceptance:
-  - S52.1 Integration tests run the watcher against a scratch clone and a bare remote, with a
-    constrained GitHub CLI shim or an equivalent host fixture.
-  - S52.2 A test proves the order prepare, apply, stage, commit, push, open PR, and proves no outer
-    mutation lock is held across it.
-  - S52.3 Tests exercise real dirty trees, duplicate terminal names, interrupted claims, malicious links,
-    and merged reconciliation success and failure.
-  - S52.4 A platform prerequisite that cannot be met is detected and skipped with a recorded reason.
-    Symlink creation on an unelevated Windows host is one such case.
-  - S52.5 Every corrected outcome from S49 to S51 is demonstrated with audit and outbox evidence.
-  - S52.6 Against the same real clone, a real symlink or plain file at each of `processing/`,
-    `processed/` and `failed/` produces the refusal D18's table names for that site. A refused
-    terminal move after a real `pr_open` leaves that pull request in the pending list (D19). Each case
-    is demonstrated with audit and outbox evidence, and a symlink the host cannot create is skipped
-    under `S52.4`.
-Out of scope: recreating the blog watcher's architecture. Adding new watcher behaviour.
+  - S54.1 The contract states that "forces TOTP re-enrolment" is a server-side session gate, names the
+    routes a session with `totp_reenrol_required` set may still reach (`/auth/totp-reenrol/begin`,
+    `/auth/totp-reenrol/complete`, logout, and the session read the console needs to show the
+    re-enrolment screen), and names the refusal every other cookie route returns. Committed before
+    S54.2.
+  - S54.2 With `totp_reenrol_required` set, every cookie route outside S54.1's list refuses with the
+    named refusal and performs no side effect. The test walks every cookie route in the route table, so
+    a route added later without the gate fails it.
+  - S54.3 After `completeTotpReenrol` succeeds, the same session reaches every cookie route again
+    without signing in a second time.
+  - S54.4 Each refused request is audited once, under the operator, naming the route.
+Out of scope: changing how recovery codes are issued, burned or counted. Bearer-token routes.
+
+## S55 — A connected agent hears when its tools change
+Delivers: An agent that stays connected across a redeploy, or whose access is narrowed, is told its
+tool list has changed and fetches the new one, instead of carrying on with a list the server no longer
+honours.
+Touches: `design/10-design.md` and `design/20-contract.md` § MCP transport; `src/surfaces/mcp-routes.ts`;
+`src/authorization/` (grant narrowing and epoch); `src/mcp-proxy/proxy.ts`.
+Depends on: none
+Status: todo
+Closes: #136
+Acceptance:
+  - S55.1 The design and contract are amended before any code: the MCP route serves the Streamable
+    HTTP server-to-client stream (`GET` with `text/event-stream`, bound to the `Mcp-Session-Id` an
+    `initialize` minted, authenticated the same way as `POST`), `initialize` advertises
+    `capabilities.tools.listChanged: true`, and the contract names exactly which events send
+    `notifications/tools/list_changed`: a grant narrowed or its epoch advanced, and a session that
+    survives a boot with a different contract fingerprint. Committed separately and first.
+  - S55.2 A real `@modelcontextprotocol/sdk` client, connected through the route, receives
+    `notifications/tools/list_changed` within 2 seconds of its grant being narrowed, and the next
+    tool list it fetches omits the removed tool. This is the first behaviour test written: if the SDK client
+    does not open or honour the stream, the slice stops and reports it.
+  - S55.3 A stream opened without a valid bearer, or for a session id the route did not mint, is
+    refused with the same `401` challenge `POST` uses, and opens nothing.
+  - S55.4 Revoking a grant closes every stream bound to it; the server never reopens a closed stream.
+  - S55.5 The stdio proxy forwards `notifications/tools/list_changed` from the remote to its local
+    client.
+  - S55.6 Open streams per grant are capped by a named constant; a stream over the cap is refused
+    rather than evicting an existing one.
+Out of scope: resource or prompt change notifications. Any server-to-client message other than
+`notifications/tools/list_changed`. Persisting MCP sessions across a restart.
+
+## S56 — Every MCP grant names the operator who approved it
+Delivers: An operator reading the audit trail or the grants screen can see which operator admitted
+each agent, not only which client asked.
+Touches: `design/20-contract.md` § `Grant.subject`; `src/surfaces/mcp-routes.ts` (consent POST,
+authorization code record, token exchange); `src/authorization/`.
+Depends on: none
+Status: todo
+Closes: #292
+Acceptance:
+  - S56.1 The contract states that a newly approved MCP grant's `subject` is the approving operator and
+    its `clientId` is the requesting client, and that grants issued earlier keep the client id as
+    subject. Committed before S56.2.
+  - S56.2 The authorization code record carries the operator subject from the consent POST's session;
+    the grant issued from it has `subject` set to that operator and `clientId` set to the client.
+  - S56.3 Issuance is audited with the approving operator as actor and the client id in the record.
+  - S56.4 A grant issued before this change still lists, verifies and revokes unchanged.
+  - S56.5 The comment above `MAX_PENDING_AUTHORIZATIONS` in `src/surfaces/mcp-routes.ts` no longer says
+    `oauth_client` rows are bounded by disk, and a route-level test shows `/oauth/revoke` answers `200`
+    for an unknown token, a live one and an already-revoked one.
+Out of scope: backfilling a subject onto existing grants. Changing the consent screen's content.
+
+## S57 — A generation number is never issued twice
+Delivers: An operator who removes a repository and declares it again gets a fresh generation, so old
+journal entries and audit records can never be mistaken for the new one's.
+Touches: `design/20-contract.md` § data model and R4; `src/store/` (a new migration);
+`src/declarations/declarations.ts`.
+Depends on: none
+Status: todo
+Closes: #288
+Acceptance:
+  - S57.1 The contract adds a persisted per-declaration-id generation high-water mark that survives
+    removal, and the migration that creates it and backfills it from the highest generation already in
+    `declaration`. Committed before S57.2.
+  - S57.2 Declare, remove, declare again: the second declaration's generation is greater than every
+    generation the id ever had, including the removed one.
+  - S57.3 The migration runs against a store copied from before it, backfills the mark per id, and the
+    migration-matches-contract check passes on it.
+  - S57.4 The declaration and the high-water write happen in one transaction; a forced failure between
+    them leaves neither.
+Out of scope: renumbering existing rows. Changing what `Journal.unsettled` selects on.
+
+## S58 — A corrupt clone is set aside, never destroyed
+Delivers: When an operator overrides the safety check on a clone the service cannot read, its
+contents are moved aside where they can still be recovered, instead of deleted.
+Touches: `design/10-design.md` and `design/20-contract.md` § L1 clone store and health;
+`src/clone/clone-store.ts`; the health view and console.
+Depends on: none
+Status: todo
+Closes: #287
+Acceptance:
+  - S58.1 The design and contract are amended before any code: `permitCorruptTree` moves the clone
+    directory to a named quarantine location on the volume, clears the clone row, counts the
+    quarantined directory as a volume consumer, and lists it in health; only an operator action deletes
+    it. Committed separately and first.
+  - S58.2 Overriding on a clone whose `.git` cannot be read leaves every original file present under
+    the quarantine location, byte for byte, and no row for the clone.
+  - S58.3 Disk accounting and the health view both report the quarantined directory and its size.
+  - S58.4 An operator can delete a quarantined directory; a read-only operator token and any MCP grant
+    cannot, and the deletion is audited.
+  - S58.5 The clone can be materialised again afterwards at its original path.
+Out of scope: automatic repair of a corrupt tree. Retention or expiry of quarantined directories.
+
+## S59 — A check wait measures time with a clock that cannot jump
+Delivers: An operator waiting on pull-request checks gets a wait that ends at its limit and a waited
+time that is true, even if the host clock is stepped mid-wait.
+Touches: `src/host/host-operations.ts`.
+Depends on: none
+Status: todo
+Closes: #365
+Acceptance:
+  - S59.1 `checks_await`'s deadline and its reported `waitedSeconds` are measured from
+    `clock.monotonicMs()`; no duration in `src/host/` subtracts two `now()` readings.
+  - S59.2 With the wall clock stepped forward one hour mid-wait, the wait does not end early; stepped
+    back one hour, it still ends at its limit. Both report the monotonic elapsed time.
+Out of scope: changing the wait's limits or poll interval.
+
+## S60 — A grant shows how many sessions are live
+Delivers: An operator looking at a grant sees how many client sessions can still continue under it,
+instead of a figure that is always zero.
+Touches: `src/authorization/authorization.ts` (`listGrants`); the grants view.
+Depends on: none
+Status: todo
+Closes: #140
+Acceptance:
+  - S60.1 `GrantView.liveSessions` is the count of the grant's refresh tokens that are unrevoked and
+    unexpired, computed at read time in the same read as `activeTokens`; a revoked grant shows `0`.
+  - S60.2 A test issues two refresh tokens under one grant, then revokes one and expires the other, and
+    the count reads 2, 1, 0.
+Out of scope: a session registry. Counting stdio or console sessions.
+
+## S61 — The dispatch pipeline always has its journal
+Delivers: A maintainer can no longer compose a dispatch pipeline that silently skips recording
+intent, because the journal is a required dependency rather than an optional one.
+Touches: `src/dispatch/dispatch-pipeline.ts`; its callers and tests.
+Depends on: none
+Status: todo
+Closes: #216
+Acceptance:
+  - S61.1 `DispatchPipelineDependencies.journal` is required; the expired "required only once S7
+    ships" comment is gone, and the type check fails on a caller that omits it.
+  - S61.2 Every branch that tested for an absent journal is removed, and the full test suite passes.
+Out of scope: changing what the journal records.
+
+## S62 — The storage guidance says where single-instance ownership stops
+Delivers: An operator deploying the service is told plainly that a network share is not supported
+storage, and why, instead of reading a design that claims protection the boot check cannot give.
+Touches: `design/10-design.md` (the two-instances failure mode and boot step 1);
+`docs/operator-guide.md`.
+Depends on: none
+Status: todo
+Closes: #135
+Acceptance:
+  - S62.1 `10-design.md`'s claim about two instances against one volume states what boot's self-test
+    proves (exclusion between processes on one kernel) and what it cannot see (lock loss across hosts
+    on a network share), citing S30 and the 2026-10-08 decision.
+  - S62.2 `docs/operator-guide.md` states that `VOLUME_ROOT` must be a local or container-managed
+    volume and that CIFS/SMB and NFS shares are unsupported, naming the failure: two instances both
+    start and both report healthy.
+  - S62.3 The design check reports no new finding.
+Out of scope: changing the lease or the self-test.
+
+## S63 — The contract's registry tables are generated from the tools
+Delivers: A maintainer who changes a tool's declaration finds the contract's table for it updated by a
+generator and checked by the build, instead of having to remember to edit it by hand.
+Touches: `scripts/` (a generator and an integrity check, after `generate-migration-0001.ts`);
+`design/20-contract.md` registry tables; the build script.
+Depends on: none
+Status: todo
+Closes: #150
+Acceptance:
+  - S63.1 A generator produces the contract's registry tables from the tree's `ToolDeclaration` values.
+  - S63.2 An integrity check in the build fails when the committed tables differ from the generator's
+    output; shown failing on a deliberately edited table and passing on the real one.
+  - S63.3 The committed tables are replaced by the generated output, with the content diff showing no
+    lost value.
+Out of scope: changing the table format to suit the generator. If the generator cannot express the
+current tables without loss, the slice stops and reports it.
+
+## S64 — One JSON helper for every HTTP surface
+Delivers: A maintainer changing how the service reads a request body or writes a JSON response does it
+in one place, with each route's size limit still stated where the route is.
+Touches: `src/surfaces/` (every file defining `sendJson` or `readJsonBody`); a shared helper.
+Depends on: S54, S55, S56
+Status: todo
+Closes: #65
+Acceptance:
+  - S64.1 One shared helper owns JSON response writing and request-body parsing; no file under
+    `src/surfaces/` defines its own `sendJson` or `readJsonBody`.
+  - S64.2 Every route keeps its existing body-size limit, passed explicitly; a test per distinct limit
+    shows a body at the limit accepted and one byte over refused.
+Out of scope: changing any limit, route payload or status code.
 
 ---
 
@@ -467,6 +666,7 @@ Bodies retired; the closed issue is the record. Criteria are not re-derived from
 | **S53** | A tampered watcher folder stops delivery, and the operator hears once | [#330](../../issues/330), closed | S53.1–S53.10 | `f3f0d7b` |
 | **S50** | Every watcher outcome is audited, and every failure is told | [#318](../../issues/318), closed | S50.1–S50.7 | `6ef5231` |
 | **S51** | A watched repository clones itself on first use | [#319](../../issues/319), closed | S51.1–S51.3 | `c87b475` |
+| **S52** | The watcher is proven against a real repository | [#320](../../issues/320), closed | S52.1–S52.6 | `2aa6647` |
 
 Three rows carry a name this document changed after the issue was opened: #31 is titled "A dropped
 file becomes a pull request…" and #92 "A consumer can declare a safe content-drop protocol", both
