@@ -304,8 +304,8 @@ rest of the watcher work names in its notices. S50 finishes the audit and notifi
 S51 fixes a first-use gap on the same tick protocol. S52 is the evidence harness, and it can only
 prove the corrected outcomes once all four have landed.
 
-S40 to S49 and S53 have landed. No gate is live (§ *Contract gates*, below), so the next slice is S50,
-with S51 and S52 following in the order above.
+S40 to S51 and S53 have landed. No gate is live (§ *Contract gates*, below), so the next slice is
+S52.
 
 ## Contract gates
 
@@ -377,57 +377,8 @@ carries the reasoning.
 
 ## Outstanding
 
-Three slices: S50 to S52, appended 2026-09-25. The other
-fifty are landed and indexed below.
-
-## S50 — Every watcher outcome is audited, and every failure is told
-
-Delivers: An operator learns about every file the watcher failed to deliver and every pull request it
-could not finish reconciling, with enough detail to act. That includes the failures that today only
-reach a console log, or nothing at all. Removing a repository cannot discard a pull request the watcher
-is still following.
-Touches: `src/watcher/watcher.ts`, `src/watcher/types.ts`, `src/declarations/declarations.ts`
-(`remove`).
-Depends on: S49 (the SHA named in S50.4), S53 (the tamper refusal S50.1 audits)
-Closes: #81, #82, #84, #88
-Acceptance:
-  - S50.1 A terminal move that fails is audited and notified at `attention`, including a refusal on a
-    tampered state directory. It never escapes the tick unrecorded.
-  - S50.2 An exception escaping a watcher tick is audited and notified at `attention`, not only written
-    to the console.
-  - S50.3 A failed `pr_enable_auto_merge` after `pr_open` succeeded leaves the file in `processed/`. It
-    is audited and notified at `attention` naming the open pull request, and never moved to `failed/`.
-  - S50.4 Once a pull request reports merged, the pending record is removed after the first
-    reconciliation attempt. A successful reconciliation audits the normal terminal outcome. A failed one
-    audits and notifies at `attention`, naming the PR, the branch, the pushed SHA and the failure
-    reason.
-  - S50.5 Tests drive both merged outcomes from a real merged-status fixture, not from a corrupted
-    pending list.
-  - S50.6 `declaration.remove` returns `watcher-directory-not-empty` while the pending list holds at
-    least one entry for the declaration, counting those entries. An absent or empty list does not
-    block, and removal deletes nothing.
-  - S50.7 Production watcher code contains no `as never` casts.
-Out of scope: implementing the state-directory tamper refusal, which is S53's. D18 and D19 fixed it on
-2026-09-25, and S50.1 audits it as S53 leaves it.
-
-## S51 — A watched repository clones itself on first use
-
-Delivers: An operator who sets up a file watcher on a repository that has not been cloned yet, or whose
-clone was cleaned up, sees the first dropped file processed. Today it sits until something unrelated
-creates the clone. A clone with uncommitted changes is reported as exactly that, rather than as
-needing attention.
-Touches: `src/watcher/watcher.ts`.
-Depends on: S50
-Closes: #286
-Acceptance:
-  - S51.1 A watcher tick against an `absent` or `evicted` clone materialises it the way any other first
-    use does, then applies the clean-tree gate on that same tick. A test drops a file for a
-    never-cloned declaration and asserts a pull request is opened on the first tick.
-  - S51.2 A dirty clone is reported `clone-not-clean`, and only a clone genuinely in `needs-attention`
-    is reported `clone-needs-attention`.
-  - S51.3 A clone that fails to materialise is reported with its failure, not as
-    `clone-needs-attention`, and the file stays in the inbox.
-Out of scope: changing the tick protocol or the clean-tree gate itself.
+One slice: S52, appended 2026-09-25. The other
+fifty-two are landed and indexed below.
 
 ## S52 — The watcher is proven against a real repository
 
@@ -437,6 +388,7 @@ rename anything, which cannot show parity with the blog's watcher that this one 
 Touches: `src/watcher/` tests and a test fixture (scratch clone, bare remote, constrained GitHub CLI
 shim).
 Depends on: S49, S50, S51, S53
+Status: todo
 Closes: #87
 Acceptance:
   - S52.1 Integration tests run the watcher against a scratch clone and a bare remote, with a
@@ -513,6 +465,8 @@ Bodies retired; the closed issue is the record. Criteria are not re-derived from
 | **S47** | Nothing waits forever, and a busy store is retried | [#315](../../issues/315), closed | S47.1–S47.4 | `0b88d38` |
 | **S48** | The console and the health view show what is real | [#316](../../issues/316), closed | S48.1–S48.5 | `0b88d38` |
 | **S53** | A tampered watcher folder stops delivery, and the operator hears once | [#330](../../issues/330), closed | S53.1–S53.10 | `f3f0d7b` |
+| **S50** | Every watcher outcome is audited, and every failure is told | [#318](../../issues/318), closed | S50.1–S50.7 | `6ef5231` |
+| **S51** | A watched repository clones itself on first use | [#319](../../issues/319), closed | S51.1–S51.3 | `c87b475` |
 
 Three rows carry a name this document changed after the issue was opened: #31 is titled "A dropped
 file becomes a pull request…" and #92 "A consumer can declare a safe content-drop protocol", both
