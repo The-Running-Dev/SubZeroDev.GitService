@@ -10,7 +10,7 @@ const EMPTY_FILTER: AuditFilter = { declarationId: '', tool: '', actorSubject: '
 
 // Mirrors `AUDIT_RECORD_FORMS` in `src/audit/types.ts` — kept as a literal copy because
 // the console bundle does not import server-side modules; update both together.
-const RECORD_FORMS = ['call', 'authorization-rejection', 'hatch-intent', 'hatch-outcome', 'file-watcher', 'identity-event', 'lease-takeover', 'watcher-tick-failed', 'totp-reenrol-refusal'];
+const RECORD_FORMS = ['call', 'authorization-rejection', 'hatch-intent', 'hatch-outcome', 'file-watcher', 'identity-event', 'lease-takeover', 'watcher-tick-failed', 'totp-reenrol-refusal', 'quarantine-deleted'];
 
 function ChainSummary({ chain }: { readonly chain: AuditPageDto['chain'] }) {
   return (

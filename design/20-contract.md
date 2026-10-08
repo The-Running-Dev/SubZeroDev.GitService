@@ -497,6 +497,14 @@ rather than an `identity-event`, because an `identity-event` carries no field na
 attempted, and a record that says only "refused" cannot tell an operator whether a stolen code was
 used to try to mint a token or merely to read the landing view.
 
+**`quarantine-deleted` records an operator deleting one quarantined clone** (S58; the quarantine is
+stated in § *L1 — clone store*). `actorRef` is the operator; `declarationId` is the id the entry was
+quarantined from, parsed from its name, which may since have been removed or declared again;
+`operationId`, `generation` and `tool` are null; `context` is `normal`. `entry` is the entry's name and
+`bytes` its size as measured immediately before deletion. The record is appended after the directory
+is gone, so a record never names an entry that still exists; an append that fails does not undo the
+deletion, as for every other form (**S3**).
+
 **Canonical serialisation (resolves U9).** `hash` is `SHA256_hex(canonical(record))`, where
 `record` is the full flattened `AuditRecord` — `AuditRecordBase` merged with whichever
 `AuditRecordBody` variant applies, exactly as the type appears — with its own `hash` field omitted
@@ -753,6 +761,8 @@ Declared across `src/store/volume-usage.ts` (`VolumeConsumer`, `VolumeUsage`),
 `VolumeConsumer` and `StoreTableName` are closed sets so that usage accounting is total: every byte on
 the volume is attributed to exactly one consumer, and adding a table without adding it here is a
 compile error rather than a silent gap in the report. That is the point of enumerating them.
+`quarantine` (S58) is the bytes under the volume's `quarantine/` directory, measured from disk on each
+reading, because no row holds them.
 
 `RetentionReport.skipped` carries *why* rows survived a pass, and it exists because a retention pass
 that deletes nothing is indistinguishable from one that failed unless it says what it declined to
@@ -1354,6 +1364,9 @@ single record does.
 audit segment and a new payload in `notification_outbox.payload`, whose `declaration_id` is already
 nullable. Segments and rows written before it hold none, and a verifier reads them unchanged.
 `totp-reenrol-refusal` (S54) is the same: a new line shape in a segment, no table, no migration.
+So is `quarantine-deleted` (S58). The quarantine itself is directories on the volume, read from disk
+whenever it is listed; no row records an entry, so an entry made by hand or left by a crash is listed
+the same way.
 
 ---
 
@@ -1525,8 +1538,22 @@ whether any era left work in the tree, eviction asks about the current one.
 `requestMaintenance` returns `void` and never awaits, because it is called on the post-mutation
 path, where eviction must not run.
 
-`remove` with `permitCorruptTree` still refuses when the tree holds commits unreachable from
-`origin/<base>`. It is never a way to discard unpushed work.
+**`remove` never destroys a tree it could not inspect** (S58). On a tree Git can read,
+`permitCorruptTree` changes nothing: the blockers are computed and any one refuses, unpushed commits
+included. On a tree Git cannot read, the blockers cannot be computed, so the override does not delete
+the directory — it moves it, whole and unaltered, to its own entry under `quarantine/` on the volume
+and clears the clone row. The entry's name is the declaration id, a `.`, and the UTC instant of the
+move in compact ISO form to the millisecond; a declaration id cannot contain `.`, so the name parses
+back unambiguously, and anything that does not parse is not an entry. The original path is then free,
+so the next `ensure` materialises a fresh clone there.
+
+A partly corrupt `.git` can still hold objects and refs a person can recover by hand, which is why
+the override sets the tree aside instead of removing it. Nothing in the service reads, repairs or
+expires a quarantined entry. `listQuarantined` reports each with its size; `deleteQuarantined` is the
+only way one leaves the volume. It is reached from one cookie route (§ *The HTTP API route table*) and
+from no tool, so no operator API token and no MCP grant can delete one. Each deletion appends one
+`quarantine-deleted` audit record (§ *Audit*). An entry name that is not on the volume answers
+`quarantine-unknown`.
 
 **`isClean` observes Git, and a lifecycle state is not a substitute for it.** `Clone.state` is a
 record of what the store last decided about a clone; `ready` says the directory is materialised and
@@ -2464,8 +2491,8 @@ The pattern is the authority; the template is how to read it.
 
 `LivenessReport` is the **only** payload served without authentication, on `/healthz`. It carries
 readiness and the running commit and nothing else. `VersionReport` and `HealthReport` are
-authenticated console routes: the fingerprints, the chain state, the failing credential references
-and the volume breakdown are all operator data, and item 15's companion check reaches the catalogue
+authenticated console routes: the fingerprints, the chain state, the failing credential references,
+the quarantined clones (S58) and the volume breakdown are all operator data, and item 15's companion check reaches the catalogue
 through an authenticated `tools/list` rather than through the probe.
 
 A bearer route accepts no cookie and a cookie route accepts no bearer — **E6** — except for the two
@@ -2612,7 +2639,11 @@ failing-credential views (S8, S9, S34). `/parked-operations*` spans every declar
 listing and resolves by `operationId`, which is not itself a repository dimension; clearing a
 failing credential names the declaration it was recorded against directly in its path. The two
 `/notifier/failed*` rows are new with S34: the health view's failed-outbox list and its own way
-out, which had a `Notifier` member (`clearFailed`) but no route before this slice.
+out, which had a `Notifier` member (`clearFailed`) but no route before this slice. The
+`/quarantine/{entry}` row is new with S58: the health view's way to delete a quarantined clone. It
+carries no repository dimension because an entry is detached from any declaration — the id it came
+from may since have been removed or declared again, so scoping it to that id would bind it to a later
+era that never held it. It is cookie only, so no operator API token reaches it whatever its scopes.
 
 | Path | Method | Credential | Repository dimension |
 |---|---|---|---|
@@ -2621,6 +2652,7 @@ out, which had a `Notifier` member (`clearFailed`) but no route before this slic
 | `/failing-credentials/{credentialRef}/{declarationId}/clear` | `POST` | cookie | yes |
 | `/notifier/failed` | `GET` | cookie | no |
 | `/notifier/failed/{id}/clear` | `POST` | cookie | no |
+| `/quarantine/{entry}` | `DELETE` | cookie | no |
 
 **Audit trail (`audit-routes.ts`)** — the audit view (S33), under `audit.read`. No repository
 dimension: `declarationId` narrows the query as a filter, the same as `tool` and `actorSubject`,
@@ -2637,17 +2669,17 @@ which name a `declarationId` directly in their path; `/oauth/authorize`'s `GET` 
 `resource` query parameter naming one, but the table below classifies routes by path rather than by
 query, consistent with every other row here.
 
-**The closed set, and the count S18.14 asks for.** Thirty-two routes above carry no repository
+**The closed set, and the count S18.14 asks for.** Thirty-three routes above carry no repository
 dimension — the three liveness/version/health routes, the ten authentication routes, the two
 declaration listing/creation routes, the six grants/authorization routes, the two
-parked-operations routes, the two `/notifier/failed*` routes, `/audit`, and the six no-dimension
+parked-operations routes, the two `/notifier/failed*` routes, `/quarantine/{entry}`, `/audit`, and the six no-dimension
 OAuth/MCP routes below (`/.well-known/oauth-authorization-server`, `/oauth/register`,
 `/oauth/authorize` ×2 methods, `/oauth/token`, `/oauth/revoke`). This is the closed set; nothing
 may be added to it without a contract amendment naming why the new route has no repository to
 scope to. The remaining eleven routes each carry a `declarationId` (or the equivalent —
 `/failing-credentials/{credentialRef}/{declarationId}/clear`'s second segment) directly in their
 path: the seven declaration-management and tool routes above, `/failing-credentials/.../clear`, the
-protected-resource metadata document, and the MCP transport's two methods. Forty-three routes in total.
+protected-resource metadata document, and the MCP transport's two methods. Forty-four routes in total.
 
 #### OAuth endpoints and the MCP transport (resolves U5)
 
@@ -2918,6 +2950,7 @@ type CloneStoreError = ModuleErrorBase & (
   | { readonly code: 'recovery-pending' }
   | { readonly code: 'needs-attention'; readonly reason: string }
   | { readonly code: 'store-failed'; readonly cause: StoreError }
+  | { readonly code: 'quarantine-unknown'; readonly entry: string }
 );
 ```
 
@@ -2929,10 +2962,11 @@ type CloneStoreError = ModuleErrorBase & (
 | `corrupt-tree` | A safety-relevant git probe over the clone could not be run, so the tree's state cannot be established. The state is never inferred from a failed probe — a command that cannot run is not evidence of safety | no | `precondition` naming `clone.remove` with its override as the exit |
 | `not-safe-to-evict` | The interlock refused | no | Report the blockers. The space request is refused; the work is never discarded |
 | `not-safe-to-remove` | `clone.remove` refused | no | `precondition`. Making the work pushable is the exit; making it discardable is not |
-| `disk-full` | The refuse watermark blocked an operation needing space | no | `precondition` naming which of the five consumers holds the volume, with the store broken down by table, and the declarations blocking eviction |
+| `disk-full` | The refuse watermark blocked an operation needing space | no | `precondition` naming which of the six consumers holds the volume, with the store broken down by table, and the declarations blocking eviction |
 | `recovery-pending` | A mutation was attempted before the lazy pass reached this declaration | no | Run recovery first. Reads are unaffected |
 | `needs-attention` | A parked entry blocks ordinary mutations | no | `precondition`. Reads, and the repair session under `attention.resolve`, still work |
 | `store-failed` | A metadata write failed | only if the cause is | `infrastructure` |
+| `quarantine-unknown` | `deleteQuarantined` named an entry that is not on the volume, or a name that is not an entry's | no | `precondition`; the route answers `404` |
 
 ### Journal
 

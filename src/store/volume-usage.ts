@@ -11,9 +11,10 @@ import type { StoreTableName } from './structured-store.ts';
  * (`Watcher.usageBytes`, folded into `CloneStore` by callback rather than
  * import — `Watcher` is L2, `CloneStore` is L1). Every consumer here is real
  * once its owning module is wired into `CloneStore`'s dependencies, and an
- * honest zero when it is not.
+ * honest zero when it is not. `quarantine` (S58) is measured from the
+ * volume's `quarantine/` directory on every reading, since no row holds it.
  */
-export type VolumeConsumer = 'clones' | 'audit-log' | 'structured-store' | 'backups-and-snapshots' | 'watcher-files';
+export type VolumeConsumer = 'clones' | 'audit-log' | 'structured-store' | 'backups-and-snapshots' | 'watcher-files' | 'quarantine';
 
 /** `20-contract.md` § Deployment configuration. Defaults fixed there: 85 and 95. */
 export interface DiskWatermarks {
@@ -37,6 +38,7 @@ const ZERO_BY_CONSUMER: Readonly<Record<VolumeConsumer, number>> = {
   'structured-store': 0,
   'backups-and-snapshots': 0,
   'watcher-files': 0,
+  quarantine: 0,
 };
 
 const ZERO_BY_TABLE: Readonly<Record<StoreTableName, number>> = {

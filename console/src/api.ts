@@ -206,6 +206,13 @@ export interface VolumeUsageDto {
   readonly byConsumer: Readonly<Record<string, number>>;
 }
 
+export interface QuarantinedCloneDto {
+  readonly entry: string;
+  readonly declarationId: string;
+  readonly quarantinedAt: string;
+  readonly bytes: number;
+}
+
 export interface HealthReportDto {
   readonly ready: boolean;
   readonly provisioningPending: boolean;
@@ -215,6 +222,7 @@ export interface HealthReportDto {
   readonly failingCredentialRefs: readonly CredentialFailureMarkDto[];
   readonly parkedOperations: number;
   readonly volume: VolumeUsageDto;
+  readonly quarantined: readonly QuarantinedCloneDto[];
 }
 
 export interface OutboxRowDto {

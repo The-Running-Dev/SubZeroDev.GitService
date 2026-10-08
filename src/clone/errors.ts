@@ -17,12 +17,13 @@ export type CloneStoreError = ModuleErrorBase &
     | { readonly code: 'recovery-pending' }
     | { readonly code: 'needs-attention'; readonly reason: string }
     | { readonly code: 'store-failed'; readonly cause: StoreError }
+    | { readonly code: 'quarantine-unknown'; readonly entry: string }
   );
 
 /**
  * `20-contract.md` § Error semantics › Clone store. `findings` is optional
  * and only ever populated for `disk-full` — S27.2's "naming which of the
- * five consumers holds the volume, with the store broken down by table, and
+ * six consumers holds the volume, with the store broken down by table, and
  * the declarations blocking eviction", read generically by
  * `moduleErrorToToolResult` off `ModuleErrorBase.findings`.
  */

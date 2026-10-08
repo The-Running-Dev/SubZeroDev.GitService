@@ -28,6 +28,12 @@ export function createStubCloneStore(): CloneStore {
     async deriveAllStatesFromDisk() {
       return [];
     },
+    async listQuarantined() {
+      return [];
+    },
+    async deleteQuarantined(entry) {
+      return err(cloneStoreError({ code: 'quarantine-unknown', entry }, 'stub: nothing is quarantined'));
+    },
     async observeGitState() {
       return err(cloneStoreError({ code: 'needs-attention', reason: 'stub: observeGitState not exercised' }, 'stub'));
     },

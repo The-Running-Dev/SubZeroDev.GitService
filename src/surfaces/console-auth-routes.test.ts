@@ -422,8 +422,8 @@ async function refusalRecords(volume: string): Promise<readonly AuditRecord[]> {
 test('S54.1 — the contract names the four routes the re-enrolment gate leaves open among its cookie routes', () => {
   const routes = cookieRoutesFromContract().map((r) => `${r.method} ${r.template}`);
   for (const open of REENROL_GATE_OPEN) assert.ok(routes.includes(open), `${open} is a cookie route in the contract`);
-  // 27 cookie-reachable routes: 4 the gate leaves open, 23 it refuses.
-  assert.equal(routes.length, 27, routes.join('\n'));
+  // 28 cookie-reachable routes: 4 the gate leaves open, 24 it refuses (S58 added DELETE /quarantine/{entry}).
+  assert.equal(routes.length, 28, routes.join('\n'));
 });
 
 test('S54.2 / S54.4 — a recovery-code session is refused on every cookie route outside the open four, with no side effect, audited once each', async () => {
@@ -435,7 +435,7 @@ test('S54.2 / S54.4 — a recovery-code session is refused on every cookie route
       async (baseUrl) => {
         const { sessionCookieHeader, csrfToken } = await enrolAndLoginWithRecoveryCode(baseUrl);
         const gated = cookieRoutesFromContract().filter((r) => !REENROL_GATE_OPEN.has(`${r.method} ${r.template}`));
-        assert.equal(gated.length, 23);
+        assert.equal(gated.length, 24);
 
         calls.length = 0;
         for (const route of gated) {

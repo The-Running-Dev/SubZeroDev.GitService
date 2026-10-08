@@ -10,7 +10,7 @@ import type { Session } from '../shared/session.ts';
 import type { OperatorSession } from '../operator-identity/operator-identity.ts';
 import type { CapabilityName } from '../contract/capabilities.ts';
 import type { Authorization } from '../authorization/authorization.ts';
-import type { ObservedGitState, PreState } from '../clone/types.ts';
+import type { ObservedGitState, PreState, QuarantinedClone } from '../clone/types.ts';
 import type { OperationJournalEntry } from '../journal/types.ts';
 import type { NotifierError } from '../notifier/errors.ts';
 import type { OutboxRow } from '../notifier/types.ts';
@@ -67,6 +67,7 @@ export interface HealthReport {
   readonly failingCredentialRefs: readonly CredentialFailureMark[];
   readonly parkedOperations: number;
   readonly volume: VolumeUsage;
+  readonly quarantined: readonly QuarantinedClone[];
 }
 
 export interface SurfacesDependencies
@@ -266,6 +267,7 @@ const RESERVED_API_PATHS: readonly RegExp[] = [
   /^\/parked-operations(\/|$)/,
   /^\/failing-credentials\//,
   /^\/notifier\//,
+  /^\/quarantine\//,
   /^\/health$/,
   /^\/audit$/,
 ];
@@ -452,6 +454,26 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
     return;
   }
 
+  // The health view's way to delete a quarantined clone (S58). Cookie only, so
+  // no operator API token reaches it whatever its scopes, and no repository
+  // dimension: the id an entry came from may since have been declared again.
+  const quarantineMatch = /^\/quarantine\/([^/]+)$/.exec(url.pathname);
+  if (req.method === 'DELETE' && quarantineMatch) {
+    const session = await requireSession(deps, req, res);
+    if (!session) return;
+    if (!csrfOk(req)) {
+      sendJson(res, 403, { error: 'csrf-check-failed' });
+      return;
+    }
+    const deleted = await deps.cloneStore.deleteQuarantined(decodeURIComponent(quarantineMatch[1]!), operatorActorFor(session));
+    if (deleted.ok) {
+      sendJson(res, 200, { deleted: true, entry: deleted.value.entry, bytes: deleted.value.bytes });
+      return;
+    }
+    sendJson(res, deleted.error.code === 'quarantine-unknown' ? 404 : 503, { error: deleted.error.code, summary: deleted.error.summary });
+    return;
+  }
+
   // `bearer or cookie` since S34 — the console's own health view.
   if (req.method === 'GET' && url.pathname === '/health') {
     if (!(await requireBearerOrCookieSession(deps, req, res, 'repo.read'))) return;
@@ -474,6 +496,7 @@ async function handleRequest(deps: SurfacesDependencies, req: IncomingMessage, r
       failingCredentialRefs: deps.failingCredentialRefs ? await deps.failingCredentialRefs() : [],
       parkedOperations: parked.length,
       volume: usage.value,
+      quarantined: await deps.cloneStore.listQuarantined(),
     };
     sendJson(res, 200, report);
     return;

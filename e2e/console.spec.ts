@@ -424,6 +424,7 @@ test('S18.12/S18.13/S18.10/S18.2/S31.4/S31.5/S32.1/S32.2/S32.3/S32.4/S33.2/S33.3
   await page.getByTestId('nav-health').click();
   await expect(page.getByTestId('health-parked-count')).toHaveText('2');
   await expect(page.getByTestId('failed-outbox-list')).toBeVisible();
+  await expect(page.getByTestId('quarantine-list-empty')).toBeVisible();
   const outboxRows = page.locator('[data-testid="failed-outbox-list"] tbody tr[data-testid^="failed-outbox-row-"]');
   await expect(outboxRows).toHaveCount(1);
 

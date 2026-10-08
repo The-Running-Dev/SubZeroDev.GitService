@@ -331,11 +331,10 @@ committed separately and before the handler work depending on it. **No slice may
 signature absent from the contract** — where a slice needs tools, amending the contract is its
 first acceptance criterion, not an implementation detail.
 
-**One gate is live, raised by this document on 2026-10-08:** `S58.1`, a contract and design
-amendment committed before the code in its slice that depends on it. Four more were raised the same
-day and met by their own slices: `S54.1`, the re-enrolment gate in § *The HTTP API route table*;
-`S55.1`, the MCP route's `GET` stream; `S56.1`, the approving operator as an MCP grant's subject; and
-`S57.1`, the generation high-water mark and migration 0003.
+**No gate is live.** Five were raised by this document on 2026-10-08 and met by their own slices:
+`S54.1`, the re-enrolment gate in § *The HTTP API route table*; `S55.1`, the MCP route's `GET`
+stream; `S56.1`, the approving operator as an MCP grant's subject; `S57.1`, the generation
+high-water mark and migration 0003; and `S58.1`, the corrupt-tree override's quarantine.
 
 Before these, the last gate was `S46.10`, raised by this document on 2026-10-03. The amendment
 of that date (**#343**) gave `ExecError` a `signalled` variant and made a signalled mutating call park
@@ -503,7 +502,7 @@ contents are moved aside where they can still be recovered, instead of deleted.
 Touches: `design/10-design.md` and `design/20-contract.md` § L1 clone store and health;
 `src/clone/clone-store.ts`; the health view and console.
 Depends on: none
-Status: todo
+Status: done
 Closes: #287
 Acceptance:
   - S58.1 The design and contract are amended before any code: `permitCorruptTree` moves the clone
