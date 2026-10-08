@@ -14,7 +14,7 @@ naming which variable and why — a deployment never runs on a silently-invented
 |---|---|---|
 | `PORT` | `8080` | The HTTP listener port. |
 | `PUBLIC_ORIGIN` | `http://localhost:<PORT>` | The origin MCP clients and the operator console see — used in OAuth metadata URLs and the `resource_metadata` challenge. Set this to the real external origin in any deployment behind a reverse proxy. |
-| `VOLUME_ROOT` | `<repo>/volume` | Where the structured store, audit log, backups, clones and the file-watcher inboxes live. Point this at the container-managed named volume (`docker-compose.yml`) in any real deployment. |
+| `VOLUME_ROOT` | `<repo>/volume` | Where the structured store, audit log, backups, clones and the file-watcher inboxes live. Point this at the container-managed named volume (`docker-compose.yml`) in any real deployment. Must be a local or container-managed volume, never a network share — see [Supported storage](#supported-storage). |
 | `CREDENTIAL_MOUNT_ROOT` | `<repo>/credentials` | A **read-only** mount whose file names are credential reference names (`^[a-z0-9][a-z0-9._-]{0,63}$`), read at point of use. Also where the TOTP sealing key (`_totp-sealing-key`) lives. Rotation is a file write the next operation observes — no restart needed. |
 | `GIT_COMMIT_SHA` | build-time `--build-arg` | The commit the image was built from. Reported on `/healthz` and `/version`; boot refuses to start if this cannot be resolved from either the build arg or `git rev-parse HEAD`, because an unlabelled runtime can never be verified (S22.1's own companion check depends on this). |
 | `REMOTE_HOST_ALLOWLIST` | empty (nothing may be declared) | Comma-separated remote git hosts a declaration's `cloneUrl` may name (e.g. `github.com`). |
@@ -170,6 +170,17 @@ It polls `/healthz` until the commit SHA stabilises, then runs a real
 `verification-credential` (the check's own bearer token was rejected), or
 `unexpected-profile-or-catalog` (the expected tool is missing from the catalogue, or fails when
 called — the deployed profile does not match what was expected).
+
+## Supported storage
+
+`VOLUME_ROOT` must be a local or container-managed volume. **CIFS/SMB and NFS shares are
+unsupported**, whether mounted by Docker's volume driver or by the host.
+
+The failure on a share is silent: two instances started against the same share can **both start and
+both report healthy**, each writing the same store, journal and clones. Boot's lease self-test
+cannot catch it — it proves exclusion between processes on one kernel, and its test process shares
+the instance's own client session with the share, so it passes on both sides. This was reproduced
+against a CIFS share mounted `nobrl` (`design/90-decisions.md`, 2026-08-19 and 2026-10-08).
 
 ## Volume loss — an accepted risk
 
