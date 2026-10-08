@@ -2,6 +2,12 @@
 
 Append-only. Newest at the top. The rejected alternatives are the point — without them, every future session relitigates the same choice.
 
+### 2026-10-08 — Install: `codex/PROFILES.md` refreshed from the kit; `story.md` keeps its own wording
+Context: Re-running `/agentkit:install` found two artifacts divergent from the kit. `codex/PROFILES.md` was an older kit copy with no local edits. `.github/ISSUE_TEMPLATE/story.md` line 24 says `run /brief` where the kit says `/interview`.
+Chosen: Refresh `codex/PROFILES.md` to the kit's current text. Leave `story.md` as it stands — the target's wording wins on a divergence.
+Rejected: **Leaving `codex/PROFILES.md` stale.** It has no local edits to protect and drifts further with every kit release. **Rewriting `story.md` to `/interview`.** The target changed it deliberately; overwriting it would undo a target-side edit for no gain.
+Reversibility: cheap
+
 ### 2026-10-08 — The real-repository watcher fixture is excluded from the layer-direction walk by file path (S52.1)
 Context: `src/watcher/testing/real-repo-fixture.ts` wires the production clone store, git operations, host operations, composites, module adapter and dispatch pipeline around a real clone, which is the S52.1 requirement. Under `src/watcher/` it is L2, so `scripts/check-layer-direction.ts` reported two upward value imports (L3, L4) and failed its real-graph test.
 Chosen: A named `TEST_SUPPORT_PATHS` list in the checker, holding this one file, excluded from the walk. It is the reasoning the checker already applies to `*.test.ts` (a harness composing the layers is exercising the seam, not sitting behind it) and the by-path discipline of `EXEMPT_PATHS`, so adding a second file is a visible diff.
