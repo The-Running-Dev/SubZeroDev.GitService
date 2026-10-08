@@ -555,28 +555,33 @@ export function createAuthorization(deps: AuthorizationDependencies): Authorizat
         // itself still live. `expires_at` compares lexicographically
         // because every writer of it goes through `Date.toISOString()`.
         const liveGrantIds = rows.filter((row) => row.revoked_at === null).map((row) => row.grant_id);
+        // A live session is a live refresh token (S60): it is what lets a
+        // client continue once its access token lapses, so it is counted in
+        // the same query and by the same liveness rule as `activeTokens`.
         const activeTokensByGrantId = new Map<string, number>();
+        const liveSessionsByGrantId = new Map<string, number>();
         if (liveGrantIds.length > 0) {
           const placeholders = liveGrantIds.map(() => '?').join(', ');
           const countRows = db
-            .prepare(`SELECT grant_id, COUNT(*) AS n FROM token WHERE grant_id IN (${placeholders}) AND revoked_at IS NULL AND expires_at > ? GROUP BY grant_id`)
-            .all(...liveGrantIds, now) as unknown as { grant_id: string; n: number }[];
-          for (const countRow of countRows) activeTokensByGrantId.set(countRow.grant_id, countRow.n);
+            .prepare(
+              `SELECT grant_id, COUNT(*) AS n, SUM(kind = 'refresh') AS refresh FROM token WHERE grant_id IN (${placeholders}) AND revoked_at IS NULL AND expires_at > ? GROUP BY grant_id`,
+            )
+            .all(...liveGrantIds, now) as unknown as { grant_id: string; n: number; refresh: number }[];
+          for (const countRow of countRows) {
+            activeTokensByGrantId.set(countRow.grant_id, countRow.n);
+            liveSessionsByGrantId.set(countRow.grant_id, countRow.refresh);
+          }
         }
 
         return rows.map((row): GrantView => {
           const grant = toGrant(row);
           const clientRow = grant.clientId ? clientsById.get(grant.clientId) : undefined;
-          const activeTokens = row.revoked_at !== null ? 0 : (activeTokensByGrantId.get(row.grant_id) ?? 0);
+          const revoked = row.revoked_at !== null;
           return {
             grant,
             client: clientRow ? toClient(clientRow) : null,
-            activeTokens,
-            // No live-session registry exists yet — MCP sessions are not
-            // persisted (`10-design.md` § Data model) and operator-api
-            // tokens are verified statelessly per call. Real until S14 gives
-            // MCP connections somewhere to be counted from.
-            liveSessions: 0,
+            activeTokens: revoked ? 0 : (activeTokensByGrantId.get(row.grant_id) ?? 0),
+            liveSessions: revoked ? 0 : (liveSessionsByGrantId.get(row.grant_id) ?? 0),
           };
         });
       });
