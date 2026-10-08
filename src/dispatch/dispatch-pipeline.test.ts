@@ -30,7 +30,8 @@ import { err, ok, type Outcome } from '../shared/outcome.ts';
 import type { Session } from '../shared/session.ts';
 import { createRecoveryCatalogue } from '../recovery/catalogue.ts';
 import { recoverDeclaration } from '../lifecycle/recovery.ts';
-import { createDispatchPipeline, type ParkSink } from './dispatch-pipeline.ts';
+import { createDispatchPipeline, type DispatchPipelineDependencies, type ParkSink } from './dispatch-pipeline.ts';
+import { inertJournal } from '../journal/testing/inert-journal.ts';
 import { execError } from '../exec/errors.ts';
 import type { HttpAdapter } from '../http/http-adapter.ts';
 
@@ -147,6 +148,7 @@ test('visibleTools returns the tool for a declaration granting repo.read, and no
     const moduleAdapter = createModuleAdapter();
     const entry = fixtureTool({ name: 'repo_status', capabilities: ['repo.read'] });
     const pipeline = createDispatchPipeline({
+      journal: inertJournal(),
       exec,
       registry: registryOf([entry]),
       ceiling: CAPABILITY_SET,
@@ -181,6 +183,7 @@ test('S15.1 — git_raw is absent until the declaration explicitly grants git.ra
       contractCapabilitySet: RAW_CAPABILITY_SET as unknown as CompiledRegistry['contractCapabilitySet'],
     };
     const pipeline = createDispatchPipeline({
+      journal: inertJournal(),
       exec,
       registry, ceiling: RAW_CAPABILITY_SET, moduleAdapter: createModuleAdapter(), declarations, cloneStore, locks: createLocks(),
       audit: createAudit({ volumeRoot: '/dev/null-unused-raw', clock: systemClock }), clock: systemClock,
@@ -216,6 +219,7 @@ test('a by-name call for a tool absent from visibleTools returns authorization, 
     const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations });
 
     const pipeline = createDispatchPipeline({
+      journal: inertJournal(),
       exec,
       registry: registryOf([entry]),
       ceiling: CAPABILITY_SET,
@@ -256,6 +260,7 @@ test('a tool absent from the registry entirely returns authorization and audits 
     const locks = createLocks();
     const cloneStore = createCloneStore({ volumeRoot: volume, clock: systemClock, exec, locks, declarations });
     const pipeline = createDispatchPipeline({
+      journal: inertJournal(),
       exec,
       registry: registryOf([]),
       ceiling: CAPABILITY_SET,
@@ -302,6 +307,7 @@ test('input failing the declared schema returns validation with findings, and th
     });
 
     const pipeline = createDispatchPipeline({
+      journal: inertJournal(),
       exec,
       registry: registryOf([entry]),
       ceiling: CAPABILITY_SET,
@@ -344,6 +350,7 @@ test('a handler returning a value the output schema rejects returns infrastructu
     });
 
     const pipeline = createDispatchPipeline({
+      journal: inertJournal(),
       exec,
       registry: registryOf([entry]),
       ceiling: CAPABILITY_SET,
@@ -384,6 +391,7 @@ test('a result exceeding maxResultBytes returns infrastructure rather than a tru
     });
 
     const pipeline = createDispatchPipeline({
+      journal: inertJournal(),
       exec,
       registry: registryOf([entry]),
       ceiling: CAPABILITY_SET,
@@ -419,6 +427,7 @@ test('a real repo_status call succeeds end to end and carries a ReadStamp', asyn
 
     const entry = fixtureTool({ name: 'repo_status', capabilities: ['repo.read'], target: { kind: 'module', target: 'git.status' as never } });
     const pipeline = createDispatchPipeline({
+      journal: inertJournal(),
       exec,
       registry: registryOf([entry]),
       ceiling: CAPABILITY_SET,
@@ -456,6 +465,7 @@ test('two dispatched reads of the same repository run concurrently — the mater
     moduleAdapter.register('git.status' as never, toModuleHandler(gitOperations.status));
     const entry = fixtureTool({ name: 'repo_status', capabilities: ['repo.read'], target: { kind: 'module', target: 'git.status' as never } });
     const pipeline = createDispatchPipeline({
+      journal: inertJournal(),
       exec,
       registry: registryOf([entry]),
       ceiling: CAPABILITY_SET,
@@ -613,6 +623,9 @@ test('mutation with the journal forced to fail returns infrastructure, and the w
         throw new Error('unreachable — begin() already failed');
       },
       async settle() {
+        throw new Error('unreachable — begin() already failed');
+      },
+      async park() {
         throw new Error('unreachable — begin() already failed');
       },
     };
@@ -1892,6 +1905,7 @@ test('S10.5: a monitoring wait holds neither lock while it runs', async () => {
     });
 
     const pipeline = createDispatchPipeline({
+      journal: inertJournal(),
       exec,
       registry: registryOf([waitingTool('checks_await')]),
       ceiling: CAPABILITY_SET,
@@ -1949,6 +1963,7 @@ test('S10.6: a wait requesting 3600s is clamped to 1800s rather than refused', a
     });
 
     const pipeline = createDispatchPipeline({
+      journal: inertJournal(),
       exec,
       registry: registryOf([waitingTool('checks_await')]),
       ceiling: CAPABILITY_SET,
@@ -1987,6 +2002,7 @@ test('S10.6: a wait requesting less than the cap is left exactly as asked', asyn
     });
 
     const pipeline = createDispatchPipeline({
+      journal: inertJournal(),
       exec,
       registry: registryOf([waitingTool('checks_await')]),
       ceiling: CAPABILITY_SET,
@@ -2032,6 +2048,7 @@ test('S10.7: exceeding concurrentWaitsPerSession returns conflict', async () => 
     });
 
     const pipeline = createDispatchPipeline({
+      journal: inertJournal(),
       exec,
       registry: registryOf([waitingTool('checks_await')]),
       ceiling: CAPABILITY_SET,
@@ -2096,6 +2113,7 @@ test('S10.7: exceeding concurrentLockFreeOperations returns conflict, naming the
     });
 
     const pipeline = createDispatchPipeline({
+      journal: inertJournal(),
       exec,
       registry: registryOf([waitingTool('checks_await')]),
       ceiling: CAPABILITY_SET,
@@ -2152,6 +2170,7 @@ test('an http-targeted monitoring-wait tool never materialises a clone either �
     };
 
     const pipeline = createDispatchPipeline({
+      journal: inertJournal(),
       exec,
       registry: registryOf([entry]),
       ceiling: CAPABILITY_SET,
@@ -2199,6 +2218,7 @@ test('an http-targeted read tool never materialises a clone — no credential de
     };
 
     const pipeline = createDispatchPipeline({
+      journal: inertJournal(),
       exec,
       registry: registryOf([entry]),
       ceiling: CAPABILITY_SET,
@@ -2397,7 +2417,7 @@ test('S23.3 — a file-watcher plan receives cloneRoot null and takes no clone, 
       registry: registryOf([entry]), ceiling: CAPABILITY_SET, moduleAdapter, declarations,
       cloneStore: { ...cloneStore, ensure: (...args) => { ensureCalls += 1; return cloneStore.ensure(...args); } },
       locks: { pinActiveOperation: () => ({ release() {} }), acquireMutation: async () => { mutationCalls += 1; return { ok: false, error: { resultKind: 'conflict', retryable: false, summary: 'unexpected', code: 'acquire-timeout', holder: null } } as never; } },
-      journal: { begin: async () => { journalCalls += 1; return { ok: false } as never; }, markApplied: async () => ({ ok: true, value: undefined }) as never, settle: async () => ({ ok: true, value: undefined }) as never },
+      journal: { begin: async () => { journalCalls += 1; return { ok: false } as never; }, markApplied: async () => ({ ok: true, value: undefined }) as never, settle: async () => ({ ok: true, value: undefined }) as never, park: async () => ({ ok: true, value: undefined }) as never },
       audit: createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock }), clock: systemClock,
     });
     const result = await pipeline.dispatch({ toolName: entry.name, input: { sourceFile: 'item.md', content: 'body' }, session: sessionWith([]), declarationId: 'repo-a' as never, scheduledJobId: null, context: 'normal', signal: new AbortController().signal });
@@ -2412,7 +2432,7 @@ test('S23.3 — invalid file-watcher plan output returns infrastructure', async 
     const moduleAdapter = createModuleAdapter();
     moduleAdapter.register('watch.bad-plan' as never, async (ctx) => success('bad', { permittedPaths: ['z.md', 'a.md'], plan: {} }, { operationId: ctx.operationId, declarationId: ctx.declarationId, generation: ctx.generation, durationMs: 0 }));
     const entry = fixtureTool({ name: 'watch_bad_plan', target: moduleTarget('watch.bad-plan'), scopes: ['write'], capabilities: [], executionClass: 'read', annotations: { schedulable: false, fileWatcher: 'plan', untrustedOutput: true }, outputSchema: { type: 'object', properties: { permittedPaths: { type: 'array', items: { type: 'string' } }, plan: { type: 'object' } }, required: ['permittedPaths', 'plan'] } as never });
-    const pipeline = createDispatchPipeline({ exec, registry: registryOf([entry]), ceiling: CAPABILITY_SET, moduleAdapter, declarations, cloneStore, locks: createLocks(), audit: createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock }), clock: systemClock });
+    const pipeline = createDispatchPipeline({ journal: inertJournal(), exec, registry: registryOf([entry]), ceiling: CAPABILITY_SET, moduleAdapter, declarations, cloneStore, locks: createLocks(), audit: createAudit({ volumeRoot: '/dev/null-unused', clock: systemClock }), clock: systemClock });
     const result = await pipeline.dispatch({ toolName: entry.name, input: {}, session: sessionWith([]), declarationId: 'repo-a' as never, scheduledJobId: null, context: 'normal', signal: new AbortController().signal });
     assert.equal(result.kind, 'infrastructure');
     assert.match(result.summary, /sorted and duplicate-free/);
@@ -2707,6 +2727,7 @@ test('S47.1: a module tool that never settles returns timeout at its declared li
       limits: { timeoutSeconds: 1, maxResultBytes: 1_000_000 },
     });
     const pipeline = createDispatchPipeline({
+      journal: inertJournal(),
       exec,
       registry: registryOf([entry]),
       ceiling: CAPABILITY_SET,
@@ -2753,6 +2774,7 @@ test('S47.1: a module tool that settles within its limit is unaffected and its t
       limits: { timeoutSeconds: 1, maxResultBytes: 1_000_000 },
     });
     const pipeline = createDispatchPipeline({
+      journal: inertJournal(),
       exec,
       registry: registryOf([entry]),
       ceiling: CAPABILITY_SET,
@@ -2775,4 +2797,23 @@ test('S47.1: a module tool that settles within its limit is unaffected and its t
     assert.equal(result.ok, true);
     assert.equal((seenSignal as AbortSignal | null)?.aborted, false, 'a completed call is not aborted after the fact');
   });
+});
+
+// --- S61 — the dispatch pipeline always has its journal ---
+
+test('S61.1 — a pipeline composed without a journal does not type-check', () => {
+  const withoutJournal = {} as Omit<DispatchPipelineDependencies, 'journal'>;
+  // @ts-expect-error — `journal` is required (S61.1); `npm run typecheck` fails if this ever compiles.
+  const composed: DispatchPipelineDependencies = withoutJournal;
+  void composed;
+
+  const source = readFileSync(path.join(import.meta.dirname, 'dispatch-pipeline.ts'), 'utf8');
+  assert.doesNotMatch(source, /Required only once/, 'the expired "required only once S7 ships" comment is gone');
+});
+
+test('S61.2 — no branch in the pipeline tests for an absent journal or an absent park', () => {
+  const source = readFileSync(path.join(import.meta.dirname, 'dispatch-pipeline.ts'), 'utf8');
+  assert.doesNotMatch(source, /!journal\b/);
+  assert.doesNotMatch(source, /journal\.park\?\./);
+  assert.doesNotMatch(source, /no journal configured|journal park is unavailable/);
 });

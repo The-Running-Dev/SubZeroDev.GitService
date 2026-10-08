@@ -13,6 +13,7 @@ import { base32Decode, currentTotpCode } from '../operator-identity/totp.ts';
 import { createAuthorization } from '../authorization/authorization.ts';
 import { createDeclarations, type Declarations } from '../declarations/declarations.ts';
 import { createDispatchPipeline } from '../dispatch/dispatch-pipeline.ts';
+import { inertJournal } from '../journal/testing/inert-journal.ts';
 import { createModuleAdapter } from '../module-adapter/module-adapter.ts';
 import { fixtureTool, httpTarget } from '../contract/fixtures.ts';
 import { isError, success, type ResultKind, type ToolResult } from '../result/envelope.ts';
@@ -98,6 +99,7 @@ async function withServer<T>(volume: string, fn: (handle: ServerHandle) => Promi
     audit: createAudit({ volumeRoot: volume, clock: systemClock }),
   });
   const dispatchPipeline = createDispatchPipeline({
+    journal: inertJournal(),
     exec: NO_SECRETS_TO_SCRUB,
     registry: { fingerprint: 'a'.repeat(64) as never, compiledAt: systemClock.now(), entries: [READ_TOOL, RAW_TOOL], contractCapabilitySet: CEILING as unknown as never },
     ceiling: CEILING as unknown as DeploymentCeiling,
