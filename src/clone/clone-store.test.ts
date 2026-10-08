@@ -876,7 +876,7 @@ test('a preState captured before a change goes stale: a fresh observeGitState() 
   });
 });
 
-test('S27.2 — at the refuse watermark, ensure() refuses a fresh materialisation with disk-full naming all five consumers, the sixteen-table breakdown, and the blocking declaration', async () => {
+test('S27.2 — at the refuse watermark, ensure() refuses a fresh materialisation with disk-full naming all five consumers, the seventeen-table breakdown, and the blocking declaration', async () => {
   await withMigratedVolume(async (volume) => {
     const blockingRemote = createBareGitRemote();
     const blockingDeclaration = fixtureDeclaration('repo-blocking', blockingRemote);
@@ -931,7 +931,7 @@ test('S27.2 — at the refuse watermark, ensure() refuses a fresh materialisatio
     );
 
     const tableFindings = findings.filter((f) => f.path === 'volume.storeByTable');
-    assert.equal(tableFindings.length, 16, 'the structured-store breakdown names all sixteen tables');
+    assert.equal(tableFindings.length, 17, 'the structured-store breakdown names all seventeen tables');
 
     const blockedFindings = findings.filter((f) => f.path === 'volume.evictionBlocked');
     assert.ok(blockedFindings.some((f) => f.rule === blockingDeclaration.id), 'the declaration whose clone blockers prevented release is named');

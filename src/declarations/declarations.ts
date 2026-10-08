@@ -420,7 +420,6 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
       if (input.fileWatcher !== null) { const checked = watcherValidation(input.fileWatcher); if (!checked.ok) return checked; }
 
       const existing = await get(input.id);
-      let nextGeneration: Generation;
 
       if (existing && existing.state === 'active') {
         return err(declarationError({ code: 'already-exists' }, `declaration '${input.id}' is already active`));
@@ -455,44 +454,61 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
         if (!verdict.safe) {
           return err(declarationError({ code: 'adoption-refused', blockers: verdict.blockers }, `the orphaned clone is not clean: ${verdict.blockers.map((b) => b.kind).join(', ')}`));
         }
-        const bumped = validateGeneration(existing.generation + 1);
-        if (!bumped.ok) throw new Error('unreachable: generation + 1 is always a valid Generation');
-        nextGeneration = bumped.value;
-      } else {
-        const first = validateGeneration(1);
-        if (!first.ok) throw new Error('unreachable: 1 is always a valid Generation');
-        nextGeneration = first.value;
       }
 
       const now = clock.now();
       const epoch = validateGrantEpoch(0);
       if (!epoch.ok) throw new Error('unreachable: 0 is always a valid GrantEpoch');
 
-      const written = withDb(volumeRoot, (db) => {
-        db.prepare(
-          `INSERT INTO declaration
-             (id, generation, clone_url, host, credential_ref, capability_grant, writable_path_prefixes,
-              pinned, file_watcher_plan_tool, file_watcher_apply_tool, file_watcher_auto_merge, git_user_name, git_user_email,
-              state, grant_epoch, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
-        ).run(
-          input.id,
-          nextGeneration,
-          input.cloneUrl,
-          input.host,
-          input.credentialRef,
-          JSON.stringify(input.capabilityGrant),
-          JSON.stringify(input.writablePathPrefixes),
-          input.pinned ? 1 : 0,
-          input.fileWatcher?.planTool ?? null,
-          input.fileWatcher?.applyTool ?? null,
-          input.fileWatcher ? (input.fileWatcher.autoMerge ? 1 : 0) : null,
-          input.identity.gitUserName,
-          input.identity.gitUserEmail,
-          epoch.value,
-          now,
-          now,
-        );
+      // S57 — the generation is numbered from the id's high-water mark, which
+      // `remove` never touches, and the row and the raised mark commit
+      // together: a generation is never in use without the mark covering it.
+      // Numbered inside the transaction, so a declare that raced this one is
+      // seen here as an active row rather than as a second generation.
+      const written = withDb(volumeRoot, (db): DeclarationRow | 'raced' => {
+        db.exec('BEGIN IMMEDIATE;');
+        try {
+          const latest = latestRowFor(db, input.id);
+          if (latest && latest.state === 'active') {
+            db.exec('ROLLBACK;');
+            return 'raced';
+          }
+          const mark = db.prepare('SELECT high_water FROM declaration_generation_mark WHERE id = ?').get(input.id) as { high_water: number } | undefined;
+          const next = validateGeneration(Math.max(mark?.high_water ?? 0, latest?.generation ?? 0) + 1);
+          if (!next.ok) throw new Error('unreachable: one above a generation is always a valid Generation');
+          const nextGeneration: Generation = next.value;
+          db.prepare(
+            `INSERT INTO declaration
+               (id, generation, clone_url, host, credential_ref, capability_grant, writable_path_prefixes,
+                pinned, file_watcher_plan_tool, file_watcher_apply_tool, file_watcher_auto_merge, git_user_name, git_user_email,
+                state, grant_epoch, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
+          ).run(
+            input.id,
+            nextGeneration,
+            input.cloneUrl,
+            input.host,
+            input.credentialRef,
+            JSON.stringify(input.capabilityGrant),
+            JSON.stringify(input.writablePathPrefixes),
+            input.pinned ? 1 : 0,
+            input.fileWatcher?.planTool ?? null,
+            input.fileWatcher?.applyTool ?? null,
+            input.fileWatcher ? (input.fileWatcher.autoMerge ? 1 : 0) : null,
+            input.identity.gitUserName,
+            input.identity.gitUserEmail,
+            epoch.value,
+            now,
+            now,
+          );
+          db.prepare(
+            'INSERT INTO declaration_generation_mark (id, high_water) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET high_water = excluded.high_water',
+          ).run(input.id, nextGeneration);
+          db.exec('COMMIT;');
+        } catch (cause) {
+          if (db.isTransaction) db.exec('ROLLBACK;');
+          throw cause;
+        }
         const row = latestRowFor(db, input.id);
         if (!row) throw new Error('unreachable: just inserted');
         return row;
@@ -512,10 +528,14 @@ export function createDeclarations(deps: DeclarationsDependencies): Declarations
         return err(declarationError({ code: 'store-failed', cause: written.error }, written.error.summary));
       }
 
-      // A fresh declare (generation 1) and an adopted one (generation N+1,
-      // above) both start this era with no pending pull requests of its own
-      // — clearing unconditionally is cheap and correct either way, and
-      // never fires on the common case where the file does not exist.
+      if (written.value === 'raced') {
+        return err(declarationError({ code: 'already-exists' }, `declaration '${input.id}' is already active`));
+      }
+
+      // A fresh declare and an adopted one both start this era with no
+      // pending pull requests of its own — clearing unconditionally is cheap
+      // and correct either way, and never fires on the common case where the
+      // file does not exist.
       clearPendingPullRequests(volumeRoot, input.id);
 
       return ok(toDeclaration(written.value));

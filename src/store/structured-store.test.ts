@@ -33,7 +33,7 @@ const EXPECTED_INDEXES = [
   'outbox_retention',
 ];
 
-test('S2.1 — migration 0001 applies against a fresh volume: all sixteen tables, the declared indexes, and one schema_migration row per migration', async () => {
+test('S2.1 — migration 0001 applies against a fresh volume: all seventeen tables, the declared indexes, and one schema_migration row per migration', async () => {
   await withVolumeAsync(async (volume) => {
     const store = createStructuredStore({ volumeRoot: volume, clock: systemClock });
     assert.equal((await store.open()).ok, true);
@@ -49,7 +49,7 @@ test('S2.1 — migration 0001 applies against a fresh volume: all sixteen tables
       const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(
         (r) => r.name,
       );
-      assert.equal(STORE_TABLE_NAMES.length, 16, 'StoreTableName names sixteen tables');
+      assert.equal(STORE_TABLE_NAMES.length, 17, 'StoreTableName names seventeen tables');
       for (const expected of STORE_TABLE_NAMES) {
         assert.ok(tables.includes(expected), `table '${expected}' exists`);
       }
@@ -207,7 +207,7 @@ test('S2.5 — an induced migration failure leaves the pre-migration copy intact
     const store = createStructuredStore({
       volumeRoot: volume,
       clock: systemClock,
-      migrations: [...MIGRATIONS, { version: 3, sql: 'CREATE TABLE this_is_not_valid_sql (((;' }],
+      migrations: [...MIGRATIONS, { version: MIGRATIONS.length + 1, sql: 'CREATE TABLE this_is_not_valid_sql (((;' }],
     });
     try {
       await store.open();
@@ -218,7 +218,7 @@ test('S2.5 — an induced migration failure leaves the pre-migration copy intact
       if (migrated.ok) return;
       assert.equal(migrated.error.code, 'migration-failed');
       if (migrated.error.code !== 'migration-failed') return;
-      assert.equal(migrated.error.version, 3, 'names the migration that failed');
+      assert.equal(migrated.error.version, MIGRATIONS.length + 1, 'names the migration that failed');
       assert.ok(migrated.error.backupAt.length > 0, 'names the rollback target');
 
       const copies = readdirSync(path.join(volume, 'backups')).filter((f) => f.startsWith('pre-migration-'));
@@ -226,9 +226,8 @@ test('S2.5 — an induced migration failure leaves the pre-migration copy intact
 
       await store.close();
 
-      // The failed migration (version 3) rolled back: every real migration
-      // through version 2 is still recorded and no partial row was left
-      // behind for version 3.
+      // The failed migration rolled back: every real migration is still
+      // recorded and no partial row was left behind for the failed one.
       const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
       try {
         const versions = (db.prepare('SELECT version FROM schema_migration').all() as { version: number }[]).map(

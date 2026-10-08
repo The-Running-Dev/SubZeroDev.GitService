@@ -10,6 +10,7 @@ import { directoryBytes, unlinkAndCountBytes, type RetentionReport } from '../sh
 import { storeError, type BackupStamp, type StoreError } from './errors.ts';
 import { MIGRATION_0001_SQL } from './migration-0001.ts';
 import { MIGRATION_0002_SQL } from './migration-0002.ts';
+import { MIGRATION_0003_SQL } from './migration-0003.ts';
 
 /** What `node:sqlite` accepts as a bound parameter. */
 export type SqlParameter = string | number | bigint | null | Uint8Array;
@@ -56,7 +57,8 @@ export type StoreTableName =
   | 'notification_outbox'
   | 'audit_chain_head'
   | 'audit_retained_anchor'
-  | 'credential_failure_mark';
+  | 'credential_failure_mark'
+  | 'declaration_generation_mark';
 
 export const STORE_TABLE_NAMES: readonly StoreTableName[] = [
   'schema_migration',
@@ -75,6 +77,7 @@ export const STORE_TABLE_NAMES: readonly StoreTableName[] = [
   'audit_chain_head',
   'audit_retained_anchor',
   'credential_failure_mark',
+  'declaration_generation_mark',
 ];
 
 export interface StructuredStore {
@@ -107,6 +110,7 @@ export interface Migration {
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, sql: MIGRATION_0001_SQL },
   { version: 2, sql: MIGRATION_0002_SQL },
+  { version: 3, sql: MIGRATION_0003_SQL },
 ];
 
 /** Filename stems, so a backup and a snapshot are never mistaken for each other. */

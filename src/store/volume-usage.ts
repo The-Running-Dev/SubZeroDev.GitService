@@ -56,6 +56,7 @@ const ZERO_BY_TABLE: Readonly<Record<StoreTableName, number>> = {
   audit_chain_head: 0,
   audit_retained_anchor: 0,
   credential_failure_mark: 0,
+  declaration_generation_mark: 0,
 };
 
 export const NO_VOLUME_USAGE: VolumeUsage = {
