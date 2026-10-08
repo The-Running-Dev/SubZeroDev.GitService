@@ -10,7 +10,7 @@ import { execError } from '../exec/errors.ts';
 import { PRODUCTION_TOOL_DECLARATIONS } from '../composition-root/production-declarations.ts';
 import { validateAgainstSchema } from '../contract/json-schema.ts';
 import { createGitHubAdapter } from './github-adapter.ts';
-import { createHostOperations } from './host-operations.ts';
+import { createHostOperations, type HostOperationsDependencies } from './host-operations.ts';
 import type { ParkSink } from '../shared/park-sink.ts';
 import { PR_ENABLE_AUTO_MERGE_RECOVERY, PR_OPEN_RECOVERY } from './recovery-descriptors.ts';
 
@@ -1120,4 +1120,22 @@ test('S59.1 — no duration in src/host/ is measured between two wall-clock read
     ['github-adapter.ts: const wallNowMs = Date.parse(deps.clock.now()); // compared only with x-ratelimit-reset, an instant the host supplies'],
     offenders.join('\n'),
   );
+});
+
+// --- S65 — host operations always have their journal ---
+
+test('S65.1 — host operations composed without a journal do not type-check', () => {
+  const withoutJournal = {} as Omit<HostOperationsDependencies, 'journal'>;
+  // @ts-expect-error — `journal` is required (S65.1); `npm run typecheck` fails if this ever compiles.
+  const composed: HostOperationsDependencies = withoutJournal;
+  void composed;
+});
+
+test('S65.2 — no branch in host operations tests for an absent journal', async () => {
+  const { readFileSync } = await import('node:fs');
+  const path = await import('node:path');
+  const source = readFileSync(path.join(import.meta.dirname, 'host-operations.ts'), 'utf8');
+  assert.doesNotMatch(source, /readonly journal\?:/);
+  assert.doesNotMatch(source, /!deps\.journal\b/);
+  assert.doesNotMatch(source, /no journal configured/);
 });
