@@ -903,3 +903,46 @@ test('S40.6/S40.7 — revokeBearerToken audits the actual token owner on a real 
     assert.equal(afterAgain.length, afterRevoked.length, 'revoking an already-revoked token must not audit again');
   });
 });
+
+test('S60.1/S60.2 — liveSessions counts the grant\'s unrevoked, unexpired refresh tokens at read time; a revoked grant shows 0', async () => {
+  await migratedVolume(async (volume) => {
+    const auth = createAuthorization({
+      volumeRoot: volume,
+      clock: systemClock,
+      contractCapabilitySet: FULL_CEILING,
+      ceiling: FULL_CEILING as unknown as DeploymentCeiling,
+      declarations: declarationsFor(volume),
+      audit: createAudit({ volumeRoot: volume, clock: systemClock }),
+    });
+
+    const now = systemClock.now();
+    const future = new Date(Date.now() + 86_400_000).toISOString();
+    const db = new DatabaseSync(path.join(volume, 'store.sqlite'));
+    const insertGrant = db.prepare(
+      `INSERT INTO "grant" (grant_id, kind, client_id, subject, resource, declaration_id, generation, scopes, created_at, last_used_at, revoked_at)
+       VALUES (?, 'mcp', 'client-s60', 'ben', 'urn:example', 'repo-a', 1, '[]', ?, NULL, ?)`,
+    );
+    db.prepare(`INSERT INTO oauth_client (client_id, redirect_uris, registered_at, revoked_at) VALUES ('client-s60', '[]', ?, NULL)`).run(now);
+    const insertToken = db.prepare(`INSERT INTO token (jti, grant_id, kind, verifier_hash, issued_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, NULL)`);
+    insertGrant.run('grant-s60', now, null);
+    insertToken.run('refresh-a', 'grant-s60', 'refresh', 'ha', now, future);
+    insertToken.run('refresh-b', 'grant-s60', 'refresh', 'hb', now, future);
+    // An access token is not a session: nothing continues from it once it lapses.
+    insertToken.run('access-a', 'grant-s60', 'access', 'hc', now, future);
+    // A revoked grant with a refresh token still inside its window.
+    insertGrant.run('grant-s60-revoked', now, now);
+    insertToken.run('refresh-c', 'grant-s60-revoked', 'refresh', 'hd', now, future);
+
+    const liveSessions = async (grantId: string) => (await auth.listGrants('mcp')).find((view) => view.grant.grantId === grantId)?.liveSessions;
+
+    assert.equal(await liveSessions('grant-s60'), 2);
+    assert.equal(await liveSessions('grant-s60-revoked'), 0, 'a revoked grant has no live session whatever its tokens say');
+
+    db.prepare(`UPDATE token SET revoked_at = ? WHERE jti = 'refresh-a'`).run(now);
+    assert.equal(await liveSessions('grant-s60'), 1, 'a revoked refresh token is not counted');
+
+    db.prepare(`UPDATE token SET expires_at = ? WHERE jti = 'refresh-b'`).run(new Date(Date.now() - 1_000).toISOString());
+    assert.equal(await liveSessions('grant-s60'), 0, 'an expired refresh token is not counted');
+    db.close();
+  });
+});

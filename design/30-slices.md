@@ -536,7 +536,7 @@ Delivers: An operator looking at a grant sees how many client sessions can still
 instead of a figure that is always zero.
 Touches: `src/authorization/authorization.ts` (`listGrants`); the grants view.
 Depends on: none
-Status: todo
+Status: done
 Closes: #140
 Acceptance:
   - S60.1 `GrantView.liveSessions` is the count of the grant's refresh tokens that are unrevoked and
