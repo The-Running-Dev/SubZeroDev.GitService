@@ -701,7 +701,7 @@ export function createLifecycle(deps: LifecycleDependencies): Lifecycle {
       const usageAfter = evictions.some((e) => e.evicted) ? await computeUsage() : usageAfterRetention;
 
       // One `info` summary for the whole pass, never one per module or per
-            // row (`20-contract.md` § Notification). Summed across every module's
+// row (`20-contract.md` § Notification). Summed across every module's
       // own `freedBytes` plus every eviction's `freedBytes` (the vacuum's
       // bytes are already folded into the structured-store entry above)
       // rather than just `vacuumBytes`: before S26 every non-vacuum owner
