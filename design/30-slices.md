@@ -16,13 +16,13 @@ re-deriving criteria for a finished slice is how a closed issue gets reopened ag
 checked. The index keeps the id, the name and the issue, which is what a reader needs to reach the
 record.
 
-Three rules follow from that, and both `/track` and `tools/Test-DesignDrift.ps1` depend on them:
+Three rules follow from that, and the former track command and the Test-DesignDrift script depended on them, and `/next` still reads a `## Landed` table as history:
 
 - **A landed row is never rewritten** — not the name, not the issue. A landed slice with a closed
   issue is finished, not drifted.
 - **A re-run appends new slices under `## Outstanding`, and retires closed ones out of it.**
-  `/slices` owns both directions because it is the only command that writes this file — `/reconcile`
-  puts it out of scope entirely and `/track` only reads the two sections — so a slice whose issue has
+  `/plan` owns both directions because it is the only command that writes this file — the former
+  reconcile command put it out of scope entirely and the track command only read the two sections — so a slice whose issue has
   closed is retired here or nowhere. A re-run never resurrects a landed body, and never renumbers or
   reuses a retired id.
 - **Criteria are compared on ids, never on prose.** A landed slice carries no criteria here, so
@@ -30,7 +30,7 @@ Three rules follow from that, and both `/track` and `tools/Test-DesignDrift.ps1`
 
 ## Criterion ids
 
-Every acceptance criterion carries a stable `S<n>.<m>` id. `/track` compares ids rather than prose,
+Every acceptance criterion carries a stable `S<n>.<m>` id. The former track command compared ids rather than prose,
 so a reworded criterion does not read as drift and a ticked checkbox keeps meaning what it meant.
 
 **The ids are positional from 1 within each slice, and that was not a free choice.** The test suite
@@ -38,8 +38,8 @@ had already been citing them — `S3.4`, `S4.7`, `S9.2`, `S10.4` — derived pos
 wrote each test, against a document that contained no `S<n>.<m>` token anywhere. Numbering any other
 way would have silently re-pointed every one of those test names at a criterion it does not prove.
 The positional reading was checked against each cited id before numbering, and each resolves to the
-criterion its test name describes. This resolves the open decision of 2026-08-04, in the `/slices`
-session that entry said it needed.
+criterion its test name describes. This resolves the open decision of 2026-08-04, in the session (then the slices
+command, now `/plan`) that entry said it needed.
 
 **Ids are never reused and never renumbered.** Removing a criterion leaves a gap; the next one takes
 the next free number. A criterion added later is **appended, even when it has to run first** —
@@ -50,7 +50,7 @@ failure this scheme exists to prevent.
 The same rule applies to slice ids. Splitting the original S17 created S23–S27, placed where their
 dependencies run rather than after S22; S18–S22 keep their established identities. Extracted
 criteria S17.8 and S17.10–S17.14 are retired, not reassigned. Their requirements now have new ids in
-the new slices, so `/track` can report the removal and addition rather than silently treating one
+the new slices, so the former track command could report the removal and addition rather than silently treating one
 checkbox as another. S28 and S29 are appended on the same rule and placed the same way — ahead of
 S18, because that is where their dependencies run and where the assumption S28 rests on is worth
 exercising. S30 is appended on the same rule and placed after S29, for the same reason.
@@ -92,10 +92,10 @@ written as a control for `S30.1`, and `S30.4`'s outcome set had no category for 
 S30 was **renamed** for the same reason: "The lease guard refuses a filesystem that does not lock"
 states as fact the thing the slice existed to disprove. Issue
 [#118](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/118) carried the old title and
-the old criteria at the time; `/track` reported that drift and synced it, and the issue has since
+the old criteria at the time; the former track command reported that drift and synced it, and the issue has since
 closed. S30 is a landed row.
 
-**The blindness itself was not resolved there, and must not be read as accepted.** `/slices` could
+**The blindness itself was not resolved there, and must not be read as accepted.** The slices command (now `/plan`) could
 decide what S30 checks; it could not decide whether boot should be able to see a cross-session lock
 failure at all, because that means telling boot what kind of mount it is on — new surface in
 `lease.ts` and a claim in `10-design.md` that would have to change. That is `/design`'s, and it is
@@ -108,7 +108,7 @@ login against a real identity provider, and drive all of it through a browser. A
 was no user interface in this repository at all — no markup, no styles, no build for any of it — so
 the console S18 described as needing completion had not been started, and the slice was mis-sized by
 roughly the whole of its first half. `S18.3`, `S18.4`, `S18.5`, `S18.6`, `S18.7` and `S18.8` are **retired**, and
-their requirements carry new ids in S31 to S34, so `/track` reports a removal and an addition rather
+their requirements carry new ids in S31 to S34, so the former track command reported a removal and an addition rather
 than silently treating one checkbox as another. S18 keeps `S18.1` and `S18.2`, both of which describe
 work that now sits in the first sub-slice; the criteria covering the parts that were never written
 down — serving the bundle at all, signing in from a browser, enrolling the first operator, and
@@ -139,7 +139,7 @@ captures or compares tool metadata. The slice was mis-sized by the whole of its 
 same way S18 was.
 
 `S20.1`, `S20.2`, `S20.5` and `S20.6` are **retired**, and their requirements carry new ids in S35
-to S38, so `/track` reports a removal and an addition rather than silently treating one checkbox as
+to S38, so the former track command reported a removal and an addition rather than silently treating one checkbox as
 another. S20 keeps `S20.3` and `S20.4`, both of which describe work that stays in the narrowed
 slice; the two requirements that remain S20's own but were previously carried inside a retired
 criterion — the blog's own tools compiling into its derived image, and the parity comparison
@@ -151,7 +151,7 @@ what S35, S36, S20, S37 and S38 achieve together, not what the narrowed slice de
 [#34](https://github.com/The-Running-Dev/SubZeroDev.GitService/issues/34) closed on 2026-08-23 still
 carrying the old title. Its criteria were synced and are the narrowed set, so the title is the only
 half that went unreconciled, and it is now one of the superseded names the note under the landed
-index records rather than drift `/track` can still act on.
+index records rather than drift the former track command could still act on.
 
 S35 to S38 are appended on the same rule as S23–S27 and S31–S34, and placed where their
 dependencies run rather than after S22 — S35 and S36 ahead of S20 because S20 cannot start without
@@ -280,7 +280,7 @@ decided, each confirmed against the code at `982b738` before it was sliced. Each
 issues it closes, and its criteria carry those issues' `Done when` rather than restating them loosely.
 The issues that are decisions rather than defects (#54, #135, #136, #140, #216, #276, #287, #288,
 #292, and the W08/D18 item in `90-decisions.md` § *Open*), the kit-tooling issues, and the #65
-helper refactor are deliberately not sliced: each belongs to `/design`, `/contract`, the kit, or
+helper refactor are deliberately not sliced: each belongs to `/design`, the kit, or
 `/fix`, and a slice written against an undecided contract would be deciding it.
 
 **S40 runs first because it is the one gap exploitable today.** A read-only operator token can resolve
@@ -333,7 +333,7 @@ gate and on what date, and it is not restated here. The one gate this document r
 other — was `S35.1`, committed separately and before the rest of S35, exactly as every earlier gate
 was. S35 has landed and that gate is closed.
 
-Naming a gate here is not the same as recording it in § Unresolved, which is `/contract`'s to write.
+Naming a gate here is not the same as recording it in § Unresolved, which is `/design`'s to write.
 This document names what blocks a slice and the criterion that closes it; the amendment itself
 decides the shape.
 

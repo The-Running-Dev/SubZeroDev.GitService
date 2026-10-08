@@ -1,6 +1,6 @@
 # Brief — SubZeroDev.Git
 
-> Written by me, not by a model. A model may interrogate it (`/brief-check`) but not author it.
+> Written by me, not by a model. A model may interrogate it (`/brief`) but not author it.
 >
 > **Transcription note.** The content below was captured by interview on 2026-08-03. The model asked; the answers are mine. Selections are recorded as facts and prose is transcribed rather than restyled. This file is not ratified until I have read it back.
 
@@ -321,4 +321,4 @@ Stated so the design does not silently assume otherwise.
 
 ## Lifespan
 
-Maintained for years. Full pipeline: `/brief-check` → `/design` → `/redteam` → `/contract` → `/slices` → `/slice`.
+Maintained for years. Full pipeline: `/interview` → `/brief` → `/design` → `/redteam` → `/plan` → `/next`.
