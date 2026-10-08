@@ -593,7 +593,8 @@ export function createDispatchPipeline(deps: DispatchPipelineDependencies): Disp
    *   operator would most need it.
    * - **Local writes only.** `executionClass: 'mutating'` alone is too wide:
    *   `git_push` (S9) is a mutating entry too, and admitting a push to a
-   *   parked declaration is new authority the design never granted. The*   design's own capability table (`10-design.md` § `CapabilityProfile` and the lattice) maps
+   *   parked declaration is new authority the design never granted. The
+   *   design's own capability table (`10-design.md` § `CapabilityProfile` and the lattice) maps
    *   `git.local.write` to exactly "branch preparation, stage, commit,
    *   restore-paths" — the four the repair session names. Requiring that
    *   capability *is* the design's list, expressed as a predicate.
