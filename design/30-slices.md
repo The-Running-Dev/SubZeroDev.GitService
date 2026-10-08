@@ -331,9 +331,10 @@ committed separately and before the handler work depending on it. **No slice may
 signature absent from the contract** — where a slice needs tools, amending the contract is its
 first acceptance criterion, not an implementation detail.
 
-**Five gates are live, all raised by this document on 2026-10-08:** `S54.1`, `S55.1`, `S56.1`,
-`S57.1` and `S58.1`. Each is a contract amendment (and for S55 and S58 a design amendment too),
-committed before the code in its slice that depends on it.
+**Four gates are live, all raised by this document on 2026-10-08:** `S55.1`, `S56.1`, `S57.1` and
+`S58.1`. Each is a contract amendment (and for S55 and S58 a design amendment too), committed before
+the code in its slice that depends on it. A fifth, `S54.1`, was raised the same day and met by its own
+slice: the re-enrolment gate in § *The HTTP API route table*.
 
 Before these, the last gate was `S46.10`, raised by this document on 2026-10-03. The amendment
 of that date (**#343**) gave `ExecError` a `signalled` variant and made a signalled mutating call park
@@ -408,7 +409,7 @@ route keeps serving the session, so a stolen recovery code buys a full session w
 Touches: `design/20-contract.md` § cookie routes and the recovery-code error row;
 `src/surfaces/console-auth-routes.ts` (`requireSession`); `src/operator-identity/`.
 Depends on: none
-Status: todo
+Status: done
 Closes: #276
 Acceptance:
   - S54.1 The contract states that "forces TOTP re-enrolment" is a server-side session gate, names the

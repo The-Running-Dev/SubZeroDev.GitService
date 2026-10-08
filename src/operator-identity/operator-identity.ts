@@ -76,6 +76,13 @@ export interface OperatorIdentity {
   completeTotpReenrol(sessionId: SessionId, totpCode: string): Promise<Outcome<void, OperatorIdentityError>>;
 
   touch(sessionId: SessionId): Promise<Outcome<OperatorSession, OperatorIdentityError>>;
+  /**
+   * The re-enrolment gate's refusal (S54): audits `route` once under the
+   * session's operator and returns the `totp-reenrol-required` error for the
+   * surface to send. Called only for a session whose `totpReenrolRequired`
+   * is set; it reads and writes nothing else.
+   */
+  refuseUntilReenrolled(session: OperatorSession, route: string): Promise<OperatorIdentityError>;
   logout(sessionId: SessionId): Promise<Outcome<void, OperatorIdentityError>>;
   revokeSession(sessionId: SessionId, actor: ActorRef): Promise<Outcome<void, OperatorIdentityError>>;
   listSessions(): Promise<readonly OperatorSession[]>;
@@ -692,6 +699,21 @@ export function createOperatorIdentity(deps: OperatorIdentityDependencies): Oper
 
     async touch(sessionId: SessionId): Promise<Outcome<OperatorSession, OperatorIdentityError>> {
       return touchSession(sessionId);
+    },
+
+    async refuseUntilReenrolled(session: OperatorSession, route: string): Promise<OperatorIdentityError> {
+      await audit.append({
+        at: clock.now(),
+        operationId: null,
+        declarationId: null,
+        generation: null,
+        tool: null,
+        actorRef: IDENTITY_ACTOR(session.subject),
+        context: 'normal',
+        form: 'totp-reenrol-refusal',
+        route,
+      });
+      return operatorIdentityError({ code: 'totp-reenrol-required' }, 'this session must re-enrol TOTP before any other route');
     },
 
     async logout(sessionId: SessionId): Promise<Outcome<void, OperatorIdentityError>> {

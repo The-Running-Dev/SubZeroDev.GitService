@@ -18,12 +18,14 @@ export type OperatorIdentityError = ModuleErrorBase &
     | { readonly code: 'session-unknown' }
     | { readonly code: 'session-expired' }
     | { readonly code: 'session-revoked' }
+    | { readonly code: 'totp-reenrol-required' }
     | { readonly code: 'store-failed'; readonly cause: StoreError }
   );
 
 /**
  * Every variant maps to `401` at the surface (`20-contract.md` § Operator
- * identity), except `store-failed`, which follows the Authorization module's
+ * identity), except `totp-reenrol-required`, which is `403` because the
+ * session is alive (S54), and `store-failed`, which follows the Authorization module's
  * own precedent for the same code (line 2545: "`store-failed` is a `503`")
  * rather than inventing a second convention for the same failure.
  */
