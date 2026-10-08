@@ -125,6 +125,14 @@ export const EXEMPT_PATHS: readonly string[] = ['server.ts', 'composition-root/c
  *
  * A value import is never allowed here, whichever kind it claims to be.
  */
+/**
+ * Test-support files that compose the layers on purpose, excluded from the walk **by file path** for
+ * the reason test files are: a harness that wires the production collaborators together to exercise
+ * the seam is not a module behind it. Named one by one, so widening this is a visible diff rather than
+ * a habit (`EXEMPT_PATHS` makes the same bargain).
+ */
+export const TEST_SUPPORT_PATHS: readonly string[] = ['watcher/testing/real-repo-fixture.ts'];
+
 export interface UpwardTypeEdge {
   readonly from: string;
   readonly to: string;
@@ -257,8 +265,12 @@ export function checkLayerDirection(
     (entry) => !(entry in LAYER_BY_TOP_DIR) && !UNLAYERED_TOP_ENTRIES.has(entry),
   );
 
+  const testSupport = new Set(TEST_SUPPORT_PATHS);
   const files: string[] = [];
   walk(srcRoot, files);
+  for (let i = files.length - 1; i >= 0; i -= 1) {
+    if (testSupport.has(path.relative(srcRoot, files[i]!).replace(/\\/g, '/'))) files.splice(i, 1);
+  }
 
   const exempt = new Set((typeof exemptPaths === 'string' ? [exemptPaths] : exemptPaths).map(normalise));
   const allowanceKeys = new Set(allowedUpwardTypeEdges.map((edge) => `${edge.from} -> ${edge.to}`));

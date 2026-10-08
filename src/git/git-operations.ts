@@ -723,7 +723,7 @@ export function createGitOperations(deps: GitOperationsDependencies): GitOperati
       const baseRef = `origin/${baseBranch}`;
 
       const branch = await currentBranch(cwd, signal);
-      const statusResult = await git(cwd, ['status', '--porcelain=v1'], signal);
+      const statusResult = await git(cwd, ['status', '--porcelain=v1', '--untracked-files=all'], signal);
       const lines = statusResult.ok ? statusResult.value.stdout.split('\n').filter((l) => l.length > 0) : [];
       const changedPaths: RepoStatusEntry[] = lines.map((line) => {
         const codes = line.slice(0, 2);

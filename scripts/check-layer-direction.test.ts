@@ -123,6 +123,21 @@ test('check-layer-direction rejects an upward value import, and accepts the same
   }
 });
 
+test('check-layer-direction skips a named test-support file, and still reports the same edge from any other file', () => {
+  const fixture = withFixtureRoot((root) => {
+    write(root, 'server.ts', '// composition root\n');
+    write(root, 'dispatch/pipeline.ts', 'export const dispatch = true;\n');
+    write(root, 'watcher/testing/real-repo-fixture.ts', "import { dispatch } from '../../dispatch/pipeline.ts';\nexport { dispatch };\n");
+    write(root, 'watcher/testing/other-fixture.ts', "import { dispatch } from '../../dispatch/pipeline.ts';\nexport { dispatch };\n");
+  });
+  try {
+    const result = checkLayerDirection(fixture.srcRoot, path.join(fixture.srcRoot, 'server.ts'), []);
+    assert.deepEqual(result.upwardValueViolations, ['watcher/testing/other-fixture.ts (L2) value-imports dispatch/pipeline.ts (L4)']);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test('check-layer-direction rejects a type-only upward edge that is not listed, and reports a listed edge that is gone', () => {
   const { srcRoot, cleanup } = withFixtureRoot((root) => {
     write(root, 'server.ts', '// composition root\n');

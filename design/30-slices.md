@@ -388,7 +388,7 @@ rename anything, which cannot show parity with the blog's watcher that this one 
 Touches: `src/watcher/` tests and a test fixture (scratch clone, bare remote, constrained GitHub CLI
 shim).
 Depends on: S49, S50, S51, S53
-Status: todo
+Status: done
 Closes: #87
 Acceptance:
   - S52.1 Integration tests run the watcher against a scratch clone and a bare remote, with a
