@@ -2614,10 +2614,10 @@ parked-operations routes, the two `/notifier/failed*` routes, `/audit`, and the 
 OAuth/MCP routes below (`/.well-known/oauth-authorization-server`, `/oauth/register`,
 `/oauth/authorize` ×2 methods, `/oauth/token`, `/oauth/revoke`). This is the closed set; nothing
 may be added to it without a contract amendment naming why the new route has no repository to
-scope to. The remaining ten routes each carry a `declarationId` (or the equivalent —
+scope to. The remaining eleven routes each carry a `declarationId` (or the equivalent —
 `/failing-credentials/{credentialRef}/{declarationId}/clear`'s second segment) directly in their
 path: the seven declaration-management and tool routes above, `/failing-credentials/.../clear`, the
-protected-resource metadata document, and the MCP transport itself. Forty-two routes in total.
+protected-resource metadata document, and the MCP transport's two methods. Forty-three routes in total.
 
 #### OAuth endpoints and the MCP transport (resolves U5)
 
@@ -2660,6 +2660,7 @@ interface AuthorizationServerMetadata {
 | `/oauth/token` | `POST` | none (PKCE substitutes for a client secret) | `authorization_code` grant (with `code_verifier`) calls `issueMcpGrant`; `refresh_token` grant calls `refresh` |
 | `/oauth/revoke` | `POST` | none — the token in the form body is its own credential | Revokes the presented token via `revokeBearerToken` (RFC 7009) |
 | `/mcp/{declarationId}` | `POST` | bearer, audience-checked against the path | The MCP JSON-RPC transport: `initialize`, `tools/list`, `tools/call`, and JSON-RPC notifications |
+| `/mcp/{declarationId}` | `GET` | bearer, audience-checked against the path, and the `Mcp-Session-Id` of a live session minted under that bearer's grant | The Streamable HTTP server-to-client stream (`text/event-stream`). Carries `notifications/tools/list_changed` and nothing else |
 
 **A body carrying no `id` member is a JSON-RPC notification, and is answered `202 Accepted` with no
 body.** Two things about that are load-bearing and neither is recoverable from the tree.
@@ -2677,6 +2678,38 @@ A notification is not an exemption from either, and accepting one before them wo
 `id` an unauthenticated 2xx entrypoint on a route that exposes repository state — **E8**. `initialize`
 is a request and never a notification: one arriving without an `id` is accepted and dropped rather
 than minting a session whose result has no `id` to answer. See `design/90-decisions.md`, 2026-08-31.
+
+**The `GET` stream is how a held session hears that its tool list changed.** `initialize` advertises
+`capabilities.tools.listChanged: true`, and the service sends `notifications/tools/list_changed` on
+every open stream of a session in exactly two cases, and no other:
+
+- **the session's epoch moved** — its declaration's `grantEpoch` is no longer the one the session
+  froze at, whichever of `10-design.md` § *the grant epoch*'s triggers moved it. This is the only
+  way a live session's grant narrows; there is no operation that narrows a `Grant` row's scopes in
+  place. The notification is sent from the same recomputation **A3** already performs, whether a
+  `POST` or the stream sweep reaches it first, so neither can consume a move the other then misses.
+- **a session that survives a boot under a different contract fingerprint** — which, because MCP
+  sessions are process-local (`10-design.md` § *Operator sessions are persisted; MCP sessions are
+  not*), is no session. A client holding a session id from before a boot is refused on its next
+  request with the `401` below, must `initialize` again, and the first list that new session fetches
+  is the new contract's. The trigger is met by construction, and stays named here so that persisting
+  MCP sessions cannot be done without deciding what such a session is told.
+
+A notification reaches an open stream within `MCP_STREAM_SWEEP_INTERVAL_MS` of the move plus one
+store read, because a narrowing or a revocation is a write to the store that may come from a
+connection this surface does not share. The stream is opened by a `GET` carrying
+`Accept: text/event-stream`; without it the answer is `405`, as for any other method. It is
+refused with the same `401` challenge as `POST` — and opens nothing — when the bearer is absent or
+fails `establishMcpSession` for this resource, when no live session has the presented
+`Mcp-Session-Id`, or when that session was minted under a different grant than the bearer's. A
+session that `POST` would close — grant or client revoked, declaration gone or orphaned — has every
+one of its streams ended when the sweep or a `POST` finds it, and the service never reopens one: a
+client that reconnects is refused like any other request on a closed session. At most
+`MAX_STREAMS_PER_GRANT` streams are open under one grant at once; one more is refused `429` with
+`{ "error": "too_many_streams" }` and no existing stream is closed to make room, because evicting
+the oldest would let any holder of the grant silence every other. Events carry no `id`: nothing is
+replayed on reconnect, since the only message is idempotent and the next list request is the
+source of truth.
 
 A `401` from `/mcp/{declarationId}` — audience mismatch, unknown/expired/revoked token or grant —
 answers `WWW-Authenticate: Bearer realm="subzerodev-git", resource_metadata="<origin>/.well-known/oauth-protected-resource/mcp/{declarationId}"`

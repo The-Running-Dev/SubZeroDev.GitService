@@ -492,6 +492,21 @@ next call. A call the recomputed grant no longer admits returns `authorization`.
 its client was revoked outright, the session is closed and the transport answers `401` with the
 resource-metadata challenge, because the caller now needs to re-authorise rather than retry.
 
+**A held session is told when its list narrows, rather than finding out by failing.** The narrowing
+above takes effect on the next call, but an agent holding the tool list it last fetched
+learns of it only by calling a tool that is no longer there. So the MCP transport also serves the
+Streamable HTTP server-to-client stream, and pushes `notifications/tools/list_changed` down it
+when the session's epoch moves; `20-contract.md` § *OAuth endpoints and the MCP transport* names the
+triggers and the refusals. Moves are found by **sweeping the store** on a short fixed interval while
+any stream is open, not by an in-process event: the epoch and the revocation both live in the store,
+and a write from a connection the transport does not share — the console's own `Authorization`
+instance, a second test harness, a future CLI — would never raise one. The sweep and a `POST` share
+one recomputation, so whichever reaches a moved epoch first is the one that notifies. A session the
+transport closes has its streams ended with it, and nothing reopens them. Open streams are capped
+per grant and the cap refuses rather than evicts, since an eviction would let one holder of a grant
+silence the others. No session survives a boot, so a redeploy that changes the contract reaches a
+connected agent as a refused session id and a fresh `initialize`, not as a notification.
+
 Revocation is reachable only from the console, under `auth.manage`, for the same structural
 reason declaration management is: an MCP session is bound to one repository and revoking the
 authority of *other* sessions is not an operation on that repository.
@@ -873,7 +888,7 @@ L0  Contract        contract types  |  compiler  |  generated registry
 | **Authorization** (L4) | Resource-server token verification, the embedded provider, durable clients and grants, operator API tokens, revocation and the grant-epoch check. | The store file on its own connection, declarations, audit, clock. | MCP session establishment, API-token verification, revocation the console calls, `runRetention`. |
 | **Operator identity** (L4) | First-boot provisioning, password, enforced TOTP, recovery codes, break-glass, OIDC relying party, subject allowlist, and the persisted operator session. | Structured store. | Operator session establishment, logout, revocation. |
 | **Surfaces** (L5) | Transport framing, routing, session lifecycle, cookie attributes, CSRF defence, static console assets. | L4 for every operation, and L1 for values it only reads — the envelope constructors, the branded-string constructors, the audit record forms, the volume-usage shape and the console hash filename. Never L2 and never L3, which is what **B1** enforces; "L4 only" was a stronger claim than the invariant and than the tree. **One deliberate write exception**: declaration management — declare, amend, orphan, remove, and `clone.remove` — calls the declarations and clone store modules directly, because those are console-only instance operations rather than registry tools, so the dispatch pipeline has no entry to route them through; the route itself is their gate — the console cookie, the only credential that carries `declaration.manage` (**A7**, **A11**). | Nothing inward. |
-| **MCP proxy** (L5) | A standalone stdio process (S14.9) that relays MCP tool calls to this service's own HTTP MCP transport at `/mcp/{declarationId}` — a thin transport shim opening no volume, taking no lock, holding no clone. Every git operation happens server-side; this process only relays JSON-RPC. Configured entirely by environment, since an MCP client's own config launches it directly. | `@modelcontextprotocol/sdk`, both its server and client transports. No other module — it is confined to `src/mcp-proxy/` and reaches the service only over HTTP, the same as any external MCP client. | A stdio MCP server. |
+| **MCP proxy** (L5) | A standalone stdio process (S14.9) that relays MCP tool calls to this service's own HTTP MCP transport at `/mcp/{declarationId}`, and forwards that transport's `notifications/tools/list_changed` to its local client — a thin transport shim opening no volume, taking no lock, holding no clone. Every git operation happens server-side; this process only relays JSON-RPC. Configured entirely by environment, since an MCP client's own config launches it directly. | `@modelcontextprotocol/sdk`, both its server and client transports. No other module — it is confined to `src/mcp-proxy/` and reaches the service only over HTTP, the same as any external MCP client. | A stdio MCP server. |
 
 ### The acyclicity argument
 
