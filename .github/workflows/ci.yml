@@ -44,18 +44,12 @@ on:
       - 'design/10-design.md'
       - 'design/30-slices.md'
       - 'design/90-decisions.md'
-      - 'design/FROZEN.md'
-      - 'design/state/**'
-      - 'design/state-index.md'
   pull_request:
     paths-ignore:
       - 'design/00-brief.md'
       - 'design/10-design.md'
       - 'design/30-slices.md'
       - 'design/90-decisions.md'
-      - 'design/FROZEN.md'
-      - 'design/state/**'
-      - 'design/state-index.md'
 
 jobs:
   build:
