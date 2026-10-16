@@ -4,6 +4,13 @@ volume/
 **/console/dist/
 test-results/
 
+# Per-machine deployment state, written by scripts/deploy.ts: access tokens and
+# the TOTP sealing key, the generated container environment, and the saved
+# operator sign-in. Secrets all; never tracked.
+/credentials/
+/.deploy/
+/deploy.config.json
+
 # Per-machine Claude Code settings; the tracked settings.json is deliberate
 .claude/settings.local.json
 
