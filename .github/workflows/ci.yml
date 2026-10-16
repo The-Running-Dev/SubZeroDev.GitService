@@ -1,38 +1,40 @@
 # S29 (`design/30-slices.md` § S29): every gate this repository already has
 # runs unattended on every push and pull request, rather than when someone
-# remembers to run it. `node-version-file: package.json` pins the runner to
-# `engines.node`; `.npmrc`'s `engine-strict=true` makes `npm ci` itself
-# refuse a Node outside that range, so a mismatch fails the job rather than
-# silently running every gate on a different runtime.
+# remembers to run it. The jobs are the shared library's reusable workflows
+# (The-Running-Dev/GitHub-ActionTemplates); the steps they run are no longer
+# written out here.
 #
-# `npm run build` chains typecheck, the registry build and every `check:*`
-# gate `package.json` names — the same chain the Dockerfile's `builder`
-# stage runs, so `package.json` is the one place that ordering is stated.
-# Out of scope: any deployment step — this is the repository's own CI, not
-# the service's execution mechanism. S35's derived
-# example-consumer image gets its own build-and-boot step below, alongside
-# the base's own container gate — the ordering S35.7 asks for.
+# `tests` runs `npm test`, then `npm run build` (typecheck, the registry
+# build and every `check:*` gate `package.json` names, the same chain the
+# Dockerfile's `builder` stage runs, so `package.json` is the one place that
+# ordering is stated), then S18.13's end-to-end browser suite. Node 22 is the
+# runtime both images ship; `.npmrc`'s `engine-strict=true` still makes
+# `npm ci` refuse a Node outside `engines.node`. `browser: true` gives the
+# suite the runner's own Chrome (read by `playwright.config.ts`) instead of
+# `npx playwright install --with-deps`, whose apt step could stall the job.
+#
+# `image` and `example-consumer` build S28's base image and S35's derived
+# example-consumer image, boot each one and require `GET /healthz` to answer
+# 200 within the timeout (S35.7: a tampered or mismatched registry/console
+# artifact fails boot). `push: false`: this is the repository's own CI, not
+# the service's execution mechanism, so nothing is published. The
+# permissions are the ones GitHub checks for the reusable workflow's publish
+# job before the run starts, even though that job never runs here.
 #
 # `push` is restricted to `main` (issue #122): a branch with an open pull
 # request already gets every commit gated by `pull_request` below, so a
 # `push:` with no branch filter fired a second, concurrent run of the exact
-# same commit. Real subprocess/HTTP-heavy tests (a spawned `git`, an
-# in-process HTTP server) sharing a GitHub-hosted runner with their own
-# duplicate run is a plausible source of CI-only flakiness that never
-# reproduced locally. Every commit that can reach `main` is still gated
-# either way: a feature-branch commit through `pull_request`, a direct or
-# merged push to `main` through `push`.
+# same commit. Every commit that can reach `main` is still gated either way:
+# a feature-branch commit through `pull_request`, a direct or merged push to
+# `main` through `push`.
 #
 # `paths-ignore` skips this workflow entirely when every changed file is one
-# of the design/tracking documents below — none of them is a build input, so
-# there is nothing here for `npm test`/`npm run build`/the container gates to
-# check. `design/20-contract.md` is deliberately absent from this list: it is
-# the one design document actually read by the build, at
+# of the design/tracking documents below — none of them is a build input.
+# `design/20-contract.md` is deliberately absent from this list: it is the one
+# design document actually read by the build, at
 # `scripts/check-migration-matches-contract.ts` (`check:migration`) and
 # `scripts/check-contract-registry-tables.ts` (`check:registry-tables`), both
-# chained into `npm run build` below — a change there must still run every gate. If
-# a change touches any file outside this list too, the workflow still runs,
-# same as any other `paths-ignore`.
+# chained into `npm run build` — a change there must still run every gate.
 
 name: CI
 
@@ -51,94 +53,46 @@ on:
       - 'design/30-slices.md'
       - 'design/90-decisions.md'
 
+permissions: {}
+
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    # A bound on the whole job, not just the retried step below: GitHub's own
-    # default (360 minutes) is what let the hang this fixes run for hours
-    # undetected rather than failing loudly. 45 leaves headroom for that
-    # step's own worst case (three 8-minute attempts) plus everything else.
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
+  tests:
+    uses: The-Running-Dev/GitHub-ActionTemplates/.github/workflows/node-ci.yml@v0
+    permissions:
+      contents: read
+    with:
+      node-versions: '["22"]'
+      scripts: test build test:e2e
+      browser: true
+      cache: npm
+      timeout-minutes: 45
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: package.json
+  image:
+    uses: The-Running-Dev/GitHub-ActionTemplates/.github/workflows/container.yml@v0
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    with:
+      build-args: GIT_COMMIT_SHA=${{ github.sha }}
+      push: false
+      smoke-port: '8080'
+      smoke-path: /healthz
+      smoke-env: PUBLIC_ORIGIN=http://localhost:8080
 
-      - run: npm ci
-
-      # verification: true
-      - name: Run the full test suite
-        run: npm test
-
-      # verification: true
-      - name: Run typecheck and every check:* gate
-        run: npm run build
-
-      # `--with-deps` shells out to `apt-get`. The confirmed cause of this
-      # step's hang (pulled from a cancelled run's own logs, not guessed):
-      # `azure.archive.ubuntu.com` — the runner's local mirror — refused
-      # every request (`Ign:` in the log), apt fell back to the public
-      # `archive.ubuntu.com`, and that fetch itself then stalled mid-download
-      # with no further output for the rest of the job. apt has no default
-      # timeout on a connection that stops sending data, so this hangs
-      # indefinitely rather than failing — `timeout 8m` bounds one attempt,
-      # and the loop retries twice more since a stalled mirror is usually
-      # transient. `NEEDRESTART_MODE`/`DEBIAN_FRONTEND` guard the unrelated
-      # interactive-prompt failure mode this class of command can also hit.
-      - name: Install Playwright's browser
-        env:
-          DEBIAN_FRONTEND: noninteractive
-          NEEDRESTART_MODE: a
-        run: |
-          for attempt in 1 2 3; do
-            if timeout 8m npx playwright install --with-deps chromium; then
-              exit 0
-            fi
-            echo "attempt $attempt failed or stalled past 8 minutes; retrying" >&2
-            sleep 10
-          done
-          exit 1
-
-      # verification: true
-      - name: Run S18.13's end-to-end browser suite
-        run: npm run test:e2e
-
-      # verification: true
-      - name: Build S28's container image
-        run: docker build --build-arg GIT_COMMIT_SHA=${{ github.sha }} -t subzerodev-git:ci .
-
-      # verification: true
-      # S35.7 — the derived example-consumer image builds and boots
-      # unattended alongside the base's own container gate above, and fails
-      # this job the same way a broken seam does locally: a compile error in
-      # `example-consumer/scripts/build-registry.ts` fails the `docker build`
-      # step; a tampered or mismatched registry/console artifact fails boot,
-      # which this step catches by requiring "listening on" in the logs
-      # within the timeout rather than merely that the container started.
-      - name: Build and boot S35's example-consumer image
-        run: |
-          docker build --build-arg GIT_COMMIT_SHA=${{ github.sha }} -f example-consumer/Dockerfile -t subzerodev-git-example-consumer:ci .
-          docker run -d --name example-consumer-ci -p 18080:8080 -e PUBLIC_ORIGIN=http://localhost:18080 subzerodev-git-example-consumer:ci
-          # 30s / 500ms polling matches the budget src/lifecycle/lease-self-test-container.ts
-          # (S28.7) already settled on for this same class of check — the real production
-          # boot path (lease self-test child spawn, SQLite migration) this container also runs.
-          for attempt in $(seq 1 60); do
-            if docker logs example-consumer-ci 2>&1 | grep -q "server: listening on"; then
-              echo "example-consumer booted"
-              docker rm -f example-consumer-ci
-              exit 0
-            fi
-            if [ "$(docker inspect -f '{{.State.Running}}' example-consumer-ci)" != "true" ]; then
-              echo "example-consumer exited before reporting ready" >&2
-              docker logs example-consumer-ci >&2
-              docker rm -f example-consumer-ci
-              exit 1
-            fi
-            sleep 0.5
-          done
-          echo "example-consumer did not report ready within 30s" >&2
-          docker logs example-consumer-ci >&2
-          docker rm -f example-consumer-ci
-          exit 1
+  example-consumer:
+    uses: The-Running-Dev/GitHub-ActionTemplates/.github/workflows/container.yml@v0
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    with:
+      dockerfile: example-consumer/Dockerfile
+      image-name: subzerodev-git-example-consumer
+      build-args: GIT_COMMIT_SHA=${{ github.sha }}
+      push: false
+      smoke-port: '8080'
+      smoke-path: /healthz
+      smoke-env: PUBLIC_ORIGIN=http://localhost:8080

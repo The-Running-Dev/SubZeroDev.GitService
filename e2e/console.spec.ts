@@ -271,18 +271,17 @@ test('S18.12/S18.13/S18.10/S18.2/S31.4/S31.5/S32.1/S32.2/S32.3/S32.4/S33.2/S33.3
   await page.evaluate(
     async ({ requestId }) => {
       const csrfToken = document.cookie.match(/(?:^|; )szg_csrf=([^;]+)/)?.[1] ?? '';
-      try {
-        await fetch('/oauth/authorize', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': csrfToken },
-          body: new URLSearchParams({ request_id: requestId!, action: 'approve' }).toString(),
-        });
-      } catch {
-        // The fulfilled response is the real 302; the in-page `fetch` then
-        // tries to follow it to a host that doesn't resolve. Irrelevant —
-        // `authorizeLocation` above already captured the header server-side.
-      }
+      // The fulfilled response is the real 302. `redirect: 'manual'` keeps the
+      // in-page `fetch` from following it to a host that doesn't resolve —
+      // a system Chrome can spend most of the test's timeout on that lookup —
+      // and `authorizeLocation` above already captured the header.
+      await fetch('/oauth/authorize', {
+        method: 'POST',
+        credentials: 'same-origin',
+        redirect: 'manual',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRF-Token': csrfToken },
+        body: new URLSearchParams({ request_id: requestId!, action: 'approve' }).toString(),
+      });
     },
     { requestId },
   );
