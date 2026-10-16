@@ -18,6 +18,13 @@ export default defineConfig({
   reporter: 'list',
   use: {
     baseURL: E2E_BASE_URL,
+    // CI provides the runner's own Chrome (node-ci.yml's `browser: true`) in
+    // place of `npx playwright install --with-deps`, whose apt step could
+    // stall for the whole job. Unset locally, so Playwright's bundled
+    // Chromium is used as before.
+    ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+      ? { launchOptions: { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH } }
+      : {}),
   },
   webServer: {
     command: 'node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON e2e/run-server.ts',
