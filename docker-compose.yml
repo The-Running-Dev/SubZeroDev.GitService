@@ -10,10 +10,14 @@
 # has a `fileWatcher` configured; a declaration with none needs no inbox
 # mount at all.
 #
-# Build with `docker build --build-arg GIT_COMMIT_SHA=$(git rev-parse HEAD) -t subzerodev-git .`
+# `npm run deploy` (`scripts/deploy.ts`) writes `.deploy/service.env` and
+# passes it both as `--env-file` (the port and build arg below) and, through
+# `env_file`, as the container's environment. Run by hand instead, build with
+# `docker build --build-arg GIT_COMMIT_SHA=$(git rev-parse HEAD) -t subzerodev-git .`
 # first, or point `image:` at a tag already built that way — `/healthz`'s
 # `commitSha` is only meaningful when it names the commit the image actually
-# came from.
+# came from. Without that file the service starts with an empty allowlist and
+# ceiling, so nothing can be declared until they are set.
 
 services:
   git-service:
@@ -23,15 +27,14 @@ services:
       args:
         GIT_COMMIT_SHA: ${GIT_COMMIT_SHA:-}
     ports:
-      - '8080:8080'
+      - '${SZG_HOST_PORT:-8080}:8080'
     volumes:
       - data:/data
       - ./credentials:/credentials:ro
       # - ./watcher-inboxes/<declarationId>:/data/watcher-inboxes/<declarationId>
-    environment:
-      REMOTE_HOST_ALLOWLIST: ''
-      DEPLOYMENT_CEILING: ''
-      PUBLIC_ORIGIN: ''
+    env_file:
+      - path: .deploy/service.env
+        required: false
     restart: unless-stopped
 
 volumes:

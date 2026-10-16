@@ -60,7 +60,10 @@ this is not a GitOps-watched-directory feature. No restart, no rebuild:
 2. `POST /declarations` (or the console's "declare a repository" form) with the clone URL, the
    remote host (must be on `REMOTE_HOST_ALLOWLIST`), the credential reference to resolve from
    `CREDENTIAL_MOUNT_ROOT`, the capability grant (bounded above by `DEPLOYMENT_CEILING`), and any
-   writable path prefixes.
+   writable path prefixes. The credential reference must also be listed for that host in
+   `<CREDENTIAL_MOUNT_ROOT>/_allowed-hosts.json` (`{ "<ref>": ["github.com"] }`, `20-contract.md`
+   § L1 — credentials); a reference absent from it reaches no host, and the first remote operation
+   fails with `host-not-permitted`. `scripts/deploy.ts` writes this file from its config.
 3. The clone happens on first use, not at declare time — the declaration exists and appears in
    `tools/list` for any session whose grant intersects its capabilities immediately, while the
    instance keeps serving every other repository unaffected.

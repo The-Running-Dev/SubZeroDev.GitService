@@ -41,7 +41,7 @@ export interface CredentialResolverDependencies {
  * which `CredentialRef`'s pattern forbids as a first character, so it can
  * never be mistaken for a reference.
  */
-const ALLOWED_HOSTS_MANIFEST = '_allowed-hosts.json';
+export const ALLOWED_HOSTS_MANIFEST = '_allowed-hosts.json';
 
 const ENV_VAR_PREFIX = 'SZG_CREDENTIAL_';
 

@@ -25,6 +25,7 @@
     "check:registry-tables": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/check-contract-registry-tables.ts",
     "check:doc-citations": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/check-doc-citations.ts",
     "build": "npm run typecheck && npm run typecheck:console && npm run typecheck:e2e && npm run build:registry && npm run build:console && npm run check:layering && npm run check:migration && npm run check:layer-direction && npm run check:parity && npm run check:registry-tables && npm run check:doc-citations",
+    "deploy": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/deploy.ts",
     "start": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON src/server.ts",
     "verify:container-lease": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/lifecycle/lease-self-test-container.ts",
     "verify:split-brain-lease": "node --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/lifecycle/lease-self-test-split-brain.ts"

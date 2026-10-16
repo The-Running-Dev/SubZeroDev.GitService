@@ -1,0 +1,21 @@
+{
+  "port": 8080,
+  "publicOrigin": "http://localhost:8080",
+  "remoteOperations": false,
+  "operator": "admin",
+  "gitIdentity": { "name": "SubZeroDev.Git", "email": "git-service@example.com" },
+  "repositories": [
+    {
+      "id": "my-app",
+      "cloneUrl": "https://github.com/acme/my-app.git",
+      "tokenEnv": "MY_APP_TOKEN",
+      "capabilities": ["repo.read", "git.local.write", "host.pr.read", "host.checks.read"],
+      "writablePaths": ["docs/", "src/"]
+    },
+    {
+      "id": "infra",
+      "cloneUrl": "git@gitlab.example.com:ops/infra.git",
+      "credential": "gitlab-deploy-token"
+    }
+  ]
+}

@@ -1,6 +1,29 @@
 # Decision log
 
 Append-only. Newest at the top. The rejected alternatives are the point — without them, every future session relitigates the same choice.
+### 2026-10-16 — One `npm run deploy` script sets up and runs a local instance from a JSON config, deriving the allowlist and ceiling from the repositories it declares
+Context: Standing up an instance by hand took a dozen steps across the operator guide: generate the sealing key, write token files, set `REMOTE_HOST_ALLOWLIST` and `DEPLOYMENT_CEILING` by hand to agree with the grants, start compose, provision and enrol an operator, compute TOTP codes, then declare each repository through the console. One step was undocumented: a credential reference missing from `<CREDENTIAL_MOUNT_ROOT>/_allowed-hosts.json` is refused at the first remote operation with `host-not-permitted`, which the end-to-end run of this script hit. Two values had to be kept consistent by hand, and nothing checked them.
+Chosen: `scripts/deploy.ts`, run as `npm run deploy`, reads a gitignored `deploy.config.json` (shape in `deploy.config.example.json`) and does the following:
+- Writes the sealing key once and never overwrites it.
+- Copies tokens from named environment variables, and writes the per-credential username files and a merged `_allowed-hosts.json`.
+- Derives the host allowlist from the clone URLs and the ceiling from the union of the grants, then writes them with the rest of the container environment to `.deploy/service.env`.
+- Builds and starts compose, and waits for `/healthz` to report the current commit.
+- Enrols the first operator through the provisioning secret, and saves the credentials to `.deploy/operator.json` (mode 0600).
+- Signs in and declares or amends each repository through the existing console routes.
+
+It never removes a declaration missing from the config; it reports it. A clone-URL host change is an error, not an amendment.
+
+`docker-compose.yml` reads `.deploy/service.env` through an optional `env_file`, and takes its host port from `SZG_HOST_PORT`, so a plain `docker compose up` still works without the script. `ALLOWED_HOSTS_MANIFEST` is exported from `src/credentials/credentials.ts` so the script names the file the service reads rather than a second copy of it. The operator guide now states the manifest requirement.
+Rejected:
+- **A bash/PowerShell pair** — two copies of one procedure that diverge. The TOTP and branded-type code already exists in TypeScript, and Node is already a requirement.
+- **Compose-only, with a hand-written `.env`** — removes none of the steps that make this manual (enrolment, TOTP, declaring, the manifest) and leaves the allowlist and ceiling hand-kept.
+- **A CLI or prompt library** — a new dependency for argument parsing that `node:util` `parseArgs` already does.
+- **Remove declarations missing from the config** — a typo in the config would then orphan a repository; removal stays a deliberate console action.
+- **Keep the operator credentials only in the terminal output** — every later run would need the user to sign in by hand.
+
+`.deploy/operator.json` holds the password, the TOTP secret and the recovery codes in plain text. That is the price of an unattended re-run, and the README says how to opt out: delete the file and declare in the console.
+Reversibility: cheap — the script calls only routes and files the service already defines; deleting it and the compose `env_file` line restores the manual procedure.
+
 
 ### 2026-10-08 — A design citation resolves by prefix against a heading or a named anchor, and an id must appear somewhere in the document (S66, #301)
 Context: #298 cited `20-contract.md § L2 — watcher, W08.3` and `W08.4`, neither of which exists, and review did not catch it. The manual sweep #301 records found twenty false misses for every real one, because a citation runs straight on into prose and a script has to guess where the section name ends. Cited sections are also not always headings: the source cites invariant ids (`D18`), bold-lead paragraphs, quoted phrases, and criteria of landed slices whose bodies `30-slices.md` retires to the closed issue. The first run over the tree found 42 unresolved citations; 18 were real misattributions and are repointed in this slice, and the rest were forms the rules below now accept.
