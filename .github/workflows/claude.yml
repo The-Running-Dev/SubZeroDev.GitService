@@ -14,9 +14,7 @@ permissions: {}
 
 jobs:
   claude:
-    uses: The-Running-Dev/.github/.github/workflows/claude-review.yml@main
-    with:
-      mode: mention
+    uses: The-Running-Dev/.github/.github/workflows/claude-mention.yml@main
     permissions:
       contents: write
       pull-requests: write
