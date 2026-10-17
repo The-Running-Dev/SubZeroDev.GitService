@@ -57,7 +57,7 @@ permissions: {}
 
 jobs:
   tests:
-    uses: The-Running-Dev/GitHub-ActionTemplates/.github/workflows/node-ci.yml@v0
+    uses: The-Running-Dev/GitHub-ActionTemplates/.github/workflows/node-ci.yml@v1
     permissions:
       contents: read
     with:
@@ -68,7 +68,7 @@ jobs:
       timeout-minutes: 45
 
   image:
-    uses: The-Running-Dev/GitHub-ActionTemplates/.github/workflows/container.yml@v0
+    uses: The-Running-Dev/GitHub-ActionTemplates/.github/workflows/container.yml@v1
     permissions:
       contents: read
       packages: write
@@ -82,7 +82,7 @@ jobs:
       smoke-env: PUBLIC_ORIGIN=http://localhost:8080
 
   example-consumer:
-    uses: The-Running-Dev/GitHub-ActionTemplates/.github/workflows/container.yml@v0
+    uses: The-Running-Dev/GitHub-ActionTemplates/.github/workflows/container.yml@v1
     permissions:
       contents: read
       packages: write
